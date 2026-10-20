@@ -28,12 +28,12 @@ _UMAX_DPP_ASM = "\n".join(
 )
 
 
-def rsrc(addr):
-    return bo.create_buffer_resource_from_addr(addr)
+def rsrc(addr, nbytes=None):
+    return bo.create_buffer_resource_from_addr(addr, num_records_bytes=nbytes)
 
 
 def uniform(value):
-    return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(value).ir_value()))
+    return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(value)))
 
 
 def uniform_f32(value):
@@ -78,20 +78,17 @@ def mem_realtime():
     return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
 
 
-def _hardware_f32(name, value):
-    return fx.Float32(llvm.call_intrinsic(T.f32, name, [fx.Float32(value).ir_value()], [], []))
-
-
 def rsq(value):
-    return _hardware_f32("llvm.amdgcn.rsq.f32", value)
+    return fx.Float32(rocdl.rsq(T.f32, fx.Float32(value).ir_value()))
 
 
 def rcp(value):
-    return _hardware_f32("llvm.amdgcn.rcp.f32", value)
+    return fx.Float32(rocdl.rcp(T.f32, fx.Float32(value)))
 
 
 def exp(value):
-    return _hardware_f32("llvm.amdgcn.exp2.f32", fx.Float32(value) * 1.4426950408889634)
+    value = fx.Float32(value) * 1.4426950408889634
+    return fx.Float32(rocdl.exp2(T.f32, value.ir_value()))
 
 
 def xshfl(value, offset):

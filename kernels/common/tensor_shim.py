@@ -14,7 +14,45 @@ from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
 from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
+
+_BUF_COPY_ATOM = {
+    16: fx.rocdl.BufferCopy128b,
+    8: fx.rocdl.BufferCopy64b,
+}
+BUF_VIEW_MAX_ELEMS = 0xFFFFFFFF
+
+
+def ptr_buf_tensor(ptr, elem, *, unit_elems, num_records_bytes):
+    """Buffer tensor with a runtime byte bound and vector-unit indexing."""
+    layout = fx.make_layout((BUF_VIEW_MAX_ELEMS, unit_elems), (unit_elems, 1))
+    typed_ptr = fx.PointerType.get(
+        elem.ir_type,
+        address_space=fx.AddressSpace.Global,
+        alignment=unit_elems * (elem.width // 8),
+    )
+    view = fx.make_view(fx.recast_iter(typed_ptr, ptr), layout)
+    return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+
+
+def _buf_copy_atom(elem, unit_elems, cache_modifier):
+    unit_bytes = unit_elems * (elem.width // 8)
+    return fx.make_copy_atom(_BUF_COPY_ATOM[unit_bytes](cache_modifier), elem)
+
+
+def buf_copy_load(buffer, index, elem, unit_elems, *, cache_modifier=0):
+    """Load one 8- or 16-byte unit from a bounded buffer tensor."""
+    fragment = fx.make_rmem_tensor(unit_elems, elem)
+    fx.copy(_buf_copy_atom(elem, unit_elems, cache_modifier), fx.slice(buffer, (index, None)), fragment)
+    return Vec(fragment.load())
+
+
+def buf_copy_store(buffer, index, value, elem, unit_elems, *, cache_modifier=0):
+    """Store one 8- or 16-byte unit into a bounded buffer tensor."""
+    fragment = fx.make_rmem_tensor(unit_elems, elem)
+    fragment.store(Vec(value))
+    fx.copy(_buf_copy_atom(elem, unit_elems, cache_modifier), fragment, fx.slice(buffer, (index, None)))
 
 
 def _run_compiled(exe, *args):

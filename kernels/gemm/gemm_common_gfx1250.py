@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FlyDSL Project Contributors
+
 """Shared utilities for gfx1250 GEMM kernels (fp16 / mxfp4 / mxfp8)."""
 
 import flydsl.expr as fx
@@ -36,6 +39,23 @@ def make_lds_copy_ops(bits):
         fx.copy(atom, rmem, _view(lds_base_idx, byte_offset))
 
     return load, store
+
+
+def make_gemm_grid(M, N, tile_m, tile_n, cluster_m, *, split_k=1, persistent_n_tiles=1, fused_splitk=False):
+    """Pad M to whole clusters and split long grids without duplicating tiles.
+
+    Fused split-K reserves grid.z for the K splits of one tile. Other grids
+    may put exact chunks of M there, keeping grid.x in whole cluster rows.
+    """
+    rows = fx.ceildiv(M, tile_m)
+    rows = fx.ceildiv(fx.max(rows, 1), cluster_m) * cluster_m
+    run = rows
+    if not fused_splitk:
+        divisor = rows & -rows
+        capped = fx.min(divisor, 32)
+        fits = (capped % cluster_m) == 0
+        run = ((rows > 32) & (divisor >= 8) & fits).select(capped, rows)
+    return run, fx.ceildiv(N, tile_n) // persistent_n_tiles, (rows // run) * split_k
 
 
 def workgroup_barrier(use_cluster=False):
@@ -118,6 +138,8 @@ def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):
 __all__ = [
     # LDS helpers
     "make_lds_copy_ops",
+    # Launch grid
+    "make_gemm_grid",
     # Pipeline
     "workgroup_barrier",
     "pipeline_fence",

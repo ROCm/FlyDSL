@@ -302,18 +302,11 @@ def build_router_projection(
                             k_base = k128 * 128 + lane_div16 * 16
                             activation_halves = []
                             for k64_half in range_constexpr(2):
-                                loaded = fx.Vector(
-                                    fx.ptr_load(
-                                        x + (sample * hidden + k_base + k64_half * 64) // 4,
-                                        result_type=fx.Vector.make_type(4, fx.Float32),
-                                    )
+                                loaded = fx.ptr_load(
+                                    x + (sample * hidden + k_base + k64_half * 64) // 4,
+                                    result_type=fx.Vector.make_type(4, fx.Float32),
                                 ).bitcast(fx.Int32)
-                                activation_halves.append(
-                                    fx.Vector.from_elements(
-                                        [valid_sample.select(loaded[index], fx.Int32(0)) for index in range(4)],
-                                        fx.Int32,
-                                    )
-                                )
+                                activation_halves.append(valid_sample.select(loaded, 0))
                             activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
                             activation_fragment.store(
                                 activation_halves[0].shuffle(activation_halves[1], list(range(8)))

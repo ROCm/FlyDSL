@@ -41,6 +41,8 @@ subtrees:
         title: Kernel authoring
       - file: kernel_tuning_guide
         title: Kernel tuning
+      - file: ktrace_guide
+        title: In-kernel wave tracing
       - file: autotune_guide
         title: Offline autotune configs
       - file: prebuilt_kernels_guide

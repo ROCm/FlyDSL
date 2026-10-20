@@ -1241,13 +1241,11 @@ def build_glm5_monokernel(
                 """One scaled-MFMA B operand from a row-major 128-value MXFP8 tile."""
                 if const_expr(activation_fp4):
                     # FP4 uses contiguous K[32*g:32*g+32] for lane group g.
-                    return fx.Vector(fx.ptr_load(xs + chunk_word + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
+                    return fx.ptr_load(xs + chunk_word + 4 * (lane // 16), result_type=v4f).bitcast(fx.Int32)
                 words = [
-                    fx.Vector(
-                        fx.ptr_load(
-                            xs + chunk_word + 16 * half + 4 * (lane // 16),
-                            result_type=v4f,
-                        )
+                    fx.ptr_load(
+                        xs + chunk_word + 16 * half + 4 * (lane // 16),
+                        result_type=v4f,
                     ).bitcast(fx.Int32)
                     for half in range(2)
                 ]
@@ -1303,17 +1301,14 @@ def build_glm5_monokernel(
                             a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
                             if const_expr(fmt == "mxfp4"):
                                 wh, ws = sp // 2, sp % 2
-                                bv = fx.Vector(fx.ptr_load(xs + (bw + wh * 16), result_type=v4f)).bitcast(fx.Int32)
+                                bv = fx.ptr_load(xs + (bw + wh * 16), result_type=v4f).bitcast(fx.Int32)
                                 b = _fp8_to_bf16x8(bv[ws * 2], bv[ws * 2 + 1])
                             else:
                                 b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
                             c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
                     if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                         a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                        bv = [
-                            fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32)
-                            for h in range(2)
-                        ]
+                        bv = [fx.ptr_load(xs + (bw + h * 16), result_type=v4f).bitcast(fx.Int32) for h in range(2)]
                         b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                         one = fx.Int32(127)
                         c = fx.Vector(
@@ -1342,7 +1337,7 @@ def build_glm5_monokernel(
                         halves64 = 2 if fmt == "ptpc" else 1
                         for half64 in range_constexpr(halves64):
                             a = wv[half64].bitcast(fx.Int64)
-                            b = fx.Vector(fx.ptr_load(xs + (bw + half64 * 16), result_type=v4f)).bitcast(fx.Int64)
+                            b = fx.ptr_load(xs + (bw + half64 * 16), result_type=v4f).bitcast(fx.Int64)
                             for half32 in range_constexpr(2):
                                 c = fx.Vector(
                                     rocdl.mfma_f32_16x16x32_fp8_fp8(
@@ -5277,13 +5272,13 @@ def build_glm5_monokernel(
                     def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                         nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                         ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                        r_wug = bo.create_buffer_resource_from_addr(
+                        r_wug = _rsrc(
                             w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
-                            num_records_bytes=nw,
+                            nw,
                         )
-                        r_sug = bo.create_buffer_resource_from_addr(
+                        r_sug = _rsrc(
                             s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
-                            num_records_bytes=ns,
+                            ns,
                         )
                         unit = wave * (UG8_CPW // 2) + cc
                         kc = unit * 2
@@ -5430,13 +5425,13 @@ def build_glm5_monokernel(
                         rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
                         rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
                     else:
-                        rw = bo.create_buffer_resource_from_addr(
+                        rw = _rsrc(
                             w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
-                            num_records_bytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
+                            live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
                         )
-                        rs = bo.create_buffer_resource_from_addr(
+                        rs = _rsrc(
                             s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
-                            num_records_bytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
+                            live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
                         )
                     sn = n_sel() if sample is None else fx.Int32(sample)
                     units = []
@@ -6151,9 +6146,7 @@ def build_glm5_monokernel(
                 def partial(u):
                     raw, scale, bw, sw, coefficient = u
                     words = [
-                        fx.Vector(fx.ptr_load(xs + bw + 16 * half + 4 * (lane // 16), result_type=v4f)).bitcast(
-                            fx.Int32
-                        )
+                        fx.ptr_load(xs + bw + 16 * half + 4 * (lane // 16), result_type=v4f).bitcast(fx.Int32)
                         for half in range(2)
                     ]
                     b = fx.Vector.from_elements(
@@ -6161,7 +6154,7 @@ def build_glm5_monokernel(
                         fx.Int32,
                     )
                     if const_expr(activation_fp4):
-                        b = fx.Vector(fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
+                        b = fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f).bitcast(fx.Int32)
                     asc = ld(misc, sw).bitcast(fx.Int32)
                     zero = fx.Vector.filled(4, 0.0, fx.Float32)
                     return fx.Vector(
@@ -6298,12 +6291,9 @@ def build_glm5_monokernel(
                             for kc in range_constexpr(4):
                                 if ((sn * SLOTS + slot) * 4 + kc) // 90 == gw:
                                     if const_expr(DN_CONTIG_CONTRIBUTIONS):
-                                        vals = fx.Vector(
-                                            fx.ptr_load(
-                                                contributions
-                                                + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
-                                                result_type=v4f,
-                                            )
+                                        vals = fx.ptr_load(
+                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                            result_type=v4f,
                                         )
                                     else:
                                         vals = [
@@ -6324,11 +6314,9 @@ def build_glm5_monokernel(
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
                                 if const_expr(DN_CONTIG_CONTRIBUTIONS):
-                                    vals = fx.Vector(
-                                        fx.ptr_load(
-                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
-                                            result_type=v4f,
-                                        )
+                                    vals = fx.ptr_load(
+                                        contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                        result_type=v4f,
                                     )
                                 else:
                                     vals = [
@@ -6490,9 +6478,7 @@ def build_glm5_monokernel(
                 def partial(u):
                     raw, scale, bw, sw, coefficient = u
                     words = [
-                        fx.Vector(fx.ptr_load(xs + bw + 16 * half + 4 * (lane // 16), result_type=v4f)).bitcast(
-                            fx.Int32
-                        )
+                        fx.ptr_load(xs + bw + 16 * half + 4 * (lane // 16), result_type=v4f).bitcast(fx.Int32)
                         for half in range(2)
                     ]
                     b = fx.Vector.from_elements(
@@ -6500,7 +6486,7 @@ def build_glm5_monokernel(
                         fx.Int32,
                     )
                     if const_expr(activation_fp4):
-                        b = fx.Vector(fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
+                        b = fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f).bitcast(fx.Int32)
                     asc = ld(misc, sw).bitcast(fx.Int32)
                     zero = fx.Vector.filled(4, 0.0, fx.Float32)
                     return fx.Vector(
@@ -6643,12 +6629,9 @@ def build_glm5_monokernel(
                             for kc in range_constexpr(4):
                                 if ((sn * SLOTS + slot) * 4 + kc) // 90 == gw:
                                     if const_expr(DN_CONTIG_CONTRIBUTIONS):
-                                        vals = fx.Vector(
-                                            fx.ptr_load(
-                                                contributions
-                                                + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
-                                                result_type=v4f,
-                                            )
+                                        vals = fx.ptr_load(
+                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                            result_type=v4f,
                                         )
                                     else:
                                         vals = [
@@ -6669,11 +6652,9 @@ def build_glm5_monokernel(
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
                                 if const_expr(DN_CONTIG_CONTRIBUTIONS):
-                                    vals = fx.Vector(
-                                        fx.ptr_load(
-                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
-                                            result_type=v4f,
-                                        )
+                                    vals = fx.ptr_load(
+                                        contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                        result_type=v4f,
                                     )
                                 else:
                                     vals = [
@@ -6819,17 +6800,13 @@ def build_glm5_monokernel(
                             slot_q = (q // DN_NKC) % MOE_SLOTS
                             kc = q % DN_NKC
                             e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
-                            wb = bo.create_buffer_resource_from_addr(
+                            wb = _rsrc(
                                 w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                                num_records_bytes=(
-                                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0))
-                                ),
+                                (None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0))),
                             )
-                            sb = bo.create_buffer_resource_from_addr(
+                            sb = _rsrc(
                                 s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                                num_records_bytes=(
-                                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0))
-                                ),
+                                (None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0))),
                             )
 
                             def coef():  # mid block scale * route weight, only in this sample's column

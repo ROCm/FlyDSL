@@ -43,7 +43,6 @@ the 8 partials in rank order, so all ranks produce bit-identical hidden states
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
@@ -83,6 +82,7 @@ from kernels.monokernel.layout import (
     layout,
     stage_tasks,
 )
+from kernels.monokernel.ops import bpermute_i32, mem_realtime, write_lane_i32
 from kernels.monokernel.ops import (
     exp as _exp,
 )
@@ -612,9 +612,7 @@ def build_kimi_k3_mla_attention(
                 c = fx.Vector.filled(4, 0.0, fx.Float32)
                 if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                     a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    bv = [
-                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
-                    ]
+                    bv = [fx.ptr_load(xs + (bw + h * 16), result_type=v4f).bitcast(fx.Int32) for h in range(2)]
                     b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                     one = fx.Int32(127)
                     c = fx.Vector(
@@ -901,18 +899,10 @@ def build_kimi_k3_mla_attention(
                 m = _wave_umax(ks[0])
                 hit = ks[0] == m
                 ks = [hit.select(ks[i + 1], ks[i]) for i in range(4)] + [ks[4]]
-                mv = fx.Int32(
-                    llvm.call_intrinsic(
-                        T.i32,
-                        "llvm.amdgcn.writelane.i32",
-                        [m.ir_value(), fx.Int32(k).ir_value(), mv.ir_value()],
-                        [],
-                        [],
-                    )
-                )
+                mv = write_lane_i32(m, k, mv)
             e = 255 - (mv & 255)
             src = (e % 64) * 4
-            got = [fx.Int32(rocdl.ds_bpermute(T.i32, src.ir_value(), r.bitcast(fx.Int32).ir_value())) for r in raws]
+            got = [bpermute_i32(src, r.bitcast(fx.Int32)) for r in raws]
             raw = got[0]
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
@@ -1054,7 +1044,7 @@ def build_kimi_k3_mla_attention(
         def stamp(name, t, which, lead=0):
             if const_expr(timeline):
                 if tid == lead:
-                    now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
+                    now = mem_realtime()
                     fx.generic_store(
                         fx.inttoptr(
                             fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
@@ -1790,12 +1780,8 @@ def build_kimi_k3_mla_attention(
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                     nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                    r_wug = bo.create_buffer_resource_from_addr(
-                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                    )
-                    r_sug = bo.create_buffer_resource_from_addr(
-                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                    )
+                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                     unit = wave * UG8_UNITS + cc
                     if const_expr(use_mxfp4_weight):
                         coefficients = None
@@ -1918,12 +1904,8 @@ def build_kimi_k3_mla_attention(
             def ug8_units(e, sample, live=None):
                 nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                rw = bo.create_buffer_resource_from_addr(
-                    w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                )
-                rs = bo.create_buffer_resource_from_addr(
-                    s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                )
+                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
                 for cc in range_constexpr(UG8_UNITS):
@@ -2045,13 +2027,13 @@ def build_kimi_k3_mla_attention(
                 slot_q = (q // DN_UNITS_PER_SLOT) % MOE_SLOTS
                 kc = q % DN_UNITS_PER_SLOT
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
-                wb = bo.create_buffer_resource_from_addr(
+                wb = _rsrc(
                     w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
-                sb = bo.create_buffer_resource_from_addr(
+                sb = _rsrc(
                     s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
                 )
 
                 if const_expr(use_mxfp4_weight):
