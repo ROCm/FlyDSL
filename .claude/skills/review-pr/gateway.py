@@ -26,7 +26,8 @@ UPSTREAM = urllib.parse.urlsplit(os.environ["API_URL"].rstrip("/"))
 PORT = 8080
 PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
 FORWARDED = {"accept", "anthropic-beta", "anthropic-version", "content-type"}
-HOP_BY_HOP = {"connection", "content-length", "keep-alive", "transfer-encoding"}
+# The response headers the CLI reads; it parses bodies by content type and retries by these hints.
+RELAYED = ("content-encoding", "content-type", "request-id", "retry-after", "retry-after-ms", "x-should-retry")
 # Longer than the review job's timeout, so a gateway whose job died still exits and is removed.
 LIFETIME = 3 * 3600
 TLS = ssl.create_default_context()
@@ -56,10 +57,11 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             self.send_error(502, f"upstream unreachable: {type(exc).__name__}")
             return
         try:
-            self.send_response(reply.status, reply.reason)
-            for name, value in reply.getheaders():
-                if name.lower() not in HOP_BY_HOP:
-                    self.send_header(name, value)
+            self.send_response(reply.status)
+            for name in RELAYED:
+                value = reply.getheader(name)
+                if value is not None:
+                    self.send_header(name, value.replace("\r", "").replace("\n", ""))
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             # read1 returns what has arrived, so server-sent events reach the agent as they stream.

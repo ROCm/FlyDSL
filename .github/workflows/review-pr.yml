@@ -57,8 +57,9 @@ jobs:
             case "$status" in in_progress|completed) exit 0 ;; esac
             sleep 60
           done
-          body="The AI review requested with the \`ai-review\` label has waited 20 minutes for the self-hosted"
-          body+=" \`flydsl-review\` runner, which looks offline. It starts when the runner is back; see the [run]($RUN_URL)."
+          body="The AI review requested with the \`ai-review\` label has not started after 20 minutes: the"
+          body+=" self-hosted \`flydsl-review\` runner is offline or busy with another review. It starts when the"
+          body+=" runner is free; see the [run]($RUN_URL)."
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
 
   review:
@@ -170,7 +171,7 @@ jobs:
             { cat card/card.md; printf '\n---\n<sub>%s</sub>\n<!-- review-pr head=%s -->\n' \
                 "$footer" "$(cat card/head_sha 2>/dev/null)"; } > body.md
           else
-            printf 'The AI review requested by @%s ended without a card (review job: %s); see the [run](%s).\n' \
+            printf 'The AI review requested by @%s did not finish (review job: %s), so no card is posted. The [run](%s) has the log and, if one was written, the unposted card.\n' \
               "$LABELER" "$RESULT" "$RUN_URL" > body.md
           fi
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file body.md
