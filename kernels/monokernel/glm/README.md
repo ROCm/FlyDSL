@@ -105,7 +105,7 @@ python tests/kernels/test_glm5_monokernel.py \
 Repeat the paged commands with `--npes 8` for TP8, without `--indexer-cp` for
 local selection, or without `--fused-indexer` for externally supplied indices.
 `--native 0` selects software expert dequantization. The paged fused fixture
-supports S=1/5/10. The native test's `--model-tp` selects actual model shard
+supports S=1/5/10. The golden test's `--model-tp` selects actual model shard
 geometry; omitting it retains the historical TP8 shard used for peer-protocol
 checks with fewer GPUs.
 
@@ -114,7 +114,9 @@ Attention and expert timing weights are otherwise zero-filled;
 `--check-attention` adds nonzero attention weights and KV. Its selected-set
 golden requires at least 99% overlap. CP control checks separately require
 exact ordered indices, output/cache bytes, and 306 graph replays of 16 layers.
-Full nonzero expert validation comes from `test_glm5_monokernel.py`.
+The nonzero expert golden in `test_glm5_monokernel.py` covers FP8 and
+native-storage MXFP4 with software dequantization. It does not enable
+`native_fp4_mfma=True`; native MFMA needs a separate numerical comparison.
 
 These timings measure synthetic per-layer latency. They exclude checkpoint
 prefill, scheduling, and serving overhead. Historical ATOM proxy comparisons
