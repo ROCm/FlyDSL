@@ -4092,29 +4092,28 @@ def build_glm5_monokernel(
                     nkeys, sparse = split_keys(t, s)
                     gpu.barrier()
                     gather_old_kv()  # before waiting for q: these rows are from earlier launches
-                    if const_expr(True):
-                        N_PE_T = PE_DIM // Q_B_TILE
-                        hint_wait(
-                            N_UK + H * N_PE_T + 1,
-                            lambda k: (
-                                (k < N_UK).select(
-                                    fx.Int64(SC["q_lat"]),
-                                    (k < N_UK + H * N_PE_T).select(fx.Int64(SC["q_pe"]), fx.Int64(SC["penew"])),
-                                )
-                                + scratch,
-                                (k < N_UK).select(
-                                    (s * H + k // UK_PER_HEAD) * KV_LORA + (k % UK_PER_HEAD) * UK_TILE + UK_TILE - 1,
-                                    (k < N_UK + H * N_PE_T).select(
-                                        (s * H + (k - N_UK) // N_PE_T) * PE_DIM
-                                        + ((k - N_UK) % N_PE_T) * Q_B_TILE
-                                        + Q_B_TILE
-                                        - 1,
-                                        s * PE_DIM + PE_DIM - 1,
-                                    ),
+                    N_PE_T = PE_DIM // Q_B_TILE
+                    hint_wait(
+                        N_UK + H * N_PE_T + 1,
+                        lambda k: (
+                            (k < N_UK).select(
+                                fx.Int64(SC["q_lat"]),
+                                (k < N_UK + H * N_PE_T).select(fx.Int64(SC["q_pe"]), fx.Int64(SC["penew"])),
+                            )
+                            + scratch,
+                            (k < N_UK).select(
+                                (s * H + k // UK_PER_HEAD) * KV_LORA + (k % UK_PER_HEAD) * UK_TILE + UK_TILE - 1,
+                                (k < N_UK + H * N_PE_T).select(
+                                    (s * H + (k - N_UK) // N_PE_T) * PE_DIM
+                                    + ((k - N_UK) % N_PE_T) * Q_B_TILE
+                                    + Q_B_TILE
+                                    - 1,
+                                    s * PE_DIM + PE_DIM - 1,
                                 ),
                             ),
-                            mark=("split", tt),
-                        )
+                        ),
+                        mark=("split", tt),
+                    )
                     # q of all heads -> bf16 Q[h][576] (words h * 288 + d / 2): latent 512 then pe 64
                     NQ = H * KV_LORA // 4 // THREADS
                     tpe = fx.min(tid, H * PE_DIM // 4 - 1)
@@ -4140,8 +4139,7 @@ def build_glm5_monokernel(
                         lds_st(xs, qw, qv[NQ][0].bitcast(fx.Float32))
                         lds_st(xs, qw + 1, qv[NQ][1].bitcast(fx.Float32))
                     patch_new_kv()
-                    if const_expr(True):
-                        stamp("split", tt, 2)
+                    stamp("split", tt, 2)
                     gpu.barrier()
                     stamp("split", tt, 5)
                     # scores = K Q^T on MFMA.  The 64-key tile maps the eight waves to
@@ -4510,29 +4508,28 @@ def build_glm5_monokernel(
                     nkeys, sparse = split_keys(t, s)
                     gpu.barrier()
                     gather_old_kv()  # before waiting for q: these rows are from earlier launches
-                    if const_expr(True):
-                        N_PE_T = PE_DIM // Q_B_TILE
-                        hint_wait(
-                            N_UK + H * N_PE_T + 1,
-                            lambda k: (
-                                (k < N_UK).select(
-                                    fx.Int64(SC["q_lat"]),
-                                    (k < N_UK + H * N_PE_T).select(fx.Int64(SC["q_pe"]), fx.Int64(SC["penew"])),
-                                )
-                                + scratch,
-                                (k < N_UK).select(
-                                    (s * H + k // UK_PER_HEAD) * KV_LORA + (k % UK_PER_HEAD) * UK_TILE + UK_TILE - 1,
-                                    (k < N_UK + H * N_PE_T).select(
-                                        (s * H + (k - N_UK) // N_PE_T) * PE_DIM
-                                        + ((k - N_UK) % N_PE_T) * Q_B_TILE
-                                        + Q_B_TILE
-                                        - 1,
-                                        s * PE_DIM + PE_DIM - 1,
-                                    ),
+                    N_PE_T = PE_DIM // Q_B_TILE
+                    hint_wait(
+                        N_UK + H * N_PE_T + 1,
+                        lambda k: (
+                            (k < N_UK).select(
+                                fx.Int64(SC["q_lat"]),
+                                (k < N_UK + H * N_PE_T).select(fx.Int64(SC["q_pe"]), fx.Int64(SC["penew"])),
+                            )
+                            + scratch,
+                            (k < N_UK).select(
+                                (s * H + k // UK_PER_HEAD) * KV_LORA + (k % UK_PER_HEAD) * UK_TILE + UK_TILE - 1,
+                                (k < N_UK + H * N_PE_T).select(
+                                    (s * H + (k - N_UK) // N_PE_T) * PE_DIM
+                                    + ((k - N_UK) % N_PE_T) * Q_B_TILE
+                                    + Q_B_TILE
+                                    - 1,
+                                    s * PE_DIM + PE_DIM - 1,
                                 ),
                             ),
-                            mark=("split", tt),
-                        )
+                        ),
+                        mark=("split", tt),
+                    )
                     # q of all heads -> bf16 Q[h][576] (words h * 288 + d / 2): latent 512 then pe 64
                     NQ = H * KV_LORA // 4 // THREADS
                     tpe = fx.min(tid, H * PE_DIM // 4 - 1)
@@ -4558,8 +4555,7 @@ def build_glm5_monokernel(
                         lds_st(xs, qw, qv[NQ][0].bitcast(fx.Float32))
                         lds_st(xs, qw + 1, qv[NQ][1].bitcast(fx.Float32))
                     patch_new_kv()
-                    if const_expr(True):
-                        stamp("split", tt, 2)
+                    stamp("split", tt, 2)
                     gpu.barrier()
                     stamp("split", tt, 5)
                     # scores = K Q^T on MFMA.  The 64-key tile maps the eight waves to
@@ -6083,7 +6079,6 @@ def build_glm5_monokernel(
 
             def dn_union_tile(t, output_rows=32):
 
-                mode = "union_lut4"
                 hidden, INTER, SLOTS = HIDDEN, 512, DU_SLOTS
                 XROW, SCROW, UNION_MAX = DU_XROW, DU_SCROW, DU_UMAX
                 MSOFF, KEYOFF, DWOFF = DU_MSOFF, DU_KEYOFF, DU_DWOFF
@@ -6109,9 +6104,7 @@ def build_glm5_monokernel(
                         # Preserve the logical (slot, K, row, token) contribution;
                         # keep each lane's four adjacent rows together for float4 I/O.
                         return (((slot * 4 + kc) * 8 + row // 4) * S + token) * 4 + row % 4
-                    if const_expr(mode in ("union_transpose", "union_batch4", "union_lut4")):
-                        return ((slot * 4 + kc) * 32 + row) * S + token
-                    return ((token * SLOTS + slot) * 4 + kc) * 32 + row
+                    return ((slot * 4 + kc) * 32 + row) * S + token
 
                 def unit(expert, slot, kc, coefficient):
                     sn = fx.min(lane % 16, S - 1)
@@ -6225,41 +6218,35 @@ def build_glm5_monokernel(
                 um = ue + UNION_MAX
                 uc = um + UNION_MAX
 
-                if const_expr(mode == "union_lut4"):
-                    slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
-                    if union_inputs_needed(t):
-                        for j in range_constexpr((257 * S + THREADS - 1) // THREADS):
-                            address = tid + j * THREADS
-                            if address < 257 * S:
-                                st(slot_lut, address, fx.Int8(0))
-                        gpu.barrier()
-                        if tid < S * SLOTS:
-                            lut_expert = ld(keys, tid)
-                            st(
-                                slot_lut,
-                                lut_expert * S + tid // SLOTS,
-                                fx.Int8(tid % SLOTS),
-                            )
-                        gpu.barrier()
+                slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
+                if union_inputs_needed(t):
+                    for j in range_constexpr((257 * S + THREADS - 1) // THREADS):
+                        address = tid + j * THREADS
+                        if address < 257 * S:
+                            st(slot_lut, address, fx.Int8(0))
+                    gpu.barrier()
+                    if tid < S * SLOTS:
+                        lut_expert = ld(keys, tid)
+                        st(
+                            slot_lut,
+                            lut_expert * S + tid // SLOTS,
+                            fx.Int8(tid % SLOTS),
+                        )
+                    gpu.barrier()
 
                 n_union = _uniform(ld(uc, 4))
 
                 sn = fx.min(lane % 16, S - 1)
 
-                BATCH = 4 if mode in ("union_batch4", "union_lut4") else 1
+                BATCH = 4
 
                 if wave < (output_rows // 16) * 4:
                     for batch in range((n_union + BATCH - 1) // BATCH):
                         units, slots, active_columns = [], [], []
                         for part in range_constexpr(BATCH):
-                            index = fx.min(batch * BATCH + part, n_union - 1)
-                            expert = _uniform(ld(ue, index))
-                            if const_expr(mode == "union_lut4"):
-                                slot = fx.Int32(ld(slot_lut, expert * S + sn))
-                            else:
-                                slot = fx.Int32(0)
-                                for j in range_constexpr(SLOTS):
-                                    slot = (ld(keys, sn * SLOTS + j) == expert).select(fx.Int32(j), slot)
+                            union_index = fx.min(batch * BATCH + part, n_union - 1)
+                            expert = _uniform(ld(ue, union_index))
+                            slot = fx.Int32(ld(slot_lut, expert * S + sn))
                             slots.append(slot)
                             active_columns.append((lane % 16 < S) & (ld(keys, sn * SLOTS + slot) == expert))
                             units.append(unit(expert, slot, gw, fx.Float32(1.0)))
@@ -6274,7 +6261,7 @@ def build_glm5_monokernel(
                                     if const_expr(DN_CONTIG_CONTRIBUTIONS):
                                         fx.ptr_store(c, contributions + target)
                                     else:
-                                        stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
+                                        stride = S
                                         for e in range_constexpr(4):
                                             st(contributions, target + e * stride, c[e])
 
@@ -6417,7 +6404,6 @@ def build_glm5_monokernel(
 
             def dn_pair_tile(t, output_rows=32):
 
-                mode = "union_lut4"
                 hidden, INTER, SLOTS = HIDDEN, 512, DP_SLOTS
                 XROW, SCROW, UNION_MAX = DP_XROW, DP_SCROW, DP_UMAX
                 MSOFF, KEYOFF, DWOFF = DP_MSOFF, DP_KEYOFF, DP_DWOFF
@@ -6441,9 +6427,7 @@ def build_glm5_monokernel(
                         # Preserve the logical (slot, K, row, token) contribution;
                         # keep each lane's four adjacent rows together for float4 I/O.
                         return (((slot * 4 + kc) * 8 + row // 4) * DN_PAIR_ROWS + token) * 4 + row % 4
-                    if const_expr(mode in ("union_transpose", "union_batch4", "union_lut4")):
-                        return ((slot * 4 + kc) * 32 + row) * DN_PAIR_ROWS + token
-                    return ((token * SLOTS + slot) * 4 + kc) * 32 + row
+                    return ((slot * 4 + kc) * 32 + row) * DN_PAIR_ROWS + token
 
                 def unit(expert, slot, kc, coefficient):
                     sn = fx.min(lane % 16, DN_PAIR_ROWS - 1)
@@ -6470,7 +6454,7 @@ def build_glm5_monokernel(
                     return (
                         raw,
                         scale,
-                        row * XROW + kc * (16 if True else 32),
+                        row * XROW + kc * 16,
                         row * SCROW + kc * 4 + lane // 16,
                         coefficient,
                     )
@@ -6497,61 +6481,50 @@ def build_glm5_monokernel(
 
                 # Contributions, metadata restores, LUT rebuilds and TP do not
                 # write this input prefix. Retain it across output task rounds.
-                if const_expr(True):
-                    mid_read_words = (
-                        (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 4) // 2
-                        if True
-                        else (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 4)
+                mid_read_words = (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 4) // 2
+                MID_PAIR_ROUNDS = (mid_read_words + 2 * THREADS - 1) // (2 * THREADS)
+
+                def mid_wire_word(compact_word):
+                    word = fx.min(compact_word, mid_read_words - 2)
+                    return (word // 16) * 32 + word % 16
+
+                for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
+                    packed = poll(
+                        [
+                            pair_mid_spec(mid_wire_word((tid + j * THREADS) * 2))
+                            for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
+                        ]
                     )
-                    MID_PAIR_ROUNDS = (mid_read_words + 2 * THREADS - 1) // (2 * THREADS)
-
-                    def mid_wire_word(compact_word):
-                        word = fx.min(compact_word, mid_read_words - 2)
-                        if const_expr(True):
-                            return (word // 16) * 32 + word % 16
-                        return word
-
-                    for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
-                        packed = poll(
-                            [
-                                pair_mid_spec(mid_wire_word((tid + j * THREADS) * 2))
-                                for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
-                            ]
-                        )
-                        if const_expr(pack_base == 0):
-                            stamp("down", t, 2)
-                        for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
-                            word = (tid + j * THREADS) * 2
-                            if word < mid_read_words:
-                                target_word = word
-                                if const_expr(GROUPED_DN):
-                                    row_words = expert_inter // (8 if True else 4)
-                                    target_word = (word // row_words) * XROW + word % row_words
-                                st(
-                                    xs,
-                                    target_word,
-                                    packed[j - pack_base][0].bitcast(fx.Float32),
-                                )
-                                st(
-                                    xs,
-                                    target_word + 1,
-                                    packed[j - pack_base][1].bitcast(fx.Float32),
-                                )
-                    for j in range_constexpr(
-                        ((DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32) + THREADS - 1) // THREADS
-                    ):
-                        index = tid + j * THREADS
-                        scale_index = fx.min(index, DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32 - 1)
-                        scale_cohort = pair_row_tile + scale_index // MID_SCALE_WORDS
-                        scale_ptr = full_scratch + fx.Int64(scale_cohort) * TILE_SCRATCH_BYTES + fx.Int64(SC["ugp"])
-                        mid_exponent = get(scale_ptr, MIDQ_WORDS + scale_index % MID_SCALE_WORDS)
-                        if index < (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32):
-                            target_scale = index
+                    if const_expr(pack_base == 0):
+                        stamp("down", t, 2)
+                    for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
+                        word = (tid + j * THREADS) * 2
+                        if word < mid_read_words:
+                            target_word = word
                             if const_expr(GROUPED_DN):
-                                target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
-                                    expert_inter // 32
-                                )
-                            st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
+                                row_words = expert_inter // 8
+                                target_word = (word // row_words) * XROW + word % row_words
+                            st(
+                                xs,
+                                target_word,
+                                packed[j - pack_base][0].bitcast(fx.Float32),
+                            )
+                            st(
+                                xs,
+                                target_word + 1,
+                                packed[j - pack_base][1].bitcast(fx.Float32),
+                            )
+                for j in range_constexpr(((DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32) + THREADS - 1) // THREADS):
+                    index = tid + j * THREADS
+                    scale_index = fx.min(index, DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32 - 1)
+                    scale_cohort = pair_row_tile + scale_index // MID_SCALE_WORDS
+                    scale_ptr = full_scratch + fx.Int64(scale_cohort) * TILE_SCRATCH_BYTES + fx.Int64(SC["ugp"])
+                    mid_exponent = get(scale_ptr, MIDQ_WORDS + scale_index % MID_SCALE_WORDS)
+                    if index < (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32):
+                        target_scale = index
+                        if const_expr(GROUPED_DN):
+                            target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (expert_inter // 32)
+                        st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
 
                 gpu.barrier()
 
@@ -6559,41 +6532,34 @@ def build_glm5_monokernel(
                 um = ue + UNION_MAX
                 uc = um + UNION_MAX
 
-                if const_expr(mode == "union_lut4"):
-                    slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
-                    if const_expr(True):
-                        for j in range_constexpr((257 * DN_PAIR_ROWS + THREADS - 1) // THREADS):
-                            address = tid + j * THREADS
-                            if address < 257 * DN_PAIR_ROWS:
-                                st(slot_lut, address, fx.Int8(0))
-                        gpu.barrier()
-                        if tid < DN_PAIR_ROWS * SLOTS:
-                            lut_expert = ld(keys, tid)
-                            st(
-                                slot_lut,
-                                lut_expert * DN_PAIR_ROWS + tid // SLOTS,
-                                fx.Int8(tid % SLOTS),
-                            )
-                        gpu.barrier()
+                slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
+                for j in range_constexpr((257 * DN_PAIR_ROWS + THREADS - 1) // THREADS):
+                    address = tid + j * THREADS
+                    if address < 257 * DN_PAIR_ROWS:
+                        st(slot_lut, address, fx.Int8(0))
+                gpu.barrier()
+                if tid < DN_PAIR_ROWS * SLOTS:
+                    lut_expert = ld(keys, tid)
+                    st(
+                        slot_lut,
+                        lut_expert * DN_PAIR_ROWS + tid // SLOTS,
+                        fx.Int8(tid % SLOTS),
+                    )
+                gpu.barrier()
 
                 n_union = _uniform(ld(uc, 4))
 
                 sn = fx.min(lane % 16, DN_PAIR_ROWS - 1)
 
-                BATCH = 4 if mode in ("union_batch4", "union_lut4") else 1
+                BATCH = 4
 
                 if wave < (output_rows // 16) * 4:
                     for batch in range((n_union + BATCH - 1) // BATCH):
                         units, slots, active_columns = [], [], []
                         for part in range_constexpr(BATCH):
-                            index = fx.min(batch * BATCH + part, n_union - 1)
-                            expert = _uniform(ld(ue, index))
-                            if const_expr(mode == "union_lut4"):
-                                slot = fx.Int32(ld(slot_lut, expert * DN_PAIR_ROWS + sn))
-                            else:
-                                slot = fx.Int32(0)
-                                for j in range_constexpr(SLOTS):
-                                    slot = (ld(keys, sn * SLOTS + j) == expert).select(fx.Int32(j), slot)
+                            union_index = fx.min(batch * BATCH + part, n_union - 1)
+                            expert = _uniform(ld(ue, union_index))
+                            slot = fx.Int32(ld(slot_lut, expert * DN_PAIR_ROWS + sn))
                             slots.append(slot)
                             active_columns.append((lane % 16 < DN_PAIR_ROWS) & (ld(keys, sn * SLOTS + slot) == expert))
                             units.append(unit(expert, slot, gw, fx.Float32(1.0)))
@@ -6608,11 +6574,7 @@ def build_glm5_monokernel(
                                     if const_expr(DN_CONTIG_CONTRIBUTIONS):
                                         fx.ptr_store(c, contributions + target)
                                     else:
-                                        stride = (
-                                            DN_PAIR_ROWS
-                                            if mode in ("union_transpose", "union_batch4", "union_lut4")
-                                            else 1
-                                        )
+                                        stride = DN_PAIR_ROWS
                                         for e in range_constexpr(4):
                                             st(contributions, target + e * stride, c[e])
 
