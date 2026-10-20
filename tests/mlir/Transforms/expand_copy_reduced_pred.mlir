@@ -52,3 +52,49 @@ gpu.module @expand_copy_reduced_pred {
     gpu.return
   }
 }
+
+// Each of the four atoms reads its own element of the predicate.
+// CHECK-LABEL: gpu.func @hierarchical_reduced_pred_copy
+// CHECK-SAME: %[[PRED:arg[0-9]+]]: !fly.ptr<i1, register>
+// CHECK: fly.copy_atom_call({{.*}}!fly.memref<i1, register, 1:0>) -> ()
+// CHECK: fly.add_offset(%[[PRED]], %{{.*}}) : (!fly.ptr<i1, register>, !fly.int_tuple<1>)
+// CHECK: fly.copy_atom_call({{.*}}!fly.memref<i1, register, 1:0>) -> ()
+// CHECK: fly.add_offset(%[[PRED]], %{{.*}}) : (!fly.ptr<i1, register>, !fly.int_tuple<2>)
+// CHECK: fly.copy_atom_call({{.*}}!fly.memref<i1, register, 1:0>) -> ()
+// CHECK: fly.add_offset(%[[PRED]], %{{.*}}) : (!fly.ptr<i1, register>, !fly.int_tuple<3>)
+// CHECK: fly.copy_atom_call({{.*}}!fly.memref<i1, register, 1:0>) -> ()
+// CHECK-NOT: fly.copy_atom_call
+gpu.module @expand_copy_hierarchical_reduced_pred {
+  gpu.func @hierarchical_reduced_pred_copy(%src_ptr: !fly.ptr<f32, global>, %dst_ptr: !fly.ptr<f32, register>,
+                                           %pred_ptr: !fly.ptr<i1, register>) kernel {
+    // src and dst: V-mode (1,(2,2)) = (ATOM_V, ATOM_REST) with a hierarchical ATOM_REST.
+    %src_shape = fly.make_int_tuple() : () -> !fly.int_tuple<((1,(2,2)),1,1)>
+    %src_stride = fly.make_int_tuple() : () -> !fly.int_tuple<((0,(1,2)),0,0)>
+    %src_layout = fly.make_layout(%src_shape, %src_stride)
+        : (!fly.int_tuple<((1,(2,2)),1,1)>, !fly.int_tuple<((0,(1,2)),0,0)>)
+        -> !fly.layout<((1,(2,2)),1,1):((0,(1,2)),0,0)>
+    %src_view = fly.make_view(%src_ptr, %src_layout)
+        : (!fly.ptr<f32, global>, !fly.layout<((1,(2,2)),1,1):((0,(1,2)),0,0)>)
+        -> !fly.memref<f32, global, ((1,(2,2)),1,1):((0,(1,2)),0,0)>
+    %dst_view = fly.make_view(%dst_ptr, %src_layout)
+        : (!fly.ptr<f32, register>, !fly.layout<((1,(2,2)),1,1):((0,(1,2)),0,0)>)
+        -> !fly.memref<f32, register, ((1,(2,2)),1,1):((0,(1,2)),0,0)>
+
+    // pred: reduced (ATOM_REST, REST...) = ((2,2),1,1), one boolean per atom.
+    %pred_shape = fly.make_int_tuple() : () -> !fly.int_tuple<((2,2),1,1)>
+    %pred_stride = fly.make_int_tuple() : () -> !fly.int_tuple<((1,2),0,0)>
+    %pred_layout = fly.make_layout(%pred_shape, %pred_stride)
+        : (!fly.int_tuple<((2,2),1,1)>, !fly.int_tuple<((1,2),0,0)>) -> !fly.layout<((2,2),1,1):((1,2),0,0)>
+    %pred_view = fly.make_view(%pred_ptr, %pred_layout)
+        : (!fly.ptr<i1, register>, !fly.layout<((2,2),1,1):((1,2),0,0)>)
+        -> !fly.memref<i1, register, ((2,2),1,1):((1,2),0,0)>
+
+    %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly.universal_copy<32>, 32>
+    fly.copy(%atom, %src_view, %dst_view, %pred_view)
+        : (!fly.copy_atom<!fly.universal_copy<32>, 32>,
+           !fly.memref<f32, global, ((1,(2,2)),1,1):((0,(1,2)),0,0)>,
+           !fly.memref<f32, register, ((1,(2,2)),1,1):((0,(1,2)),0,0)>,
+           !fly.memref<i1, register, ((2,2),1,1):((1,2),0,0)>) -> ()
+    gpu.return
+  }
+}

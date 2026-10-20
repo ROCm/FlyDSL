@@ -6,6 +6,7 @@ import enum
 import operator
 import types
 from collections.abc import Callable as AbcCallable
+from fractions import Fraction
 from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
@@ -81,6 +82,7 @@ __all__ = [
     "Tile",
     "TiledCopy",
     "TiledMma",
+    "FastDivmodDivisor",
     "Stream",
     "Tuple3D",
     "Basis",
@@ -696,7 +698,7 @@ class IntTuple(BuiltinDslType):
         if ty.is_leaf_basis:
             bt = ty.get_leaf_as_basis
             return Basis(bt.value, list(bt.modes))
-        return ty.get_static_leaf_int
+        return ty.static_value
 
     @staticmethod
     def _dynamic_leaf_to_py(ty, value):
@@ -1388,6 +1390,62 @@ class TiledMma(BuiltinDslType):
         return mma_make_fragment(MmaOperand.C, self, c, stages=stages)
 
 
+@ir.register_value_caster(FastDivModType.static_typeid, replace=True)
+class FastDivmodDivisor(BuiltinDslType):
+    """A divisor with the magic numbers of its fast division.
+
+    Constructing one from an Int32 or Int64 computes the magic numbers once
+    (``make_fast_divmod``): in a ``@flyc.jit`` function on the host, which
+    passes the divisor to a kernel as one argument; in a kernel on the GPU.
+    Dividing by it is then a multiply-high, an add and a shift::
+
+        divisor = fx.FastDivmodDivisor(n)
+        q, r = divmod(x, divisor)
+        q = x // divisor
+        r = x % divisor
+
+    The divisor must be in [1, 2^(width-1)) and the dividend in
+    [0, 2^(width-1)), where width is that of the divisor. ``divisor`` reads the
+    divisor back, inside a kernel too. As a shape leaf, e.g.
+    ``fx.make_shape(divisor, 8)``, it makes the layout algebra divide by it
+    the same way.
+    """
+
+    def __init__(self, divisor):
+        if not (isinstance(divisor, ir.Value) and isinstance(divisor.type, FastDivModType)):
+            divisor = make_fast_divmod(divisor)
+        super().__init__(divisor)
+
+    @property
+    def width(self) -> int:
+        return self.type.divisor_type.width
+
+    @property
+    def divisor(self):
+        return fast_divmod_get_divisor(self)
+
+    def _dividend(self, dividend):
+        dtype = Int32 if self.width == 32 else Int64
+        if isinstance(dividend, ir.Value) and not isinstance(dividend, Numeric):
+            dividend = as_dsl_value(dividend)
+        dividend = as_numeric(dividend)
+        if not isinstance(dividend, Integer) or dividend.width > self.width:
+            raise TypeError(
+                f"a {self.width}-bit FastDivmodDivisor cannot divide {type(dividend).__name__}; "
+                f"pass an integer at most {self.width} bits wide"
+            )
+        return dividend if type(dividend) is dtype else dividend.to(dtype)
+
+    def __rdivmod__(self, dividend):
+        return fast_divmod(self._dividend(dividend), self)
+
+    def __rfloordiv__(self, dividend):
+        return self.__rdivmod__(dividend)[0]
+
+    def __rmod__(self, dividend):
+        return self.__rdivmod__(dividend)[1]
+
+
 class Stream:
     """Opaque async queue handle for kernel launch.
 
@@ -1461,8 +1519,8 @@ class Basis:
         self.modes = modes
 
     def __mul__(self, other):
-        if not isinstance(other, (int, Integer)):
-            raise TypeError(f"Basis multiplication requires int or Integer, got {type(other)}")
+        if not isinstance(other, (int, Fraction, Integer)):
+            raise TypeError(f"Basis multiplication requires int, Fraction, or Integer, got {type(other)}")
         return Basis(self.value * other, self.modes)
 
     __rmul__ = __mul__

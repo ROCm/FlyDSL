@@ -21,6 +21,7 @@ This guide covers the FlyDSL project structure, compilation stages, key abstract
 ```text
 FlyDSL/
 ├── include/flydsl/                   # C++ dialect headers
+│   ├── Core/                         # Layout algebra library (Trait/EmitOp categories)
 │   └── Dialect/
 │       ├── Fly/                      # Fly layout dialect
 │       │   ├── IR/
@@ -30,8 +31,7 @@ FlyDSL/
 │       │   │   ├── FlyAttrDefs.td    # Attributes
 │       │   │   └── FlyInterfaces.td  # Op interfaces
 │       │   └── Transforms/
-│       │       ├── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
-│       │       └── LayoutLowering.td # Layout lowering pass
+│       │       └── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
 │       └── FlyROCDL/                 # FlyROCDL dialect (copy/MMA atoms)
 │           └── IR/
 │               ├── Dialect.td        # FlyROCDL dialect declaration
@@ -168,8 +168,8 @@ Python Function (@flyc.kernel / @flyc.jit)
         ▼  MlirCompiler.compile()
    ┌────────────────────────────────────────────────────────┐
    │ Stage A — pre_binary_fragments  (Fly → ROCDL)          │
-   │   fly-rewrite-func-signature                           │
    │   fly-canonicalize                                     │
+   │   fly-rocdl-expand-ops                                 │
    │   fly-layout-lowering                                  │
    │   fly-int-swizzle-simplify                             │
    │   canonicalize                                         │
@@ -226,14 +226,14 @@ definition for this checkout:
 
 | # | Pass | Description |
 |---|---|---|
-| 1 | `fly-rewrite-func-signature` | Rewrite DSL types at function and SCF control-flow boundaries; lowers `IntTuple` / `Layout` / `ComposedLayout` / `CoordTensor` / `MemRef` to packed LLVM struct types and reconstructs them in the body via constructor ops. |
-| 2 | `fly-canonicalize` | FlyDSL-specific canonicalization (folds `!fly.layout` algebra when shapes are static). |
+| 1 | `fly-canonicalize` | FlyDSL-specific canonicalization (rebuilds every static-typed result as `fly.static`, so static layout algebra folds away; producers with side effects stay). |
+| 2 | `fly-rocdl-expand-ops` | Expands target-specific FlyROCDL operations while Core layout profiles are available. |
 | 3 | `fly-layout-lowering` | Lowers layout algebra (`fly.crd2idx`, partitions, divides) to concrete `arith` + `vector` ops. |
 | 4 | `fly-int-swizzle-simplify` | Algebraically simplifies the swizzle-shaped arith sequences emitted by `applySwizzle`. |
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |
 | 6 | `fly-convert-atom-call-to-ssa-form` | Converts `copy_atom_call` / `mma_atom_call` to their SSA counterparts; promotes register tensors to vector SSA values. |
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
-| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
+| 8 | `convert-fly-to-rocdl` | Converts Fly values everywhere, including function arguments, results, calls, kernel launches and SCF/CF values, to the nested packed ABI, omitting static fields. Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
 | 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
@@ -491,8 +491,8 @@ This produces numbered dump files (exact pass count tracks `RocmBackend._pipelin
 ```text
 dumps/my_func_name/
 ├── 00_origin.mlir
-├── 01_fly_rewrite_func_signature.mlir
-├── 02_fly_canonicalize.mlir
+├── 01_fly_canonicalize.mlir
+├── 02_fly_rocdl_expand_ops.mlir
 ├── 03_fly_layout_lowering.mlir
 ├── 04_fly_int_swizzle_simplify.mlir
 ├── 05_canonicalize.mlir

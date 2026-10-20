@@ -23,6 +23,8 @@ def Fly_TensorLikeType : AnyTypeOf<[Fly_CoordTensor, Fly_MemRef]>;
 def Fly_NarrowLayoutType : AnyTypeOf<[Fly_Layout, Fly_ComposedLayout]>;
 def Fly_LayoutLikeType : AnyTypeOf<[Fly_NarrowLayoutType, Fly_TensorLikeType]>;
 def Fly_IntTupleLikeType : AnyTypeOf<[Fly_IntTuple, Fly_LayoutLikeType]>;
+// What a dynamic leaf binds: an integer, or the handle of a fast-divmod divisor.
+def Fly_DynamicLeafType : AnyTypeOf<[I32, I64, Fly_FastDivMod]>;
 
 //===----------------------------------------------------------------------===//
 // Constraints
@@ -46,22 +48,22 @@ def Fly_StaticOp : Fly_Op<"static", [Pure]> {
 }
 
 def Fly_MakeIntTupleOp : Fly_Op<"make_int_tuple", [Pure]> {
-  let arguments = (ins Variadic<AnyTypeOf<[I32,I64]>>:$dyncElems);
+  let arguments = (ins Variadic<Fly_DynamicLeafType>:$dyncElems);
   let results = (outs Fly_IntTuple:$result);
 }
 
 def Fly_MakeShapeOp : Fly_Op<"make_shape", [Pure]> {
-  let arguments = (ins Variadic<AnyTypeOf<[I32,I64]>>:$dyncElems);
+  let arguments = (ins Variadic<Fly_DynamicLeafType>:$dyncElems);
   let results = (outs Fly_IntTuple:$result);
 }
 
 def Fly_MakeStrideOp : Fly_Op<"make_stride", [Pure]> {
-  let arguments = (ins Variadic<AnyTypeOf<[I32,I64]>>:$dyncElems);
+  let arguments = (ins Variadic<Fly_DynamicLeafType>:$dyncElems);
   let results = (outs Fly_IntTuple:$result);
 }
 
 def Fly_MakeCoordOp : Fly_Op<"make_coord", [Pure]> {
-  let arguments = (ins Variadic<AnyTypeOf<[I32,I64]>>:$dyncElems);
+  let arguments = (ins Variadic<Fly_DynamicLeafType>:$dyncElems);
   let results = (outs Fly_IntTuple:$result);
 }
 
@@ -85,6 +87,12 @@ def Fly_MakeComposedLayoutOp : Fly_Op<"make_composed_layout", [Pure, DeclareOpIn
                        Fly_IntTuple:$offset,
                        Fly_NarrowLayoutType:$outer);
   let results = (outs Fly_ComposedLayout:$result);
+}
+
+// Operands fill the dynamic leaves of the tile's layouts in Core traversal order.
+def Fly_MakeTileOp : Fly_Op<"make_tile", [Pure]> {
+  let arguments = (ins Variadic<Fly_DynamicLeafType>:$dyncElems);
+  let results = (outs Fly_Tile:$result);
 }
 
 def Fly_MakeIdentityLayoutOp : Fly_Op<"make_identity_layout", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -115,11 +123,14 @@ def Fly_MakeFragmentLayoutLikeOp : Fly_Op<"make_fragment_layout_like", [Pure, De
 def Fly_GetScalarOp : Fly_Op<"get_scalar", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_IntTuple:$int_tuple);
   let results = (outs AnyType:$result);
+  let hasFolder = 1;
 }
 
+// The dynamic leaves of the input; its static leaves live in the type.
 def Fly_GetLeavesOp : Fly_Op<"get_leaves", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_IntTuple:$input, DefaultValuedAttr<BoolAttr, "false">:$dynamicOnly);
-  let results = (outs Variadic<AnyTypeOf<[I32, I64]>>:$results);
+  let arguments = (ins AnyTypeOf<[Fly_IntTuple, Fly_Layout, Fly_Tile,
+      Fly_ComposedLayout, Fly_CoordTensor, Fly_MemRef]>:$input);
+  let results = (outs Variadic<Fly_DynamicLeafType>:$results);
 }
 
 def Fly_GetShapeOp : Fly_Op<"get_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -295,12 +306,12 @@ def Fly_ComplementOp : Fly_Op<"complement", [Pure, DeclareOpInterfaceMethods<Inf
 }
 
 def Fly_RightInverseOp : Fly_Op<"right_inverse", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_NarrowLayoutType:$layout);
-  let results = (outs Fly_NarrowLayoutType:$result);
+  let arguments = (ins Fly_Layout:$layout);
+  let results = (outs Fly_Layout:$result);
 }
 def Fly_LeftInverseOp : Fly_Op<"left_inverse", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_NarrowLayoutType:$layout);
-  let results = (outs Fly_NarrowLayoutType:$result);
+  let arguments = (ins Fly_Layout:$layout);
+  let results = (outs Fly_Layout:$result);
 }
 
 class Fly_LayoutDivideOp<string mnemonic>
@@ -541,6 +552,29 @@ def Fly_MemRefLoadOp : Fly_Op<"memref.load", [DeclareOpInterfaceMethods<InferTyp
 }
 def Fly_MemRefStoreOp : Fly_Op<"memref.store", []> {
   let arguments = (ins AnyType:$value, Fly_MemRef:$memref, Fly_IntTuple:$indices);
+}
+
+//===----------------------------------------------------------------------===//
+// Fast division
+//===----------------------------------------------------------------------===//
+
+// The handle of `divisor`, an i32 or i64 in [1, 2^(width-1)): the divisor with
+// the magic numbers of its fast division.
+def Fly_MakeFastDivModOp : Fly_Op<"make_fast_divmod", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyTypeOf<[I32, I64]>:$divisor);
+  let results = (outs Fly_FastDivMod:$result);
+}
+
+// The quotient and remainder of `dividend`, as wide as the divisor and in
+// [0, 2^(width-1)), by a multiply-high, an add and a shift.
+def Fly_FastDivModOp : Fly_Op<"fast_divmod", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyTypeOf<[I32, I64]>:$dividend, Fly_FastDivMod:$divisor);
+  let results = (outs AnyTypeOf<[I32, I64]>:$quotient, AnyTypeOf<[I32, I64]>:$remainder);
+}
+
+def Fly_FastDivModGetDivisorOp : Fly_Op<"fast_divmod_get_divisor", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_FastDivMod:$divisor);
+  let results = (outs AnyTypeOf<[I32, I64]>:$result);
 }
 
 //===----------------------------------------------------------------------===//

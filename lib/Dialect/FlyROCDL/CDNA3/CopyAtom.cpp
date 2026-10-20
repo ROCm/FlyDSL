@@ -523,6 +523,7 @@ LogicalResult CopyOpCDNA3BufferAtomicType::emitAtomCall(OpBuilder &builder, Loca
                                                         Type dstMemTyArg, Type predMemTyArg,
                                                         Value atomVal, Value src, Value dst,
                                                         Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);

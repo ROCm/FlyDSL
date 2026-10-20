@@ -254,11 +254,12 @@ TEST(IntTupleParity, CompactOrder) {
             "(0,1,128,4,0)");
 }
 
-// A coordinate is static only if the index and every shape it divides by are.
+// A coordinate is static if the index and every shape it divides by are, or if
+// divisibility fixes it: 16 % (2 * ?) is even, so its remainder by 2 is 0.
 TEST(IntTupleParity, Idx2Crd) {
   EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_c), 4_c))), "((0,2),2)");
   EXPECT_EQ(toString(idx2crd(16_dt, make_tuple(make_tuple(2_c, 3_c), 4_c))), "((?0,?2),?2)");
-  EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_d), 4_c))), "((?0,?2),?2)");
+  EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_d), 4_c))), "((0,?2),?2)");
   EXPECT_EQ(toString(idx2crd(make_tuple(5_c, 3_c), make_tuple(make_tuple(2_c, 3_c), 4_c))),
             "((1,2),3)");
   EXPECT_EQ(toString(idx2crd(13_dt, make_tuple(2_c, 3_c, 4_c), make_tuple(1_c, 2_c, 6_c))),

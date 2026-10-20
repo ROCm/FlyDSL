@@ -12,12 +12,11 @@
 
 #include "llvm/Support/MathExtras.h"
 
+#include "flydsl/Core/EmitOp.hpp"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-#include "flydsl/Dialect/FlyROCDL/Utils/TdmGeometry.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 using namespace mlir;
 using namespace mlir::fly;
@@ -66,10 +65,9 @@ namespace mlir::fly_rocdl {
 
 namespace {
 
-constexpr unsigned kMaxTdmRank = 5;
-constexpr uint64_t kMaxTensorStride = (uint64_t{1} << 48) - 1;
+// The state struct has a slot per possible descriptor axis.
+constexpr unsigned kMaxTdmRank = tdm::kMaxRank;
 constexpr int32_t kMaxAtomicBarrierAddress = 0x7FFF8;
-constexpr int32_t kMaxIterateCount = 256;
 
 // Filler for the extent slots past the atom's rank, which the lowering never reads --
 // a value that would be obviously wrong in a descriptor, so a stray read shows up.
@@ -286,42 +284,27 @@ Value tdmInitialState(OpBuilder &builder, Location loc, const TdmSlots &slots, u
 // reaches this point is a pipeline that skipped the pass rather than something to
 // translate a second time.
 //
-// A static leaf lives in the tuple's *type*, so it reaches the descriptor math as a
-// constant and the select it feeds folds away; a dynamic leaf is an i32/i64 operand of
-// `make_int_tuple` and is compared against zero to reach the i1 the slot holds.
+// The final conversion passes an int tuple field as a struct of all its integer
+// leaves: a static leaf is a constant, so the select it feeds folds away; a dynamic
+// leaf is the kernel's i32/i64 value. Either is compared against zero to reach the i1
+// the slot holds.
 LogicalResult tdmUnpackBoundaryCheckAxes(OpBuilder &builder, Location loc, Value flags,
                                          unsigned rank, SmallVectorImpl<Value> &out) {
-  auto tupleTy = dyn_cast<IntTupleType>(flags.getType());
-  if (!tupleTy)
-    return mlir::emitError(loc) << "cdna5 TDM: \"boundary_check_axes\" must be an int_tuple, got "
-                                << flags.getType();
-  IntTupleAttr attr = tupleTy.getAttr();
-  if (attr.isLeaf() || attr.rank() != static_cast<int32_t>(rank))
-    return mlir::emitError(loc) << "cdna5 TDM: \"boundary_check_axes\" is " << attr
+  auto structType = dyn_cast<LLVM::LLVMStructType>(flags.getType());
+  if (!structType || structType.getBody().size() != rank)
+    return mlir::emitError(loc) << "cdna5 TDM: \"boundary_check_axes\" is " << flags.getType()
                                 << ", expected the flat " << rank
                                 << "-leaf tuple `fly-rocdl-expand-ops` produces, one leaf per "
                                    "descriptor axis";
-
-  auto tupleOp = flags.getDefiningOp<MakeIntTupleOp>();
-  OperandRange dyn = tupleOp ? tupleOp.getDyncElems() : OperandRange(nullptr, 0);
-  auto dynIt = dyn.begin();
   out.clear();
-  for (int32_t axis = 0; axis < attr.rank(); ++axis) {
-    IntTupleAttr leaf = attr.at(axis);
-    if (!leaf.isLeaf())
+  for (auto [axis, type] : llvm::enumerate(structType.getBody())) {
+    if (!type.isInteger(32) && !type.isInteger(64))
       return mlir::emitError(loc) << "cdna5 TDM: \"boundary_check_axes\" leaf " << axis
-                                  << " is nested";
-    IntAttr value = leaf.extractIntFromLeaf();
-    if (value.isStatic()) {
-      out.push_back(arith::ConstantIntOp::create(builder, loc, value.getValue() != 0, 1));
-      continue;
-    }
-    if (!tupleOp || dynIt == dyn.end())
-      return mlir::emitError(loc) << "cdna5 TDM: \"boundary_check_axes\" leaf " << axis
-                                  << " is dynamic but the tuple is not normal form";
-    Value v = *dynIt++;
-    Value zero = arith::ConstantIntOp::create(builder, loc, v.getType(), 0);
-    out.push_back(arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne, v, zero));
+                                  << " must be i32 or i64, got " << type;
+    Value v = builder.createOrFold<LLVM::ExtractValueOp>(
+        loc, flags, ArrayRef<int64_t>{static_cast<int64_t>(axis)});
+    Value zero = arith::ConstantIntOp::create(builder, loc, type, 0);
+    out.push_back(builder.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, v, zero));
   }
   return success();
 }
@@ -390,10 +373,11 @@ int32_t tdmNumBits(ArrayRef<int32_t> tileShape, int32_t elemBits, int32_t iterCo
 // `getContext()` call and so only work inside a type member function.
 Attribute tdmThrBitLayout(MLIRContext *ctx, ArrayRef<int32_t> tileShape, int32_t elemBits,
                           int32_t iterCount) {
-  Attribute one = IntTupleAttr::getLeafStatic(ctx, 1);
-  Attribute bits = IntTupleAttr::getLeafStatic(ctx, tdmNumBits(tileShape, elemBits, iterCount));
-  return LayoutAttr::get(IntTupleAttr::get(ArrayAttr::get(ctx, {one, bits})),
-                         IntTupleAttr::get(ArrayAttr::get(ctx, {one, one})));
+  using IntTuple = core::IntTuple<core::Trait>;
+  auto one = IntTuple::getSInt(1);
+  auto bits = IntTuple::getSInt(tdmNumBits(tileShape, elemBits, iterCount));
+  return LayoutAttr::get(
+      ctx, core::make_layout(core::make_tuple(one, bits), core::make_tuple(one, one)));
 }
 
 // Shared verifier. `padInterval` / `padAmount` are always zero on the store type,
@@ -404,20 +388,20 @@ LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<i
   int32_t rank = static_cast<int32_t>(tileShape.size());
   if (rank < 1 || rank > static_cast<int32_t>(kMaxTdmRank))
     return emitError() << "TDM rank must be in [1, " << kMaxTdmRank << "], got " << rank;
-  IntTupleBuilder<IntTupleAttr> tupleBuilder(tensor2tdm.getContext());
   SmallVector<IntTupleAttr> mapLeaves;
-  intTupleFlattenToVector(tupleBuilder, tensor2tdm, mapLeaves);
+  for (auto leaf : tensor2tdm.getRef().leaves())
+    mapLeaves.push_back(
+        IntTupleAttr::get(tensor2tdm.getContext(), core::IntTuple<core::Trait>::fromLeaf(leaf)));
   // A tensor always has at least as many modes as the descriptor has dims: dims are
   // built from modes, and several modes can share one, never the other way round.
   if (static_cast<int32_t>(mapLeaves.size()) < rank)
     return emitError() << "TDM tensor2tdm has " << mapLeaves.size()
                        << " modes but the descriptor has " << rank << " dims";
-  // Only a static map is representable: a mode either lands on a known axis at a known
-  // scale, or it has no bound to give. A mode with a dynamic stride never shares a dim
-  // with another, so it either owns its axis at scale 1 or reaches here as a `0` leaf.
+  // Axis paths are static. Scales may be dynamic or rational: this type metadata
+  // routes boundary flags, while the coordinate tensor carries runtime scales.
   for (auto [mode, leaf] : llvm::enumerate(mapLeaves)) {
     if (leaf.isLeafBasis()) {
-      BasisAttr basis = leaf.getLeafAsBasis();
+      LeafAttr basis = leaf.getLeaf();
       if (basis.getModes().size() != 1)
         return emitError() << "TDM tensor2tdm mode " << mode
                            << " must name one descriptor dim, got " << leaf;
@@ -425,9 +409,6 @@ LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<i
       if (dim < 0 || dim >= rank)
         return emitError() << "TDM tensor2tdm mode " << mode << " lands on dim " << dim
                            << ", which is not a descriptor dim in [0, " << rank << ")";
-      if (!basis.getValue().isStatic())
-        return emitError() << "TDM tensor2tdm mode " << mode << " must have a static scale, got "
-                           << leaf;
     } else if (!leaf.isLeafStaticValue(0)) {
       return emitError() << "TDM tensor2tdm mode " << mode << " must be a basis stride or 0, got "
                          << leaf;
@@ -477,8 +458,8 @@ LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<i
   }
   // `iterate_count` is a 16-bit field encoded as value-minus-one, and iteration is paid
   // for out of GROUP2's own slots -- see `tdm::kMaxIterateRank` for which ones.
-  if (iterCount < 1 || iterCount > kMaxIterateCount)
-    return emitError() << "TDM iterCount must be in [1, " << kMaxIterateCount << "], got "
+  if (iterCount < 1 || iterCount > tdm::kMaxIterateCount)
+    return emitError() << "TDM iterCount must be in [1, " << tdm::kMaxIterateCount << "], got "
                        << iterCount;
   if (iterCount > 1 && rank > tdm::kMaxIterateRank)
     return emitError() << "TDM descriptor iteration takes dim 2's stride for its own, so it "
@@ -495,40 +476,25 @@ LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<i
   return success();
 }
 
-// Rebuild a tile coordinate from a lowered coordinate tensor.
-//
-// A coordinate tensor lowers to its coordinate the way a memref lowers to its
-// pointer (see `MakeViewOpLowering`), and an `IntTuple` keeps its static leaves in
-// its type and only its dynamic ones as SSA operands. So the coordinate is read from
-// both halves: constants for the leaves the layout algebra already folded, and the
-// `make_int_tuple` operands for the ones a kernel computed.
-LogicalResult unpackCoord(OpBuilder &builder, Location loc, IntTupleAttr baseAttr, Value coordValue,
-                          SmallVectorImpl<Value> &out) {
-  IntTupleBuilder<IntTupleAttr> tupleBuilder(builder.getContext());
-  SmallVector<IntTupleAttr> leaves;
-  intTupleFlattenToVector(tupleBuilder, baseAttr, leaves);
-
-  // Only the dynamic leaves are carried by the value, and only a normal-form tuple
-  // exposes them in order.
-  auto tupleOp = coordValue.getDefiningOp<MakeIntTupleOp>();
-  OperandRange dyn = tupleOp ? tupleOp.getDyncElems() : OperandRange(nullptr, 0);
-  auto dynIt = dyn.begin();
-  auto dynEnd = dyn.end();
-  Type i32Ty = builder.getI32Type();
-  for (auto [dim, leaf] : llvm::enumerate(leaves)) {
-    auto intAttr = leaf.extractIntFromLeaf();
-    if (intAttr.isStatic()) {
-      out.push_back(arith::ConstantIntOp::create(builder, loc, i32Ty, intAttr.getValue()));
-      continue;
-    }
-    if (!tupleOp || dynIt == dynEnd)
-      return mlir::emitError(loc) << "cdna5 TDM: coordinate leaf " << dim
-                                  << " is dynamic but the coordinate tensor is not in normal form";
-    Value v = *dynIt++;
-    if (!v.getType().isInteger(32))
-      return mlir::emitError(loc) << "cdna5 TDM: coordinate leaf " << dim
-                                  << " must be i32 (a tile index in elements), got " << v.getType();
-    out.push_back(v);
+// Read the tile coordinate off a lowered coordinate tensor: bind the lowered value to
+// the tensor's Core profile and take its engine. Static coordinates become constants
+// that the descriptor math folds away; dynamic ones keep the kernel's i32/i64 values.
+// The SSA producer may be a constructor, a block argument, or a control-flow result.
+LogicalResult unpackCoord(OpBuilder &builder, Location loc, CoordTensorType coordType,
+                          Value coordValue, SmallVectorImpl<Value> &out) {
+  core::EmitContext ctx(builder, loc);
+  auto tensor = core::bind_llvm_value(coordType.getRef(), coordValue, ctx);
+  if (failed(tensor))
+    return mlir::emitError(loc) << "cdna5 TDM: invalid lowered coordinate tensor";
+  for (auto leaf : tensor->data().leaves()) {
+    auto scale = leaf.scale();
+    if (scale.isRatio())
+      return mlir::emitError(loc)
+             << "cdna5 TDM: tile origin must be aligned to internal_type elements";
+    auto value = scale.materialize(ctx);
+    if (failed(value))
+      return mlir::emitError(loc) << "cdna5 TDM: cannot materialize a tile coordinate";
+    out.push_back(*value);
   }
   return success();
 }
@@ -620,20 +586,18 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
     strideElems[i] = slotField(slots.stride0 + i);
   strideElems[rank - 1] = arith::ConstantIntOp::create(builder, loc, 1, 64); // innermost contiguous
   for (int32_t i = 0; i < rank - 1; ++i) {
-    Value inRange =
-        arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ule, strideElems[i],
-                              arith::ConstantIntOp::create(builder, loc, kMaxTensorStride, 64));
+    Value inRange = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::ule, strideElems[i],
+        arith::ConstantIntOp::create(builder, loc, tdm::kMaxTensorStride, 64));
     LLVM::AssumeOp::create(builder, loc, inRange);
   }
 
-  // The tile coordinate comes from the coordinate-tensor operand, whose runtime value
-  // is that coordinate: static leaves live in its type and dynamic ones are the
-  // operands of the `make_int_tuple` that built it. A static leaf therefore costs a
-  // constant the descriptor math folds away, and a dynamic one costs exactly the
-  // integer the kernel already had.
+  // Read the tile coordinate from the original profile and the lowered base fields.
+  // Static leaves become constants that descriptor math folds away; dynamic
+  // leaves preserve the kernel's original integer values.
   Value glbCoord = cfg.isLoad ? src : dst;
   SmallVector<Value> coord;
-  if (failed(unpackCoord(builder, loc, coordTy.getBase(), glbCoord, coord)))
+  if (failed(unpackCoord(builder, loc, coordTy, glbCoord, coord)))
     return failure();
   if (static_cast<int32_t>(coord.size()) != rank)
     return mlir::emitError(loc) << "cdna5 TDM: the coordinate has " << coord.size()
@@ -649,9 +613,12 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   Value elemOff = zero64;
   for (int32_t i = 0; i < rank; ++i) {
     Value coordNonNegative =
-        arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge, coord[i], zeroC);
+        arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge, coord[i],
+                              coord[i].getType().isInteger(64) ? zero64 : zeroC);
     LLVM::AssumeOp::create(builder, loc, coordNonNegative);
-    Value c64 = arith::ExtUIOp::create(builder, loc, i64Ty, coord[i]);
+    Value c64 = coord[i].getType().isInteger(64)
+                    ? coord[i]
+                    : arith::ExtUIOp::create(builder, loc, i64Ty, coord[i]);
     elemOff = arith::AddIOp::create(builder, loc, elemOff,
                                     arith::MulIOp::create(builder, loc, c64, strideElems[i]));
   }
@@ -679,8 +646,14 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
     // Extents and coordinates are non-negative, so the two agree, but the compare form is
     // the `usub.sat` idiom and AMDGPU only has that on the VALU -- which would drag a
     // uniform descriptor field onto the vector path and back through readfirstlane.
-    Value rem = arith::SubIOp::create(builder, loc, extent, coord[i]);
-    Value clamped = arith::MaxSIOp::create(builder, loc, rem, zeroC);
+    Value bound = extent;
+    bool wide = coord[i].getType().isInteger(64);
+    if (wide)
+      bound = arith::ExtUIOp::create(builder, loc, i64Ty, extent);
+    Value rem = arith::SubIOp::create(builder, loc, bound, coord[i]);
+    Value clamped = arith::MaxSIOp::create(builder, loc, rem, wide ? zero64 : zeroC);
+    if (wide)
+      clamped = arith::TruncIOp::create(builder, loc, i32Ty, clamped);
     tensorDim[i] =
         arith::SelectOp::create(builder, loc, slotField(slots.boundaryCheck0 + i), clamped, extent);
   }
@@ -690,8 +663,7 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   auto ldsLayout = dyn_cast<LayoutAttr>(ldsMemTy.getLayout());
   if (!ldsLayout || !ldsLayout.isStatic())
     return mlir::emitError(loc) << "cdna5 TDM: the LDS operand needs a fully static layout";
-  LayoutBuilder<LayoutAttr> layoutBuilder(builder.getContext());
-  int64_t ldsCapacity = layoutCosize(layoutBuilder, ldsLayout).getLeafAsInt().getValue();
+  auto ldsCapacity = core::cosize(ldsLayout.getRef()).staticValue();
   int64_t tileElems = 1;
   for (int32_t dim : tileShape)
     tileElems *= dim;

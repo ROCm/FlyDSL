@@ -218,7 +218,9 @@ N=16512`, i32 output put the invalid tail row at byte offset exactly 2^32.
 → `⚠️/🔴 D3: the guard covers [one bound] but not [the other] — [input] passes validation and still wraps`
 
 **D4 — A defaulted width on a width-carrying C++ factory** ⚠️
-`IntAttr::getDynamic(MLIRContext*, int32_t width = 32, ...)` silently records width 32 for an i64.
+A factory that defaults the width records the wrong one: the former `IntAttr::getDynamic(MLIRContext*,
+int32_t width = 32, ...)` silently recorded width 32 for an i64. Core's `Leaf<Trait>::getDInt` takes the
+width explicitly, and `Leaf<EmitOp>::getDyn` reads it from the SSA value's type.
 Real example (PR #729): fixed by reading the actual `IntegerType` width and rejecting anything but
 32 or 64.
 → `⚠️ D4: getDynamic called without an explicit width — an i64 value is recorded as i32`
@@ -331,8 +333,9 @@ Real example (PR #973): `Uint32(0xFFFFFFFF) + Uint32(2)` folded to `0x100000001`
 ### G — Layout algebra and compiler internals
 
 **G1 — A `{value, attr}` adaptor pair describing different shapes** 🔴
-Pairing a scalar value with a nested-tuple attr in `IntTupleValueAdaptor` yields wrong coordinates,
-which can make edge predicates true and permit out-of-bounds accesses.
+Binding SSA scalars to a profile of another shape (`core::bind(profile, bindings, ctx)`, formerly the
+`IntTupleValueAdaptor` pair) yields wrong coordinates, which can make edge predicates true and permit
+out-of-bounds accesses.
 Real example (PR #1052): a `(48,48)` tile returned grid coordinate `(0,1)` as logical `(0,1)`
 instead of `(0,48)`.
 → `🔴 G1: [adaptor] pairs a [scalar] value with a [nested] attr — coordinates resolve to [wrong value]`
@@ -342,7 +345,8 @@ Real example (PR #707): `SliceOp` recomputed the layout and left the base unmove
 → `🔴 G2: [op]'s inferred type updates [component] but not [component] — addresses stay at the source base`
 
 **G3 — Reading a value off an attribute without its static predicate** 🔴
-A dynamic `IntAttr` carries `value == 0`, so `getValue()` without `isStatic()` returns 0.
+A static value read off a dynamic leaf is meaningless: the former `IntAttr` carried `value == 0`, so
+`getValue()` without `isStatic()` returned 0. Check `isStatic()` before `Leaf::staticValue()`.
 Real example (PR #926): `add_offset(reg_ptr, dynamic)` dropped the dynamic index and always
 accessed slot 0.
 → `🔴 G3: getValue() without isStatic() — a dynamic attr reads back as 0 and [access] targets slot 0`

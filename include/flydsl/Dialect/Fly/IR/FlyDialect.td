@@ -14,8 +14,7 @@ def Fly_Dialect : Dialect {
   let name = "fly";
   let cppNamespace = "::mlir::fly";
   
-  // let hasConstantMaterializer = 1
-  let hasConstantMaterializer = 0;
+  let hasConstantMaterializer = 1;
   
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
