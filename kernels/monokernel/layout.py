@@ -34,11 +34,6 @@ POLL_MAX = 12
 TL_COLS = 8
 
 
-def atom_mxfp4_weight_index(row_group, k_chunk, lane, step, k_size):
-    row = row_group * 16 + lane % 16
-    return (row_group * (k_size // 64) + k_chunk * 2 + step // 2) * 128 + (step % 2) * 64 + (row % 16) * 4 + lane // 16
-
-
 def atom_mxfp4_scale_index(row, col, cols):
     r32, a, b = row // 32, (row // 16) % 2, row % 16
     c8, d, e = col // 8, (col // 4) % 2, col % 4

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Synthetic TP4 GLM-5.2 MTP4 C1/C2 kernel timing.
+"""Synthetic TP4/TP8 GLM-5.2 MTP4 C1/C2 kernel timing.
 
-Run on four MI355X GPUs with a current FlyDSL runtime::
+Run on four MI355X GPUs, or select eight with --npes 8::
 
-    python tests/kernels/bench_glm5_tp4_native.py --samples 5 10 --native 1
-    python tests/kernels/bench_glm5_tp4_native.py --samples 5 10 --native 0
+    python tests/kernels/bench_glm5_monokernel.py --samples 5 10 --native 1
+    python tests/kernels/bench_glm5_monokernel.py --samples 5 10 --native 0
 
 S=5 and S=10 correspond to C1 and C2 with five tokens per MTP4 request.
 The default uses zero-filled attention and expert weights; --fused-indexer
@@ -33,7 +33,7 @@ from kernels.monokernel.config import (
     Mxfp4WeightLayout,
     glm5_tp_config,
 )
-from kernels.monokernel.glm.op import Glm5MonoKernel, prepare_glm5_weights
+from kernels.monokernel.glm.op import MAX_TOTAL_TOKENS, Glm5MonoKernel, prepare_glm5_weights
 from kernels.monokernel.glm.reference import indexer_golden
 from kernels.monokernel.packing import pack_ptpc_fp8
 from kernels.monokernel.reference import attention_mats, scale_shape
@@ -86,45 +86,27 @@ def make_weights(rank, npes=4):
     )
 
 
-def worker(
-    rank,
-    port,
-    samples,
-    native,
-    replays,
-    fused_indexer,
-    debug_progress,
-    split_bf16_kv,
-    check_golden,
-    shuffled_pages,
-    check_attention,
-    npes,
-    indexer_cp,
-    check_cp,
-    position,
-    max_seq,
-    request_pos_stride,
-    indexer_ties,
-):
+def worker(rank, port, args):
+    npes, native = args.npes, bool(args.native)
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     dev = torch.device("cuda", rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=npes)
     W = make_weights(rank, npes)
-    attention_weight = AttentionWeight.FP8_BLOCK128 if split_bf16_kv else AttentionWeight.FP8_PTPC
-    cache_layout = KvCacheLayout.SPLIT if split_bf16_kv else KvCacheLayout.ATOM
-    cache_dtype = "bf16" if split_bf16_kv else "fp8"
-    if split_bf16_kv:
+    attention_weight = AttentionWeight.FP8_BLOCK128 if args.split_bf16_kv else AttentionWeight.FP8_PTPC
+    cache_layout = KvCacheLayout.SPLIT if args.split_bf16_kv else KvCacheLayout.ATOM
+    cache_dtype = "bf16" if args.split_bf16_kv else "fp8"
+    if args.split_bf16_kv:
         for name, (rows, width, bk) in attention_mats(W.config.local_heads, W.config).items():
             W.t[f"s_{name}"] = torch.ones(scale_shape(rows, width, bk), device=dev)
-    if fused_indexer:
+    if args.fused_indexer:
         generator = torch.Generator(device=dev).manual_seed(2435)
         logical_qkv = (torch.randn(W.t["w_qkv_a"].shape, device=dev, generator=generator) * 0.05).to(
             torch.float8_e4m3fnuz
         )
         W.t["w_qkv_a"].copy_(
             logical_qkv
-            if split_bf16_kv
+            if args.split_bf16_kv
             else pack_ptpc_fp8(logical_qkv).view(torch.float8_e4m3fnuz).view_as(W.t["w_qkv_a"])
         )
         W.t["s_qkv_a"].fill_(W.config.hidden**-0.5)
@@ -143,7 +125,7 @@ def worker(
             g_index_k=torch.ones(128, device=dev),
             b_index_k=torch.zeros(128, device=dev),
         )
-        if check_attention:
+        if args.check_attention:
             for name in ("q_b", "uk", "uv", "o"):
                 logical = (torch.randn(W.t[f"w_{name}"].shape, device=dev, generator=generator) * 0.02).to(
                     torch.float8_e4m3fnuz
@@ -153,31 +135,32 @@ def worker(
                     if name in ("q_b", "o")
                     else logical
                 )
-    if indexer_ties:
+    if args.indexer_ties:
         W.t["w_index_w"].zero_()
     prepared = prepare_glm5_weights(W, attention_weight)
-    for S in samples:
+    operator_options = dict(
+        rank=rank,
+        npes=npes,
+        topk=2048,
+        attention_weight=attention_weight,
+        kv_cache_layout=cache_layout,
+        kv_cache_dtype=cache_dtype,
+        prepared_weights=prepared,
+        native_fp4_mfma=native,
+        rope_dtype="bf16",
+        index_max_seq=args.max_seq,
+        with_indexer=args.fused_indexer,
+        indexer_cp=args.indexer_cp,
+    )
+
+    def make_op(samples, **overrides):
+        options = operator_options | overrides
+        return Glm5MonoKernel(W, samples, index_request_width=5 if samples >= 5 else 1, **options)
+
+    for S in args.samples:
         if rank == 0:
-            print(f"starting TP{npes} S={S} native_fp4_mfma={native} fused_indexer={fused_indexer}", flush=True)
-        op = Glm5MonoKernel(
-            W,
-            S,
-            rank=rank,
-            npes=npes,
-            topk=2048,
-            launches_per_step=16,
-            attention_weight=attention_weight,
-            kv_cache_layout=cache_layout,
-            kv_cache_dtype=cache_dtype,
-            prepared_weights=prepared,
-            native_fp4_mfma=native,
-            rope_dtype="bf16",
-            index_request_width=5 if S >= 5 else 1,
-            index_max_seq=max_seq,
-            with_indexer=fused_indexer,
-            timeline=debug_progress,
-            indexer_cp=indexer_cp,
-        )
+            print(f"starting TP{npes} S={S} native_fp4_mfma={native} fused_indexer={args.fused_indexer}", flush=True)
+        op = make_op(S, launches_per_step=16, timeline=args.debug_progress)
         h = torch.randn(
             (S, W.config.hidden),
             dtype=torch.bfloat16,
@@ -185,50 +168,53 @@ def worker(
             generator=torch.Generator(device=dev).manual_seed(524),
         )
         x = torch.empty_like(h)
-        cur_pos = torch.tensor([position], dtype=torch.int32, device=dev)
+        cur_pos = torch.tensor([args.pos], dtype=torch.int32, device=dev)
         positions = torch.tensor(
-            [position + i % 5 + (i // 5) * request_pos_stride for i in range(S)], dtype=torch.int64, device=dev
+            [args.pos + i % 5 + (i // 5) * args.request_pos_stride for i in range(S)], dtype=torch.int64, device=dev
         )
         slots = torch.tensor(
-            [position + i % 5 + ((i // 5) * max_seq if fused_indexer else (500 if i >= 5 else 0)) for i in range(S)],
+            [
+                args.pos + i % 5 + ((i // 5) * args.max_seq if args.fused_indexer else (500 if i >= 5 else 0))
+                for i in range(S)
+            ],
             dtype=torch.int64,
             device=dev,
         )
         indptr = torch.arange(S + 1, dtype=torch.int32, device=dev) * 2048
         indices = torch.arange(2048, dtype=torch.int32, device=dev).repeat(S)
         kv = torch.zeros(
-            (max_seq * (S // 5 if fused_indexer and S >= 5 else 1), 512 if split_bf16_kv else 576),
-            dtype=torch.bfloat16 if split_bf16_kv else torch.float8_e4m3fnuz,
+            (args.max_seq * (S // 5 if args.fused_indexer and S >= 5 else 1), 512 if args.split_bf16_kv else 576),
+            dtype=torch.bfloat16 if args.split_bf16_kv else torch.float8_e4m3fnuz,
             device=dev,
         )
-        if check_attention:
+        if args.check_attention:
             kv.copy_((torch.randn(kv.shape, device=dev, generator=generator) * 0.05).to(kv.dtype))
-        pe = torch.zeros((max_seq, 64), dtype=torch.bfloat16, device=dev) if split_bf16_kv else kv
-        angles = torch.arange(max_seq, device=dev, dtype=torch.float32)[:, None] * (
+        pe = torch.zeros((args.max_seq, 64), dtype=torch.bfloat16, device=dev) if args.split_bf16_kv else kv
+        angles = torch.arange(args.max_seq, device=dev, dtype=torch.float32)[:, None] * (
             10000.0 ** (-torch.arange(32, device=dev, dtype=torch.float32)[None, :] / 32)
         )
         cos = angles.cos().to(torch.bfloat16)
         sin = angles.sin().to(torch.bfloat16)
         index_cache = (
             torch.randn(
-                (max_seq * (S // 5 if S >= 5 else 1), 128),
+                (args.max_seq * (S // 5 if S >= 5 else 1), 128),
                 device=dev,
                 dtype=torch.bfloat16,
                 generator=torch.Generator(device=dev).manual_seed(912),
             )
-            if fused_indexer
+            if args.fused_indexer
             else None
         )
-        index_cache_before = index_cache.clone() if check_golden and fused_indexer else None
+        index_cache_before = index_cache.clone() if args.check_golden and args.fused_indexer else None
         block_tables = (
-            torch.arange(index_cache.shape[0] // 16, dtype=torch.int32, device=dev).view(-1, max_seq // 16)
-            if fused_indexer
+            torch.arange(index_cache.shape[0] // 16, dtype=torch.int32, device=dev).view(-1, args.max_seq // 16)
+            if args.fused_indexer
             else None
         )
-        if shuffled_pages and fused_indexer:
-            permutation = torch.randperm(max_seq // 16, device=dev, generator=generator)
+        if args.shuffled_pages and args.fused_indexer:
+            permutation = torch.randperm(args.max_seq // 16, device=dev, generator=generator)
             block_tables = block_tables[:, permutation].contiguous()
-        if fused_indexer:
+        if args.fused_indexer:
             request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
             logical_positions = positions.to(torch.int64)
             slots = block_tables[request_ids, logical_positions // 16].to(torch.int64) * 16 + logical_positions % 16
@@ -252,9 +238,9 @@ def worker(
                 block_tables=block_tables,
             )
 
-        launch(0, not debug_progress)
+        launch(0, not args.debug_progress)
         torch.cuda.synchronize()
-        if debug_progress:
+        if args.debug_progress:
             op.advance_step()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -264,12 +250,12 @@ def worker(
         for _ in range(20):
             graph.replay()
         torch.cuda.synchronize()
-        if debug_progress and rank == 0:
+        if args.debug_progress and rank == 0:
             print(op.timeline_report(), flush=True)
-        if fused_indexer:
+        if args.fused_indexer:
             data = op.intermediates()
             selected = data["indices"]
-            if debug_progress and rank == 0:
+            if args.debug_progress and rank == 0:
                 stats = {}
                 for name, value in data.items():
                     if name in ("sel", "indices"):
@@ -291,17 +277,19 @@ def worker(
                 )
             if not bool(((selected >= 0) & (selected <= positions[:, None])).all().item()):
                 raise RuntimeError(f"fused indexer selected an invalid token for TP{npes} S={S}")
-            if check_golden:
+            if args.check_golden:
                 overlaps = []
                 for start in range(0, S, 5 if S >= 5 else 1):
                     width = min(5, S - start)
                     physical_pages = block_tables[start // 5].to(torch.int64)
-                    logical_cache = index_cache_before.view(-1, 16, 128)[physical_pages].reshape(max_seq, 128).clone()
+                    logical_cache = (
+                        index_cache_before.view(-1, 16, 128)[physical_pages].reshape(args.max_seq, 128).clone()
+                    )
                     ref, _, _, _, _ = indexer_golden(
                         W,
                         h[start : start + width],
                         data["q_a"][start : start + width],
-                        position + (start // 5) * request_pos_stride,
+                        args.pos + (start // 5) * args.request_pos_stride,
                         logical_cache,
                         cos,
                         sin,
@@ -319,28 +307,12 @@ def worker(
                     )
                 if min(overlaps) < 0.99:
                     raise RuntimeError(f"fused indexer top-k overlap below 99% for TP{npes} S={S}")
-            if check_attention:
+            if args.check_attention:
                 request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
                 physical_indices = (
                     block_tables[request_ids[:, None], selected.long() // 16].to(torch.int32) * 16 + selected % 16
                 ).flatten()
-                comparison = Glm5MonoKernel(
-                    W,
-                    S,
-                    rank=rank,
-                    npes=npes,
-                    topk=2048,
-                    launches_per_step=1,
-                    attention_weight=attention_weight,
-                    kv_cache_layout=cache_layout,
-                    kv_cache_dtype=cache_dtype,
-                    prepared_weights=prepared,
-                    native_fp4_mfma=native,
-                    rope_dtype="bf16",
-                    index_request_width=5 if S >= 5 else 1,
-                    index_max_seq=max_seq,
-                    with_indexer=False,
-                )
+                comparison = make_op(S, with_indexer=False, indexer_cp=False)
                 x_comparison = comparison.forward(
                     h,
                     cur_pos,
@@ -365,25 +337,8 @@ def worker(
                 if max_diff > 0.05 or attention_signal < 1e-4:
                     raise RuntimeError(f"fused attention physical-cache comparison failed for TP{npes} S={S}")
                 comparison.close()
-        if check_cp:
-            control = Glm5MonoKernel(
-                W,
-                S,
-                rank=rank,
-                npes=npes,
-                topk=2048,
-                launches_per_step=1,
-                attention_weight=attention_weight,
-                kv_cache_layout=cache_layout,
-                kv_cache_dtype=cache_dtype,
-                prepared_weights=prepared,
-                native_fp4_mfma=native,
-                with_indexer=True,
-                indexer_cp=not indexer_cp,
-                rope_dtype="bf16",
-                index_request_width=5 if S >= 5 else 1,
-                index_max_seq=max_seq,
-            )
+        if args.check_cp:
+            control = make_op(S, indexer_cp=not args.indexer_cp)
             kv_control, index_control = kv.clone(), index_cache.clone()
             expected = control.forward(
                 h,
@@ -444,16 +399,16 @@ def worker(
             start = torch.cuda.Event(enable_timing=True)
             stop = torch.cuda.Event(enable_timing=True)
             start.record()
-            for _ in range(replays):
+            for _ in range(args.replays):
                 graph.replay()
             stop.record()
             stop.synchronize()
-            elapsed.append(start.elapsed_time(stop) * 1000 / (replays * 16))
+            elapsed.append(start.elapsed_time(stop) * 1000 / (args.replays * 16))
         gathered = [None] * npes
         dist.all_gather_object(gathered, statistics.median(elapsed))
         if rank == 0:
             print(
-                f"TP{npes} S={S} native={native} fused_indexer={fused_indexer} indexer_cp={indexer_cp}: "
+                f"TP{npes} S={S} native={native} fused_indexer={args.fused_indexer} indexer_cp={args.indexer_cp}: "
                 f"median-rank={statistics.median(gathered):.3f} us/layer; "
                 f"max-rank={max(gathered):.3f} us/layer; ranks={gathered}",
                 flush=True,
@@ -472,7 +427,7 @@ if __name__ == "__main__":
     parser.add_argument("--request-pos-stride", type=int, default=0)
     parser.add_argument("--indexer-ties", action="store_true")
     parser.add_argument("--samples", type=int, nargs="+", default=[5, 10])
-    parser.add_argument("--native", type=int, default=1)
+    parser.add_argument("--native", type=int, choices=(0, 1), default=1)
     parser.add_argument("--replays", type=int, default=32)
     parser.add_argument("--fused-indexer", action="store_true")
     parser.add_argument("--debug-progress", action="store_true")
@@ -481,42 +436,25 @@ if __name__ == "__main__":
     parser.add_argument("--shuffled-pages", action="store_true")
     parser.add_argument("--check-attention", action="store_true")
     args = parser.parse_args()
+    if any(not 1 <= sample <= MAX_TOTAL_TOKENS for sample in args.samples):
+        parser.error(f"samples must be in [1, {MAX_TOTAL_TOKENS}]")
+    if args.replays <= 0:
+        parser.error("replays must be positive")
     if (args.indexer_cp or args.check_cp or args.indexer_ties) and not args.fused_indexer:
         parser.error("CP and tie checks require --fused-indexer")
     if args.max_seq <= 0 or args.max_seq % 64 or args.pos < 0 or args.request_pos_stride < 0:
         parser.error("capacity must be positive and aligned to 64; positions must be nonnegative")
-    if args.pos + 5 + (max(args.samples) // 5 - 1) * args.request_pos_stride > args.max_seq:
+    last_position = max(args.pos + i % 5 + (i // 5) * args.request_pos_stride for i in range(max(args.samples)))
+    if last_position >= args.max_seq:
         parser.error("request positions must fit max-seq")
     if args.fused_indexer and any(sample not in (1, 5, 10) for sample in args.samples):
-        parser.error("fused indexer supports TP4 MTP4 C1/C2: --samples 5 or 10 (or 1 for debug)")
+        parser.error("the fused MTP4 fixture supports --samples 5 or 10 (or 1 for debug)")
     if args.fused_indexer and args.split_bf16_kv:
-        parser.error("TP4 fused indexer requires ATOM paged FP8 KV cache")
+        parser.error("the fused MTP4 fixture requires ATOM paged FP8 KV cache")
     if not args.fused_indexer and (args.check_golden or args.shuffled_pages or args.check_attention):
         parser.error("indexer correctness options require --fused-indexer")
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    mp.spawn(
-        worker,
-        args=(
-            port,
-            args.samples,
-            bool(args.native),
-            args.replays,
-            args.fused_indexer,
-            args.debug_progress,
-            args.split_bf16_kv,
-            args.check_golden,
-            args.shuffled_pages,
-            args.check_attention,
-            args.npes,
-            args.indexer_cp,
-            args.check_cp,
-            args.pos,
-            args.max_seq,
-            args.request_pos_stride,
-            args.indexer_ties,
-        ),
-        nprocs=args.npes,
-    )
+    mp.spawn(worker, args=(port, args), nprocs=args.npes)

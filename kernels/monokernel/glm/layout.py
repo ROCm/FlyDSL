@@ -3,8 +3,6 @@
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
 
-import math
-
 from kernels.monokernel.config import (
     HIDDEN,
     INTER,
@@ -71,43 +69,13 @@ def fp8_pe_upper_pair_lane(lane):
     return (lane & -2) + 1
 
 
-def sparse_cache_rows(sparse_kv_indices, *, sample: int, topk: int, cur_pos: int = 0, sparse_kv_indptr=None):
-    """Resolve the cache rows consumed by one flat or paged attention row."""
-
-    if sparse_kv_indptr is not None:
-        start, end = sparse_kv_indptr[sample : sample + 2]
-        return sparse_kv_indices[start:end]
-    context = cur_pos + sample + 1
-    count = min(context, topk)
-    if context <= topk:
-        return range(count)
-    start = sample * topk
-    return sparse_kv_indices[start : start + count]
-
-
-def paged_row_contract(sparse_kv_indices, sparse_kv_indptr, sample: int, slot_mapping=None):
-    """Reference the device contract for one ATOM-layout request row."""
-
-    start, end = sparse_kv_indptr[sample : sample + 2]
-    active = end > start
-    rows = sparse_kv_indices[start:end] if active else ()
-    slot_owned = slot_mapping is None or slot_mapping[sample] >= 0
-    return {
-        "active": active,
-        "context": end - start,
-        "index_base": start if active else 0,
-        "safe_row": rows[0] if active else 0,
-        "write_cache": active if slot_mapping is None else slot_owned,
-    }
-
-
 INDEX_CP_TILE = 4096
 INDEX_RADIX_DIGITS = 4
 INDEX_RADIX_BINS = 256
 INDEX_LOCAL_LDS_CAPACITY = 16384
 
 
-def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
+def indexer_uses_tiles(index_max_seq: int) -> bool:
     """Keep the existing short selector; use bounded tiles for larger contexts."""
     return index_max_seq > INDEX_LOCAL_LDS_CAPACITY
 
@@ -206,10 +174,6 @@ def grouped_ug_enabled(samples: int, npes: int, native_fp4_mfma: bool, cohort_ro
     return native_fp4_mfma and ((npes == 4 and samples in (8, 10, 12)) or (cohort_rows and npes == 8 and samples == 10))
 
 
-def ug_task_rounds(inter: int) -> int:
-    return (inter + BLOCKS - 1) // BLOCKS
-
-
 def down_prefetch_batch(
     samples: int, native_fp4_mfma: bool = False, atom_experts: bool = False, inter: int = INTER
 ) -> int:
@@ -226,13 +190,6 @@ def down_prefetch_batch(
 
 def down_x_words(samples: int, inter: int, expert_mxfp4: bool, native_fp4_mfma: bool = False) -> int:
     return samples * MOE_SLOTS * inter // (4 if native_fp4_mfma or not expert_mxfp4 else 2)
-
-
-def dcp_softmax_weights(maxima, sums):
-    global_max = max(maxima)
-    scaled = [total * math.exp(maximum - global_max) for maximum, total in zip(maxima, sums)]
-    denominator = sum(scaled)
-    return [value / denominator if denominator else 0.0 for value in scaled]
 
 
 def dcp_summary_index(source, sample, tile, item, samples, n_uv):
@@ -305,7 +262,7 @@ def layout(
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples, heads)
     output_heads = heads if output_heads is None else output_heads
-    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq, indexer_cp)
+    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq)
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
     pair_bytes = 8
     items = [
@@ -448,13 +405,13 @@ def stage_tasks(
         ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
     ]
     if with_indexer:
-        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq, indexer_cp)
+        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq)
         tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE // (index_ranks if shard_q else 1))]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
         capacity = index_cp_capacity(index_max_seq, index_ranks) if indexer_cp else index_max_seq
         tasks += [("index_score", samples * ((capacity + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK))]
-        if indexer_uses_tiles(index_max_seq, indexer_cp):
+        if indexer_uses_tiles(index_max_seq):
             parts = index_cp_partitions(index_max_seq, index_ranks)
             for digit in range(INDEX_RADIX_DIGITS):
                 tasks += [(f"index_hist_{digit}", samples * parts), (f"index_prefix_{digit}", samples)]

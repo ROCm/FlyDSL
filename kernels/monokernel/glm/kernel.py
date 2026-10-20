@@ -283,11 +283,9 @@ def build_glm5_monokernel(
     # TP4 uses bounded radix tasks at long capacities. The cache join and
     # per-tile scratch/peer epochs do not depend on context capacity.
     COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or npes == 4 or index_max_seq == 4096)
-    GLOBAL_UG40 = COHORT_ROW_TILES and npes == 4 and grouped_ug_enabled(S, npes, native_fp4_mfma, True)
+    GLOBAL_UG = COHORT_ROW_TILES and npes == 4 and grouped_ug_enabled(S, npes, native_fp4_mfma, True)
     GLOBAL_UG_WIDTH = 64 if with_indexer else 128
-    INDEX_PRE_ROPE = (
-        COHORT_ROW_TILES and with_indexer and (not indexer_cp or indexer_uses_tiles(index_max_seq, indexer_cp))
-    )
+    INDEX_PRE_ROPE = COHORT_ROW_TILES and with_indexer and (not indexer_cp or indexer_uses_tiles(index_max_seq))
     INDEX_SCORE_REUSE = 2 if COHORT_ROW_TILES else 1
     SPLIT_TASK_PAIR = 2 if COHORT_ROW_TILES and npes == 8 and heads == 8 else 1
     SPLIT_GATHER_KEYS = SPLIT_KEYS * SPLIT_TASK_PAIR
@@ -308,28 +306,26 @@ def build_glm5_monokernel(
     )
     TILE_SCRATCH_BYTES = SC["_bytes"]
     TILE_PEER_BYTES = SY["_bytes"]
-    TILE_TIMELINE_TASKS = sum(
-        count
-        for _, count in stage_tasks(
-            S,
-            H,
-            topk,
-            with_indexer,
-            index_max_seq,
-            expert_mxfp4,
-            inter=expert_inter,
-            indexer_cp=indexer_cp,
-            npes=W,
-            native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES,
-            uv_reuse=COHORT_ROW_TILES,
-            split_task_pair=SPLIT_TASK_PAIR,
-            cohort_samples=total_samples,
-        )
+    stages = stage_tasks(
+        S,
+        H,
+        topk,
+        with_indexer,
+        index_max_seq,
+        expert_mxfp4,
+        inter=expert_inter,
+        indexer_cp=indexer_cp,
+        npes=W,
+        native_fp4_mfma=native_fp4_mfma,
+        cohort_rows=COHORT_ROW_TILES,
+        uv_reuse=COHORT_ROW_TILES,
+        split_task_pair=SPLIT_TASK_PAIR,
+        cohort_samples=total_samples,
     )
+    TILE_TIMELINE_TASKS = sum(count for _, count in stages)
     CP_RANKS = index_cp_world(W, S, index_max_seq) if indexer_cp else 1
     INDEX_CAPACITY = index_cp_capacity(index_max_seq, CP_RANKS) if indexer_cp else index_max_seq
-    TILED_INDEXER = with_indexer and indexer_uses_tiles(index_max_seq, indexer_cp)
+    TILED_INDEXER = with_indexer and indexer_uses_tiles(index_max_seq)
     LOCAL_INDEX_CAPACITY = min(index_max_seq, INDEX_LOCAL_LDS_CAPACITY)
     SHARD_INDEX_Q = indexer_cp and not TILED_INDEXER and W > 1
     CP_PARTS = index_cp_partitions(index_max_seq, CP_RANKS) if TILED_INDEXER else 0
@@ -340,7 +336,7 @@ def build_glm5_monokernel(
     )
     if DEFER_OFF_CACHE:
         assert ROW_TILES >= 2
-    GLOBAL_QA40 = (
+    GLOBAL_QKV_A = (
         COHORT_ROW_TILES
         and total_samples % 4 == 0
         and npes == 4
@@ -350,9 +346,8 @@ def build_glm5_monokernel(
         and not attention_ptpc
         and not attention_bf16
     )
-    GLOBAL_UV40 = GLOBAL_QA40 and GLOBAL_UG40 and D == 1 and L == H
-    O_PAD4 = GLOBAL_UV40
-    GLOBAL_QB40 = COHORT_ROW_TILES and total_samples % 4 == 0 and npes == 4 and native_fp4_mfma and H == 16
+    GLOBAL_UV = GLOBAL_QKV_A and GLOBAL_UG and D == 1 and L == H
+    GLOBAL_Q_B = COHORT_ROW_TILES and total_samples % 4 == 0 and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -388,7 +383,7 @@ def build_glm5_monokernel(
     UG_UNION_WORDS = 2 * UG_UNION_MAX + N_EXPERTS // 64 + 1 if GROUPED_UG else 0
     DN_TILE = dn_tile(S, expert_mxfp4)
     N_DN_TILES = HIDDEN // DN_TILE
-    DN_UNION_ROWS40 = (
+    DN_UNION_ROW10 = (
         COHORT_ROW_TILES
         and not with_indexer
         and native_fp4_mfma
@@ -397,9 +392,9 @@ def build_glm5_monokernel(
         and S == 10
         and expert_inter == 512
     )
-    GROUPED_DN = GROUPED_UG and (S in (8, 12) or DN_UNION_ROWS40)
-    DN_UNION_INPUT_REUSE40 = DN_UNION_ROWS40 and H == 16
-    DN_INPUT_REUSE40 = COHORT_ROW_TILES and npes == 4 and with_indexer and native_fp4_mfma and H == 16
+    GROUPED_DN = GROUPED_UG and (S in (8, 12) or DN_UNION_ROW10)
+    DN_UNION_INPUT_REUSE = DN_UNION_ROW10 and H == 16
+    DN_INPUT_REUSE = COHORT_ROW_TILES and npes == 4 and with_indexer and native_fp4_mfma and H == 16
     DN_X_ROW = expert_inter // 4 + (4 if GROUPED_DN else 0)
     DN_SCALE_ROW = expert_inter // 32 + (4 if GROUPED_DN else 0)
 
@@ -447,27 +442,27 @@ def build_glm5_monokernel(
     )
     # Global route metadata shares the same finite LDS allocation as staging.
     # Retain the cohort-local UG body whenever that live arena would exceed it.
-    GLOBAL_UG40 = GLOBAL_UG40 and global_ug_words <= 32768
-    if GLOBAL_UG40:
+    GLOBAL_UG = GLOBAL_UG and global_ug_words <= 32768
+    if GLOBAL_UG:
         LDS_KEYS = global_ug_keys
     DNW_OFF = KEYS_OFF + LDS_KEYS
-    RED_OFF = DNW_OFF + (total_samples if GLOBAL_UG40 else S) * MOE_SLOTS
+    RED_OFF = DNW_OFF + (total_samples if GLOBAL_UG else S) * MOE_SLOTS
     OUT_OFF = RED_OFF + RED_WORDS
     # UK writes its 128-row result straight from the reduction tile to q_lat;
     # all remaining stages need at most these compact output tiles.
     OUT_WORDS = max(S * ROW_TILE, S * 2 * UG_TILE, UV_TILE)
     # Each globally projected batch must fit its actual staging/output arena.
     # Cohorts without this capacity keep the per-cohort projection bodies.
-    GLOBAL_QA40 = GLOBAL_QA40 and 16 * 1028 <= X_WORDS and 16 * QKV_A_TILE <= OUT_WORDS
-    GLOBAL_QB40 = GLOBAL_QB40 and 16 * (Q_LORA // 2 + 4) <= X_WORDS and 16 * Q_B_TILE <= OUT_WORDS
-    GLOBAL_UV40 = GLOBAL_UV40 and GLOBAL_UG40 and GLOBAL_QA40 and S * (O_K // 2 + 4) <= X_WORDS
-    O_PAD4 = GLOBAL_UV40
+    GLOBAL_QKV_A = GLOBAL_QKV_A and 16 * 1028 <= X_WORDS and 16 * QKV_A_TILE <= OUT_WORDS
+    GLOBAL_Q_B = GLOBAL_Q_B and 16 * (Q_LORA // 2 + 4) <= X_WORDS and 16 * Q_B_TILE <= OUT_WORDS
+    GLOBAL_UV = GLOBAL_UV and GLOBAL_UG and GLOBAL_QKV_A and S * (O_K // 2 + 4) <= X_WORDS
+    O_PAD4 = GLOBAL_UV
     # The all-row global route gather already joins every persistent
     # cache reader through split -> UV -> O -> router data dependencies.
     CACHE_READERS_JOINED = (
         DEFER_OFF_CACHE
         and npes == 4
-        and GLOBAL_UG40
+        and GLOBAL_UG
         and GROUPED_UG
         and S > 1
         and D == 1
@@ -481,8 +476,8 @@ def build_glm5_monokernel(
     FRONT_PAYLOAD_RETIRE = (
         COHORT_ROW_TILES
         and DEFER_OFF_CACHE
-        and GLOBAL_QA40
-        and GLOBAL_UV40
+        and GLOBAL_QKV_A
+        and GLOBAL_UV
         and INPUT_NORM_ONCE
         and not with_indexer
         and S <= 16
@@ -496,8 +491,8 @@ def build_glm5_monokernel(
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
     INDEX_ROT_OFF = MIDQ_WORDS + MID_SCALE_WORDS
     UV_MERGE_OFF = MIDQ_WORDS + MID_SCALE_WORDS
-    if GLOBAL_UV40:
-        assert GLOBAL_UG40 and not with_indexer
+    if GLOBAL_UV:
+        assert GLOBAL_UG and not with_indexer
         assert UV_MERGE_OFF + S * H * KV_LORA // 2 <= BLOCKS * S * 2 * UG_TILE
         assert 16 * 260 <= X_WORDS and UV_TILE == 64
     if INDEX_PRE_ROPE:
@@ -510,11 +505,11 @@ def build_glm5_monokernel(
     WORK_WORDS = OUT_OFF + OUT_WORDS
     if O_PAD4:
         assert S * (O_K // 2 + 4) <= X_WORDS
-    if GLOBAL_QA40:
+    if GLOBAL_QKV_A:
         assert INPUT_NORM_ONCE and 16 * 1028 <= X_WORDS
         assert 16 * QKV_A_TILE <= OUT_WORDS
         assert HIDDEN // 128 // WAVES == 6 and THREADS == 512
-    if GLOBAL_QB40:
+    if GLOBAL_Q_B:
         assert 16 * (Q_LORA // 2 + 4) <= X_WORDS
         assert 16 * Q_B_TILE <= OUT_WORDS
         assert N_QB == BLOCKS
@@ -549,7 +544,7 @@ def build_glm5_monokernel(
         DN_UNION_ALIGNED and N_DN_TILES > G and DN_TILE == 32 and 0 < DN_TAIL_TASKS and 2 * DN_TAIL_TASKS <= G
     )
     DN_WORK_ITEMS = N_DN_TILES + (DN_TAIL_TASKS if DN_SPLIT_UNION_TAIL else 0)
-    DU_ROWS = S if DN_UNION_ALIGNED else (10 if DN_UNION_ROWS40 else 12)
+    DU_ROWS = S if DN_UNION_ALIGNED else (10 if DN_UNION_ROW10 else 12)
     DU_SLOTS, DU_XROW, DU_SCROW, DU_UMAX = 9, 132, 20, DU_ROWS * 8 + 1
     DU_ROUTE_WORDS = DU_ROWS * DU_SLOTS
     DU_KEY_WORDS = DU_ROUTE_WORDS + 2 * DU_UMAX + 5
@@ -562,18 +557,18 @@ def build_glm5_monokernel(
     # Vectorize any selected union body whose padded arena and LUT fit.
     DU_FRAGMENT_WORDS = (DU_CROFF + 3) // 4 * 4 + DU_CWORDS + (257 * DU_ROWS + 3) // 4
     DN_CONTIG_CONTRIBUTIONS = (
-        DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED
+        DN_UNION_CANDIDATE or DN_UNION_ROW10 or DN_UNION_ALIGNED
     ) and DU_FRAGMENT_WORDS <= WORK_WORDS
     if DN_CONTIG_CONTRIBUTIONS:
         # The work array is 16-byte aligned; each fragment starts at a float4.
         DU_CROFF = (DU_CROFF + 3) // 4 * 4
-    if DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED:
+    if DN_UNION_CANDIDATE or DN_UNION_ROW10 or DN_UNION_ALIGNED:
         assert GROUPED_DN
         assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * DU_ROWS
 
-    # A pair of existing cohorts shares expert weights across up to16 tokens.
+    # A pair of existing cohorts shares expert weights across up to 16 tokens.
     # Keep all partials in LDS and preserve each original token's slot/K/wave
-    # accumulation. The compact FP4 input makes this live set fit128KiB.
+    # accumulation. The compact FP4 input makes this live set fit 128 KiB.
     DN_PAIR_ROWS = 2 * S
     DN_PAIR_G = 2 * G
     DP_ROUTE_WORDS = DN_PAIR_ROWS * MOE_SLOTS
@@ -589,7 +584,7 @@ def build_glm5_monokernel(
     DN_COHORT_PAIR = (
         DN_UNION_ALIGNED
         and activation_fp4
-        and GLOBAL_UG40
+        and GLOBAL_UG
         and CACHE_READERS_JOINED
         and ROW_TILES % 2 == 0
         and DN_PAIR_ROWS <= 16
@@ -605,45 +600,13 @@ def build_glm5_monokernel(
         assert WORK_WORDS <= 32768
 
     base, first, acc = {}, {}, 0
-    for name, n in stage_tasks(
-        S,
-        H,
-        topk,
-        with_indexer,
-        index_max_seq,
-        expert_mxfp4,
-        indexer_cp=indexer_cp,
-        npes=W,
-        inter=expert_inter,
-        native_fp4_mfma=native_fp4_mfma,
-        cohort_rows=COHORT_ROW_TILES,
-        uv_reuse=COHORT_ROW_TILES,
-        split_task_pair=SPLIT_TASK_PAIR,
-        cohort_samples=total_samples,
-    ):
+    for name, n in stages:
         first[name] = acc
         acc += n
     # CTA placement: split before uk, so every split tile lands on a CTA freed by
     # qkv_a (uk shares the q_b CTAs it waits on anyway)
-    tasks = dict(
-        stage_tasks(
-            S,
-            H,
-            topk,
-            with_indexer,
-            index_max_seq,
-            expert_mxfp4,
-            indexer_cp=indexer_cp,
-            npes=W,
-            inter=expert_inter,
-            native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES,
-            uv_reuse=COHORT_ROW_TILES,
-            split_task_pair=SPLIT_TASK_PAIR,
-            cohort_samples=total_samples,
-        )
-    )
-    if GLOBAL_UG40:
+    tasks = dict(stages)
+    if GLOBAL_UG:
         # Each routed expert contributes its first chunk, then at most one extra
         # chunk per S additional routes. Include every shared-expert row chunk.
         global_chunks_max = global_ug_chunks(total_samples, S)
@@ -2176,7 +2139,7 @@ def build_glm5_monokernel(
             if const_expr(with_indexer):
                 r_wik, r_sik = _rsrc(index_arg(0)), _rsrc(index_arg(1))
                 r_wiw = _rsrc(index_arg(2))
-            if const_expr(GLOBAL_QA40):
+            if const_expr(GLOBAL_QKV_A):
                 # Reuse weights across 16 global tokens while preserving each
                 # original per-wave K accumulator and the eight-wave reduction.
                 for qa_task in range(full_bid, ((total_samples + 15) // 16) * N_QKV_A, BLOCKS):
@@ -2733,7 +2696,7 @@ def build_glm5_monokernel(
             if const_expr(with_indexer):
                 r_wiq, r_siq = _rsrc(index_arg(3)), _rsrc(index_arg(4))
 
-            if const_expr(GLOBAL_QB40):
+            if const_expr(GLOBAL_Q_B):
                 # All output tiles cover the same global 16-row chunk. Each
                 # output element retains its original eight-wave K reduction.
                 for qb_chunk in range((total_samples + 15) // 16):
@@ -4066,7 +4029,7 @@ def build_glm5_monokernel(
                     """Patch the cache version visible at this tile's serial boundary."""
                     if const_expr(DEFER_OFF_CACHE):
                         # One coalesced incoming-slot load per lane, then one ballot
-                        # per key replaces a serial forty-slot search in wave zero.
+                        # per key replaces a serial row-slot search in wave zero.
                         incoming_slot = fx.Int32(
                             bo.buffer_load(
                                 _rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32
@@ -4484,7 +4447,7 @@ def build_glm5_monokernel(
                     """Patch the cache version visible at this tile's serial boundary."""
                     if const_expr(DEFER_OFF_CACHE):
                         # One coalesced incoming-slot load per lane, then one ballot
-                        # per key replaces a serial forty-slot search in wave zero.
+                        # per key replaces a serial row-slot search in wave zero.
                         incoming_slot = fx.Int32(
                             bo.buffer_load(
                                 _rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32
@@ -4723,7 +4686,7 @@ def build_glm5_monokernel(
             UV_R = UV_TILE // 16
             UV_WPR = WAVES // UV_R
             UV_UNITS = UV_NKC // (attention_k_chunks_per_unit * UV_WPR)
-            if const_expr(GLOBAL_UV40):
+            if const_expr(GLOBAL_UV):
                 # Retired input-norm payloads already have the ordinary epoch.
                 # A separate phase bit prevents UV from accepting them as ready.
                 uv_tag = tag ^ fx.Int32(-2147483648)
@@ -4763,7 +4726,7 @@ def build_glm5_monokernel(
                         coef=((lambda: lds_ld(misc, N_SPLIT + 2 + kc // 2)) if const_expr(attention_ptpc) else None),
                     )
 
-                if const_expr(not GLOBAL_UV40):
+                if const_expr(not GLOBAL_UV):
                     pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
                 hint_wait(
                     N_SPLIT,
@@ -4851,7 +4814,7 @@ def build_glm5_monokernel(
                             div_rn(uv1, uv_scale, uv_rcp),
                         )
                     gpu.barrier()
-                if const_expr(GLOBAL_UV40):
+                if const_expr(GLOBAL_UV):
                     # This range is disjoint from packed mid values/scales.
                     # Input-norm readers retire before merge through the grid join
                     # or QKV completion polls. The distinct UV phase tag prevents consumers from
@@ -4892,7 +4855,7 @@ def build_glm5_monokernel(
                                 gpu.barrier()
                 stamp("uv", tt, 4)
 
-            if const_expr(GLOBAL_UV40):
+            if const_expr(GLOBAL_UV):
                 # Every CTA has finished its merge producers before waiting here.
                 # Timeline columns 6/7 use the first 64 slots/cohort for 192 global
                 # projector tasks; columns0..5 remain the original merge tasks.
@@ -5533,10 +5496,10 @@ def build_glm5_monokernel(
                 dn_route(load_bias())
                 gpu.barrier()
                 stage_ug_first = atom_experts or (expert_mxfp4 and S > 4)
-                if const_expr(stage_ug_first and not GLOBAL_UG40):
+                if const_expr(stage_ug_first and not GLOBAL_UG):
                     stage_xq(list(range(S)))
                     gpu.barrier()
-                if const_expr(GLOBAL_UG40):
+                if const_expr(GLOBAL_UG):
                     # Publish the original route once per cohort before global work.
                     if (bid == 0) & (tid < S * MOE_SLOTS):
                         put(mb("sel"), tid, lds_ld(keys, tid))
@@ -5795,7 +5758,7 @@ def build_glm5_monokernel(
                         lds_st(keys, tid, gu_my_key)
                         lds_st(dnw, tid, gu_my_prob)
                     gpu.barrier()
-                    if const_expr(DN_UNION_ROWS40 or DN_UNION_CANDIDATE or DN_UNION_ALIGNED):
+                    if const_expr(DN_UNION_ROW10 or DN_UNION_CANDIDATE or DN_UNION_ALIGNED):
                         # Rebuild cohort-local expert metadata expected by ordered down union;
                         # wave-local masks only occupy the otherwise-idle reduction workspace.
                         union_experts = keys + S * MOE_SLOTS
@@ -6119,7 +6082,7 @@ def build_glm5_monokernel(
             )
 
             def union_inputs_needed(t):
-                if const_expr(DN_UNION_INPUT_REUSE40):
+                if const_expr(DN_UNION_INPUT_REUSE):
                     return t == start("down")
                 return fx.Boolean(True)
 
@@ -6326,7 +6289,7 @@ def build_glm5_monokernel(
 
                 acc = fx.Vector.filled(4, 0.0, fx.Float32)
 
-                if const_expr(DN_UNION_ROWS40):
+                if const_expr(DN_UNION_ROW10):
                     # S10 assigns 90 contiguous slot/K units to each wave.
                     # Tokens2/7 cross a wave boundary at slot4, K chunk2.
                     if lane % 16 < S:
@@ -6397,7 +6360,7 @@ def build_glm5_monokernel(
                         )
                     lds_st(outs, output_token * output_rows + output_row, tot)
 
-                if const_expr(N_DN_TILES > G and not DN_UNION_INPUT_REUSE40):
+                if const_expr(N_DN_TILES > G and not DN_UNION_INPUT_REUSE):
                     # Multiple output tasks reuse this CTA's original route data.
                     # The union arena overlaps it, so restore metadata after all
                     # contribution reads and before any later task reconstructs it.
@@ -6411,7 +6374,7 @@ def build_glm5_monokernel(
                     gpu.barrier()
 
             def down_inputs_needed(t):
-                if const_expr(DN_INPUT_REUSE40):
+                if const_expr(DN_INPUT_REUSE):
                     return t == start("down")
                 return fx.Boolean(True)
 
@@ -6671,7 +6634,7 @@ def build_glm5_monokernel(
 
                 acc = fx.Vector.filled(4, 0.0, fx.Float32)
 
-                if const_expr(DN_UNION_ROWS40):
+                if const_expr(DN_UNION_ROW10):
                     # S10 assigns 90 contiguous slot/K units to each wave.
                     # Tokens2/7 cross a wave boundary at slot4, K chunk2.
                     if lane % 16 < DN_PAIR_ROWS:
@@ -6820,7 +6783,7 @@ def build_glm5_monokernel(
                 for t in range(start("down"), DN_WORK_ITEMS, G):
                     t = fx.Int32(t)
                     stamp("down", t, 0)
-                    if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED):
+                    if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROW10 or DN_UNION_ALIGNED):
                         if const_expr(DN_SPLIT_UNION_TAIL):
                             if t >= DN_FULL_TASKS:
                                 dn_union_tile(t, output_rows=16)

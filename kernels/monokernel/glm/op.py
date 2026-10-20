@@ -270,15 +270,12 @@ class Glm5MonoKernel:
             else None
         )
         self.cohort_rows = (
-            (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
-            and npes in (4, 8)
+            npes == 4
+            and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)
             and dcp_size == 1
-            and (not indexer_cp or npes == 4)
             and self.attention_weight is AttentionWeight.FP8_BLOCK128
             and self.kv_cache_layout is KvCacheLayout.ATOM
-            and (kv_cache_dtype == "bf16" or npes == 4)
             and rope_dtype == "fp32"
-            and (not with_indexer or npes == 4 or index_max_seq == 4096)
         )
         self.stages = stage_tasks(
             samples,
@@ -293,23 +290,6 @@ class Glm5MonoKernel:
             native_fp4_mfma=native_fp4_mfma,
             cohort_rows=self.cohort_rows,
             uv_reuse=self.cohort_rows,
-            split_task_pair=(
-                2
-                if (
-                    (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
-                    and npes == 8
-                    and W.heads == 8
-                    and native_fp4_mfma
-                    and dcp_size == 1
-                    and not indexer_cp
-                    and self.attention_weight is AttentionWeight.FP8_BLOCK128
-                    and self.kv_cache_layout is KvCacheLayout.ATOM
-                    and (kv_cache_dtype == "bf16" or npes == 4)
-                    and rope_dtype == "fp32"
-                    and (not with_indexer or index_max_seq == 4096)
-                )
-                else 1
-            ),
         )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
