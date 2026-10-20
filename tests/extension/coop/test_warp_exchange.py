@@ -100,6 +100,85 @@ def test_warp_exchange_policies(algorithm, width, method):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("width,count,universal", matrix_cases([1, 8, WARP_SIZE], [1, 3, 4], [False, True]))
+def test_scatter_layout_matches_explicit_ranks(width, count, universal):
+    block = 128
+    values = torch.arange(block * count, device="cuda", dtype=torch.int32)
+
+    def transform(value):
+        namespace = fx.coop.universal if universal else fx.coop
+        P = namespace.WarpExchange[fx.Int32, width, count]
+        storage = warp_storage(P)
+        # Nested item mode also accepts a flattened item coordinate.
+        src = fx.make_layout((width, (1, count)), (count, (0, 1)))
+        dst = fx.make_layout((width, count), (1, width))
+        from_layout = P.scatter_to_striped(value, src_layout=src, dst_layout=dst, storage=storage)
+        fx.barrier()
+        ranks = value % (width * count)
+        from_ranks = P.scatter_to_striped(value, ranks=ranks, storage=storage)
+        return from_layout, from_ranks
+
+    actual, explicit = run_tile(transform, values, block, count, outputs=2)
+    expected = values.cpu()[warp_indices(block, count, width)]
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, explicit)
+
+
+def mfma_scatter(value, width, round_trip=False):
+    P = fx.coop.WarpExchange[value.dtype, width, 4]
+    # Both layouts map (lane, item) to row-major logical matrix indices.
+    src = fx.make_layout(((16, width // 16), 4), ((1, 64), 16))
+    dst = fx.make_layout((width, 4), (4, 1))
+    storage = warp_storage(P)
+    output = P.scatter_to_striped(value, src_layout=src, dst_layout=dst, storage=storage)
+    if round_trip:
+        fx.barrier()
+        restored = P.scatter_to_striped(output, src_layout=dst, dst_layout=src, storage=storage)
+        return output, restored
+    return output
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("width", [width for width in (16, 32, 64) if width <= WARP_SIZE])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.bfloat16] if torch is not None else [])
+def test_scatter_mfma_layout(width, dtype):
+    block, count = 128, 4
+    # Independent logical groups own matrices with distinct values. Each lane
+    # initially holds four rows of one column; output must be row-major chunks.
+    lane = torch.arange(block, device="cpu") % width
+    row = 4 * (lane // 16)
+    group = torch.arange(block, device="cpu") // width
+    logical = group[:, None] * width * count + (row[:, None] + torch.arange(count)) * 16 + lane[:, None] % 16
+    values = logical.flatten().to(device="cuda", dtype=dtype)
+    actual, restored = run_tile(
+        lambda value: mfma_scatter(value, width, round_trip=True), values, block, count, outputs=2
+    )
+    torch.testing.assert_close(actual, torch.arange(block * count, dtype=torch.int32).to(dtype))
+    torch.testing.assert_close(restored, values.cpu())
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("case", ["source_only", "destination_only", "ranks_and_layouts"])
+def test_scatter_layout_argument_conflicts(ctx, insert_point, case):
+    P = fx.coop.WarpExchange[fx.Int32, 8, 4]
+    value = fx.Vector.filled(4, 0, fx.Int32)
+    layout = fx.make_layout((8, 4), (4, 1))
+    kwargs = dict(src_layout=layout, dst_layout=layout)
+    if case == "source_only":
+        del kwargs["dst_layout"]
+    elif case == "destination_only":
+        del kwargs["src_layout"]
+    else:
+        kwargs["ranks"] = value
+    with pytest.raises(ValueError, match="not both" if case == "ranks_and_layouts" else "provided together"):
+        P.scatter_to_striped(value, storage=object(), **kwargs)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("width", [width for width in (8, 64) if width <= WARP_SIZE])
 def test_warp_smem_independent_branches(width):
     block, count = 128, 3
