@@ -601,11 +601,8 @@ def compile_pa_metadata_v1(
     assert is_pow2(kv_granularity), "kv_granularity must be power of 2"
     assert num_cu % num_heads_k == 0, "num_cu must be divisible by num_heads_k"
     num_splits_per_khead = num_cu // num_heads_k
-    _shuffle_offsets = []
-    _o = WARP_SIZE // 2
-    while _o >= 1:
-        _shuffle_offsets.append(_o)
-        _o //= 2
+    # The coop integer fast path scalarizes the worklist state and slows gfx950.
+    _shuffle_offsets = [WARP_SIZE >> step for step in range(1, WARP_SIZE.bit_length())]
 
     @flyc.kernel(known_block_size=(WARP_SIZE, 1, 1))
     def pa_metadata_v1_kernel(
