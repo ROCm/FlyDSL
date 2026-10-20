@@ -546,6 +546,21 @@ def test_make_tile_dynamic_layout(frontend_only_jit):
     assert "!fly.tile<[?:1|*]>" in ir
 
 
+def test_tile_unpack_dynamic_layout(frontend_only_jit):
+    """Tile.unpack rebuilds a dynamic layout mode from the tile's leaves; repacked, it lowers."""
+
+    @flyc.jit
+    def build(n: fx.Int32):
+        tile = fx.make_tile(fx.make_layout(n, 1), None)
+        mode, rest = tile.unpack()
+        assert str(mode.type) == "!fly.layout<?:1>" and rest is None
+        layout = fx.make_layout((8, 16), (1, 8))
+        fx.logical_divide(layout, fx.make_tile(mode, rest))
+
+    build(4)
+    assert "fly.static : !fly.layout<?:1>" not in _source_ir(build)
+
+
 # ==============================================================================
 # Fraction (ratio) leaves
 # ==============================================================================

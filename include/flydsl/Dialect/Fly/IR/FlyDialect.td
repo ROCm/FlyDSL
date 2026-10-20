@@ -14,6 +14,7 @@ def Fly_Dialect : Dialect {
   let name = "fly";
   let cppNamespace = "::mlir::fly";
   
+  let dependentDialects = ["::mlir::arith::ArithDialect"];
   let hasConstantMaterializer = 1;
   
   let useDefaultTypePrinterParser = 1;

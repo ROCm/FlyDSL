@@ -350,10 +350,6 @@ def tdm_partition(
         layout_v = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, tensor.type, n_warps))
         n_rest = tensor.layout.rank - 1
         tiled = composition(tensor, static(TileType.get([layout_v.type, *([None] * n_rest)])))
-        # Composition canonicalizes singleton wrappers. Restore the tile mode
-        # before selecting WARP from ((ATOM, WARP), ITER).
-        if n_rest == 0:
-            tiled = group(tiled, 0, tiled.layout.rank)
         tiled = tiled[(((None, warp_id), None), *([None] * n_rest))]
         # Slice collects the surviving ATOM and ITER modes at the outer level.
         tiled = group(tiled, 0, 2)

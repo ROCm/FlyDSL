@@ -11,7 +11,7 @@ from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
 from .._mlir import ir
-from .._mlir.dialects import arith, gpu, vector
+from .._mlir.dialects import arith, fly, gpu, vector
 from .meta import dsl_loc_tracing
 from .numeric import (  # noqa: F401
     BFloat16,
@@ -752,13 +752,30 @@ class Tile(BuiltinDslType):
         """Return the value on each mode, mirroring ``IntTuple.unpack``.
 
         Int modes become Python ints, layout modes become ``Layout`` values, and
-        nested modes become tuples.
+        nested modes become tuples. A dynamic layout mode is rebuilt from the
+        tile's runtime leaves, which follow the modes in order.
         """
+        leaves = None
+
+        def dynamic_leaf_count(ty):
+            if ty.is_leaf:
+                return 0 if ty.is_static else 1
+            return sum(dynamic_leaf_count(ty.at(i)) for i in range(ty.rank))
+
+        def int_tuple(ty):
+            nonlocal leaves
+            if ty.is_static:
+                return static(ty)
+            if leaves is None:
+                leaves = iter(fly.GetLeavesOp(self).results)
+            return fly.make_int_tuple(ty, [next(leaves) for _ in range(dynamic_leaf_count(ty))])
 
         def to_py_value(ty):
             ty = ty.maybe_downcast()
             if isinstance(ty, LayoutType):
-                return static(ty)
+                if ty.is_static:
+                    return static(ty)
+                return make_layout(int_tuple(IntTupleType(ty.shape)), int_tuple(IntTupleType(ty.stride)))
             if not isinstance(ty, TileType):
                 return IntTuple._static_to_py_value(ty)
             if ty.is_leaf:
