@@ -397,6 +397,8 @@ def compile_mxfp8_gemm_8w(
             b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
+            # The other wave group refills B0 right after this barrier: finish this wave's LDS reads first.
+            rocdl.s_waitcnt(lgkmcnt=0)
             rocdl.s_barrier()
             scale_chunk_dma(k)
 
@@ -433,7 +435,8 @@ def compile_mxfp8_gemm_8w(
         sb0 = scale_read(sc_pf, k, "b0")
         b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
         a0_frag = a_s2r.load(a_cur0)
-        rocdl.s_barrier()
+        # Drain the last tile's loads: its B0/A0 are read before the final wait.
+        wait_barrier(0)
 
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
