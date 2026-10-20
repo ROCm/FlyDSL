@@ -164,20 +164,9 @@ def uni64(v):
 
 # Buffer resources from raw (peer / arena) addresses plus per-lane byte offsets
 # and explicit cache-policy bits (sc0 / sc1 / nt): no layout-tensor form.
-# CDNA V# flags word: DATA_FORMAT 7 (float), NUM_FORMAT 4 (32-bit), no bounds-check select
-_RSRC_FLAGS = (7 << 12) | (4 << 15)
-
-
 def rsrc(addr, nbytes=None):
-    base = _llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr"), _u(uni64(addr))).result
-    n = fx.Int64(0xFFFFFFFF) if nbytes is None else fx.Int64(uni(nbytes))
-    return _rocdl.MakeBufferRsrcOp(
-        ir.Type.parse("!llvm.ptr<8>"),
-        base,
-        _u(fx.Int16(0)),
-        _u(n),
-        _u(fx.Int32(_RSRC_FLAGS)),
-    ).result
+    size = None if nbytes is None else fx.Int64(uni(nbytes))
+    return rocdl.get_buffer_rsrc(rocdl.make_buffer_ptr(gptr(uni64(addr)), num_records_bytes=size))
 
 
 def bld(rs, voff, soff, ty, aux=0):
@@ -193,7 +182,7 @@ def bst(val, rs, voff, soff, aux=0):
 def _dma(lds_addr, rs, voff, soff, nbytes, aux):
     _rocdl.raw_ptr_buffer_load_async_lds(
         rs,
-        _llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<3>"), _u(uni(lds_addr))).result,
+        lds_ptr(uni(lds_addr), 0, T.i8).llvm_ptr,
         _u(i32(nbytes)),
         _u(i32(voff)),
         _u(uni(soff)),

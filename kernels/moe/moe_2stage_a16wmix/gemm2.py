@@ -5,13 +5,10 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
-    _gep1,
-    _global_base_ptr1,
     global_typed_ptr,
     lds_typed_ptr,
     lds_vec_load,
@@ -83,8 +80,6 @@ def _atomic_bf16_epilog(
     # v2bf16" (same fork as moe_gemm_2stage / mxfp4_gemm2).
     if const_expr(not is_gfx942):
         atomic_bf16x2 = fx.make_copy_atom(fx.rocdl.BufferAtomicPkAdd(fx.BFloat16), fx.BFloat16)
-    else:
-        out_base = _global_base_ptr1(arg_out)
 
     def load_scalar(atom, src, index, elem_ty):
         frag = fx.make_rmem_tensor(1, elem_ty)
@@ -126,15 +121,8 @@ def _atomic_bf16_epilog(
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 out_off = row_base_addr + fx.Int32(s * 64)
                 if const_expr(is_gfx942):
-                    out_ptr = _gep1(out_base, out_off * fx.Int32(2))
-                    llvm.AtomicRMWOp(
-                        llvm.AtomicBinOp.fadd,
-                        out_ptr,
-                        _raw(pk),
-                        llvm.AtomicOrdering.monotonic,
-                        syncscope="agent",
-                        alignment=4,
-                    )
+                    out_ptr = global_typed_ptr(arg_out, T.bf16, align=4, byte_offset=out_off * 2)
+                    fx.atomic_add(out_ptr, pk, syncscope="agent")
                 else:
                     out_frag = fx.make_rmem_tensor(2, fx.BFloat16)
                     out_frag.store(pk)

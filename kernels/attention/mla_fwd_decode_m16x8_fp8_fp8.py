@@ -207,54 +207,15 @@ def _inline_asm_void(operands, asm_string, constraints):
     llvm.inline_asm(None, operands, asm_string, constraints, has_side_effects=True)
 
 
-_LDS_PTR_TYPE = None
+def _lds_ptr_from_i32(addr_i32, byte_offset=0, *, alignment=8):
+    ptr_type = fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, alignment)
+    return fx.inttoptr(ptr_type, fx.Uint64(fx.Uint32(addr_i32)) + byte_offset)
 
 
-def _inttoptr_lds(byte_addr):
-    """Convert an integer byte address to !llvm.ptr<3> (LDS pointer)."""
-    global _LDS_PTR_TYPE
-    if _LDS_PTR_TYPE is None:
-        _LDS_PTR_TYPE = ir.Type.parse("!llvm.ptr<3>")
-    return llvm.inttoptr(_LDS_PTR_TYPE, _raw(fx.Int64(byte_addr)))
-
-
-_gep = buffer_ops.get_element_ptr
-
-
-def _lds_load_volatile(base_i32, vec_type, byte_offset=0):
-    """Volatile LDS load forcing ds_read_b64/b32 with immediate offset.
-
-    Unlike _lds_load, uses volatile to prevent LLVM from merging adjacent
-    loads into ds_read2 variants (which have limited 8-bit offsets).
-    LLVM still tracks these as LDS loads for lgkmcnt.
-    Input: base_i32 must be an i32 ir.Value (LDS byte address).
-    """
-    lds_ptr = _inttoptr_lds(fx.Uint64(fx.Uint32(base_i32)))
-    if byte_offset != 0:
-        lds_ptr = _gep(lds_ptr, static_byte_offset=byte_offset)
-    return _ptr_load(vec_type, lds_ptr, alignment=8, volatile_=True)
-
-
-def _lds_ptr_from_i32(addr_i32, byte_offset=0):
-    """Build an LDS pointer (ptr<3>) from an i32 byte address + optional static offset."""
-    ptr = _inttoptr_lds(fx.Uint64(fx.Uint32(addr_i32)))
-    if byte_offset != 0:
-        ptr = _gep(ptr, static_byte_offset=byte_offset)
-    return ptr
-
-
-def _ptr_load(result_type, ptr, *, alignment=None, volatile_=False, nontemporal=False):
-    return llvm.LoadOp(
-        result_type,
-        ptr,
-        alignment=alignment,
-        volatile_=volatile_,
-        nontemporal=nontemporal,
-    ).result
-
-
-def _ptr_store(value, ptr, *, alignment=None, volatile_=False):
-    return llvm.StoreOp(_raw(value), ptr, alignment=alignment, volatile_=volatile_)
+def _lds_load_volatile(base_i32, dtype, byte_offset=0):
+    # Volatile prevents ds_read2 merging, whose immediate offsets are too small.
+    ptr = _lds_ptr_from_i32(base_i32, byte_offset)
+    return fx.generic_load(ptr, dtype=dtype, volatile=True).ir_value()
 
 
 def _i32(value):
@@ -446,7 +407,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             voff = _i32(fx.Int32(row_i32) * QK_HEAD_DIM + col_base_i32)
             rocdl.buffer_load_to_lds(
                 kv_rsrc,
-                _lds_ptr_from_i32(lds_base_i32),
+                _lds_ptr_from_i32(lds_base_i32).llvm_ptr,
                 voff,
                 offset=block_idx_const * KV_NUM_COLS,
             )
@@ -605,7 +566,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
 
         # ds_read_b64 with immediate offset (volatile prevents ds_read2 merge)
-        data = _lds_load_volatile(k_base_i32, T.i64, byte_offset=fixed_offset)
+        data = _lds_load_volatile(k_base_i32, fx.Int64, byte_offset=fixed_offset)
         return data
 
     # ---- Helper: load V from KV LDS (un-transposed) ----
@@ -719,8 +680,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         offset_tl_bl = 4 * VT_BLKS_PER_ROW_PAD * VT_ELEMS_PER_BLK  # 8448
 
         # ds_read_b32 x 2 with immediate offsets (volatile prevents ds_read2 merge)
-        v0 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset)
-        v1 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset + offset_tl_bl)
+        v0 = _lds_load_volatile(vt_base_i32, fx.Int32, byte_offset=fixed_block_offset)
+        v1 = _lds_load_volatile(vt_base_i32, fx.Int32, byte_offset=fixed_block_offset + offset_tl_bl)
         return v0, v1
 
     # ---- Helper: warp reduce (butterfly XOR) ----
@@ -1280,7 +1241,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             sub_offset = sub * O16_NUM_COLS
             st_addr_sub = _i32(fx.Int32(lds_st_addr) + sub_offset)
             st_ptr = _lds_ptr_from_i32(st_addr_sub)
-            _ptr_store(vec_2dw, st_ptr, alignment=8, volatile_=True)
+            fx.generic_store(st_ptr, vec_2dw, volatile=True)
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
@@ -1540,7 +1501,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 * V3_KV_BYTES_PER_2SUB_PADDED
             )
             ptr = _lds_ptr_from_i32(v_base_i32, byte_offset=fixed_offset)
-            return rocdl.ds_read_tr8_b64(V_TR8_RES_TYPE, ptr).result
+            return rocdl.ds_read_tr8_b64(V_TR8_RES_TYPE, ptr.llvm_ptr).result
 
         # ---- Helper: process one KV tile (GEMM1 + softmax + V + GEMM2) ----
         # Interleaves async prefetch of the NEXT tile's KV data

@@ -675,11 +675,10 @@ def _gemm2_body(
             BN,
         )
     elif epilog == "nonatomic_fp8":
-        out_q_base = _global_base_ptr1(arg_out)
         tid_i32 = fx.Int32(gpu.thread_id("x"))
         _flat_mxfp8_epilog(
             accm,
-            out_q_base,
+            arg_out,
             arg_out_scale,
             m_row,
             n_block_idx,
@@ -692,11 +691,10 @@ def _gemm2_body(
             _kMChunks,
         )
     elif epilog == "nonatomic_mxfp4":
-        out_q_base = _global_base_ptr1(arg_out)
         tid_i32 = fx.Int32(gpu.thread_id("x"))
         _flat_mxfp4_epilog(
             accm,
-            out_q_base,
+            arg_out,
             arg_out_scale,
             m_row,
             n_block_idx,
@@ -776,7 +774,7 @@ def _cshuffle_flat_bf16_epilog(lds_acc_base_i32, accm, arg_out, m_row, n_block_i
 @flyc.jit
 def _flat_mxfp8_epilog(
     accm,
-    out_q_base,
+    arg_out,
     arg_out_scale,
     m_row,
     n_block_idx,
@@ -850,7 +848,7 @@ def _flat_mxfp8_epilog(
                 q_byte = _q_row0 + fx.Int64(mr * 16 * N_OUT) + fx.Int64(global_col)
                 s_byte = _s_row0 + fx.Int64(mr * 16 * (N_OUT // 32)) + fx.Int64(blk)
                 pk = Vec.from_elements([p0, p1], fx.Int32)
-                llvm.StoreOp(_raw(pk), _gep1(out_q_base, q_byte), nontemporal=True)
+                fx.generic_store(global_typed_ptr(arg_out, T.i32, align=8, byte_offset=q_byte), pk, nontemporal=True)
                 if kk == fx.Int32(0):
                     fx.ptr_store(fx.Int8(e8), global_typed_ptr(arg_out_scale, T.i8, align=1, byte_offset=s_byte))
 
@@ -858,7 +856,7 @@ def _flat_mxfp8_epilog(
 @flyc.jit
 def _flat_mxfp4_epilog(
     accm,
-    out_q_base,
+    arg_out,
     arg_out_scale,
     m_row,
     n_block_idx,
@@ -926,7 +924,7 @@ def _flat_mxfp4_epilog(
             blk = n_block_idx * fx.Int32(NBLK) + group
             q_byte = _q_row0 + fx.Int64(mr * 16 * (N_OUT // 2)) + fx.Int64(global_col // fx.Int32(2))
             s_byte = _s_row0 + fx.Int64(mr * 16 * (N_OUT // 32)) + fx.Int64(blk)
-            llvm.StoreOp(packed, _gep1(out_q_base, q_byte), nontemporal=True)
+            fx.generic_store(global_typed_ptr(arg_out, T.i32, align=4, byte_offset=q_byte), packed, nontemporal=True)
             if kk == fx.Int32(0):
                 fx.ptr_store(fx.Int8(e8), global_typed_ptr(arg_out_scale, T.i8, align=1, byte_offset=s_byte))
 
@@ -958,7 +956,6 @@ def _atomic_bf16_epilog(
     col_start = n_lane * 2
     stids_base = _global_base_ptr1(arg_stids)
     sweights_base = _global_base_ptr1(arg_sweights)
-    out_base = _global_base_ptr1(arg_out)
 
     packed = []
     weight = []
@@ -988,12 +985,5 @@ def _atomic_bf16_epilog(
                 v2 = lds_vec_load(lds_acc_base_i32, idx0 * 4, T.vec(2, T.f32), T.f32, align=8)
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)
-                out_ptr = _gep1(out_base, off)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    out_ptr,
-                    _raw(pk),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                out_ptr = global_typed_ptr(arg_out, T.bf16, align=4, byte_offset=off)
+                fx.atomic_add(out_ptr, pk, syncscope="agent")

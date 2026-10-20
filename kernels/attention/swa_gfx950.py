@@ -357,7 +357,7 @@ def build_gqa_attn(
         # block instead of drifting up into the previous compute block (which
         # forced the compiler to insert conservative vmcnt(3/5/6) drains).
         def nop_anchor():
-            _llvm.inline_asm(ir.Type.parse("!llvm.void"), [], "s_nop 7", "", has_side_effects=True)
+            rocdl.s_nop(7)
 
         def _anchor_vals(vals):
             n = len(vals)

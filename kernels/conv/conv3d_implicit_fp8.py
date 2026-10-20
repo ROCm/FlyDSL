@@ -42,14 +42,15 @@ def _normalize_3(v):
     return tuple(v)
 
 
-def _global_ptr_from_addr(addr_i64, elem_ty, ref_tensor):
+def _global_ptr_from_addr(addr_i64, elem_ty, ref_tensor, *, alignment=None):
     """Reinterpret a raw i64 byte address as a global pointer to ``elem_ty``.
 
-    Alignment is inherited from ``ref_tensor``'s iterator so the resulting
-    ``!llvm.ptr`` keeps the tensor's guarantees.
+    Buffer rebasing inherits the tensor alignment. Direct accesses specify
+    the alignment their element offset guarantees.
     """
-    alignment = fx.PointerType(fx.get_iter(ref_tensor).type).alignment
-    ptr_ty = fx.PointerType.get(elem_ty=elem_ty, address_space=1, alignment=alignment)
+    if alignment is None:
+        alignment = fx.get_iter(ref_tensor).alignment
+    ptr_ty = fx.PointerType.get(elem_ty=elem_ty, address_space=fx.AddressSpace.Global, alignment=alignment)
     return fx.inttoptr(ptr_ty, addr_i64)
 
 
@@ -158,8 +159,8 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
 
         # v16i8 is not a legal backend vector width, so move 16B chunks as dwordx4.
         def lds_store_i32x4(elem_offset, value_i32x4):
-            ptr = (fx.recast_iter(u8, lds.ptr) + fx.Int32(elem_offset)).llvm_ptr
-            llvm.StoreOp(value_i32x4, ptr, alignment=16)
+            ptr = fx.recast_iter(fx.PointerType.get(u8.ir_type, fx.AddressSpace.Shared, 16), lds.ptr + elem_offset)
+            fx.generic_store(ptr, value_i32x4)
 
         def lds_load_scalar(elem_offset):
             u8p = fx.recast_iter(u8, lds.ptr)
@@ -178,15 +179,15 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 cc_s = valid.select(fx.Int64(cc), fx.Int64(0))
                 ss_s = valid.select(fx.Int64(ss), fx.Int64(0))
                 addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
-                ptr = _global_ptr_from_addr(addr, u8.ir_type, inp).llvm_ptr
-                v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
+                ptr = _global_ptr_from_addr(addr, u8.ir_type, inp, alignment=16)
+                v = fx.generic_load(ptr, dtype=fx.Int32x4)
             else:
                 # u8 elements, so the copy-atom offset is the byte offset directly.
                 g = fx.Int32(in_base + cc * s + ss)
                 safe = valid.select(g, fx.Int32(0))
                 fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
                 v = fx.memref_load_vec(tr_reg).bitcast(fx.Int32)  # v16u8 -> v4i32
-            lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
+            lds_store_i32x4(rc * TR_LDS_S + sv, v)
 
         llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
 
@@ -204,8 +205,8 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
                 if const_expr(TR_BIG):
                     packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                     addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
-                    ptr = _global_ptr_from_addr(addr, u8.ir_type, out).llvm_ptr
-                    llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
+                    ptr = _global_ptr_from_addr(addr, u8.ir_type, out, alignment=16)
+                    fx.generic_store(ptr, packed)
                 else:
                     byte_off = out_base + ss * c + cc
                     fx.memref_store_vec(packed_u8, tr_reg)
@@ -616,9 +617,8 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
         def _big_store(off_elem, value):
             addr = y_elem_base + fx.Int64(off_elem) * 2
-            ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y).llvm_ptr
-            v = value.ir_value() if hasattr(value, "ir_value") else value
-            llvm.StoreOp(v, ptr, alignment=2)
+            ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y, alignment=2)
+            fx.generic_store(ptr, value)
 
         def store_cfrag(c_frag, base_row, base_col):
             for ti in range_constexpr(N_TILES_A):
