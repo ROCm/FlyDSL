@@ -420,8 +420,9 @@ TIER1 = (
     "lib/Conversion/FlyToROCDL/FlyToROCDL.cpp",
     "lib/Dialect/Fly/Transforms/LayoutLowering.cpp",
     "lib/Dialect/Fly/IR/FlyOps.cpp",
-    "lib/Dialect/Fly/Utils/IntTupleUtils.cpp",
-    "lib/Dialect/Fly/Utils/NormalForm.cpp",
+    "lib/Dialect/Fly/Utils/CoreBridge.cpp",
+    "lib/Core/EmitOp.cpp",
+    "lib/Core/Trait.cpp",
 )
 # Files whose defect changes WHICH artifact is served: silent by construction.
 TIER1C = (

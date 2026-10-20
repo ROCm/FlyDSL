@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2025 FlyDSL Project Contributors
+// Copyright (c) 2026 FlyDSL Project Contributors
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -66,11 +67,29 @@ void printVariadicOperandGroup(OpAsmPrinter &printer, Operation *, OperandRange 
 
 } // namespace mlir::fly
 
+static Attribute getLayoutAttr(MLIRContext *ctx, const core::AnyLayout<core::Trait> &layout) {
+  return std::visit(
+      [&](const auto &value) -> Attribute {
+        if constexpr (std::is_same_v<std::decay_t<decltype(value)>, core::Layout<core::Trait>>)
+          return LayoutAttr::get(ctx, value);
+        else
+          return ComposedLayoutAttr::get(ctx, value);
+      },
+      layout);
+}
+
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/Fly/IR/FlyTypeDefs.cpp.inc"
 
 #define GET_ATTRDEF_CLASSES
 #include "flydsl/Dialect/Fly/IR/FlyAttrDefs.cpp.inc"
+
+Operation *FlyDialect::materializeConstant(OpBuilder &builder, Attribute value, Type type,
+                                           Location location) {
+  if (auto integer = dyn_cast<IntegerAttr>(value); integer && isa<IntegerType>(type))
+    return arith::ConstantOp::create(builder, location, type, integer);
+  return nullptr;
+}
 
 void FlyDialect::initialize() {
   addTypes<
