@@ -434,15 +434,19 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
                         : Scalar::getDynamic(i, /*fromShape=*/false);
   }
 
-  // The single contiguous global mode.
+  // The single contiguous global mode, counting only modes that are axes: a degenerate
+  // leaf's stride is unobservable and must not make the tensor look ambiguous.
   int32_t contiguousMode = -1;
   {
     int32_t found = 0;
-    for (int32_t i = 0; i < numModes; ++i)
+    for (int32_t i = 0; i < numModes; ++i) {
+      if (!isMovableMode(modeExtent[i], modeStride[i]))
+        continue;
       if (modeStride[i].isStatic && modeStride[i].value == 1) {
         contiguousMode = i;
         ++found;
       }
+    }
     if (found != 1)
       contiguousMode = -1;
   }
@@ -516,6 +520,8 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   // Missing global modes are appended afterwards, so they never change this choice.
   SmallVector<RawDim> dims;
   for (const VectorEntry &e : vector) {
+    // Not `isMovableMode`: this is how much of the mode the tile takes, not whether the
+    // mode is an axis. The filler below restores the coordinate.
     if (e.extent == 1)
       continue;
     const Scalar &stride = modeStride[e.mode];
@@ -537,9 +543,7 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   for (int32_t i = 0; i < numModes; ++i) {
     if (coveredModes.contains(i))
       continue;
-    if (modeExtent[i].isStatic && modeExtent[i].value == 1)
-      continue;
-    if (modeStride[i].isStatic && modeStride[i].value == 0)
+    if (!isMovableMode(modeExtent[i], modeStride[i]))
       continue;
     if (i == contiguousMode)
       dims.insert(dims.begin(), {1, {i}, modeStride[i]});
@@ -697,13 +701,9 @@ FailureOr<SmallVector<Attribute>> axisBasisPerMode(MLIRContext *ctx, const Geome
     int32_t axis = clampableOnly ? descRank - 1 - static_cast<int32_t>(descDim)
                                  : static_cast<int32_t>(descDim);
     for (int32_t mode : dim.modes) {
-      // A size-1 axis has only coordinate 0 and a stride-0 one is a
-      // broadcast; neither can move the tile, so neither gets a basis.
       const Scalar &extent = geometry.modeExtent[mode];
       const Scalar &stride = geometry.modeStride[mode];
-      if (extent.isStatic && extent.value == 1)
-        continue;
-      if (stride.isStatic && stride.value == 0)
+      if (!isMovableMode(extent, stride))
         continue;
       if (dim.modes.size() == 1) {
         byMode[mode] = BasisAttr::get(IntAttr::getStatic(ctx, 1), axis);

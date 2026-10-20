@@ -70,3 +70,31 @@ def _compile_dynamic():
 def test_tile_one_wide_along_contiguous_mode(monkeypatch, extent):
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
     (_compile_static if extent == "static" else _compile_dynamic)()
+
+
+def _compile_degenerate_mode():
+    """The same tile behind a size-one global mode that also reads as stride one."""
+
+    @flyc.kernel(name="tdm_contiguous_filler_degenerate", known_block_size=[32, 1, 1])
+    def load_scales(arg: fx.Pointer):
+        g = fx.Tensor(
+            fx.make_view(arg, fx.make_layout((N_BLOCKS, 1, KT_ALL), (KT_ALL, 1, 1)))
+        )
+        return fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(),
+            g,
+            fx.make_layout((N_BLOCKS, 1, 1), (1, 1, 1)),
+            (N_BLOCKS, 1, 1),
+            num_warps=1,
+        )
+
+    @flyc.jit
+    def run(p: fx.Pointer, stream: fx.Stream = fx.Stream(None)):
+        load_scales(p).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+    flyc.compile(run, flyc.from_c_void_p(fx.Uint8, 0))
+
+
+def test_degenerate_mode_does_not_hide_the_contiguous_one(monkeypatch):
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
+    _compile_degenerate_mode()
