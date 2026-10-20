@@ -273,7 +273,7 @@ def launch_gemm_a8w8_256x256(
                 stride, mask, bound, step, pad = sb_gstride, b_mask, None, sb_step, 0
                 if const_expr(not mx32):
                     flat_wg = fx.Int32(local_x) + fx.Int32(local_y) * cluster_m + cluster_plane
-                    mask = fx.Int32(1) << fx.Int32(rocdl.readfirstlane(T.i32, flat_wg))
+                    mask = 1 << fx.Int32(rocdl.readfirstlane(T.i32, flat_wg))
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=tensor,
                 lds_memref=_view(fx.add_offset(base_ptr, offset), shape, (lds_stride, 1)),
@@ -292,8 +292,8 @@ def launch_gemm_a8w8_256x256(
             )
             return Vec(desc.dgroup0), Vec(desc.dgroup1), fx.Int32(shape[0] * lds_stride), fx.Int32(step)
 
-        dgroup0 = Vec.filled(4, 0, fx.Int32)
-        dgroup1 = Vec.filled(8, 0, fx.Int32)
+        dgroup0 = fx.full(4, 0, fx.Int32)
+        dgroup1 = fx.full(8, 0, fx.Int32)
         tdm_lds_step, tdm_global_step = fx.Int32(0), fx.Int32(0)
         if wave == 0:
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _build_tdm_desc(0)
@@ -337,7 +337,7 @@ def launch_gemm_a8w8_256x256(
         for qm, qn, im, jn in itertools.product(range(2), range(2), range(half_m), range(half_n)):
             c_frags[(qm * half_m + im) * wmma_n_rep + qn * half_n + jn] = fx.make_rmem_tensor(8, fx.Float32)
         for cf in c_frags:
-            cf.store(Vec.filled(8, 0.0, fx.Float32))
+            cf.store(fx.full(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)

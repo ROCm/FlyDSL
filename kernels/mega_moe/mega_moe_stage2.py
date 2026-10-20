@@ -59,8 +59,8 @@ def _quantize_fp8_payload(v8, weight):
     e8m0 = _fp8_scale(local_max)
     block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
     pk_ty = T.vec(2, T.i16)
-    packed_lo = fx.Vector.filled(2, 0, fx.Int16).ir_value()
-    packed_hi = fx.Vector.filled(2, 0, fx.Int16).ir_value()
+    packed_lo = fx.full(2, 0, fx.Int16).ir_value()
+    packed_hi = fx.full(2, 0, fx.Int16).ir_value()
     for pair in range_constexpr(4):
         if pair < 2:
             packed_lo = rocdl.cvt_scalef32_pk_fp8_f32(
@@ -437,8 +437,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
-        num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)
-        k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)
+        num_n_blocks = i32_hidden // fx.Int32(BN)
+        k_bytes = i32_inter // fx.Int32(1 if is_f8 else 2)
         # kernel-invariant scatter resources + peer-base table (loaded into registers once).
         trb_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_trb)
         r_stids = buffer_ops.create_buffer_resource_from_addr(arg_stids)
@@ -514,24 +514,24 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         total_m_blocks = (cumsum0 + fx.Int32(BM - 1)) // fx.Int32(BM)
 
         if const_expr(not persist and g2_spart <= 0):
-            bound = total_m_blocks * fx.Int32(num_n_blocks)
+            bound = total_m_blocks * num_n_blocks
             if fx.Int32(bx_i32) < bound:
                 issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
                 rocdl.sched_barrier(0)
                 run_unit(bx_i32, bx_i32 // num_n_blocks)
         elif const_expr(not persist):
-            bound = total_m_blocks * fx.Int32(num_n_blocks)
+            bound = total_m_blocks * num_n_blocks
             if fx.Int32(bx_i32) < bound:
                 m_block_idx, n_block_idx = _spart_output_tile_index(
                     bx_i32, total_m_blocks, num_n_blocks, g2_group_num, g2_m01
                 )
-                unit_bx = m_block_idx * fx.Int32(num_n_blocks) + n_block_idx
+                unit_bx = m_block_idx * num_n_blocks + n_block_idx
                 issue_all_a_loads(m_block_idx * fx.Int32(BM))
                 rocdl.sched_barrier(0)
                 run_unit(unit_bx, m_block_idx)
         elif const_expr(skew_cu > 0):
-            m_slot = bx_i32 // fx.Int32(num_n_blocks)
-            n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
+            m_slot = bx_i32 // num_n_blocks
+            n_block = bx_i32 - m_slot * num_n_blocks
             total_stage1_tiles = (cumsum0 + fx.Int32(SBM - 1)) // fx.Int32(SBM)
             max_expert_tiles = global_typed_ptr(arg_max_expert_tiles, T.i32)[0]
             skewed = max_expert_tiles * fx.Int32(4) > total_stage1_tiles
@@ -555,15 +555,15 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 contiguous_m = m_tile0 + _it
                 m_block = skewed.select(strided_m, contiguous_m)
                 if active:
-                    unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
+                    unit_bx = m_block * num_n_blocks + n_block
                     fx.barrier()
                     issue_all_a_loads(m_block * fx.Int32(BM))
                     rocdl.sched_barrier(0)
                     if fx.Int32(m_block) < total_m_blocks:
                         run_unit(unit_bx, m_block)
         else:
-            m_slot = bx_i32 // fx.Int32(num_n_blocks)
-            n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
+            m_slot = bx_i32 // num_n_blocks
+            n_block = bx_i32 - m_slot * num_n_blocks
             if const_expr(persist_strided):
                 diff = total_m_blocks - m_slot
                 rem = (diff > fx.Int32(0)).select(diff, fx.Int32(0))
@@ -581,7 +581,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     m_block = m_slot + _it * fx.Int32(cu_num)
                 else:
                     m_block = m_tile0 + _it
-                unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
+                unit_bx = m_block * num_n_blocks + n_block
                 fx.barrier()  # separate prev-iter epilog LDS reads from this iter's A-load into the LDS union
                 issue_all_a_loads(m_block * fx.Int32(BM))
                 rocdl.sched_barrier(0)
@@ -596,7 +596,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         i32_grid_blocks: fx.Int32, i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32,
         i32_npad: fx.Int32, stream: fx.Stream):
     # fmt: on
-        num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(BN)
+        num_n_blocks = i32_hidden // fx.Int32(BN)
         grid_x = i32_grid_blocks * num_n_blocks
         kernel_epilog(
             arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cumsum, arg_max_expert_tiles,

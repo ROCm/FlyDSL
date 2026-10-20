@@ -135,7 +135,7 @@ def build_kimi_k3_attn_res(
                 inverse = nonzero.select(rcp(scale), fx.Float32(1.0))
                 q0 = fx.min(fx.max(values[0] * inverse, -FP8_MAX), FP8_MAX)
                 q1 = fx.min(fx.max(values[1] * inverse, -FP8_MAX), FP8_MAX)
-                packed = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & fx.Int32(0xFFFF)
+                packed = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
                 neighbor = xshfl(packed, 1)
                 if lane % 2 == 0:
                     bo.buffer_store(

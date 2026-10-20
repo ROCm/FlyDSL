@@ -12,6 +12,11 @@
         "file": "rocdl-waves-per-eu-range.patch",
         "description": "Support waves_per_eu min,max range attribute for full VGPR utilization.",
         "upstream_status": "merged into upstream: 4d5db577f969519703c348b8c7b02ee22987bd94"
+      },
+      {
+        "file": "xnack-any-codegen-override.patch",
+        "description": "Allow overriding xnack=any codegen to xnack- or xnack+ on gfx1250 via LLVM_GFX1250_ANY_XNACK_CODEGEN env var.",
+        "upstream_status": "experimental"
       }
     ],
     "extensions": []

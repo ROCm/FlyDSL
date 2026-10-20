@@ -10,7 +10,7 @@ The kernel register-buffers the row across max, exp+sum, and normalize passes.
 
 Two paths:
   - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
-  - Generic path (arbitrary N): scalar copy_atom_call with masking.
+  - Generic path (arbitrary N): scalar fx.copy with masking.
 """
 
 import math

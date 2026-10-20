@@ -448,7 +448,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                     )
                 )
 
-        dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
+        dweight_partial = fx.full(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
         for row in range(bid, MIn, num_programs):
             row_source = fx.slice(Source_buf, (row, None))
             row_dy = fx.slice(DY_buf, (row, None))

@@ -328,7 +328,7 @@ def build_kimi_k3_tail(
             tile_in_task = wave // _WAVES_PER_TILE
             wave_in_tile = wave % _WAVES_PER_TILE
             row_tile = row_tile_base + tile_in_task
-            accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+            accumulator = fx.full(4, 0.0, fx.Float32)
             for chunk_index in range_constexpr(chunks_per_wave):
                 chunk = wave_in_tile * chunks_per_wave + chunk_index
                 if chunk < k_chunks:
@@ -357,8 +357,8 @@ def build_kimi_k3_tail(
                             )
                         )
                         scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
-                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
-                        scale = ((scale_byte & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & 0xFF
+                        scale = ((scale_byte & 0xFF) << 23).bitcast(fx.Float32)
                         lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
                         rhs = fx.ptr_load(
                             activation + (sample * k_dim + chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,

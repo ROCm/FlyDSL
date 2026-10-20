@@ -510,9 +510,9 @@ class ScaleGatherLDS:
 
         self._wave_base_s = fx.as_ir_value(self._lds_base + wid * fx.Int32(_SCALE_QUARTER_BYTES))
 
-        is_a = wid < fx.Int32(2)
-        q = wid % fx.Int32(2)
-        base_tile = is_a.select(a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
+        is_a = wid < 2
+        q = wid % 2
+        base_tile = is_a.select(a_base_tile + q * 64, b_base_tile + q * 64)
         self._G = _uniform_i32(base_tile // fx.Int32(32))
         self._rsrc = fx.arith.select(is_a, self.a_rsrc, self.b_rsrc)
         # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).
@@ -520,7 +520,7 @@ class ScaleGatherLDS:
 
     def gather(self, kstep, slot):
         grp = fx.Int32(self._G) + (self._blk // 2) * fx.Int32(4) + (self._blk % 2)
-        i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * fx.Int32(64) + self._in16 * fx.Int32(4)
+        i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * 64 + self._in16 * fx.Int32(4)
         voff = fx.as_ir_value(i32_off * fx.Int32(4))  # bytes
         # m0 = precomputed wave quarter (SGPR) + slot*4096 (scalar): no readfirstlane.
         addr = fx.Int32(self._wave_base_s) + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES)
@@ -823,8 +823,8 @@ def compile_fp4_gemm_4w(
             _b0n = [None] * N_TILES_B
             _b1n = [None] * N_TILES_B
             # This step prefetches K-step (kc+2) for g2s. a*_off = base + (kc+2)*STEP.
-            ak = (kc_i + fx.Int32(2)) * fx.Int32(A_K_STEP)
-            bk = (kc_i + fx.Int32(2)) * fx.Int32(B_K_STEP)
+            ak = (kc_i + 2) * fx.Int32(A_K_STEP)
+            bk = (kc_i + 2) * fx.Int32(B_K_STEP)
             a0_off = fx.Int32(A0_gl_offset) + ak
             a1_off = fx.Int32(A1_gl_offset) + ak
             b0_off = fx.Int32(B0_gl_offset) + bk
@@ -832,7 +832,7 @@ def compile_fp4_gemm_4w(
 
             _scn = [None, None, None, None]  # saR0, saR1, sbC0, sbC1 for kc+1
             _rd_scn = _read_scale_thunks(kc_i + 1, _scn)
-            _gk = _min(kc_i + fx.Int32(3), fx.Int32(K_ITERS - 1))
+            _gk = _min(kc_i + 3, fx.Int32(K_ITERS - 1))
             _sc_gather = _gather_scale_thunks(_gk, _slot(_gk))
 
             wait_barrier(_MAIN_VMCNT)

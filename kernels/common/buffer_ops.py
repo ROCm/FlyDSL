@@ -10,14 +10,12 @@ Buffer operations use a scalar base pointer and per-thread offsets for efficient
 
 Example:
     >>> from kernels.common import buffer_ops
-    >>> from flydsl.expr import arith
-    >>> from flydsl._mlir.extras import types as T
     >>>
     >>> # Create buffer resource from memref
     >>> rsrc = buffer_ops.create_buffer_resource(A)
     >>>
     >>> # Compute offset
-    >>> offset = row * arith.index(4096) + col
+    >>> offset = row * 4096 + col
     >>>
     >>> # Buffer load (4xf32)
     >>> data = buffer_ops.buffer_load(rsrc, offset, vec_width=4)
@@ -137,11 +135,11 @@ def _byte_buffer_ptr(global_ptr, num_records_bytes, base_byte_offset=None):
 
 
 @dsl_loc_tracing
-def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
+def _add_soffset_bytes(byte_offset: fx.Int32, soffset_bytes) -> fx.Int32:
     """Fold ``soffset_bytes`` into the byte offset."""
     if soffset_bytes is None:
         return byte_offset
-    return (fx.Int32(byte_offset) + fx.Int32(soffset_bytes)).ir_value()
+    return byte_offset + fx.Int32(soffset_bytes)
 
 
 @dsl_loc_tracing
@@ -408,20 +406,20 @@ def buffer_load(
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    offset = fx.Int32(_unwrap_value(offset)).ir_value()
+    offset = fx.Int32(_unwrap_value(offset))
 
     # Convert the API's element offset to the buffer instruction's byte offset.
     element_bytes = dtype.width // 8
-    offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
+    offset = offset * element_bytes
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
+        offset = fx.Boolean(mask).select(offset, 0x7FFFFFFF)
 
     result_type = dtype if vec_width == 1 else ir.VectorType.get([vec_width], dtype)
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
-    src = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
+    src = fx.make_view(rsrc + offset, fx.make_layout(vec_width * element_bytes, 1))
     atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * dtype.width, cache_modifier), fx.Int8)
     reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(dtype))
     fx.copy(atom, src, reg)
@@ -466,7 +464,7 @@ def buffer_store(
     """
     # Keep `rsrc` as a !fly.ptr<i8, BufferDesc> for the copy atom.
     data = _unwrap_value(data)
-    offset = fx.Int32(_unwrap_value(offset)).ir_value()
+    offset = fx.Int32(_unwrap_value(offset))
 
     data_type = data.type
     if hasattr(data_type, "element_type"):  # Vector type
@@ -479,14 +477,14 @@ def buffer_store(
 
     # Convert element offsets unless the caller already supplied bytes.
     if not offset_is_bytes:
-        offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
+        offset = offset * element_bytes
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
+        offset = fx.Boolean(mask).select(offset, 0x7FFFFFFF)
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
-    dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
+    dst = fx.make_view(rsrc + offset, fx.make_layout(vec_width * element_bytes, 1))
     atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * element_type.width, cache_modifier), fx.Int8)
     reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(element_type))
     fx.memref_store_vec(data, reg)

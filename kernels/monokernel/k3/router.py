@@ -12,7 +12,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr
-from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.ops import exp, rcp, rsrc
@@ -76,9 +75,7 @@ def build_sigmoid_topk_router(num_experts: int, topk: int, samples: int):
             for i in range_constexpr(1, values_per_lane):
                 candidate_score = corrected_scores[i]
                 candidate_id = expert_ids[i]
-                take = (candidate_score > best_score) | (
-                    (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
-                )
+                take = (candidate_score > best_score) | ((candidate_score == best_score) & (candidate_id < best_id))
                 best_score = take.select(candidate_score, best_score)
                 best_raw = take.select(raw_scores[i], best_raw)
                 best_id = take.select(candidate_id, best_id)
@@ -87,9 +84,7 @@ def build_sigmoid_topk_router(num_experts: int, topk: int, samples: int):
                 peer_score = best_score.shuffle_xor(fx.Int32(offset), WAVE_SIZE)
                 peer_raw = best_raw.shuffle_xor(fx.Int32(offset), WAVE_SIZE)
                 peer_id = best_id.shuffle_xor(fx.Int32(offset), WAVE_SIZE)
-                take = (peer_score > best_score) | (
-                    (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
-                )
+                take = (peer_score > best_score) | ((peer_score == best_score) & (peer_id < best_id))
                 best_score = take.select(peer_score, best_score)
                 best_raw = take.select(peer_raw, best_raw)
                 best_id = take.select(peer_id, best_id)

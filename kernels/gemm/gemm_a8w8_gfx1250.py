@@ -313,7 +313,7 @@ def launch_gemm_a8w8(
             v23 = v[2].shuffle(v[3], list(range(8)))
             packed = v01.shuffle(v23, list(range(16)))
             if const_expr(balanced_accum and ks % 2 == 0):
-                packed = packed ^ Vec.filled(16, -2139062144, fx.Int32)  # 0x80808080: negate each FP8 byte
+                packed = packed ^ fx.full(16, -2139062144, fx.Int32)  # 0x80808080: negate each FP8 byte
             return packed
 
         def load_b(buf, wn, ks):
@@ -372,7 +372,7 @@ def launch_gemm_a8w8(
             wmma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(Vec.filled(8, 0.0, fx.Float32))
+            cf.store(fx.full(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
@@ -526,8 +526,8 @@ def launch_gemm_a8w8(
             gSB_base = fx.recast_iter(fx.Float32, arg_scale_b)
             sa_view = fx.Tensor(fx.make_view(gSA_base, fx.make_layout(i32_m, 1)))
             sb_view = fx.Tensor(fx.make_view(gSB_base, fx.make_layout(i32_n, 1)))
-            sa_buf = fx.rocdl.make_buffer_tensor(sa_view, max_size=False, num_records_bytes=i32_m * fx.Int32(4))
-            sb_buf = fx.rocdl.make_buffer_tensor(sb_view, max_size=False, num_records_bytes=i32_n * fx.Int32(4))
+            sa_buf = fx.rocdl.make_buffer_tensor(sa_view, max_size=False, num_records_bytes=i32_m * 4)
+            sb_buf = fx.rocdl.make_buffer_tensor(sb_view, max_size=False, num_records_bytes=i32_n * 4)
             sa_lay, sb_lay = (fx.make_layout(1, 1), fx.make_layout(4, 1))
             sa_tiles = fx.logical_divide(sa_buf, sa_lay)
             sb_tiles = fx.logical_divide(sb_buf, sb_lay)

@@ -350,7 +350,7 @@ def build_kimi_k3_mla_attention(
             return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
 
         def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+            return fx.Float32(a.to(fx.BFloat16))
 
         # ---- tagged-pair mailboxes
         def mb(name):
@@ -560,8 +560,7 @@ def build_kimi_k3_mla_attention(
             row = rg * 16 + ln % 16
             packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
             scales = [
-                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4)
+                ((packed_scale.shrui(fx.Int32(sp * 8)) & 0xFF) << 23).bitcast(fx.Float32) for sp in range_constexpr(4)
             ]
             return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
 
@@ -599,7 +598,7 @@ def build_kimi_k3_mla_attention(
                     for sp in range_constexpr(4):
                         a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
                         b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                        c = fx.Vector.filled(4, 0.0, fx.Float32)
+                        c = fx.full(4, 0.0, fx.Float32)
                         c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
                         part_coef = coef[sp] if const_expr(isinstance(coef, list)) else coef
                         if const_expr(callable(part_coef)):
@@ -609,7 +608,7 @@ def build_kimi_k3_mla_attention(
                         else:
                             acc = [acc[e] + c[e] * part_coef for e in range(4)]
                     continue
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
+                c = fx.full(4, 0.0, fx.Float32)
                 if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                     a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                     bv = [fx.ptr_load(xs + (bw + h * 16), result_type=v4f).bitcast(fx.Int32) for h in range(2)]
@@ -1423,7 +1422,7 @@ def build_kimi_k3_mla_attention(
             score_head_base = task_head_group * WAVES
             hn = fx.min(score_head_base + lane % 16, H - 1)
             rgk = wave % 4
-            c = fx.Vector.filled(4, 0.0, fx.Float32)
+            c = fx.full(4, 0.0, fx.Float32)
             for st in range_constexpr(QK_DIM // 32 // 2):
                 kst = (wave // 4) * (QK_DIM // 32 // 2) + st
                 key = rgk * 16 + lane % 16
@@ -1467,8 +1466,8 @@ def build_kimi_k3_mla_attention(
                 hn = fx.min(head_base + lane % 16, H - 1)
                 for g in range_constexpr(KV_LORA // 32 // WAVES):
                     dw = (wave * (KV_LORA // 32 // WAVES) + g) * 16 + lane % 16  # dim pair word
-                    c0 = fx.Vector.filled(4, 0.0, fx.Float32)
-                    c1 = fx.Vector.filled(4, 0.0, fx.Float32)
+                    c0 = fx.full(4, 0.0, fx.Float32)
+                    c1 = fx.full(4, 0.0, fx.Float32)
                     for js in range_constexpr(SPLIT_KEYS // 32):
                         a = fx.ptr_load(
                             pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4), result_type=v4f
@@ -1611,7 +1610,7 @@ def build_kimi_k3_mla_attention(
                 if const_expr(not attention_residual):
                     return fx.Float32(0.0), fx.Float32(0.0)
                 w = fx.Vector.from_elements(
-                    [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32))], fx.Int32
+                    [bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32)], fx.Int32
                 )
                 v = w.bitcast(fx.BFloat16).to(fx.Float32)
                 return v[0], v[1]

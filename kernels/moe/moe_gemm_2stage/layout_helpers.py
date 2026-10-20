@@ -9,20 +9,12 @@ from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import _to_raw as _raw
 from kernels.common.kernels_common import LOG2E
 
 
 def reps(tensor, mode):
     """Static repeat count of ``tensor``'s ``mode`` (shape size, as a Python int)."""
     return fx.size(fx.get_shape(tensor)[mode]).to_py_value()
-
-
-def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
-    """Encode s_waitcnt bitfield for CDNA3 (gfx94x)."""
-    vm_lo = vmcnt & 0xF
-    vm_hi = (vmcnt >> 4) & 0x3
-    return vm_lo | (expcnt << 4) | (lgkmcnt << 8) | (vm_hi << 14)
 
 
 def _as_ptr(p, dtype=None):
@@ -243,7 +235,7 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
                 if const_expr(a_scale is not None):
                     g = g * a_sc
                     u = u * a_sc
-                tmp = rocdl.exp2(T.f32, _raw(g * log2_exp1))
+                tmp = rocdl.exp2(T.f32, (g * log2_exp1).ir_value())
                 acc.append((g * rocdl.rcp(T.f32, 1.0 + tmp)) * u)
             acc = Vec.from_elements(acc, fx.Float32)
             if const_expr(out_dtype == fx.BFloat16):

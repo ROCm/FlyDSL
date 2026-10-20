@@ -114,7 +114,7 @@ def moe_reduction_kernel(
     def _decode_fp8(vfrag, sfrag):  # 8 fp8 bytes + 1 e8m0 -> Vector(8, f32)
         w = fx.Vector(fx.memref_load_vec(vfrag)).bitcast(fx.Int32)
         e8m0 = fx.Uint32(fx.Uint8(fx.Vector(fx.memref_load_vec(sfrag))[0]))
-        scale = (e8m0 << fx.Uint32(23)).bitcast(fx.Float32)
+        scale = (e8m0 << 23).bitcast(fx.Float32)
         words = (w[0], w[0], w[1], w[1])
         lanes = []
         for pi in range_constexpr(4):
@@ -137,7 +137,7 @@ def moe_reduction_kernel(
             for k in range_constexpr(topk):
                 fx.copy(sc_atom, p_sc, sfrags[k], soffset=fx.Int32(k * row_stride))
 
-        acc = fx.Vector.filled(V, 0.0, fx.Float32)
+        acc = fx.full(V, 0.0, fx.Float32)
         for k in range_constexpr(topk):
             if const_expr(is_fp8):
                 vk = _decode_fp8(frags[k], sfrags[k])
@@ -145,7 +145,7 @@ def moe_reduction_kernel(
                 vk = fx.Vector(fx.memref_load_vec(frags[k]))
                 vk = vk.extf(vec_f32) if is_16b else vk
             if const_expr(use_mask):
-                vk = (em_ptr[tk_ptr[k]] != fx.Int32(0)).select(vk, fx.Vector.filled(V, 0.0, fx.Float32))
+                vk = (em_ptr[tk_ptr[k]] != fx.Int32(0)).select(vk, fx.full(V, 0.0, fx.Float32))
             acc = acc + vk
         ofrag = fx.make_fragment_like(p_dst)
         fx.memref_store_vec(acc.truncf(vec_out) if is_16b else acc, ofrag)

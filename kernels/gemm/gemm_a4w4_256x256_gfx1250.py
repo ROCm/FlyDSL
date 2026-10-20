@@ -260,8 +260,8 @@ def launch_gemm_a4w4_256x256(
             )
             return Vec(desc.dgroup0), Vec(desc.dgroup1), fx.Int32(shape[0] * lds_stride), fx.Int32(shape[1])
 
-        dgroup0 = Vec.filled(4, 0, fx.Int32)
-        dgroup1 = Vec.filled(8, 0, fx.Int32)
+        dgroup0 = fx.full(4, 0, fx.Int32)
+        dgroup1 = fx.full(8, 0, fx.Int32)
         tdm_lds_step, tdm_global_step = fx.Int32(0), fx.Int32(0)
         if wave == 0:
             dgroup0, dgroup1, tdm_lds_step, tdm_global_step = _build_tdm_desc(0)
@@ -293,7 +293,7 @@ def launch_gemm_a4w4_256x256(
         ]
         c_frags = [fx.make_rmem_tensor(16, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(Vec.filled(16, 0.0, fx.Float32))
+            cf.store(fx.full(16, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
