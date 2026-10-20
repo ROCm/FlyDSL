@@ -65,7 +65,9 @@ def _dualwave_sync_barrier():
 def _s_nop(x):
     if not isinstance(x, int) or not 0 <= x <= 15:
         raise ValueError("s_nop immediate must be a Python int in [0, 15]")
-    llvm.inline_asm(ir.Type.parse("!llvm.void"), [], f"s_nop {x}", "", has_side_effects=True)
+    # Keep the asm scheduling boundary: the intrinsic drops hot-loop alignment
+    # and slows the BF16 split-K path even though the instructions are unchanged.
+    llvm.inline_asm(None, [], f"s_nop {x}", "", has_side_effects=True)
 
 
 def _read_exec_i64():
@@ -310,23 +312,13 @@ def _v_vec32_to_p(traits, v_p_all, elem_dtype):
     return p_lo, p_hi
 
 
-def _rescale_value_types(traits, elem_dtype):
-    v32bf16_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, elem_dtype)
-    v32f32_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, fx.Float32)
-    return v32bf16_type, v32f32_type
-
-
 def _scale_v_p(traits, v_p, scale_scalar, elem_dtype, fm_fast):
-    v32bf16_type, v32f32_type = _rescale_value_types(traits, elem_dtype)
-    fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
-    p_all = _v_p_to_vec32(v_p)
-    p_all_f32_op = llvm.FPExtOp(v32f32_type, as_mlir_value(p_all))
-    p_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    scale_vec = fx.full(traits.PV_K_STEPS * 2 * 8, fx.Float32(scale_scalar), fx.Float32)
-    p_scaled_f32 = as_mlir_value(scale_vec * Vec(p_all_f32_op.result))
-    p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
-    p_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    return _v_vec32_to_p(traits, p_scaled_bf16_op.result, elem_dtype=elem_dtype)
+    with fx.fastmath(arith.FastMathFlags.fast):
+        p_all = Vec(_v_p_to_vec32(v_p)).to(fx.Float32)
+    p_scaled = p_all * fx.Float32(scale_scalar)
+    with fx.fastmath(arith.FastMathFlags.fast):
+        p_scaled = p_scaled.to(elem_dtype)
+    return _v_vec32_to_p(traits, p_scaled, elem_dtype=elem_dtype)
 
 
 def _bf16_trunc_pack_v8(traits, f32_vals, elem_dtype):
@@ -525,26 +517,6 @@ def _apply_dualwave_causal_mask_pair(s_values, rel_i32, neg_inf_i32, pair_thresh
 # Descriptor, LDS, and buffer helpers
 
 
-def _llvm_value(value):
-    """Unwrap FlyDSL values before passing them to LLVM dialect ops."""
-    if hasattr(value, "ir_value") and not isinstance(value, ir.Value):
-        return value.ir_value()
-    return value
-
-
-def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
-    ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
-    return fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
-
-
-def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
-    return llvm.LoadOp(result_type, _llvm_value(ptr)).result
-
-
-def _pointer_store(value: ir.Value, ptr: ir.Value):
-    return llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
-
-
 def _lds_alias_scope_array(names):
     attrs = [f'#llvm.alias_scope<id = "{name}", domain = {_LDS_ALIAS_DOMAIN}>' for name in names]
     return ir.Attribute.parse(f"[{', '.join(attrs)}]")
@@ -603,8 +575,7 @@ def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, 
 
 
 def _make_raw_buffer_rsrc(tensor):
-    base_ptr = _extract_aligned_pointer(tensor)
-    base_i64 = llvm.PtrToIntOp(T.i64, base_ptr).result
+    base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(tensor)))
     base_lo = fx.Int32(base_i64)
     base_hi = fx.Int32(fx.Int64(base_i64).shrui(fx.Int64(32)))
     return Vec.from_elements(
@@ -619,16 +590,17 @@ def _make_raw_buffer_rsrc(tensor):
 
 
 def _read_v8f16_off(traits, v_base_ptr, const_off, kv_mfma_pack_type):
-    ptr = buffer_ops.get_element_ptr(
-        v_base_ptr, byte_offset=as_mlir_value(fx.Int32(const_off * traits.BF16_BYTES)), elem_type=T.i8
+    ptr = fx.recast_iter(
+        fx.PointerType.get(T.i8, fx.AddressSpace.Shared, 16),
+        v_base_ptr + const_off * traits.BF16_BYTES,
     )
-    return llvm.LoadOp(kv_mfma_pack_type, ptr, alignment=16).result
+    return fx.ptr_load(ptr, result_type=kv_mfma_pack_type).ir_value()
 
 
 def _load_k_pack_aligned(traits, lds_kv_base_ptr, elem_idx, buf_id, kv_mfma_pack_type):
     scope_name = _dualwave_lds_scope("k", buf_id)
     byte_offset = elem_idx * traits.BF16_BYTES
-    ptr = buffer_ops.get_element_ptr(lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
+    ptr = (lds_kv_base_ptr + fx.Int64(byte_offset)).llvm_ptr
     return llvm.LoadOp(
         kv_mfma_pack_type,
         ptr,
@@ -2267,8 +2239,8 @@ class GenericFlashAttnContext:
         self.elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
         self.elem_type = self.elem_dtype.ir_type
         self.compute_type = fx.Float32.ir_type
-        self.k_ptr = _extract_aligned_pointer(self.K)
-        self.v_ptr = _extract_aligned_pointer(self.V)
+        self.k_ptr = fx.get_iter(self.K)
+        self.v_ptr = fx.get_iter(self.V)
         self.load_atom_32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         self.v1i32_type = Vec.make_type(1, fx.Int32)
 
@@ -2367,8 +2339,8 @@ class GenericFlashAttnContext:
         traits = self.traits
         if const_expr(not traits.PAGED):
             off = self.kv_tok_base * fx.Index(traits.STRIDE_TOKEN_KV)
-            self.k_ptr = buffer_ops.get_element_ptr(self.k_ptr, off, elem_type=self.elem_type)
-            self.v_ptr = buffer_ops.get_element_ptr(self.v_ptr, off, elem_type=self.elem_type)
+            self.k_ptr = self.k_ptr + fx.Int64(off)
+            self.v_ptr = self.v_ptr + fx.Int64(off)
 
     def init_descriptors(self, Q, O, LSE=None):  # noqa: E741
         # Per-batch descriptors keep global indices 0-based and bounded to one batch,
@@ -2428,12 +2400,13 @@ class GenericFlashAttnContext:
         return (row_idx < self.seqlen_kv_b).select(row_idx, last)
 
     def load_global_half_vec(self, ptr, base_idx, vec_elems: int):
-        gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=self.elem_type)
-        return _pointer_load(Vec.make_type(vec_elems, self.elem_dtype), gep)
+        ptr_type = fx.PointerType.get(self.elem_type, fx.AddressSpace.Global, vec_elems * 2)
+        ptr = fx.recast_iter(ptr_type, ptr + fx.Int64(base_idx))
+        return fx.ptr_load(ptr, result_type=Vec.make_type(vec_elems, self.elem_dtype)).ir_value()
 
     def store_global_half(self, ptr, base_idx, val):
-        gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=self.elem_type)
-        _pointer_store(val, gep)
+        ptr_type = fx.PointerType.get(self.elem_type, fx.AddressSpace.Global, 2)
+        fx.generic_store(fx.recast_iter(ptr_type, ptr + fx.Int64(base_idx)), val)
 
     def load_global_f16x4(self, rsrc, base_idx):
         return self.load_global_half_vec(rsrc, base_idx, 4)
@@ -3542,10 +3515,10 @@ class DualwaveKernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
+        self.lds_kv_base_ptr = fx.recast_iter(fx.Int8, lds.kv.ptr)
         if const_expr(self.traits.PAGED):
             self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
-            self.lds_bt_base_ptr = lds.bt.ptr.llvm_ptr
+            self.lds_bt_base_ptr = fx.recast_iter(fx.Int8, lds.bt.ptr)
         else:
             self.lds_bt_base_ptr = None
 
@@ -3843,23 +3816,24 @@ class DualwavePageIdLoader(DualwaveKernelContext):
                 if local_tile < segment_tiles:
                     tile_idx = split_t0 + local_tile
                     byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
-                    dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
-                    llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
+                    dst = fx.recast_iter(
+                        fx.PointerType.get(T.i32, fx.AddressSpace.Shared, 4), lds_bt_base_ptr + byte_off
+                    )
+                    fx.generic_store(dst, fx.Int32(0))
                     if tile_idx < num_kv_tiles:
                         row_idx = batch_idx * block_table_stride_v + tile_idx
                         v = fly.copy_atom_call_ssa([bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx))))
                         page_id_i32 = as_mlir_value(Vec(v, (1,), fx.Int32)[0])
-                        llvm.StoreOp(page_id_i32, dst)
+                        fx.generic_store(dst, page_id_i32)
 
         _load_block_table_to_lds()
 
     def load_page_id_lds(self, tile_idx):
-        src = buffer_ops.get_element_ptr(
-            self.lds_bt_base_ptr,
-            byte_offset=as_mlir_value(_paged_bt_byte_offset(tile_idx, split_t0=self.split_t0)),
-            elem_type=T.i8,
+        ptr = fx.recast_iter(
+            fx.PointerType.get(T.i32, fx.AddressSpace.Shared, 4),
+            self.lds_bt_base_ptr + _paged_bt_byte_offset(tile_idx, split_t0=self.split_t0),
         )
-        return llvm.LoadOp(T.i32, src).result
+        return fx.generic_load(ptr).ir_value()
 
     def finish_page_id(self, v):
         rocdl.s_waitcnt(self.traits.LGKMCNT_0_ONLY)
@@ -3925,19 +3899,11 @@ class DualwaveQLoader(DualwaveKernelContext):
         return Vec(q_all, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), self.elem_dtype)
 
     def scale_all(self, q_all_bf16):
-        traits = self.traits
-        fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
-        v64bf16_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, self.elem_dtype)
-        v64f32_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, fx.Float32)
-        q_all_f32_op = llvm.FPExtOp(v64f32_type, as_mlir_value(q_all_bf16))
-        q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-        q_all_f32 = q_all_f32_op.result
-        scale_vec = fx.full(traits.K_STEPS_QK * traits.MFMA_LANE_K, fx.Float32(self.c_sm_scale_log2e), fx.Float32)
-        q_all_scaled_f32 = as_mlir_value(scale_vec * Vec(q_all_f32))
-        q_all_scaled_bf16_op = llvm.FPTruncOp(v64bf16_type, q_all_scaled_f32)
-        q_all_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-        q_all_scaled_bf16 = q_all_scaled_bf16_op.result
-        return Vec(q_all_scaled_bf16, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), self.elem_dtype)
+        with fx.fastmath(arith.FastMathFlags.fast):
+            q_all_f32 = q_all_bf16.to(fx.Float32)
+        q_scaled = q_all_f32 * self.c_sm_scale_log2e
+        with fx.fastmath(arith.FastMathFlags.fast):
+            return q_scaled.to(self.elem_dtype)
 
 
 class DualwaveGemmHelper(DualwaveKernelContext):
@@ -4343,20 +4309,9 @@ class DualwaveKvLdsToVgprLoader(DualwaveKernelContext):
         v_base = _v_buf_base(self.traits, buf_id)
         packs = [[None] * self.traits.D_CHUNKS for _ in range(4)]
         if const_expr(self.traits.KV_VECTORIZED):
-            v_base_ptr = buffer_ops.get_element_ptr(
-                self.lds_kv_base_ptr,
-                byte_offset=as_mlir_value(
-                    fx.Int32(
-                        _vec_v_lds_addr_base(
-                            self.traits,
-                            v_base,
-                            lane_div_32=self.lane_div_32,
-                            lane_mod_32=self.lane_mod_32,
-                        )
-                        * self.traits.BF16_BYTES
-                    )
-                ),
-                elem_type=T.i8,
+            v_base_ptr = self.lds_kv_base_ptr + fx.Int32(
+                _vec_v_lds_addr_base(self.traits, v_base, lane_div_32=self.lane_div_32, lane_mod_32=self.lane_mod_32)
+                * self.traits.BF16_BYTES
             )
             for dc in range_constexpr(self.traits.D_CHUNKS):
                 for k_substep in range_constexpr(4):
@@ -4657,7 +4612,7 @@ class DualwaveFp8KernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
+        self.lds_kv_base_ptr = fx.recast_iter(fx.Int8, lds.kv.ptr)
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
         self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
@@ -4675,7 +4630,7 @@ class DualwaveFp8KernelContext:
             )
         if hasattr(lds, "q"):
             self.lds_q_base_idx = fx.Int64(fx.ptrtoint(lds.q.ptr))
-            self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
+            self.lds_q_base_ptr = fx.recast_iter(fx.Int8, lds.q.ptr)
         else:
             self.lds_q_base_idx = None
             self.lds_q_base_ptr = None
@@ -5007,8 +4962,10 @@ class DualwaveFp8KernelContext:
     def read_i32x8_lds(self, base_ptr, byte_row):
         halves = []
         for h in range_constexpr(2):
-            p = buffer_ops.get_element_ptr(base_ptr, byte_offset=fx.Int32(byte_row + h * 16), elem_type=T.i8)
-            halves.append(Vec(llvm.LoadOp(Vec.make_type(4, fx.Int32), p, alignment=16).result))
+            p = fx.recast_iter(
+                fx.PointerType.get(T.i32, fx.AddressSpace.Shared, 16), base_ptr + fx.Int32(byte_row + h * 16)
+            )
+            halves.append(fx.generic_load(p, count=4))
         return halves[0].shuffle(halves[1], [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
 
     def read_i32x4_lds(self, byte_row):
@@ -5983,7 +5940,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         out_lo, out_hi = [], []
         for src, dst in ((p_lo, out_lo), (p_hi, out_hi)):
             for pk in src:
-                f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), as_mlir_value(pk)).result, (8,), fx.Float32)
+                f32 = Vec(pk).to(fx.Float32)
                 scaled = [f32[i] * scale_scalar for i in range(8)]
                 dst.append(self.bf16_trunc_pack_v8(scaled))
         return out_lo, out_hi

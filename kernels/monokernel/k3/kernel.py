@@ -36,7 +36,6 @@ from kernels.monokernel.ops import (
     rsrc,
     uniform,
     uniform_f32,
-    xred,
     xshfl,
 )
 
@@ -448,9 +447,7 @@ def build_kimi_k3_monokernel(
             fx.ptr_store(value, pointer + index)
 
         def wave_sum(value):
-            for offset in (32, 16, 8, 4, 2, 1):
-                value = xred(value, offset, lambda lhs, rhs: lhs + rhs)
-            return value
+            return fx.coop.warp_reduce(value, fx.ReductionOp.ADD, width=64)
 
         def block_sum(value):
             value = wave_sum(value)
@@ -763,8 +760,7 @@ def build_kimi_k3_monokernel(
                         fx.max(rounded[0], -rounded[0]),
                         fx.max(rounded[1], -rounded[1]),
                     )
-                    for offset in (8, 4, 2, 1):
-                        absolute_max = xred(absolute_max, offset, fx.max)
+                    absolute_max = fx.coop.warp_reduce(absolute_max, fx.ReductionOp.MAX, width=16)
                     raw_scale = absolute_max * fx.Float32(1.0 / FP8_MAX)
                     bits = raw_scale.bitcast(fx.Int32)
                     exponent = bits.shrui(fx.Int32(23)) & fx.Int32(0xFF)
@@ -998,8 +994,7 @@ def build_kimi_k3_monokernel(
                             fx.max(rounded[0], -rounded[0]),
                             fx.max(rounded[1], -rounded[1]),
                         )
-                        for offset in (8, 4, 2, 1):
-                            absolute_max = xred(absolute_max, offset, fx.max)
+                        absolute_max = fx.coop.warp_reduce(absolute_max, fx.ReductionOp.MAX, width=16)
                         raw_scale = absolute_max * fx.Float32(1.0 / FP8_MAX)
                         bits = raw_scale.bitcast(fx.Int32)
                         exponent = bits.shrui(fx.Int32(23)) & fx.Int32(0xFF)

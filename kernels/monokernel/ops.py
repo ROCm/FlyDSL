@@ -43,7 +43,7 @@ def uniform_f32(value):
 def spin_pause() -> None:
     """Keep tagged-mailbox polling loads inside the retry loop."""
 
-    llvm.InlineAsmOp(None, [], "s_nop 0", "", has_side_effects=True)
+    rocdl.s_nop(0)
 
 
 def read_lane_i32(value, lane):

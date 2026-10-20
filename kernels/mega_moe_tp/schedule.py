@@ -387,12 +387,10 @@ def build_schedule(kc: KernelCtx) -> dict:
                     g_st_sys(lb_lbr(a, nb, tid - i32(NCK)), i32(0))
 
     def _wave_prefix(v, bits):
-        pre, tot = i32(0), i32(0)
-        for b in range_constexpr(bits):
-            below, cnt = wave_rank(((v >> i32(b)) & i32(1)) == i32(1))
-            pre = pre + (below << i32(b))
-            tot = tot + (cnt << i32(b))
-        return pre, tot
+        if bits == 1:
+            return wave_rank((v & 1) == 1)
+        _, prefix, total = fx.coop.warp_scan_with_aggregate(v & ((1 << bits) - 1), fx.ReductionOp.ADD, width=64)
+        return prefix, total
 
     @traced
     def _chunk_table(L, tid, offs=False):

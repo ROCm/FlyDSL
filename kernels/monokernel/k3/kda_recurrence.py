@@ -387,8 +387,7 @@ def build_kimi_k3_kda_recurrence(
                 if k_lane == 0:
                     for v_iter in range_constexpr(_V_ITERS):
                         square_sum = square_sum + results[v_iter] * results[v_iter]
-                for offset in (32, 16, 8, 4, 2, 1):
-                    square_sum = square_sum + xshfl(square_sum, offset)
+                square_sum = fx.coop.warp_reduce(square_sum, fx.ReductionOp.ADD, width=64)
                 if lane == 0:
                     fx.ptr_store(square_sum, norm_sums + wave)
                 gpu.barrier()

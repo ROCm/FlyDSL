@@ -358,9 +358,7 @@ def compile_sp_rs_norm(
             for k in range_constexpr(PIT):
                 p = tid + i32(k * NTH)
                 f = bf16x8_to_f32(bld(rp, (i * i32(H) + p * i32(8)) * i32(2), 0, T.vec(4, T.i32)))
-                am = amax(f)
-                am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
-                am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
+                am = fx.coop.warp_reduce(amax(f), fx.ReductionOp.MAX, width=4)
                 sc = fx.max(am, fx.Float32(1e-30)) / fx.Float32(127.0)
                 inv = fx.Float32(1.0) / sc
                 dv = fx.Vector.from_elements([i8x4_pack(f[0:4], inv), i8x4_pack(f[4:8], inv)], fx.Int32)

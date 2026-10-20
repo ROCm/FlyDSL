@@ -597,7 +597,6 @@ class SiluQuantEpilogue:
                     fx.ptr_store(fx.full(1, v4[ii], fx.Float32), ptr)
         gpu.barrier()
 
-        c64 = fx.Int32(64)
         n32 = fx.Int32(self._sorted_scale_cols_i32 * 32)
         NLANE = 32
         EVEC = 2
@@ -633,8 +632,7 @@ class SiluQuantEpilogue:
                 a0 = fx.max(v0, fx.Float32(0.0) - v0)
                 a1 = fx.max(v1, fx.Float32(0.0) - v1)
                 m = fx.max(a0, a1)
-                for off in (1, 2, 4, 8):
-                    m = fx.max(m, m.shuffle_xor(fx.Int32(off), c64))
+                m = fx.coop.warp_reduce(m, fx.ReductionOp.MAX, width=16)
                 max_rounded = (m.bitcast(fx.Int32) + fx.Int32(0x400000)) & fx.Int32(0xFF800000)
                 _e = (max_rounded >> fx.Int32(23)) - fx.Int32(2 if self._is_fp4 else 8)
                 e8m0_v = (_e > fx.Int32(0)).select(_e, fx.Int32(0))

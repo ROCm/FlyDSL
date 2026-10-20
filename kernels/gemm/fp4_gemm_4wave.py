@@ -79,13 +79,6 @@ class _Buf:
         return fx.add_offset(self.base_ptr, self.byte_off)
 
 
-_gep = _buffer_ops.get_element_ptr
-
-
-def _lds_ptr_t():
-    return _ir.Type.parse("!llvm.ptr<3>")
-
-
 def _asm_void(operands, asm_string, constraints, clobbers=""):
     """Side-effecting void inline asm (LLVM sees no memory op -> no waitcnt added)."""
     if clobbers:
@@ -96,9 +89,7 @@ def _asm_void(operands, asm_string, constraints, clobbers=""):
 def _cvt_pk_bf16(a, b):
     """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
     vec = Vec.from_elements([a, b], fx.Float32)
-    # llvm.bitcast, not arith.bitcast: the latter requires operand and result to
-    # have the same shape, and this one is <2xbf16> -> i32.
-    return _llvm.BitcastOp(fx.Int32.ir_type, vec.to(fx.BFloat16).ir_value()).result
+    return vec.to(fx.BFloat16).bitcast(fx.Int32)[0].ir_value()
 
 
 # for FP4_DMA_INTRINSIC=1 path, don't let compiler reorder the m0 set
@@ -182,7 +173,7 @@ class G2SLoaderAsm:
             # Off the readfirstlane'd wave base, not ptrtoint(base)+wave_id*1024:
             # wave_id is a VGPR, which would cost a v_readfirstlane per load.
             addr = fx.Int64(fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off + step * stride))
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(addr))
+            lds_ptr = fx.inttoptr(fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, 16), addr).llvm_ptr
             dma = _rocdl.raw_ptr_buffer_load_lds(self.rsrc, lds_ptr, fx.Int32(16), voff, soff, fx.Int32(0), fx.Int32(0))
             _tag_alias(dma, self.scopes, slot)
             return
@@ -227,15 +218,12 @@ class S2RLoaderFp4:
         imm = total_off - window_base
         assert 0 <= imm <= 0xFFFF
         vaddr = fx.Int32(fx.ptrtoint(lds_src.base_ptr)) + fx.Int32(window_base + dyn_offset)
-        lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
-        if imm != 0:
-            lds_ptr = _gep(lds_ptr, static_byte_offset=imm)
-        vec4_i32 = _ir.VectorType.get([4], fx.Int32.ir_type)
-        load = _llvm.LoadOp(vec4_i32, lds_ptr, alignment=16)
+        ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 16)
+        lds_ptr = fx.inttoptr(ptr_type, vaddr + imm)
+        value = fx.generic_load(lds_ptr, count=4)
         if self.scopes is not None:
-            _tag_alias(load, self.scopes, lds_src.byte_off // _LDS_BUF_BYTES)
-        raw = load.result
-        return Vec(raw)
+            _tag_alias(value, self.scopes, lds_src.byte_off // _LDS_BUF_BYTES)
+        return value
 
     def _dyn_offset(self, step, preshuffled):
         # Lane-dependent part (tile i=0); the per-tile i*2048 is added as a constant.
@@ -525,7 +513,9 @@ class ScaleGatherLDS:
         # m0 = precomputed wave quarter (SGPR) + slot*4096 (scalar): no readfirstlane.
         addr = fx.Int32(self._wave_base_s) + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES)
         if self.scopes is not None:
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(fx.Int64(addr)))
+            lds_ptr = fx.inttoptr(
+                fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, 16), fx.Int64(addr)
+            ).llvm_ptr
             dma = _rocdl.raw_ptr_buffer_load_lds(
                 self._rsrc, lds_ptr, fx.Int32(16), voff, self._soff0, fx.Int32(0), fx.Int32(0)
             )
@@ -559,11 +549,11 @@ class ScaleLoaderLDS:
         for gi in range_constexpr(self.n_groups):
             blk = half * 2 + gi
             vaddr = base + fx.Int32(blk * 256)
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
-            load = _llvm.LoadOp(fx.Int32.ir_type, lds_ptr, alignment=4)
+            ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 4)
+            value = fx.generic_load(fx.inttoptr(ptr_type, vaddr))
             if self.scopes is not None:
-                _tag_alias(load, self.scopes, self.slot_id)
-            grp_list.append(fx.Int32(load.result))
+                _tag_alias(value.ir_value(), self.scopes, self.slot_id)
+            grp_list.append(value)
         return grp_list
 
     def read(self, slot):

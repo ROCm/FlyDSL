@@ -14,7 +14,6 @@ from flydsl.expr import (
     range_constexpr,
     rocdl,
 )
-from flydsl.expr.typing import T
 from kernels.common.mem_ops import get_llvm_ptr
 
 GFX950_DMA_BYTES = 16
@@ -159,8 +158,9 @@ class SplitKProtocol:
         signal_idx,
         c_stride,
     ):
-        self.semaphore_ptr = semaphore_ptr
-        self.signal_ptr = signal_ptr
+        sync_ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 4)
+        self.semaphore_ptr = fx.recast_iter(sync_ptr_type, fx.get_iter(semaphore_ptr) + fx.Int64(fx.Index(signal_idx)))
+        self.signal_ptr = fx.recast_iter(sync_ptr_type, fx.get_iter(signal_ptr) + fx.Int64(fx.Index(signal_idx)))
         self.c_ptr = c_ptr
         self.bias_buf = bias_buf
         self.tid = tid
@@ -170,7 +170,6 @@ class SplitKProtocol:
         self.block_m_offset = block_m_offset
         self.block_n_offset = block_n_offset
         self.out_dtype_ = out_dtype_
-        self.signal_idx = signal_idx
         self.c_stride = c_stride
         if const_expr(self.HAS_BIAS):
             self.bias_vecs = fx.logical_divide(self.bias_buf, fx.make_layout(self.STG_VEC_SIZE, 1))
@@ -223,40 +222,19 @@ class SplitKProtocol:
                         )
             wait_vmcnt_and_barrier(0)
             if self.tid == 0:
-                signal_ptr = get_llvm_ptr(
+                fx.generic_store(
                     self.signal_ptr,
-                    self.signal_idx,
-                    4,
-                    ir.Type.parse("!llvm.ptr<1>"),
-                )
-                llvm.StoreOp(
-                    fx.Int32(1).ir_value(),
-                    signal_ptr,
-                    alignment=4,
-                    ordering=llvm.AtomicOrdering.monotonic,
+                    fx.Int32(1),
+                    memory_order=fx.AtomicOrdering.Monotonic,
                     syncscope="agent",
                 )
 
     @flyc.jit
     def wait_until_initialized(self):
         if self.tid == 0:
-            signal_ptr = get_llvm_ptr(
-                self.signal_ptr,
-                self.signal_idx,
-                4,
-                ir.Type.parse("!llvm.ptr<1>"),
-            )
 
             def _load_signal():
-                return fx.Int32(
-                    llvm.LoadOp(
-                        T.i32,
-                        signal_ptr,
-                        alignment=4,
-                        ordering=llvm.AtomicOrdering.monotonic,
-                        syncscope="agent",
-                    ).result
-                )
+                return fx.generic_load(self.signal_ptr, memory_order=fx.AtomicOrdering.Monotonic, syncscope="agent")
 
             # spin until signal != 0; reload stays in the loop body
             cur = _load_signal()
@@ -267,31 +245,17 @@ class SplitKProtocol:
 
     @flyc.jit
     def reset_sync_state(self):
-        semaphore_ptr = get_llvm_ptr(
+        zero = fx.Int32(0)
+        fx.generic_store(
             self.semaphore_ptr,
-            self.signal_idx,
-            4,
-            ir.Type.parse("!llvm.ptr<1>"),
-        )
-        signal_ptr = get_llvm_ptr(
-            self.signal_ptr,
-            self.signal_idx,
-            4,
-            ir.Type.parse("!llvm.ptr<1>"),
-        )
-        zero = fx.Int32(0).ir_value()
-        llvm.StoreOp(
             zero,
-            semaphore_ptr,
-            alignment=4,
-            ordering=llvm.AtomicOrdering.monotonic,
+            memory_order=fx.AtomicOrdering.Monotonic,
             syncscope="agent",
         )
-        llvm.StoreOp(
+        fx.generic_store(
+            self.signal_ptr,
             zero,
-            signal_ptr,
-            alignment=4,
-            ordering=llvm.AtomicOrdering.monotonic,
+            memory_order=fx.AtomicOrdering.Monotonic,
             syncscope="agent",
         )
 
@@ -299,20 +263,7 @@ class SplitKProtocol:
     def finish_split(self, split_k):
         gpu.barrier()
         if self.tid == 0:
-            semaphore_ptr = get_llvm_ptr(
-                self.semaphore_ptr,
-                self.signal_idx,
-                4,
-                ir.Type.parse("!llvm.ptr<1>"),
-            )
-            arrive_idx = llvm.AtomicRMWOp(
-                llvm.AtomicBinOp.add,
-                semaphore_ptr,
-                fx.Int32(1).ir_value(),
-                llvm.AtomicOrdering.monotonic,
-                syncscope="agent",
-                alignment=4,
-            ).result
+            arrive_idx = fx.atomic_add(self.semaphore_ptr, fx.Int32(1), syncscope="agent")
             if arrive_idx == split_k - 1:
                 self.reset_sync_state()
         gpu.barrier()
