@@ -13,7 +13,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import EPS, FP8_MAX
-from kernels.monokernel.ops import exp, rcp, rsq, rsrc, xred, xshfl
+from kernels.monokernel.ops import exp, rcp, rsq, rsrc, xshfl
 
 _THREADS = 896
 _WAVE_SIZE = 64
@@ -79,9 +79,7 @@ def build_kimi_k3_attn_res(
         reduction = fx.SharedAllocator().allocate(SharedStorage).peek().reduction.ptr
 
         def wave_sum(value):
-            for offset in (32, 16, 8, 4, 2, 1):
-                value = xred(value, offset, lambda lhs, rhs: lhs + rhs)
-            return value
+            return fx.coop.warp_reduce(value, fx.ReductionOp.ADD, width=64)
 
         def block_sums(lhs, rhs):
             lhs_wave = wave_sum(lhs)
@@ -118,8 +116,7 @@ def build_kimi_k3_attn_res(
             if const_expr(quantize_output):
                 values = output_values.to(fx.Float32)
                 amax = fx.max(fx.max(values[0], -values[0]), fx.max(values[1], -values[1]))
-                for offset in (8, 4, 2, 1):
-                    amax = xred(amax, offset, fx.max)
+                amax = fx.coop.warp_reduce(amax, fx.ReductionOp.MAX, width=16)
                 raw_scale = amax * fx.Float32(1.0 / FP8_MAX)
                 bits = raw_scale.bitcast(fx.Int32)
                 exponent = bits.shrui(fx.Int32(23)) & fx.Int32(0xFF)

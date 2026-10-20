@@ -117,9 +117,6 @@ from kernels.monokernel.ops import (
     wave_umax as _wave_umax,
 )
 from kernels.monokernel.ops import (
-    xred as _xred,
-)
-from kernels.monokernel.ops import (
     xshfl as _xshfl,
 )
 
@@ -470,19 +467,13 @@ def build_kimi_k3_mla_attention(
 
         # ---- wave reductions
         def wave_sum(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, lambda a, b: a + b)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.ADD, width=64)
 
         def wave_max(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, fx.max)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.MAX, width=64)
 
         def subgroup16_max(v):
-            for off in (8, 4, 2, 1):
-                v = _xred(v, off, fx.max)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.MAX, width=16)
 
         def block_sums(vs):
             """Block-wide sums of several per-thread values with one LDS exchange."""
@@ -906,9 +897,7 @@ def build_kimi_k3_mla_attention(
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
             raw = (lane < TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
-            tot = raw
-            for off in (1, 2, 4):
-                tot = _xred(tot, off, lambda a, b: a + b)
+            tot = fx.coop.warp_reduce(raw, fx.ReductionOp.ADD, width=8)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
