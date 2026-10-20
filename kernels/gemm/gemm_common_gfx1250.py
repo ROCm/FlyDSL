@@ -41,11 +41,36 @@ def make_lds_copy_ops(bits):
     return load, store
 
 
-def make_gemm_grid(M, N, tile_m, tile_n, cluster_m, *, split_k=1, persistent_n_tiles=1, fused_splitk=False):
+# Weight-scale block (N rows x K) of the MX-scaled A8W8 GEMMs; the A scale is one per token per K block.
+B_SCALE_BLOCKS = {"1x32": (1, 32), "32x32": (32, 32), "128x128": (128, 128)}
+
+
+def b_scale_block_shape(b_scale_block):
+    """(N rows, K) of one weight-scale block."""
+    assert (
+        b_scale_block in B_SCALE_BLOCKS
+    ), f"b_scale_block must be one of {tuple(B_SCALE_BLOCKS)}, got {b_scale_block!r}"
+    return B_SCALE_BLOCKS[b_scale_block]
+
+
+def make_gemm_grid(
+    M,
+    N,
+    tile_m,
+    tile_n,
+    cluster_m,
+    *,
+    split_k=1,
+    persistent_n_tiles=1,
+    fused_splitk=False,
+    cluster_n=1,
+    bounded_n=False,
+):
     """Pad M to whole clusters and split long grids without duplicating tiles.
 
     Fused split-K reserves grid.z for the K splits of one tile. Other grids
     may put exact chunks of M there, keeping grid.x in whole cluster rows.
+    With bounded N, pad columns to whole cluster and persistent groups too.
     """
     rows = fx.ceildiv(M, tile_m)
     rows = fx.ceildiv(fx.max(rows, 1), cluster_m) * cluster_m
@@ -55,7 +80,11 @@ def make_gemm_grid(M, N, tile_m, tile_n, cluster_m, *, split_k=1, persistent_n_t
         capped = fx.min(divisor, 32)
         fits = (capped % cluster_m) == 0
         run = ((rows > 32) & (divisor >= 8) & fits).select(capped, rows)
-    return run, fx.ceildiv(N, tile_n) // persistent_n_tiles, (rows // run) * split_k
+    cols = fx.ceildiv(N, tile_n)
+    if bounded_n:
+        n_group = cluster_n * persistent_n_tiles
+        cols = fx.ceildiv(cols, n_group) * n_group
+    return run, cols // persistent_n_tiles, (rows // run) * split_k
 
 
 def workgroup_barrier(use_cluster=False):
@@ -138,6 +167,9 @@ def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):
 __all__ = [
     # LDS helpers
     "make_lds_copy_ops",
+    # Weight scale
+    "B_SCALE_BLOCKS",
+    "b_scale_block_shape",
     # Launch grid
     "make_gemm_grid",
     # Pipeline
