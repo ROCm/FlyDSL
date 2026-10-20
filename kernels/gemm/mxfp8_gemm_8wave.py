@@ -5,7 +5,6 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
@@ -26,17 +25,6 @@ from kernels.gemm.fp8_gemm_utils import (
 # closes for this shape, see ``compile_mxfp8_gemm_8w``.
 BLOCK_K = 128
 LDS_LIMIT_BYTES = 160 * 1024
-
-
-def read_done_barrier():
-    """Finish this wave's LDS reads, then barrier."""
-    _llvm.inline_asm(
-        res=None,
-        operands_=[],
-        asm_string="s_waitcnt lgkmcnt(0)\ns_barrier",
-        constraints="~{memory}",
-        has_side_effects=True,
-    )
 
 
 class ScalePreshuffledS2R:
@@ -409,8 +397,7 @@ def compile_mxfp8_gemm_8w(
             b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
-            # The other wave group refills B0 right after this barrier.
-            read_done_barrier()
+            rocdl.s_barrier()
             scale_chunk_dma(k)
 
             c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
@@ -446,8 +433,7 @@ def compile_mxfp8_gemm_8w(
         sb0 = scale_read(sc_pf, k, "b0")
         b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
         a0_frag = a_s2r.load(a_cur0)
-        # Drain the last tile's loads: its B0/A0 are read before the final wait.
-        wait_barrier(0)
+        rocdl.s_barrier()
 
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
