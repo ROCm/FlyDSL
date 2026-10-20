@@ -553,8 +553,6 @@ def launch_gemm_a4w4_256x256(
             seed_mark[next_bank] = ds.issued
 
         if const_expr(tile_m == 256 and tile_n == 256 and tile_k == 256):
-            # Keep all four slots in flight and statically expand one revolution.
-            # tail_mode: K tiles left after the full revolutions (0 or 2), or -1 for any count.
             last_kt = K_TILES - 1
             for i in range_constexpr(num_buffers):
                 seed_kt = fx.Int32(i)
@@ -582,14 +580,14 @@ def launch_gemm_a4w4_256x256(
                     if do_sync:
                         cluster.cluster_barrier()
 
-                if const_expr(tail_mode == 2):
-                    # K is runtime; this fixed schedule serves all lengths with
-                    # two tiles beyond a full four-slot revolution.
-                    for s in range_constexpr(2):
+                if const_expr(tail_mode > 0):
+                    # `tail_mode` tiles past the last full revolution: a fixed,
+                    # branch-free extra group that generalizes the old r==2 case.
+                    for s in range_constexpr(tail_mode):
                         _compute_stage(s, n_full * num_buffers + s + num_buffers, num_buffers - 2, True, parity)
 
                 for j in range_constexpr(num_buffers):
-                    stage = (2 + j) % num_buffers if const_expr(tail_mode == 2) else j
+                    stage = (tail_mode + j) % num_buffers if const_expr(tail_mode >= 0) else j
                     valid = j < drain_s if const_expr(tail_mode == -1) else True
                     if valid:
                         _compute_stage(stage, None, num_buffers - 2 - j, j < num_buffers - 1, parity)
@@ -682,10 +680,16 @@ def launch_gemm_a4w4_256x256(
 
     if const_expr(tile_m == tile_n == tile_k == 256):
         per_split_tiles = K // (tile_k * split_k)
-        if (per_split_tiles >= num_buffers) & (per_split_tiles % num_buffers == 2):
-            _launch(2)
-        elif (per_split_tiles >= num_buffers) & (per_split_tiles % num_buffers == 0):
+        enough = per_split_tiles >= num_buffers
+        rem = per_split_tiles % num_buffers
+        if enough & (rem == 0):
             _launch(0)
+        elif enough & (rem == 1):
+            _launch(1)
+        elif enough & (rem == 2):
+            _launch(2)
+        elif enough & (rem == 3):
+            _launch(3)
         else:
             _launch(-1)
     else:

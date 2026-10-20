@@ -50,6 +50,10 @@ __all__ = [
     "TDMDescriptor2D",
     "TDMGatherDescriptor",
     "make_tensor_descriptor_2d",
+    "clamp_tensor_descriptor_2d_inner_extent",
+    "clamp_tensor_descriptor_2d_outer_extent",
+    "update_tensor_descriptor_2d_pred",
+    "update_tensor_descriptor_2d_lds_addr",
     "make_tensor_gather_dgroup0",
     "make_tensor_gather_descriptor",
     "tensor_load_2d",
@@ -874,6 +878,76 @@ def tensor_store_gather(
 # the loop and patching only lane 2 inside the loop, we cut the per-iteration
 # work to a single vector.insert plus the addr_lo SGPR add.
 # ---------------------------------------------------------------------------
+
+
+_DIM0_LO_SGPR = 1  # GROUP1 sgpr1[31:16] holds tensor_dim0[15:0]
+_DIM0_HI_SGPR = 2  # GROUP1 sgpr2[15:0]  holds tensor_dim0[31:16]
+_DIM1_LO_SGPR = 2  # GROUP1 sgpr2[31:16] holds tensor_dim1[15:0]
+_DIM1_HI_SGPR = 3  # GROUP1 sgpr3[15:0]  holds tensor_dim1[31:16]
+
+
+def _clamp_inner_extent(desc: TDMDescriptor2D, bound) -> TDMDescriptor2D:
+    """Rewrite a built descriptor's ``tensor_dim0`` to ``max(0, bound)``."""
+    from ... import expr as fx
+    from ..typing import Vector as Vec
+
+    g1 = Vec(desc.dgroup1)
+    b = fx.Int32(bound)
+    dim0 = (b > 0).select(b, fx.Int32(0))
+    dim0 = fx.Uint32(dim0)
+    lanes = [fx.Uint32(g1[i]) for i in range(8)]
+    lanes[_DIM0_LO_SGPR] = (lanes[_DIM0_LO_SGPR] & 0xFFFF) | ((dim0 & 0xFFFF) << 16)
+    lanes[_DIM0_HI_SGPR] = (lanes[_DIM0_HI_SGPR] & fx.Uint32(0xFFFF0000)) | (dim0 >> 16)
+    return TDMDescriptor2D(
+        dgroup0=desc.dgroup0,
+        dgroup1=Vec.from_elements(lanes, fx.Uint32).ir_value(),
+    )
+
+
+def clamp_tensor_descriptor_2d_inner_extent(desc: TDMDescriptor2D, bound, predicate=None) -> TDMDescriptor2D:
+    """Limit a 2-D load after advancing its global address along dim0."""
+    from ... import expr as fx
+    from ..typing import Vector as Vec
+
+    if predicate is not None:
+        g1 = Vec(desc.dgroup1)
+        old = (fx.Uint32(g1[_DIM0_LO_SGPR]) >> 16) | ((fx.Uint32(g1[_DIM0_HI_SGPR]) & 0xFFFF) << 16)
+        bound = predicate.select(fx.Int32(bound), fx.Int32(old))
+    return _clamp_inner_extent(desc, bound)
+
+
+def clamp_tensor_descriptor_2d_outer_extent(desc: TDMDescriptor2D, bound, predicate=None) -> TDMDescriptor2D:
+    """Limit the outer dimension after advancing its global address."""
+    from ... import expr as fx
+    from ..typing import Vector as Vec
+
+    g1 = Vec(desc.dgroup1)
+    b = fx.Int32(bound)
+    if predicate is not None:
+        old = (fx.Uint32(g1[_DIM1_LO_SGPR]) >> 16) | ((fx.Uint32(g1[_DIM1_HI_SGPR]) & 0xFFFF) << 16)
+        b = predicate.select(b, fx.Int32(old))
+    dim1 = (b > 0).select(b, fx.Int32(0))
+    dim1 = fx.Uint32(dim1)
+    lanes = [fx.Uint32(g1[i]) for i in range(8)]
+    lanes[_DIM1_LO_SGPR] = (lanes[_DIM1_LO_SGPR] & 0xFFFF) | ((dim1 & 0xFFFF) << 16)
+    lanes[_DIM1_HI_SGPR] = (lanes[_DIM1_HI_SGPR] & fx.Uint32(0xFFFF0000)) | (dim1 >> 16)
+    return TDMDescriptor2D(
+        dgroup0=desc.dgroup0,
+        dgroup1=Vec.from_elements(lanes, fx.Uint32).ir_value(),
+    )
+
+
+@dsl_loc_tracing
+def update_tensor_descriptor_2d_pred(desc: TDMDescriptor2D, pred) -> TDMDescriptor2D:
+    """Enable one wave's TDM load only when its panel needs refilling."""
+    from ... import expr as fx
+    from ..typing import Vector as Vec
+
+    g0 = Vec(desc.dgroup0)
+    return TDMDescriptor2D(
+        dgroup0=Vec.from_elements([pred, g0[1], g0[2], g0[3]], fx.Int32).ir_value(),
+        dgroup1=desc.dgroup1,
+    )
 
 
 @dsl_loc_tracing

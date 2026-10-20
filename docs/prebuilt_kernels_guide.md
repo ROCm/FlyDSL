@@ -554,7 +554,8 @@ What operation do you need?
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
 | `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
-| `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
+| `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 general FP8 GEMM with per-token/per-channel, 1x32, 32x32 or 128x128 scales and shuffled or row-major B |
+| `kernels/gemm/gemm_a8w8_256x256_gfx1250.py` | GFX1250 compute-bound FP8 GEMM (256/128 tiles) with 1x32, 32x32 or 128x128 weight scales, N/K tails and split-K |
 | `kernels/gemm/gemm_a4w4_gfx1250.py` | GFX1250 standalone MXFP4 x MXFP4 GEMM, 16x16 shuffled B / 32x4 shuffled scales, fused split-K |
 | `kernels/gemm/gemm_a8w4_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
 | `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
