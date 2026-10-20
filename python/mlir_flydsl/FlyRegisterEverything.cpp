@@ -26,6 +26,7 @@ NB_MODULE(_mlirRegisterEverything, m) {
 
     MlirDialectHandle flyHandle = mlirGetDialectHandle__fly__();
     mlirDialectHandleInsertDialect(flyHandle, registry);
+    flydsl_register_ktrace_dialect(registry);
     FLYDSL_FOR_EACH_BACKEND(REGISTER_BACKEND_DIALECTS)
   });
   m.def("register_llvm_translations", [](MlirContext context) {

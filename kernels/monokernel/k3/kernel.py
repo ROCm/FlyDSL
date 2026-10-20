@@ -20,7 +20,6 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
@@ -29,6 +28,7 @@ from kernels.monokernel.config import EPS, FP8_MAX, MAX_LAYERS_PER_STEP
 from kernels.monokernel.layout import CM_DEV, CM_SYS
 from kernels.monokernel.ops import (
     exp,
+    mem_realtime,
     mxfp4_to_bf16x8,
     mxfp8_to_bf16x8,
     rcp,
@@ -430,7 +430,7 @@ def build_kimi_k3_monokernel(
 
         def stamp(index):
             if (bid == 0) & (tid == 0):
-                now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
+                now = mem_realtime()
                 bo.buffer_store(now, rsrc(timeline), index, cache_modifier=CM_DEV)
 
         stamp(0)
@@ -1266,18 +1266,11 @@ def build_kimi_k3_monokernel(
                     k_base = k128 * 128 + lane_div16 * 16
                     activation_halves = []
                     for k64_half in range_constexpr(2):
-                        loaded = fx.Vector(
-                            fx.ptr_load(
-                                x + (sample * _HIDDEN + k_base + k64_half * 64) // 4,
-                                result_type=fx.Vector.make_type(4, fx.Float32),
-                            )
+                        loaded = fx.ptr_load(
+                            x + (sample * _HIDDEN + k_base + k64_half * 64) // 4,
+                            result_type=fx.Vector.make_type(4, fx.Float32),
                         ).bitcast(fx.Int32)
-                        activation_halves.append(
-                            fx.Vector.from_elements(
-                                [valid_sample.select(loaded[index], fx.Int32(0)) for index in range(4)],
-                                fx.Int32,
-                            )
-                        )
+                        activation_halves.append(valid_sample.select(loaded, 0))
                     activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
                     activation_fragment.store(activation_halves[0].shuffle(activation_halves[1], list(range(8))))
                     weight_halves = []
@@ -1663,11 +1656,9 @@ def build_kimi_k3_monokernel(
                 gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                 for feature_group in range_constexpr(0, _HEAD_DIM, 4 * _VALUES_PER_THREAD):
                     feature_base = feature_group + gate_split * _VALUES_PER_THREAD
-                    features = fx.Vector(
-                        fx.ptr_load(
-                            shared_f_a + feature_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    features = fx.ptr_load(
+                        shared_f_a + feature_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                     weights = fx.Vector(
                         bo.buffer_load(
@@ -1787,23 +1778,17 @@ def build_kimi_k3_monokernel(
                 key_square = fx.Float32(0.0)
                 for k_iter in range_constexpr(_K_ITERS):
                     k_base = k_lane * _VALUES_PER_THREAD + k_iter * _K_TILE
-                    query_vector = fx.Vector(
-                        fx.ptr_load(
-                            shared_query + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    query_vector = fx.ptr_load(
+                        shared_query + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
-                    key_vector = fx.Vector(
-                        fx.ptr_load(
-                            shared_key + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    key_vector = fx.ptr_load(
+                        shared_key + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
-                    gate_vector = fx.Vector(
-                        fx.ptr_load(
-                            shared_gate + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    gate_vector = fx.ptr_load(
+                        shared_gate + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                     dt_vector = fx.Vector(
                         bo.buffer_load(
@@ -2057,23 +2042,17 @@ def build_kimi_k3_monokernel(
                         key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                         gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                         if local_qkvg:
-                            query_vector = fx.Vector(
-                                fx.ptr_load(
-                                    shared_query + k_base,
-                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                )
+                            query_vector = fx.ptr_load(
+                                shared_query + k_base,
+                                result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                             ).to(fx.Float32)
-                            key_vector = fx.Vector(
-                                fx.ptr_load(
-                                    shared_key + k_base,
-                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                )
+                            key_vector = fx.ptr_load(
+                                shared_key + k_base,
+                                result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                             ).to(fx.Float32)
-                            gate_vector = fx.Vector(
-                                fx.ptr_load(
-                                    shared_gate + k_base,
-                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                )
+                            gate_vector = fx.ptr_load(
+                                shared_gate + k_base,
+                                result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                             ).to(fx.Float32)
                         else:
                             query_vector = fx.Vector(
@@ -2313,23 +2292,17 @@ def build_kimi_k3_monokernel(
                             key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                             gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                             if local_qkvg:
-                                query_vector = fx.Vector(
-                                    fx.ptr_load(
-                                        shared_query + k_base,
-                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                    )
+                                query_vector = fx.ptr_load(
+                                    shared_query + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                                 ).to(fx.Float32)
-                                key_vector = fx.Vector(
-                                    fx.ptr_load(
-                                        shared_key + k_base,
-                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                    )
+                                key_vector = fx.ptr_load(
+                                    shared_key + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                                 ).to(fx.Float32)
-                                gate_vector = fx.Vector(
-                                    fx.ptr_load(
-                                        shared_gate + k_base,
-                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                                    )
+                                gate_vector = fx.ptr_load(
+                                    shared_gate + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                                 ).to(fx.Float32)
                             else:
                                 query_vector = fx.Vector(

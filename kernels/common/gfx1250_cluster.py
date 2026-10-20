@@ -40,18 +40,12 @@ def compute_mcast_masks(local_x, local_y, cluster_m: int, cluster_n: int):
     Returns:
         (a_mask, b_mask) as MLIR i32 values for TDM workgroup_mask.
     """
-    local_x_i32 = fx.Int32(local_x)
-    local_y_i32 = fx.Int32(local_y)
-
     # A mask: pattern has bits at strides of cluster_m, shifted by local_x.
-    a_pattern_val = 0
-    for ly in range(cluster_n):
-        a_pattern_val |= 1 << (ly * cluster_m)
-    a_mask = fx.Int32(a_pattern_val) << local_x_i32
+    a_pattern = sum(1 << (ly * cluster_m) for ly in range(cluster_n))
+    a_mask = fx.Int32(a_pattern) << fx.Int32(local_x)
 
     # B mask: cluster_m contiguous low bits, shifted by local_y * cluster_m.
-    col_base = local_y_i32 * fx.Int32(cluster_m)
-    b_mask = fx.Int32((1 << cluster_m) - 1) << col_base
+    b_mask = fx.Int32((1 << cluster_m) - 1) << (fx.Int32(local_y) * cluster_m)
 
     return a_mask.ir_value(), b_mask.ir_value()
 
