@@ -11,13 +11,15 @@
 #   FLYDSL_REVIEW_AGENT           agent CLI, default `claude` (run as `<agent> -p --dangerously-skip-permissions`)
 #   FLYDSL_REVIEW_REFUTER_AGENT   a different CLI or model for Step 8.7, default the same agent
 #   FLYDSL_REVIEW_SANDBOX_IMAGE   run both agents in this Docker image instead of on the host
+#   FLYDSL_REVIEW_SANDBOX_NETWORK Docker network for that container, default host
 #   FLYDSL_AGENT_TIMEOUT          seconds per agent, default 2400
 #
 # The agents read untrusted PR text with permissions skipped. In the sandbox they see the checkout
 # read-only and $WORK read-write, run as the calling user, and get no GitHub credentials and no
 # home directory, so they cannot post to GitHub or read the host's tokens. Model access comes from
 # ANTHROPIC_BASE_URL, which must be a gateway that holds the credential and ignores the client's
-# x-api-key: no real token is passed in.
+# x-api-key: no real token is passed in. `gateway.sh start` runs one on a network whose only
+# reachable peer is the gateway, and prints the two variables that point the sandbox at it.
 set -euo pipefail
 
 SKILL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,11 +59,12 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
     bin="$(readlink -f "$(command -v "$cli")")"
     mkdir -p "$W/.home"
     for v in ANTHROPIC_BASE_URL ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
-             ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
+             ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_EFFORT_LEVEL \
+             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; do
       [ -n "${!v:-}" ] && env_args+=(-e "$v")
     done
     # The placeholder key only satisfies the CLI's start-up check; the gateway supplies the real one.
-    timeout "$TIMEOUT" docker run --rm --network host --user "$(id -u):$(id -g)" \
+    timeout "$TIMEOUT" docker run --rm --network "${FLYDSL_REVIEW_SANDBOX_NETWORK:-host}" --user "$(id -u):$(id -g)" \
       -e HOME="$W/.home" -e ANTHROPIC_API_KEY=sandbox-has-no-credential "${env_args[@]}" \
       -v "$PROJ:$PROJ:ro" -v "$W:$W" -v "$bin:/usr/local/bin/review-agent:ro" -w "$PROJ" \
       --entrypoint /usr/local/bin/review-agent "$FLYDSL_REVIEW_SANDBOX_IMAGE" \

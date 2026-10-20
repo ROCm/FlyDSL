@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FlyDSL Project Contributors
+#
+# Advisory AI review of a pull request, requested by adding the `ai-review` label (triage access or
+# above). The review job runs .claude/skills/review-pr/run_one.sh on the self-hosted
+# `flydsl-review` runner; the publish job posts the card as a PR comment. Never a merge gate.
+#
+# pull_request_target runs this file as it is on main, so a PR cannot change what runs. Only the
+# review job uses the `flydsl-review` environment, which serves main only, so only that job gets
+# the API key, and in it only the gateway step reads it. The agents call the gateway from a network
+# with no other way out (gateway.sh) and never see the key.
+name: review-pr
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  gate:
+    if: github.event.label.name == 'ai-review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - name: Review only open PRs into main
+        id: check
+        env:
+          STATE: ${{ github.event.pull_request.state }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "$STATE" = open ] && [ "$BASE" = main ]; then ok=true; else ok=false; fi
+          echo "state=$STATE base=$BASE -> ok=$ok"
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+  watchdog:
+    # A review job with no runner stays queued and never fails, so nothing else reports it.
+    needs: gate
+    if: needs.gate.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Report a review that no runner picked up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jobs="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs"
+          for _ in $(seq 20); do
+            status=$(gh api "$jobs" --jq '.jobs[] | select(.name == "review") | .status')
+            case "$status" in in_progress|completed) exit 0 ;; esac
+            sleep 60
+          done
+          body="The AI review requested with the \`ai-review\` label has waited 20 minutes for the self-hosted"
+          body+=" \`flydsl-review\` runner, which looks offline. It starts when the runner is back; see the [run]($RUN_URL)."
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+
+  review:
+    needs: gate
+    if: needs.gate.outputs.ok == 'true'
+    runs-on: [self-hosted, flydsl-review]
+    environment: flydsl-review
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: read
+    outputs:
+      model: ${{ vars.FLYDSL_REVIEW_MODEL }}
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      GATEWAY: flydsl-review-${{ github.run_id }}-${{ github.run_attempt }}
+      FLYDSL_REVIEW_SANDBOX_IMAGE: ${{ vars.FLYDSL_REVIEW_SANDBOX_IMAGE || 'rocm/sgl-dev:v0.5.21-rocm720-mi35x-20261009' }}
+    steps:
+      - name: Check out the review tooling from main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The agents' sandbox mounts this checkout, so no token may be left in .git/config.
+          persist-credentials: false
+
+      - name: Start the gateway container
+        env:
+          API_KEY: ${{ secrets.FLYDSL_REVIEW_API_KEY }}
+          API_URL: ${{ vars.FLYDSL_REVIEW_API_BASE_URL }}
+          API_USER: ${{ vars.FLYDSL_REVIEW_API_USER }}
+        run: bash .claude/skills/review-pr/gateway.sh start "$GATEWAY" >> "$GITHUB_ENV"
+
+      - name: Review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_MODEL: ${{ vars.FLYDSL_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.FLYDSL_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.FLYDSL_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.FLYDSL_REVIEW_MODEL }}
+          ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.FLYDSL_REVIEW_MODEL }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        run: |
+          export TMPDIR="${TMPDIR:-/tmp}/run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$TMPDIR"
+          echo "REVIEW_TMP=$TMPDIR" >> "$GITHUB_ENV"
+          bash .claude/skills/review-pr/run_one.sh "$PR" "$GITHUB_REPOSITORY"
+
+      - name: Stop the gateway container
+        if: always()
+        run: bash .claude/skills/review-pr/gateway.sh stop "$GATEWAY"
+
+      - name: Collect the card
+        if: always() && env.REVIEW_TMP != ''
+        run: |
+          mkdir -p "$REVIEW_TMP/out"
+          dirs=("$REVIEW_TMP"/review-pr-*/)
+          work=${dirs[0]}
+          [ -d "$work" ] || exit 0
+          cp "$work"card.md "$work"GATES.txt "$work"usage.txt "$REVIEW_TMP/out/" 2>/dev/null || true
+          python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["headRefOid"])' \
+            "$work"pr_meta.json > "$REVIEW_TMP/out/head_sha" || true
+
+      - name: Upload the card
+        if: always() && env.REVIEW_TMP != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-pr-card-${{ github.run_attempt }}
+          path: ${{ env.REVIEW_TMP }}/out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Remove the work directory
+        if: always()
+        run: |
+          [ -z "${REVIEW_TMP:-}" ] || rm -rf "$REVIEW_TMP"
+          git worktree prune
+
+  publish:
+    needs: [gate, review]
+    if: always() && needs.gate.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download the card
+        if: needs.review.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: review-pr-card-${{ github.run_attempt }}
+          path: card
+
+      - name: Post the card, or why there is none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RESULT: ${{ needs.review.result }}
+          MODEL: ${{ needs.review.outputs.model }}
+          LABELER: ${{ github.event.sender.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$RESULT" = success ] && [ -s card/card.md ]; then
+            footer="Advisory review by the review-pr skill with $MODEL, requested by @$LABELER with the"
+            footer+=" \`ai-review\` label. Not a merge gate. [Run]($RUN_URL)"
+            { cat card/card.md; printf '\n---\n<sub>%s</sub>\n<!-- review-pr head=%s -->\n' \
+                "$footer" "$(cat card/head_sha 2>/dev/null)"; } > body.md
+          else
+            printf 'The AI review requested by @%s ended without a card (review job: %s); see the [run](%s).\n' \
+              "$LABELER" "$RESULT" "$RUN_URL" > body.md
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file body.md
