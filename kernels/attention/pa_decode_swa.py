@@ -163,7 +163,7 @@ def _finish_q_fragments(
 ):
     c_head_dw = fx.Int32(head_size // 4)
     lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2
-    abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
+    abs_mask = fx.full(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
     q_f32_chunks = []
@@ -432,7 +432,7 @@ def _make_pa_phase_helpers(
     def _apply_token_mask_vec(logit_vec, td: int, kv_tok_base, causal_bound, seq_start, false_value):
         tok_vec = _token_vec_i32(kv_tok_base, td)
         in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
-        false_vec = fx.Vector.from_elements([false_value], dtype=fx.Float32).broadcast_to(4)
+        false_vec = fx.full(4, fx.Float32(false_value), fx.Float32)
         return in_range.select(logit_vec, false_vec)
 
     def _qk_and_intra_softmax(
@@ -444,13 +444,10 @@ def _make_pa_phase_helpers(
         *,
         seq_start,
     ):
-        query_scale_vec = fx.Vector.from_elements(
-            [query_scale_lane * softmax_scale_base],
-            dtype=fx.Float32,
-        ).broadcast_to(4)
+        query_scale_vec = fx.full(4, fx.Float32(query_scale_lane * softmax_scale_base), fx.Float32)
         d_out = []
         for td in range_constexpr(TLOOP):
-            acc = fx.Vector.filled(4, 0.0, fx.Float32)
+            acc = fx.full(4, 0.0, fx.Float32)
             for k_step in range_constexpr(qkhe_loop * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
             if const_expr(per_token_kv):
@@ -553,9 +550,9 @@ def _make_pa_phase_helpers(
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction)
-        v_correction_vec = fx.Vector.from_elements([v_correction], dtype=fx.Float32).broadcast_to(4)
+        v_correction_vec = fx.full(4, v_correction, fx.Float32)
         for vhe in range_constexpr(vhe_loop):
-            tmp_out = fx.Vector.filled(4, 0.0, fx.Float32)
+            tmp_out = fx.full(4, 0.0, fx.Float32)
             for vt in range_constexpr(VTLOOP):
                 v_i64x2 = fx.Vector(v_ops[vt][vhe])
                 for j in range_constexpr(2):
@@ -693,7 +690,7 @@ def compile_pa_decode_sw_reduce(
         c_wave_mask = fx.Int32(WARP_SIZE - 1)
         c_red_slots = fx.Int32(red_slots)
         lane = tid & c_wave_mask
-        wave = fx.Int32(tid >> fx.Int32(6))
+        wave = tid >> 6
 
         def _wave_reduce_max_full(val):
             red = val
@@ -718,7 +715,7 @@ def compile_pa_decode_sw_reduce(
             w = _wave_reduce_max_full(val) if const_expr(mode == "max") else _wave_reduce_sum_full(val)
 
             if lane == 0:
-                wave_idx = fx.Int32(wave)
+                wave_idx = wave
                 fx.memref_store(w, red_scratch, wave_idx)
             gpu.barrier()
 
@@ -1053,9 +1050,9 @@ def compile_pa_decode_sw(
         kv_h = udiv_const(grid_y, _mtp_groups)
         mtp_group_from_grid = urem_const(grid_y, _mtp_groups)
         partition_idx = fx.Int32(gpu.block_id("z"))
-        lane16id = tid & fx.Int32(15)
-        rowid = (tid >> fx.Int32(4)) & fx.Int32(3)
-        warp_id = fx.Int32(tid >> fx.Int32(6))
+        lane16id = tid & 15
+        rowid = (tid >> 4) & 3
+        warp_id = tid >> 6
 
         def _divide_addr(addr, dtype):
             pointer = _global_pointer_from_addr(addr, dtype, alignment=dtype.width // 8)
@@ -1255,7 +1252,7 @@ def compile_pa_decode_sw(
                 )
 
         def _write_empty_partition():
-            zero_output = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
+            zero_output = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
             qi_val, qhi_pos, _, _ = _compute_sw_mtp_group_state(
                 lane16id,
                 local_qhead_idx,
@@ -1357,7 +1354,7 @@ def compile_pa_decode_sw(
             attention_context_len = tile_context_len if const_expr(fuse_partitions) else context_len
             causal_bound = attention_context_len + fx.Int32(1 - query_length) + qi_val
             seq_start = attention_context_len - fx.Int32(query_length + sliding_window) + qi_val
-            outs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
+            outs = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(_VHELOOP)]
             running_max, running_sum, outs = _process_block_split(
                 NEG_INF,
                 ZERO_F,

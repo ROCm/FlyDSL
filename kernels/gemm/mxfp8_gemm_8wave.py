@@ -134,7 +134,7 @@ class MxMfma:
             fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
             fx.make_layout((1, 1, 1), (1, 1, 1)),
         )
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+        self.zero_value = fx.full(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
 
@@ -150,7 +150,7 @@ class MxMfma:
     def _scales(self, values):
         frag = fx.make_rmem_tensor(fx.make_layout((1, len(values)), (0, 1)), fx.Int32)
         for i in range_constexpr(len(values)):
-            fx.slice(frag, (None, i)).store(Vec.filled(1, values[i], fx.Int32))
+            fx.slice(frag, (None, i)).store(fx.full(1, values[i], fx.Int32))
         return frag
 
     def call(self, a, b, c, sa, sb, *, k_pack, set_prio=True):

@@ -47,7 +47,7 @@ def _zero_moe_buf_grid_stride(moe_buf_rsrc, gid_v4, stride_v4, total_v4, oob_idx
     """Grid-stride loop zeroing moe_buf via vectorized buffer_store."""
     c_one = fx.Int32(1)
     niters = (total_v4 + stride_v4 - c_one) // stride_v4
-    c_zero_v4 = fx.Vector.filled(4, 0, fx.Int32)
+    c_zero_v4 = fx.full(4, 0, fx.Int32)
     c4 = fx.Int32(4)
     for _z in range(fx.Int32(0), niters, fx.Int32(1)):
         idx = gid_v4 + fx.Int32(_z) * stride_v4
@@ -236,9 +236,7 @@ def _compile_moe_sorting_oneshot(
             zero_gid_v4 = (bid - c_one_i32) * fx.Int32(ONESHOT_BLOCK) + tid
             num_zero_blocks = gpu.grid_dim.x - c_one_i32
             zero_stride_v4 = num_zero_blocks * fx.Int32(ONESHOT_BLOCK)
-            _zero_moe_buf_grid_stride(
-                moe_buf_rsrc, zero_gid_v4, zero_stride_v4, i32_moe_buf_elems >> fx.Int32(2), c_oob_idx
-            )
+            _zero_moe_buf_grid_stride(moe_buf_rsrc, zero_gid_v4, zero_stride_v4, i32_moe_buf_elems >> 2, c_oob_idx)
 
         # =================== SORTING (block 0 only) ==========================
         if bid == c_zero_i32:
@@ -677,9 +675,9 @@ def compile_moe_sorting_oneshot_fused(
             zero_gid_v4 = (bid - c_one_i32) * fx.Int32(BLOCK_SIZE) + tid
             num_zero_blocks = gpu.grid_dim.x - c_one_i32
             zero_stride_v4 = num_zero_blocks * fx.Int32(BLOCK_SIZE)
-            i32_moe_buf_v4 = i32_moe_buf_elems >> fx.Int32(2)
+            i32_moe_buf_v4 = i32_moe_buf_elems >> 2
             zero_niters = (i32_moe_buf_v4 + zero_stride_v4 - c_one_i32) // zero_stride_v4
-            c_zero_v4 = fx.Vector.filled(4, 0, fx.Int32)
+            c_zero_v4 = fx.full(4, 0, fx.Int32)
             c4_i32 = fx.Int32(4)
             for _z in range(fx.Int32(0), zero_niters, fx.Int32(1)):
                 z_idx_v4 = zero_gid_v4 + fx.Int32(_z) * zero_stride_v4
@@ -1271,7 +1269,7 @@ def _compile_moe_sorting_multiphase(
         reduce_mr = lds.reduce.ptr
 
         mesh_row_i32_base = (eid * i32_mesh_stride) >> fx.Int32(2)
-        i32_words_per_row = i32_mesh_stride >> fx.Int32(2)
+        i32_words_per_row = i32_mesh_stride >> 2
         n_iters = (i32_words_per_row + fx.Int32(K3_WORDS_PER_ITER - 1)) >> fx.Int32(K3_WORDS_PER_ITER_LOG2)
 
         if has_mask:
@@ -1385,11 +1383,11 @@ def _compile_moe_sorting_multiphase(
 
         # Precompute mesh row base (in i32 words) and words per row
         mesh_row_i32_base = (eid * i32_mesh_stride) >> fx.Int32(2)
-        i32_words_per_row = i32_mesh_stride >> fx.Int32(2)
+        i32_words_per_row = i32_mesh_stride >> 2
 
-        clear_niters = (i32_words_per_row + fx.Int32(P0V2_BLOCK - 1)) >> fx.Int32(9)
+        clear_niters = (i32_words_per_row + fx.Int32(P0V2_BLOCK - 1)) >> 9
         total_assignments = i32_tokens * c_topk
-        scatter_niters = (total_assignments + fx.Int32(P0V2_BLOCK - 1)) >> fx.Int32(9)
+        scatter_niters = (total_assignments + fx.Int32(P0V2_BLOCK - 1)) >> 9
 
         # EP: load mask, write cumsum=0 for masked experts, set loop bounds to 0
         if has_mask:
@@ -1543,9 +1541,7 @@ def _compile_moe_sorting_multiphase(
             moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf, max_size=True)
             zero_gid_v4 = (bid - c_E) * fx.Int32(K4_BLOCK) + tid
             zero_stride_v4 = (gpu.grid_dim.x - c_E) * fx.Int32(K4_BLOCK)
-            _zero_moe_buf_grid_stride(
-                moe_buf_rsrc, zero_gid_v4, zero_stride_v4, i32_moe_buf_elems >> fx.Int32(2), c_oob_idx
-            )
+            _zero_moe_buf_grid_stride(moe_buf_rsrc, zero_gid_v4, zero_stride_v4, i32_moe_buf_elems >> 2, c_oob_idx)
 
         # ================ PARALLEL PREFIX-SUM + MESH SCATTER (blocks 0..E-1) ==
         # Each block independently: prefix sum (redundant), scatter for its expert only.

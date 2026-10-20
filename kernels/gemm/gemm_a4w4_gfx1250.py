@@ -8,7 +8,6 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import Constexpr, T
-from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import check_smem_capacity, get_rocm_arch
 from kernels.common.gfx1250_cluster import compute_mcast_masks
 from kernels.common.kernels_common import format_kernel_name
@@ -123,7 +122,7 @@ def launch_gemm_a4w4(
             for i in range_constexpr((size + block * 16 - 1) // (block * 16)):
                 off = (i * block + tid) * 16
                 if off < size:
-                    fx.ptr_store(Vec.filled(16, 0, fx.Int8), ptr + off)
+                    fx.ptr_store(fx.full(16, 0, fx.Int8), ptr + off)
 
         if (bm + tile_m > m) | (bn + tile_n > n) | (k % tile_k != 0):
             clear(base, arena_bytes)
@@ -215,7 +214,7 @@ def launch_gemm_a4w4(
         ld128, _ = make_lds_copy_ops(128)
         acc = [fx.make_rmem_tensor(16, fx.Float32) for _ in range_constexpr(wm_rep * wn_rep)]
         for cf in acc:
-            cf.store(Vec.filled(16, 0.0, fx.Float32))
+            cf.store(fx.full(16, 0.0, fx.Float32))
         atoms = [
             fx.make_mma_atom(rocdl.WMMAScale(32, 16, 128, fx.Float4E2M1FN, fx.Float4E2M1FN, fx.Float32, opsel_b=i))
             for i in range_constexpr(2)
@@ -365,11 +364,9 @@ def launch_gemm_a4w4(
                     idx = it * block + tid
                     row_rel, col_rel = idx // chunks, idx % chunks * 8
                     row, col = bm + row_rel, bn + col_rel
-                    values = fx.Vector(
-                        fx.ptr_load(
-                            fx.recast_iter(elem, base) + row_rel * c_lds_row + col_rel,
-                            result_type=T.vec(8, elem.ir_type),
-                        )
+                    values = fx.ptr_load(
+                        fx.recast_iter(elem, base) + row_rel * c_lds_row + col_rel,
+                        result_type=T.vec(8, elem.ir_type),
                     )
                     if row < m:
                         if col + 8 <= n:

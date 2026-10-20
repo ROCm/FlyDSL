@@ -295,7 +295,7 @@ def _emit_topk_gating_softmax_body(
         # failures when going through si32).
         val_f32 = fx.Int32(val).bitcast(fx.Float32)
         r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-        v = fx.Vector.from_elements([val_f32], fx.Float32)
+        v = fx.full(1, val_f32, fx.Float32)
         fx.memref_store_vec(v, r)
         view = fx.slice(divided, (None, index))
         fx.copy(copy_atom_f32, r, view)
@@ -561,7 +561,7 @@ def _build_topk_gating_softmax_module(
             # failures when going through si32).
             val_f32 = fx.Int32(val).bitcast(fx.Float32)
             r = fx.make_rmem_tensor(1, fx.Float32)
-            v = fx.Vector.from_elements([val_f32], fx.Float32)
+            v = fx.full(1, val_f32, fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
             fx.copy(copy_atom_f32, r, view)
@@ -650,7 +650,7 @@ def _build_topk_gating_softmax_module(
         inv_denom = c_one_f / denom
 
         if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
-            num_tokens_v = fx.Int32(i32_num_tokens)
+            num_tokens_v = i32_num_tokens
             for k_idx in range_constexpr(topk):
                 w_val = selected_weights[k_idx]
                 if renormalize:
@@ -675,7 +675,7 @@ def _build_topk_gating_softmax_module(
         # We use the (n - 1) // tpb + 1 form (valid for n >= 1) since the
         # additive (n + tpb - 1) form was producing the wrong grid count
         # under JIT specialization in this DSL.
-        grid_x = (num_tokens_in - fx.Int32(1)) // fx.Int32(TOKENS_PER_BLOCK) + fx.Int32(1)
+        grid_x = (num_tokens_in - 1) // fx.Int32(TOKENS_PER_BLOCK) + 1
 
         launcher = topk_gating_softmax_kernel(
             GatingOutput,
@@ -722,7 +722,7 @@ def build_topk_gating_softmax_module(
         num_tokens_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        if num_tokens_in <= fx.Int32(2048):
+        if num_tokens_in <= 2048:
             narrow(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
         else:
             wide(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)

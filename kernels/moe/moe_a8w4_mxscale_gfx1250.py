@@ -349,7 +349,7 @@ def launch_moe_gemm_a8w4(
         wmma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float4E2M1FN, ACT_ELEM, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(Vec.filled(8, 0.0, fx.Float32))
+            cf.store(fx.full(8, 0.0, fx.Float32))
 
         def to_rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
@@ -454,7 +454,7 @@ def launch_moe_gemm_a8w4(
             accs = [c_frags[idx].load().ir_value() for idx in range_constexpr(n_acc)]
             pipeline_fence(outstanding=0, use_cluster=use_cluster)
             STORE_N = (tile_n // 2) if stage1_act else tile_n
-            neg_limit = fx.Float32(0.0) - f32_swiglu_limit
+            neg_limit = 0.0 - f32_swiglu_limit
             is_swiglu = stage1_act == 2
             oc = fx.Float16 if out_is_f16 else fx.BFloat16
 
@@ -468,9 +468,9 @@ def launch_moe_gemm_a8w4(
                     col_rel = wnb + wn * 16 + kgrp * 8
                     acc = Vec(accs[wm * wmma_n_rep + wn])
                     if const_expr(has_bias):
-                        acc = acc + Vec(
-                            fx.ptr_load(bias_map + expert * i32_n + col_rel, result_type=T.vec(8, out_elem))
-                        ).to(fx.Float32)
+                        acc = acc + fx.ptr_load(bias_map + expert * i32_n + col_rel, result_type=T.vec(8, out_elem)).to(
+                            fx.Float32
+                        )
                     if const_expr(stage1_act):
                         hv = Vec.from_elements(
                             [

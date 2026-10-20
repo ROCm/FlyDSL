@@ -23,7 +23,7 @@ def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
     phys_block_i64 = fx.Int64(phys_block)
     block_stride_i64 = fx.Int64(block_stride)
     head_offset_i64 = fx.Int64(head_offset)
-    return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> fx.Int64(2)
+    return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> 2
 
 
 @flyc.jit

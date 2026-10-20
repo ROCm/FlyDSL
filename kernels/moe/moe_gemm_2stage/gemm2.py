@@ -288,7 +288,7 @@ def _build_moe_gemm2_fp8(
         a_scale_tensor = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_x)), fx.make_layout(M, 1)),
             max_size=False,
-            num_records_bytes=fx.Int64(M) * fx.Int64(4),
+            num_records_bytes=fx.Int64(M) * 4,
         )
         # A2 scale row = token*TOPK + slot; sentinel (token>=tokens) -> scale 0.
         a_sc_n = []

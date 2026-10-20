@@ -204,7 +204,7 @@ def _finish_q_fragments(
     qkhe_loop = head_dim // QKHE_PER_FETCH
     q_lanes_per_head = head_dim // Q_ELEMS_PER_LANE
     lds_q_base = local_qhead_idx * (head_dim // 4) + lane16id * 2
-    abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
+    abs_mask = fx.full(4, 0x7FFFFFFF, fx.Int32)
 
     q_f32_chunks = []
     local_max = fx.Float32(0.0)
@@ -456,7 +456,7 @@ def _make_pa_phase_helpers(
         query_scale = query_scale_lane * softmax_scale
         d_out = []
         for td in range_constexpr(TLOOP):
-            acc = fx.Vector.filled(4, 0.0, fx.Float32)
+            acc = fx.full(4, 0.0, fx.Float32)
             for k_step in range_constexpr(qkhe_loop * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
                     T.f32x4,
@@ -545,7 +545,7 @@ def _make_pa_phase_helpers(
         return rmax, rsum, outs, v_correction, normalized_v_scales
 
     def _pv_mfma(v_ops, outs, v_correction):
-        v_correction_vec = fx.Vector.filled(4, fx.Float32(v_correction), fx.Float32)
+        v_correction_vec = fx.full(4, fx.Float32(v_correction), fx.Float32)
 
         # P depends only on (vt, j); load it once before every VHE MFMA chain.
         p_i64_all = []
@@ -560,7 +560,7 @@ def _make_pa_phase_helpers(
                 )
 
         for vhe in range_constexpr(vhe_loop):
-            tmp_out = fx.Vector.filled(4, 0.0, fx.Float32)
+            tmp_out = fx.full(4, 0.0, fx.Float32)
             for vt in range_constexpr(VTLOOP):
                 v_i64x2 = v_ops[vt][vhe]
                 for j in range_constexpr(2):
@@ -652,14 +652,14 @@ def compile_pa_metadata_v1(
             0,
             copy_i32,
             store_reg,
-            fx.Vector.from_elements([0], dtype=fx.Int32),
+            fx.full(1, 0, fx.Int32),
         )
         copy_store(
             reduce_indptr,
             0,
             copy_i32,
             store_reg,
-            fx.Vector.from_elements([0], dtype=fx.Int32),
+            fx.full(1, 0, fx.Int32),
         )
 
         # Lane-strided partition count followed by a wave reduction.
@@ -765,7 +765,7 @@ def compile_pa_metadata_v1(
                     grt_ + 1,
                     copy_i32,
                     store_reg,
-                    fx.Vector.from_elements([lri_ + num_splits], dtype=fx.Int32),
+                    fx.full(1, lri_ + num_splits, fx.Int32),
                 )
                 fx.memref_store_vec(
                     fx.Vector.from_elements([qo_start, qo_end], dtype=fx.Int32),
@@ -834,7 +834,7 @@ def compile_pa_metadata_v1(
                 it_t,
                 copy_i32,
                 store_reg,
-                fx.Vector.from_elements([num_works], dtype=fx.Int32),
+                fx.full(1, num_works, fx.Int32),
             )
             it_t = it_t + 1
 
@@ -846,7 +846,7 @@ def compile_pa_metadata_v1(
                 it_r,
                 copy_i32,
                 store_reg,
-                fx.Vector.from_elements([last_reduce_indptr], dtype=fx.Int32),
+                fx.full(1, last_reduce_indptr, fx.Int32),
             )
             it_r = it_r + 1
 
@@ -1204,7 +1204,7 @@ def compile_pa_decode_metadata(
             init_states = [
                 tuple(
                     [fx.Float32(float("-inf")), fx.Float32(0.0)]
-                    + [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range_constexpr(VHELOOP)]
+                    + [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(VHELOOP)]
                 )
                 for _ in range(_mtp_groups)
             ]
@@ -1478,7 +1478,7 @@ def compile_pa_metadata_reduce(
                 init=[
                     fx.Float32(float("-inf")),
                     fx.Float32(0.0),
-                    fx.Vector.filled(vec_width, 0.0, fx.Float32),
+                    fx.full(vec_width, 0.0, fx.Float32),
                 ],
             ):
                 m = fx.Float32(st[0])

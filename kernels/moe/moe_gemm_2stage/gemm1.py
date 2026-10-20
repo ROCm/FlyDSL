@@ -323,7 +323,7 @@ def _build_moe_gemm1_fp8_gateup(
         a_scale_tensor = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.recast_iter(fx.Float32, fx.get_iter(arg_scale_x)), fx.make_layout(asc_rows, 1)),
             max_size=False,
-            num_records_bytes=fx.Int64(asc_rows) * fx.Int64(4),
+            num_records_bytes=fx.Int64(asc_rows) * 4,
         )
         if const_expr(is_int8smooth):
             a_sc_n = [

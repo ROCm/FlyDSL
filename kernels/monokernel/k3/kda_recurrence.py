@@ -48,7 +48,7 @@ def _load_bf16x4(resource, offset):
 
 
 def _zeros4():
-    return fx.Vector.filled(_VALUES_PER_THREAD, fx.Float32(0.0), fx.Float32)
+    return fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
 
 
 def _subgroup_sum(value):
@@ -190,10 +190,10 @@ def build_kimi_k3_kda_recurrence(
                     ).to(fx.Float32)
                     inputs = fx.Vector.from_elements(
                         [
-                            fx.Float32(state0),
-                            fx.Float32(state1),
-                            fx.Float32(state2),
-                            fx.Float32(current),
+                            state0,
+                            state1,
+                            state2,
+                            current,
                         ],
                         fx.Float32,
                     )
@@ -305,12 +305,12 @@ def build_kimi_k3_kda_recurrence(
 
             q_inverse_norm = rsq(_subgroup_sum(q_square) + fx.Float32(1.0e-6))
             k_inverse_norm = rsq(_subgroup_sum(k_square) + fx.Float32(1.0e-6))
-            q_scale = fx.Vector.filled(
+            q_scale = fx.full(
                 _VALUES_PER_THREAD,
                 q_inverse_norm * fx.Float32(_Q_SCALE),
                 fx.Float32,
             )
-            k_scale = fx.Vector.filled(_VALUES_PER_THREAD, k_inverse_norm, fx.Float32)
+            k_scale = fx.full(_VALUES_PER_THREAD, k_inverse_norm, fx.Float32)
             for k_iter in range_constexpr(_K_ITERS):
                 q_vecs[k_iter] = q_vecs[k_iter] * q_scale
                 k_vecs[k_iter] = k_vecs[k_iter] * k_scale
@@ -363,7 +363,7 @@ def build_kimi_k3_kda_recurrence(
                         )
                     )
                 v_new = (v_input - state_k) * beta_value
-                v_new_vec = fx.Vector.filled(_VALUES_PER_THREAD, v_new, fx.Float32)
+                v_new_vec = fx.full(_VALUES_PER_THREAD, v_new, fx.Float32)
 
                 for k_iter in range_constexpr(_K_ITERS):
                     index = v_iter * _K_ITERS + k_iter

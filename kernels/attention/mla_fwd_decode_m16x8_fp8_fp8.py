@@ -295,7 +295,7 @@ def _idx(val):
 
 def _pack_i32x2(lo, hi):
     """Pack two i32 values into a single i64: lo | (hi << 32)."""
-    return _raw(fx.Uint64(fx.Uint32(lo)) | (fx.Uint64(fx.Uint32(hi)) << fx.Uint64(32)))
+    return _raw(fx.Uint64(fx.Uint32(lo)) | (fx.Uint64(fx.Uint32(hi)) << 32))
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     c_zero_f32 = fx.Float32(0.0)
     c_one_f32 = fx.Float32(1.0)
     c_zero_i32 = fx.Int32(0)
-    c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+    c_zero_v4f32 = fx.full(4, 0.0, fx.Float32)
     c_log2e = fx.Float32(LOG2E)
     c_inv_log2e = fx.Float32(1.0 / LOG2E)
 
@@ -455,7 +455,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             is_oob = fx.Int32(row_i32) == -1
             if is_oob:
                 lds_addr = _i32(fx.Int32(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
-                fx.ptr_store(Vec.from_elements([c_zero_i32], fx.Int32).bitcast(fx.Uint8), _lds_ptr(lds_addr))
+                fx.ptr_store(fx.full(1, c_zero_i32, fx.Int32).bitcast(fx.Uint8), _lds_ptr(lds_addr))
             else:
                 _emit_vram_to_lds()
         else:
@@ -949,7 +949,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _rescale_oaccu(oaccu, rescale):
         """Multiply all oaccu accumulators by rescale factor.
         Descending s_setprio 3->0 across 4 groups of 8 muls."""
-        rv = _raw(Vec.filled(4, rescale, fx.Float32))
+        rv = _raw(fx.full(4, rescale, fx.Float32))
         result = [None] * len(oaccu)
         for group in range_constexpr(4):
             rocdl.s_setprio(3 - group)
@@ -1245,8 +1245,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """Convert f32x4 accumulator to 2 packed bf16 dwords."""
         i16s = Vec(acc_val).to(fx.BFloat16).bitcast(fx.Int16)
         i16_0, i16_1, i16_2, i16_3 = (_raw(i16s[j]) for j in range(4))
-        dw0 = _raw(fx.Uint32(fx.Uint16(i16_0)) | (fx.Uint32(fx.Uint16(i16_1)) << fx.Uint32(16)))
-        dw1 = _raw(fx.Uint32(fx.Uint16(i16_2)) | (fx.Uint32(fx.Uint16(i16_3)) << fx.Uint32(16)))
+        dw0 = _raw(fx.Uint32(fx.Uint16(i16_0)) | (fx.Uint32(fx.Uint16(i16_1)) << 16))
+        dw1 = _raw(fx.Uint32(fx.Uint16(i16_2)) | (fx.Uint32(fx.Uint16(i16_3)) << 16))
         return dw0, dw1
 
     def _store_oaccu_pair_bf16(oaccu_a, oaccu_b, tile_idx, p_lds_o, row_base_i32):
@@ -1366,8 +1366,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     ):
         """Last-tile GEMM2: interleave rescale + MFMA + normalize + store."""
         K_HALVES = BLOCK_N // 32
-        rescale_vec = _raw(Vec.filled(4, fx.Float32(rescale), fx.Float32))
-        reci_vec = _raw(Vec.filled(4, fx.Float32(reci_sum), fx.Float32))
+        rescale_vec = _raw(fx.full(4, fx.Float32(rescale), fx.Float32))
+        reci_vec = _raw(fx.full(4, fx.Float32(reci_sum), fx.Float32))
 
         _barrier(lgkmcnt=0)
         rocdl.sched_barrier(0)
@@ -1498,7 +1498,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         vt_block_offset = (vt_row_blk * VT_BLKS_PER_ROW_PAD + vt_col_blk) * VT_ELEMS_PER_BLK
         vt_inblock_offset = vt_row_inblk * VT_COLS_PER_THR + vt_col_inblk
         vt_lds_lane_offset = vt_block_offset + vt_inblock_offset
-        return _i32(fx.Index(lds_base_idx + P_LDS_VT) + vt_lds_lane_offset)
+        return _i32((lds_base_idx + P_LDS_VT) + vt_lds_lane_offset)
 
     if const_expr(IS_GFX950):
         # ---- V LDS lane base pointer (V3: HW transpose-during-load) ----

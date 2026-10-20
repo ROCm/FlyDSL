@@ -71,7 +71,7 @@ def _buffer_i32_scalar_read(tiles1, idx, atom):
     """
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
     fx.copy(atom, fx.slice(tiles1, (None, idx)), r)
-    return fx.Int32(fx.Vector(fx.memref_load_vec(r))[0])
+    return fx.memref_load_vec(r)[0]
 
 
 def _int_to_llvm_ptr(addr, address_space):
@@ -351,7 +351,7 @@ def make_a_loader(
             byte_off = k_grp_base_bytes + fx.Int32(slot * A_SLOT_BYTES) + row * fx.Int32(KH_TILE_BYTES) + col_swz_bytes
         r = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         fx.copy_atom_call(lds_atom, fx.slice(tiles, (None, byte_off // fx.Int32(16))), r)
-        return fx.Vector(fx.memref_load_vec(r)).bitcast(fx.BFloat16)  # v8bf16
+        return fx.memref_load_vec(r).bitcast(fx.BFloat16)  # v8bf16
 
     return _ALoader(load=lds_load_a, store_tile=store_a_tile)
 
@@ -416,8 +416,8 @@ def _fp4_mag_dwords(raw_i32):
     raw = fx.Int32(raw_i32)
     # Magnitude selectors, one per byte. v_perm only honours selector values 0..7, so
     # the sign bit is masked off here and folded back into the high byte below.
-    sel_even = raw & fx.Int32(0x07070707)  # low nibble of each byte -> elements 0,2,4,6
-    sel_odd = raw.shrui(fx.Int32(4)) & fx.Int32(0x07070707)  # -> elements 1,3,5,7
+    sel_even = raw & 0x07070707  # low nibble of each byte -> elements 0,2,4,6
+    sel_odd = raw.shrui(fx.Int32(4)) & 0x07070707  # -> elements 1,3,5,7
 
     hb_even = _fp4_perm(_FP4_MAG_HI_HI, _FP4_MAG_HI_LO, sel_even)
     lb_even = _fp4_perm(_FP4_MAG_LO_HI, _FP4_MAG_LO_LO, sel_even)
@@ -425,7 +425,7 @@ def _fp4_mag_dwords(raw_i32):
     lb_odd = _fp4_perm(_FP4_MAG_LO_HI, _FP4_MAG_LO_LO, sel_odd)
 
     # Sign: nibble bit 3 -> bf16 bit 15, i.e. bit 7 of the high byte.
-    hb_even = hb_even | ((raw & fx.Int32(0x08080808)) << fx.Int32(4))
+    hb_even = hb_even | ((raw & 0x08080808) << 4)
     hb_odd = hb_odd | (raw & fx.Int32(0x80808080))
 
     # dword d = [lb_even[d], hb_even[d], lb_odd[d], hb_odd[d]].
@@ -666,9 +666,9 @@ def make_b_loader(
             )
             # idx_pack is a fp4-byte offset; dwordx4 tile index = (idx_pack/4 dwords)/4.
             r = fx.make_rmem_tensor(w_reg_lay, fx.Int32)
-            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, idx_pack // fx.Int32(16))), r)
-            v4 = fx.Vector(fx.memref_load_vec(r))
-            raw.append([fx.Int32(v4[j]) for j in range(4)])
+            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, idx_pack // 16)), r)
+            v4 = fx.memref_load_vec(r)
+            raw.append([v4[j] for j in range(4)])
         return raw
 
     def load_b_raw_int4(base_k, n_blk, n_intra):
@@ -698,10 +698,10 @@ def make_b_loader(
                 )
                 # idx is an int4-nibble byte offset; dwordx2 tile index = (idx bytes)/8.
                 r = fx.make_rmem_tensor(w_reg_lay2, fx.Int32)
-                fx.copy(w_copy_atom64, fx.slice(w_tiles8, (None, idx // fx.Int32(8))), r)
-                v2 = fx.Vector(fx.memref_load_vec(r))
-                four.append(fx.Int32(v2[0]))
-                four.append(fx.Int32(v2[1]))
+                fx.copy(w_copy_atom64, fx.slice(w_tiles8, (None, idx // 8)), r)
+                v2 = fx.memref_load_vec(r)
+                four.append(v2[0])
+                four.append(v2[1])
             raw.append(four)
         return raw
 
@@ -729,8 +729,8 @@ def make_b_loader(
             )
             # elem_idx is a bf16-elem offset; dword index = elem_idx*2/4, tile idx = /4.
             r = fx.make_rmem_tensor(w_reg_lay, fx.Int32)
-            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, elem_idx // fx.Int32(8))), r)
-            raw.append(fx.Vector(fx.memref_load_vec(r)).bitcast(fx.BFloat16))  # v8bf16
+            fx.copy(w_copy_atom, fx.slice(w_tiles, (None, elem_idx // 8)), r)
+            raw.append(fx.memref_load_vec(r).bitcast(fx.BFloat16))  # v8bf16
         return raw
 
     def load_b_scale(base_k, mni, n_pack):
@@ -792,7 +792,7 @@ def make_b_loader(
         i32s = []
         for sel in range_constexpr(4):
             p = rocdl.cvt_scalef32_pk_bf16_fp4(vec2_bf16, i32_val, scale_f32, sel)
-            i32s.append(fx.Int32(fx.Vector(p).bitcast(fx.Int32)[0]))
+            i32s.append(fx.Vector(p).bitcast(fx.Int32)[0])
         v4i32 = fx.Vector.from_elements(i32s, fx.Int32)
         return v4i32.bitcast(fx.BFloat16)  # v8bf16
 

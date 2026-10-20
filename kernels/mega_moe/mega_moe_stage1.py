@@ -212,9 +212,9 @@ def compile_mega_moe_stage1(
         ticket = fx.Int32(ticket64 - generation * fx.Int64(launch_grid_x))
         gate_addr = a_epoch_gate + fx.Int64(grid_epoch_slot * 4)
         gate_epoch = fx.Int32(generation + fx.Int64(1))
-        compact_owner = ticket == fx.Int32(0)
-        compact_producer = (ticket > fx.Int32(0)) & (ticket <= fx.Int32(dispatch_blocks))
-        producer_slot = ticket - fx.Int32(1)
+        compact_owner = ticket == 0
+        compact_producer = (ticket > 0) & (ticket <= fx.Int32(dispatch_blocks))
+        producer_slot = ticket - 1
 
         if compact_owner:
             next_parity_lane = fx.Int32(0)
@@ -242,7 +242,7 @@ def compile_mega_moe_stage1(
                 remote_launch_ready = _buffer_load(launch_ready_table, peer, fx.Int64)
                 comm_ops.store_i32_system(remote_launch_ready, fx.Int32(fz_rank), launch_epoch)
                 mori_shmem.int32_wait_until_greater_than(
-                    a_launch_ready + fx.Int64(peer) * fx.Int64(4), launch_epoch - fx.Int32(1)
+                    a_launch_ready + fx.Int64(peer) * 4, launch_epoch - 1
                 )
                 comm_ops.fence_system_acquire()
             if tid == fx.Int32(0):
@@ -307,7 +307,7 @@ def compile_mega_moe_stage1(
                 else:
                     if tid == fx.Int32(0):
                         mori_shmem.int32_wait_until_equals(
-                            a_pair_order_ready + fx.Int64(payload_parity) * fx.Int64(4), payload_expected)
+                            a_pair_order_ready + fx.Int64(payload_parity) * 4, payload_expected)
                         comm_ops.fence_agent_acquire()
                     fx.barrier()
                 producers_per_destination = fx.Int32(dispatch_blocks // fz_npes)
@@ -316,7 +316,7 @@ def compile_mega_moe_stage1(
                     chunks_per_destination = fx.Int32(
                         (fz_mtpr + payload_chunk_rows - 1) // payload_chunk_rows
                     )
-                payload_active = fx.Int32(0) == fx.Int32(0)
+                payload_active = fx.Int32(0) == 0
                 if const_expr(payload_tile_ready and dispatch_blocks > 32):
                     producer_destination = producer_slot % fx.Int32(fz_npes)
                     producer_round = producer_slot // fx.Int32(fz_npes)
@@ -363,7 +363,7 @@ def compile_mega_moe_stage1(
         expert_rsrc = _make_buffer(expert_ids, fx.Int32)
         nv_rsrc = _make_buffer(num_valid_ids, fx.Int32)
         scale_cols = (inter_dim // 32 + 7) // 8 * 8
-        os_nbytes = tokens * fx.Int32(scale_cols) + fx.Int32(8192)
+        os_nbytes = tokens * fx.Int32(scale_cols) + 8192
         if const_expr(use_tile_resource):
             out_rsrc = None
         else:
@@ -396,7 +396,7 @@ def compile_mega_moe_stage1(
             local_plan_ready = _buffer_load(disp_rsrc, fx.Int32(int(DispatchSlot.PLAN_READY)), fx.Int64)
             ready_index = payload_parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
             mori_shmem.int32_wait_until_equals(
-                local_plan_ready + fx.Int64(ready_index) * fx.Int64(4), payload_expected)
+                local_plan_ready + fx.Int64(ready_index) * 4, payload_expected)
             comm_ops.fence_agent_acquire()
         fx.barrier()
 
@@ -411,24 +411,24 @@ def compile_mega_moe_stage1(
                     _make_buffer_from_addr(addr_tile_expected, fx.Int32), tile_index, fx.Int32
                 )
                 mori_shmem.int32_wait_until_equals(
-                    addr_tile_ready + fx.Int64(tile_index) * fx.Int64(4), expected_tiles
+                    addr_tile_ready + fx.Int64(tile_index) * 4, expected_tiles
                 )
             else:
                 pe = expert_of_flat(flat)
                 pe_index = payload_parity * fx.Int32(fz_epr) + pe
                 mori_shmem.int32_wait_until_equals(
-                    addr_payload_ready + fx.Int64(pe_index) * fx.Int64(4), payload_expected
+                    addr_payload_ready + fx.Int64(pe_index) * 4, payload_expected
                 )
 
         # Control CTAs join the work pool after dispatch.
-        consumer_active = fx.Int32(1) == fx.Int32(1)
+        consumer_active = fx.Int32(1) == 1
         work_scratch = fx.recast_iter(fx.Int32, a_buf.ptr)
         work_scratch_view = fx.make_view(work_scratch, fx.make_layout(1, 1))
         work_shard = ticket & fx.Int32(WORK_SHARDS - 1)
         while consumer_active:
             if tid == fx.Int32(0):
                 local_work = comm_ops.atomic_add_agent(
-                    a_work_head + fx.Int64(work_shard) * fx.Int64(64), fx.Int32(1)
+                    a_work_head + fx.Int64(work_shard) * 64, fx.Int32(1)
                 )
                 work = work_shard + local_work * fx.Int32(WORK_SHARDS)
                 fx.ptr_store(Vec.from_elements([work], fx.Int32), work_scratch)

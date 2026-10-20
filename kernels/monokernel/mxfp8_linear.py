@@ -201,7 +201,7 @@ def build_mxfp8_project(rows: int, n: int, k: int):
                 for opsel in (0, 2)
             ]
             accumulator = fx.make_rmem_tensor(4, fx.Float32)
-            accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
+            accumulator.store(fx.full(4, 0.0, fx.Float32))
             valid_row = lane_mod16 < rows
             input_row = fx.min(lane_mod16, rows - 1)
             scale_lane = lane_div16 * 16 + lane_mod16

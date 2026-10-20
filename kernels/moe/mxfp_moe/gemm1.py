@@ -202,7 +202,7 @@ def _gemm1_body(
     accm = [[fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32) for _ in range(4)] for _ in range(kMChunks)]
     for i in range_constexpr(kMChunks):
         for J in range_constexpr(4):
-            accm[i][J].store(fx.Vector.filled(4, 0.0, fx.Float32))
+            accm[i][J].store(fx.full(4, 0.0, fx.Float32))
     b = [[[None, None] for _ in range(4)] for _ in range(kStages)]
     b_scale_v = [[None, None] for _ in range(kStages)]
 
@@ -229,14 +229,14 @@ def _gemm1_body(
                 aq_dma_atom,
                 fx.slice(aq_dma_tiles4, (None, voffset // fx.Int32(16))),
                 fx.slice(s_aq_i32x4_tiles, (None, off // fx.Int32(16))),
-                soffset=fx.Int32(kt * KH_TILE) // fx.Int32(4),
+                soffset=fx.Int32(kt * KH_TILE) // 4,
             )
             if const_expr(a_dtype == "fp8"):
                 fx.copy(
                     aq_dma_atom,
                     fx.slice(aq_dma_tiles4, (None, (voffset + fx.Int32(128)) // fx.Int32(16))),
                     fx.slice(s_aq_i32x4_tiles, (None, (off + fx.Int32(128)) // fx.Int32(16))),
-                    soffset=fx.Int32(kt * KH_TILE) // fx.Int32(4),
+                    soffset=fx.Int32(kt * KH_TILE) // 4,
                 )
 
     def _lds_i32x4_frag(tile_idx):
@@ -359,7 +359,7 @@ def _gemm1_body(
             # cvt.pk.fp8 packs 2 fp8 into a 16b lane of a vector<2xi16> accumulator
             # (dstLoHiSel = lo/hi); two lanes -> 4 fp8 = one i32 stored to LDS.
             i16x2 = T.vec(2, T.i16)
-            zero16 = _raw(fx.Vector.filled(2, 0, fx.Int16))
+            zero16 = _raw(fx.full(2, 0, fx.Int16))
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[0]), qs_raw, 0)
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, pk0, _bf16x2(h_dw_i[1]), qs_raw, 1)
             pk1 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[2]), qs_raw, 0)
@@ -555,7 +555,7 @@ def _gemm1_body(
 
     def acc_store(idx, value):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
-        r.store(fx.Vector.from_elements([fx.Float32(value)], fx.Float32))
+        r.store(fx.Vector.from_elements([value], fx.Float32))
         fx.copy(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
 
     def acc_load(idx):
@@ -578,10 +578,10 @@ def _gemm1_body(
     gpu.barrier()
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(16)
-    n_lane = tx_i32 % fx.Int32(16)
-    wave_grp = n_lane // fx.Int32(4)
-    kk = n_lane % fx.Int32(4)
+    m_lane = tx_i32 // 16
+    n_lane = tx_i32 % 16
+    wave_grp = n_lane // 4
+    kk = n_lane % 4
 
     aqout_layout = fx.make_layout((BM, K_G2_HALF), (K_G2_HALF, 1))
     # UniversalCopy has no nontemporal/cache-hint knob; dropped (perf-neutral).
@@ -594,9 +594,9 @@ def _gemm1_body(
         gate_vs = [None] * 8
         up_vs = [None] * 8
         for ee in range_constexpr(8):
-            col_in_grp = fx.Int32(8) * kk + fx.Int32(ee)
-            gate_col = wave_grp * fx.Int32(32) + col_in_grp
-            up_col = fx.Int32(128) + gate_col
+            col_in_grp = 8 * kk + fx.Int32(ee)
+            gate_col = wave_grp * 32 + col_in_grp
+            up_col = 128 + gate_col
             gate_vs[ee] = acc_load(acc_idx(row_local, gate_col))
             up_vs[ee] = acc_load(acc_idx(row_local, up_col))
         result = _silu_mul_batch(gate_vs, up_vs)
@@ -618,7 +618,7 @@ def _gemm1_body(
             )
         packed = fx.Int32(packed_i32)
 
-        byte_pos = n_block_idx * fx.Int32(BN_INT // 2) + wave_grp * fx.Int32(16) + kk * fx.Int32(4)
+        byte_pos = n_block_idx * fx.Int32(BN_INT // 2) + wave_grp * 16 + kk * 4
         out_row = m_row + row_local
         store_off = _layout_idx(aqout_layout, out_row, byte_pos)
         _scalar_store(aqout_tiles, store_off // fx.Int32(4), packed, fx.Int32)
@@ -627,7 +627,7 @@ def _gemm1_body(
     ascaleout_layout = fx.make_layout((1 << 20, 2, 4, 16), (OUT_AS_PER_CHUNK_DW, 64, 16, 1))
     ascaleout_i8_tiles = _global_scalar_tiles(arg_ascaleout, fx.Int8, 1 << 26)
     ascaleout_i16_tiles = _global_scalar_tiles(arg_ascaleout, fx.Int16, 1 << 25)
-    if kk == fx.Int32(0):
+    if kk == 0:
         ku = n_block_idx >> fx.Int32(1)
         ikxdl = n_block_idx & fx.Int32(1)
         if const_expr(BM == 16):
@@ -741,8 +741,8 @@ def compile_gemm1_a4w4_port(
         bx = gpu.block_id("x")
         tx_i32 = fx.Int32(tx)
         bx_i32 = fx.Int32(bx)
-        lane = tx_i32 % fx.Int32(64)
-        wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
+        lane = tx_i32 % 64
+        wave = rocdl.readfirstlane(T.i32, tx_i32 // 64)
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_NUM_N_BLOCKS)

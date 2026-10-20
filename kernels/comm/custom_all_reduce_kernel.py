@@ -162,11 +162,6 @@ def _u64(v):
     return fx.Uint64(fx.Uint32(v))
 
 
-def _c64(v):
-    """Create i64 constant with concise syntax."""
-    return fx.Int64(v)
-
-
 # ---------------------------------------------------------------------------
 # Signal synchronization primitives
 # ---------------------------------------------------------------------------
@@ -177,17 +172,17 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     """Start-sync: write start flag to all peers, wait for all to arrive."""
 
     # Flag table is uint32 per block; compute byte address in i64.
-    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
+    flag_addr = self_sg_i64 + Int64(_SG_FLAG_OFF_B) + _u64(bid_i32) * Int64(4)
     flag_rsrc = _make_rsrc(flag_addr)
     flag = _load_i32_uncached(flag_rsrc) + 1
 
     # One block owns 8 slots in start/end tables (max world size).
     block_slot_base = bid_i32 * 8
     lane_slot_idx = block_slot_base + lane_i32
-    start_wait_addr = self_sg_i64 + _c64(_SG_START_OFF_B) + _u64(lane_slot_idx) * _c64(4)
+    start_wait_addr = self_sg_i64 + Int64(_SG_START_OFF_B) + _u64(lane_slot_idx) * Int64(4)
     wait_rsrc = _make_rsrc(start_wait_addr)
     rank_slot_idx = block_slot_base + rank_i32
-    start_rank_off = _c64(_SG_START_OFF_B) + _u64(rank_slot_idx) * _c64(4)
+    start_rank_off = Int64(_SG_START_OFF_B) + _u64(rank_slot_idx) * Int64(4)
 
     # Only active lanes (lane < ngpus) participate in peer signaling.
     is_active_lane = _u(lane_i32) < ngpus
@@ -213,17 +208,17 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus
     """End-sync: write end flag to all peers, wait for all to finish."""
 
     # Flag table is uint32 per block; compute byte address in i64.
-    flag_addr = self_sg_i64 + _c64(_SG_FLAG_OFF_B) + _u64(bid_i32) * _c64(4)
+    flag_addr = self_sg_i64 + Int64(_SG_FLAG_OFF_B) + _u64(bid_i32) * Int64(4)
     flag_rsrc = _make_rsrc(flag_addr)
     flag = _load_i32_uncached(flag_rsrc) + 1
 
     # One block owns 8 slots in start/end tables (max world size).
     block_slot_base = bid_i32 * 8
     lane_slot_idx = block_slot_base + lane_i32
-    end_wait_addr = self_sg_i64 + _c64(_SG_END_OFF_B) + _u64(lane_slot_idx) * _c64(4)
+    end_wait_addr = self_sg_i64 + Int64(_SG_END_OFF_B) + _u64(lane_slot_idx) * Int64(4)
     wait_rsrc = _make_rsrc(end_wait_addr)
     rank_slot_idx = block_slot_base + rank_i32
-    end_rank_off = _c64(_SG_END_OFF_B) + _u64(rank_slot_idx) * _c64(4)
+    end_rank_off = Int64(_SG_END_OFF_B) + _u64(rank_slot_idx) * Int64(4)
 
     # Only active lanes (lane < ngpus) participate in peer signaling.
     is_active_lane = _u(lane_i32) < ngpus
@@ -632,9 +627,9 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         dst_tmp_i64 = _extract_i64(tmp_ptrs_vec, warp_id)
         # Stage-1 writes are 16B vector stores; enforce non-null and 16B alignment.
-        is_tmp_null = dst_tmp_i64 == _c64(0)
-        dst_tmp_low4 = dst_tmp_i64 & _c64(0xF)
-        is_tmp_misaligned = dst_tmp_low4 != _c64(0)
+        is_tmp_null = dst_tmp_i64 == Int64(0)
+        dst_tmp_low4 = dst_tmp_i64 & Int64(0xF)
+        is_tmp_misaligned = dst_tmp_low4 != Int64(0)
         bad_tmp_addr = is_tmp_null | is_tmp_misaligned
         dst_tmp_rsrc_desc = _make_rsrc(dst_tmp_i64)
 
@@ -667,23 +662,23 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         stage2_end_pack = is_last_rank_s2.select(max_packs_per_rank_i32, packs_per_rank_i32)
 
         # Stage-2 load uses 16B vectors; enforce non-null and 16B alignment.
-        is_tmpout_null = tmp_out_base_i64 == _c64(0)
-        tmpout_low4 = tmp_out_base_i64 & _c64(0xF)
-        is_load_misaligned = tmpout_low4 != _c64(0)
+        is_tmpout_null = tmp_out_base_i64 == Int64(0)
+        tmpout_low4 = tmp_out_base_i64 & Int64(0xF)
+        is_load_misaligned = tmpout_low4 != Int64(0)
         bad_load_addr = is_tmpout_null | is_load_misaligned
 
         dst_out_ptr_i64 = _extract_i64(out_ptrs_vec, warp_id)
         dst_out_rsrc_desc = _make_rsrc(dst_out_ptr_i64)
-        is_out_null = dst_out_ptr_i64 == _c64(0)
-        dst_ptr_low4 = dst_out_ptr_i64 & _c64(0xF)
-        is_out_misaligned = dst_ptr_low4 != _c64(0)
+        is_out_null = dst_out_ptr_i64 == Int64(0)
+        dst_ptr_low4 = dst_out_ptr_i64 & Int64(0xF)
+        is_out_misaligned = dst_ptr_low4 != Int64(0)
         bad_out_addr = is_out_null | is_out_misaligned
 
         for cur in range(thread_pack_start, stage2_end_pack, pack_stride):
             # All warps load their chunk from tmp into smem
             src_pack_idx = warp_id * part_p + cur
             src_off_i32 = src_pack_idx * _ELEMS_PER_PACK
-            raw = fx.Vector.filled(4, 0, fx.Int32)
+            raw = fx.full(4, 0, fx.Int32)
             if not bad_load_addr:
                 raw = _load_v4i32(tmp_out_rsrc_desc, src_off_i32)
 

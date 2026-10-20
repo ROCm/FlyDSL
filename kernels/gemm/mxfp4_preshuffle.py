@@ -56,7 +56,7 @@ def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves, pair):
     col_base = rocdl.readfirstlane(T.i32, row_elems * KH4)
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
-    base_iter = fx.inttoptr(i32_ptr_ty, arg_bq_addr + off_i64 * fx.Int64(4))
+    base_iter = fx.inttoptr(i32_ptr_ty, arg_bq_addr + off_i64 * 4)
     shape = (4, 16, k_tiles, k_halves, pair, 4)
     strides = (64, 4, k_halves * pair * 256, pair * 256, 256, 1)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, strides)))
@@ -226,7 +226,7 @@ def launch_gemm(
                 arg_a = arg_a + bz * fx.Int64(a_batch_stride)
             arg_b = arg_b + bz * fx.Int64(N * b_row_bytes)
             if const_expr(sca_batch_stride < 0):
-                sc_bstride = fx.Int64((i32_m + 31) // 32) * fx.Int64(_scale_chunk_dw_a) * fx.Int64(4)
+                sc_bstride = fx.Int64((i32_m + 31) // 32) * fx.Int64(_scale_chunk_dw_a) * 4
                 arg_scale_a = arg_scale_a + bz * sc_bstride
             else:
                 arg_scale_a = arg_scale_a + bz * fx.Int64(sca_batch_stride)
@@ -238,7 +238,7 @@ def launch_gemm(
         # A source view, bound to the last valid M row (ragged M OOB -> 0).
         _i8g = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=16)
         if const_expr(batch > 1 and a_row_stride >= 0):
-            a_nrec = fx.Int64(i32_m - fx.Int32(1)) * fx.Int64(a_rstride) + fx.Int64(a_row_bytes)
+            a_nrec = fx.Int64(i32_m - 1) * fx.Int64(a_rstride) + fx.Int64(a_row_bytes)
         else:
             a_nrec = fx.Int64(i32_m) * fx.Int64(a_row_bytes)
         a_flat = fx.rocdl.make_buffer_tensor(
@@ -332,9 +332,9 @@ def launch_gemm(
         _sc_layout = fx.make_layout(1 << 28, 1)
         _a_sc_chunks = (i32_m + 31) // 32
         if const_expr(batch > 1 and sca_row_stride >= 0):
-            a_sc_nrec = (fx.Int64(_a_sc_chunks - 1) * fx.Int64(sca_rstride) + fx.Int64(_scale_chunk_dw_a)) * fx.Int64(4)
+            a_sc_nrec = (fx.Int64(_a_sc_chunks - 1) * fx.Int64(sca_rstride) + fx.Int64(_scale_chunk_dw_a)) * 4
         else:
-            a_sc_nrec = fx.Int64(_a_sc_chunks) * fx.Int64(_scale_chunk_dw_a) * fx.Int64(4)
+            a_sc_nrec = fx.Int64(_a_sc_chunks) * fx.Int64(_scale_chunk_dw_a) * 4
         b_sc_nrec = fx.Int64(_b_sc_rows * _scale_chunk_dw_b * 4)
         sa_flat = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
@@ -378,7 +378,7 @@ def launch_gemm(
                         hi = fx.make_rmem_tensor(4, Int32)
                         fx.copy(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 1, None], hi)
                         t = fx.make_rmem_tensor(B_NDW, Int32)
-                        t.store(Vec(fx.memref_load_vec(lo)).shuffle(Vec(fx.memref_load_vec(hi)), list(range(B_NDW))))
+                        t.store(fx.memref_load_vec(lo).shuffle(fx.memref_load_vec(hi), list(range(B_NDW))))
                         ops.append(t)
             return ops
 
@@ -470,7 +470,7 @@ def launch_gemm(
                 rocdl.sched_mfma(1)
             rocdl.sched_barrier(0)
 
-        accs_init = [Vec.filled(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
+        accs_init = [fx.full(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
 
         dma_a_to_lds(kt0, fx.Int32(0))
         rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
@@ -511,9 +511,7 @@ def launch_gemm(
             _ebytes = 2
             c_addr = arg_c
             if const_expr(batch > 1):
-                c_bstride = (
-                    fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(2) if c_batch_stride < 0 else fx.Int64(c_batch_stride)
-                )
+                c_bstride = fx.Int64(i32_m) * fx.Int64(N) * 2 if c_batch_stride < 0 else fx.Int64(c_batch_stride)
                 c_addr = c_addr + fx.Int64(bz_batch) * c_bstride
 
         c_tile_addr = c_addr + fx.Int64(bx_m) * fx.Int64(c_stride) * fx.Int64(_ebytes)
@@ -542,7 +540,7 @@ def launch_gemm(
                 acc = Vec(accs[mi * num_acc_n + ni]).to(store_elem)
                 for ii in range_constexpr(4):
                     cf = fx.make_rmem_tensor(1, store_elem)
-                    cf.store(Vec.from_elements([acc[ii]], store_elem))
+                    cf.store(fx.full(1, acc[ii], store_elem))
                     off = (row_local + ii) * c_rstride + col
                     fx.copy(c_copy, cf, c_flat[None, off])
 
@@ -625,13 +623,13 @@ def launch_splitk_reduce(
             )
             return fx.logical_divide(buf, frag_layout)
 
-        in_t = _tiled(tmp, Float32, fx.Int64(slab_dw_i) * fx.Int64(split_k) * fx.Int64(4))
-        out_t = _tiled(out, out_elem, fx.Int64(n_out_dw_i) * fx.Int64(4))
+        in_t = _tiled(tmp, Float32, fx.Int64(slab_dw_i) * fx.Int64(split_k) * 4)
+        out_t = _tiled(out, out_elem, fx.Int64(n_out_dw_i) * 4)
         in_copy = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), Float32)  # 2 x f32
         out_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), out_elem)  # 2 x 16b
 
         if vt < n_out_dw_i:
-            acc = Vec.filled(_REDUCE_VEC, 0.0, Float32)
+            acc = fx.full(_REDUCE_VEC, 0.0, Float32)
             for sk in range_constexpr(split_k):
                 frag = fx.make_rmem_tensor(frag_layout, Float32)
                 fx.copy(

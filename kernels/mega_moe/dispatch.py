@@ -148,7 +148,7 @@ def _publish_tile_range(p_tile_ready, destination, destination_base, row_begin, 
         first_tile = (destination_base + row_begin) // rows_per_tile
         last_tile = (destination_base + row_end - fx.Int32(1)) // rows_per_tile
         for tile in range(first_tile, last_tile + fx.Int32(1), 1):
-            comm_ops.atomic_add_system(remote_tile_ready + fx.Int64(tile) * fx.Int64(4), fx.Int32(1))
+            comm_ops.atomic_add_system(remote_tile_ready + fx.Int64(tile) * 4, fx.Int32(1))
 
 
 # fmt: off
@@ -196,7 +196,7 @@ def emit_direct_fixed_slot_payload(
         if lane == fx.Int32(0):
             global_expert_lane = buffer_ops.buffer_load(r_idx, wk, vec_width=1, dtype=fx.Int32)
         global_expert = fx.Int32(fx.rocdl.readfirstlane(T.i32, global_expert_lane))
-        valid_expert = (global_expert >= fx.Int32(0)) & (global_expert < fx.Int32(fz_total_experts))
+        valid_expert = (global_expert >= 0) & (global_expert < fx.Int32(fz_total_experts))
         safe_expert = valid_expert.select(global_expert, fx.Int32(0))
         destination = safe_expert // fx.Int32(fz_epr)
         local_expert = safe_expert - destination * fx.Int32(fz_epr)
@@ -208,7 +208,7 @@ def emit_direct_fixed_slot_payload(
                     crfa(p_running), destination, vec_width=1, dtype=fx.Int64
                 )
                 offset_lane = comm_ops.atomic_add_system(
-                    remote_running + fx.Int64(local_expert) * fx.Int64(4), fx.Int32(1)
+                    remote_running + fx.Int64(local_expert) * 4, fx.Int32(1)
                 )
         expert_offset = fx.Int32(fx.rocdl.readlane(T.i32, offset_lane, 0))
         publish = assigned & (expert_offset < fx.Int32(fz_cap))
@@ -245,7 +245,7 @@ def emit_direct_fixed_slot_payload(
     if tid == fx.Int32(0):
         comm_ops.fence_system_release()
         done = comm_ops.atomic_add_agent(
-            a_producer_done + fx.Int64(producer_group) * fx.Int64(4), fx.Int32(1)
+            a_producer_done + fx.Int64(producer_group) * 4, fx.Int32(1)
         )
         if done == fx.Int32(producers_per_group - 1):
             comm_ops.fence_agent_acquire()
@@ -287,7 +287,7 @@ def emit_direct_fixed_slot_finalize(
     if warp == fx.Int32(0):
         for source in range(lane, fz_npes, 64):
             done_index = parity * fx.Int32(fz_npes) + source
-            mori_shmem.int32_wait_until_equals(a_source_done + fx.Int64(done_index) * fx.Int64(4), expected)
+            mori_shmem.int32_wait_until_equals(a_source_done + fx.Int64(done_index) * 4, expected)
         comm_ops.fence_system_acquire()
 
         valid_expert = lane < fx.Int32(fz_epr)
@@ -404,7 +404,7 @@ def emit_dispatch_plan(
             comm_ops.fence_agent_release()
     else:
         if const_expr(num_waves >= 8):
-            for wk0 in range(gtid, wl, gnt * fx.Int32(2)):
+            for wk0 in range(gtid, wl, gnt * 2):
                 wk1 = wk0 + gnt
                 valid_wk1 = wk1 < wl
                 safe_wk1 = valid_wk1.select(wk1, fx.Int32(0))
@@ -413,15 +413,15 @@ def emit_dispatch_plan(
                 valid0 = (expert0 >= fx.Int32(0)) & (expert0 < fx.Int32(fz_total_experts))
                 valid1 = valid_wk1 & (expert1 >= fx.Int32(0)) & (expert1 < fx.Int32(fz_total_experts))
                 if valid0:
-                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert0) * fx.Int64(4), fx.Int32(1))
+                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert0) * 4, fx.Int32(1))
                 if valid1:
-                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert1) * fx.Int64(4), fx.Int32(1))
+                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert1) * 4, fx.Int32(1))
         else:
             for wk in range(gtid, wl, gnt):
                 expert = buffer_ops.buffer_load(r_idx, wk, vec_width=1, dtype=fx.Int32)
                 valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
                 if valid:
-                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
+                    comm_ops.atomic_add_agent(a_lh + fx.Int64(expert) * 4, fx.Int32(1))
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     fx.barrier()
     comm_ops.fence_agent_acquire()
@@ -456,7 +456,7 @@ def emit_dispatch_plan(
             comm_ops.store_i32_system(remote_done, done_index, expected)
         for source in range(lane, fz_npes, 64):
             done_index = parity * fx.Int32(fz_npes) + source
-            mori_shmem.int32_wait_until_equals(a_cd + fx.Int64(done_index) * fx.Int64(4), expected)
+            mori_shmem.int32_wait_until_equals(a_cd + fx.Int64(done_index) * 4, expected)
         comm_ops.fence_system_acquire()
 
         r_nv = crfa(a_nv)
@@ -574,7 +574,7 @@ def emit_dispatch_plan(
         if warp > fx.Int32(0):
             if warp > fx.Int32(1):
                 if lane == fx.Int32(0):
-                    mori_shmem.int32_wait_until_equals(a_pair_ready + fx.Int64(parity) * fx.Int64(4), expected)
+                    mori_shmem.int32_wait_until_equals(a_pair_ready + fx.Int64(parity) * 4, expected)
                     comm_ops.fence_agent_acquire()
             group_tid = (warp - fx.Int32(1)) * fx.Int32(64) + lane
             group_threads = fx.Int32((num_waves - 1) * 64)
@@ -582,7 +582,7 @@ def emit_dispatch_plan(
                 expert = buffer_ops.buffer_load(r_idx, wk, vec_width=1, dtype=fx.Int32)
                 valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
                 if valid:
-                    position = comm_ops.atomic_add_agent(a_lc + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
+                    position = comm_ops.atomic_add_agent(a_lc + fx.Int64(expert) * 4, fx.Int32(1))
                     buffer_ops.buffer_store(wk, r_pair, position)
 
     fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
@@ -634,14 +634,14 @@ def emit_dispatch_group(
             expert = buffer_ops.buffer_load(r_idx, route, vec_width=1, dtype=fx.Int32)
             valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
             if valid:
-                comm_ops.atomic_add_agent(a_local_hist + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
+                comm_ops.atomic_add_agent(a_local_hist + fx.Int64(expert) * 4, fx.Int32(1))
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         fx.barrier()
         if tid == fx.Int32(0):
             comm_ops.fence_agent_release()
             comm_ops.atomic_add_agent(a_group_done, fx.Int32(1))
     if tid == fx.Int32(0):
-        mori_shmem.int32_wait_until_equals(a_pair_ready + fx.Int64(parity) * fx.Int64(4), expected)
+        mori_shmem.int32_wait_until_equals(a_pair_ready + fx.Int64(parity) * 4, expected)
         comm_ops.fence_agent_acquire()
     fx.barrier()
 
@@ -658,14 +658,14 @@ def emit_dispatch_group(
             expert = buffer_ops.buffer_load(r_idx, route, vec_width=1, dtype=fx.Int32)
             valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
             if valid:
-                position = comm_ops.atomic_add_agent(a_local_cursor + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
+                position = comm_ops.atomic_add_agent(a_local_cursor + fx.Int64(expert) * 4, fx.Int32(1))
                 buffer_ops.buffer_store(route, r_pair, position)
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         fx.barrier()
         if tid == fx.Int32(0):
             comm_ops.fence_agent_release()
             comm_ops.atomic_add_agent(a_group_done, fx.Int32(1))
-            mori_shmem.int32_wait_until_equals(a_pair_order_ready + fx.Int64(parity) * fx.Int64(4), expected)
+            mori_shmem.int32_wait_until_equals(a_pair_order_ready + fx.Int64(parity) * 4, expected)
             comm_ops.fence_agent_acquire()
     fx.barrier()
 
@@ -717,13 +717,13 @@ def emit_dispatch_payload(
         comm_ops.fence_system_release()
         ready_remote = buffer_ops.buffer_load(crfa(p_payload_ready), destination, vec_width=1, dtype=fx.Int64)
         ready_index = parity * fx.Int32(fz_epr) + local_expert
-        comm_ops.atomic_add_system(ready_remote + fx.Int64(ready_index) * fx.Int64(4), fx.Int32(1))
+        comm_ops.atomic_add_system(ready_remote + fx.Int64(ready_index) * 4, fx.Int32(1))
         buffer_ops.buffer_store(fx.Int32(0), r_lh, ge)
 
     def _finish_task(destination, local_expert, ge, num_chunks):
         if const_expr(payload_chunk_rows > 0):
             comm_ops.fence_system_release()
-            completed = comm_ops.atomic_add_agent(a_chunk_done + fx.Int64(ge) * fx.Int64(4), fx.Int32(1))
+            completed = comm_ops.atomic_add_agent(a_chunk_done + fx.Int64(ge) * 4, fx.Int32(1))
             if completed == num_chunks - fx.Int32(1):
                 comm_ops.fence_agent_acquire()
                 buffer_ops.buffer_store(fx.Int32(0), r_chunk_done, ge)
@@ -745,7 +745,7 @@ def emit_dispatch_payload(
     producer_destination = producer_slot % fx.Int32(num_destinations)
     ready_index = parity * fx.Int32(num_destinations) + producer_destination
     if tid == fx.Int32(0):
-        mori_shmem.int32_wait_until_equals(a_plan_ready + fx.Int64(ready_index) * fx.Int64(4), expected)
+        mori_shmem.int32_wait_until_equals(a_plan_ready + fx.Int64(ready_index) * 4, expected)
         comm_ops.fence_system_acquire()
     destination_ready_rows = fx.Int32(0)
     if const_expr(payload_tile_ready):
@@ -791,7 +791,7 @@ def emit_dispatch_payload(
             row_end = chunk_active.select(chunk_end, fx.Int32(0))
         else:
             num_chunks = fx.Int32(1)
-            chunk_active = fx.Int32(0) == fx.Int32(0)
+            chunk_active = fx.Int32(0) == 0
             row_begin = fx.Int32(0)
             row_end = source_count
         if const_expr(hoist_remote_resources):
@@ -811,7 +811,7 @@ def emit_dispatch_payload(
 
             def _copy_route_header():
                 weight = buffer_ops.buffer_load(r_wts, wk, vec_width=1, dtype=fx.Float32)
-                source_encoding = (fx.Int32(fz_rank * fz_mtpr) + source_token) | (topk_slot << fx.Int32(24))
+                source_encoding = (fx.Int32(fz_rank * fz_mtpr) + source_token) | (topk_slot << 24)
                 weight_bits = fx.Float32(weight).bitcast(fx.Int32)
                 if const_expr(hoist_remote_resources):
                     buffer_ops.buffer_store(weight_bits, wts_remote_rsrc, destination_row)

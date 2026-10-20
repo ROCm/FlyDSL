@@ -135,7 +135,7 @@ def build_communication(kc: KernelCtx) -> dict:
     swiglu_limit = kc.swiglu_limit
 
     def ctrl_at(a, idx):
-        return fx.Int64(a["ctrl"]) + fx.Int64(i32(idx) * i32(4))
+        return fx.Int64(a["ctrl"]) + fx.Int64(i32(idx) * 4)
 
     def lrdy_at(a, c):
         return ctrl_at(a, i32(CTRL_LRDY) + c * i32(LRDY_STRIDE))
@@ -283,7 +283,7 @@ def build_communication(kc: KernelCtx) -> dict:
         if const_expr(MLL):
             for i_ in range(tid, n, i32(NT)):
                 i = i32(i_)
-                pk = fx.Vector(bld(rid, i * i32(16), 0, V4I, 0))
+                pk = fx.Vector(bld(rid, i * 16, 0, V4I, 0))
                 hit = (fx.Int32(pk[0]) == expert) & _in_chunk(i, chunk)
                 _gather_one(L, i, hit, fx.Int32(pk[2]))
         else:
@@ -313,8 +313,8 @@ def build_communication(kc: KernelCtx) -> dict:
                         lds_st(L, L_WT + slot * i32(4), fx.Int32(wv))
             for idx_ in range(n4 * i32(4) + tid, n, i32(NT)):
                 idx = i32(idx_)
-                e = g_ld_i32(fx.Int64(ids_addr) + fx.Int64(idx) * fx.Int64(4))
-                wv = g_ld_i32(fx.Int64(tw_addr) + fx.Int64(idx) * fx.Int64(4))
+                e = g_ld_i32(fx.Int64(ids_addr) + fx.Int64(idx) * 4)
+                wv = g_ld_i32(fx.Int64(tw_addr) + fx.Int64(idx) * 4)
                 _gather_one(L, idx, (e == expert) & _in_chunk(idx, chunk), wv)
         cbar(L, tid)
         if tid == i32(0):
@@ -336,10 +336,10 @@ def build_communication(kc: KernelCtx) -> dict:
             off = fx.min(i, n - i32(1)) * i32(16 if MLL else 4)
             e = fx.Int32(bld(rid, off, 0, T.i32, 0))
             bal = fx.Int64(rocdl.ballot(T.i64, (i < hi) & masked(e)))
-            if bal != fx.Int64(0):
+            if bal != 0:
                 for j_ in range(i32(0), i32(64), i32(1)):
                     j = i32(j_)
-                    if ((bal >> fx.Int64(j)) & fx.Int64(1)) != fx.Int64(0):
+                    if ((bal >> fx.Int64(j)) & 1) != 0:
                         _zero_route(a, lane, i32(b_) + j)
                 wait_vm(0)
 
@@ -354,15 +354,15 @@ def build_communication(kc: KernelCtx) -> dict:
                 q = i32(q_)
                 if const_expr(DLL):
                     v = ll_pkt(a, i32(0), i32(0), i32(0))
-                    bst(v, rs, base + (ridx * i32(H) + q * i32(8)) * i32(2), 0, AUX_SC1)
+                    bst(v, rs, base + (ridx * i32(H) + q * 8) * i32(2), 0, AUX_SC1)
                 elif const_expr(route_fp8):
                     if q < i32(H // 16):
-                        bst(z, rs, base + ridx * i32(H) + q * i32(16), 0, AUX_SC1)
+                        bst(z, rs, base + ridx * i32(H) + q * 16, 0, AUX_SC1)
                     if q < i32(H // 512):
                         soff = a["ttot"] * i32(TOPK * H) + ridx * i32(H // 32)
-                        bst(z, rs, base + soff + q * i32(16), 0, AUX_SC1)
+                        bst(z, rs, base + soff + q * 16, 0, AUX_SC1)
                 else:
-                    bst(z, rs, base + (ridx * i32(H) + q * i32(8)) * i32(2), 0, AUX_SC1)
+                    bst(z, rs, base + (ridx * i32(H) + q * 8) * i32(2), 0, AUX_SC1)
 
     @traced
     def _wave_claim(L, tid, n):
@@ -429,7 +429,7 @@ def build_communication(kc: KernelCtx) -> dict:
 
     def push_units(ttot):
         nblk = i32(gpu.grid_dim.x)
-        return fx.min(i32(2) * nblk, ttot)
+        return fx.min(2 * nblk, ttot)
 
     def push_first_unit(ns, cidx):
         nblk = i32(gpu.grid_dim.x)
@@ -623,7 +623,7 @@ def build_communication(kc: KernelCtx) -> dict:
                 for q_ in range(tid, i32(TPC * (H // 8)), i32(NTT)):
                     q = i32(q_)
                     p = q // nq
-                    col = (q - p * nq) * i32(8)
+                    col = (q - p * nq) * 8
                     if p != a["rank"]:
                         grow = p * a["m"] + row
                         doff, soff = part_offs(a, grow, col)
@@ -1077,7 +1077,7 @@ def build_communication(kc: KernelCtx) -> dict:
             rid = rsrc(a["ids_in"], n * i32(4))
             rtw = rsrc(a["tw_in"], n * i32(4))
             dst0 = a["rank"] * n * i32(4)
-            v = bid * i32(64) + lane
+            v = bid * 64 + lane
             idv = bld(rid, v * i32(16), 0, V4I, 0)
             wvv = bld(rtw, v * i32(16), 0, V4I, 0)
             e = n4 * i32(4) + lane
@@ -1085,7 +1085,7 @@ def build_communication(kc: KernelCtx) -> dict:
             wte = bld(rtw, e * i32(4), 0, T.i32, 0)
             big = i32(1 << 30)
             vo = (v < n4).select(dst0 + v * i32(16), big)
-            eo = ((bid == i32(0)) & (e < n)).select(dst0 + e * i32(4), big)
+            eo = ((bid == 0) & (e < n)).select(dst0 + e * i32(4), big)
             for p in range_constexpr(TPC):
                 ri = peer_rs(a, p, "off_ids", big)
                 rw = peer_rs(a, p, "off_w", big)
@@ -1107,10 +1107,10 @@ def build_communication(kc: KernelCtx) -> dict:
         rid = rsrc(a["ids_in"], n * i32(4))
         rtw = rsrc(a["tw_in"], n * i32(4))
         big = i32(1 << 30)
-        for i_ in range(i32(gpu.block_id("x")) * i32(64) + lane, n, i32(gpu.grid_dim.x) * i32(64)):
+        for i_ in range(i32(gpu.block_id("x")) * 64 + lane, n, i32(gpu.grid_dim.x) * 64):
             i = i32(i_)
-            e = fx.Int32(bld(rid, i * i32(4), 0, T.i32, 0))
-            wv = fx.Int32(bld(rtw, i * i32(4), 0, T.i32, 0))
+            e = fx.Int32(bld(rid, i * 4, 0, T.i32, 0))
+            wv = fx.Int32(bld(rtw, i * 4, 0, T.i32, 0))
             pkt = fx.Vector.from_elements([e, a["epoch"], wv, a["epoch"]], fx.Int32)
             off = (a["rank"] * n + i) * i32(16)
             for p in range_constexpr(TPC):
@@ -1122,11 +1122,11 @@ def build_communication(kc: KernelCtx) -> dict:
         rid = rsrc(a["ids"])
         for i_ in range(tid, n, i32(NT)):
             i = i32(i_)
-            t = fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1]
+            t = fx.Vector(bld(rid, i * 16, 0, V4I, AUX_SYS))[1]
             t0 = now()
             while (t != a["epoch"]) & alive(t0):
                 rocdl.s_sleep(1)
-                t = fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1]
+                t = fx.Vector(bld(rid, i * 16, 0, V4I, AUX_SYS))[1]
             _report_if(a, t != a["epoch"], ERR_META)
 
     def _meta_pending(a, lane, epoch, own=False):
@@ -1192,10 +1192,10 @@ def build_communication(kc: KernelCtx) -> dict:
         if (tid >= i32(NT + 64)) & (tid < i32(NT + 64 + NBW)):
             lds_st(L, L_DYN + (tid - i32(NT + 64)) * i32(4), i32(0))
         for e_ in range(tid, i32(E), i32(NTT)):
-            lds_st(L, L_DCNT + i32(e_) * i32(4), i32(0))
+            lds_st(L, L_DCNT + i32(e_) * 4, i32(0))
         if const_expr(lb):
             for e_ in range(tid, i32(E), i32(NTT)):
-                lds_st(L, L_DPRE + i32(e_) * i32(4), i32(0))
+                lds_st(L, L_DPRE + i32(e_) * 4, i32(0))
 
     @traced
     def init_lds(L, tid, a):
@@ -1232,7 +1232,7 @@ def build_communication(kc: KernelCtx) -> dict:
 
     def _dll_items(ws):
         nblk = i32(gpu.grid_dim.x)
-        return i32(gpu.block_id("x")) + i32(ws) * nblk, nblk * i32(4)
+        return i32(gpu.block_id("x")) + i32(ws) * nblk, nblk * 4
 
     @traced
     def push_dll(L, tid, a, ws=0):

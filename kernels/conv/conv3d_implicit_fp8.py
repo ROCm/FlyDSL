@@ -615,7 +615,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             y_elem_base = fx.Int64(fx.ptrtoint(fx.get_iter(y)))
 
         def _big_store(off_elem, value):
-            addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
+            addr = y_elem_base + fx.Int64(off_elem) * 2
             ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y).llvm_ptr
             v = value.ir_value() if hasattr(value, "ir_value") else value
             llvm.StoreOp(v, ptr, alignment=2)
@@ -628,7 +628,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                     if const_expr(has_bias):
                         col_i = fx.Int32(col_valid.select(col, fx.Int64(0)))
                         fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
-                        bias_val = fx.Float32(fx.memref_load_vec(bias_reg)[0])
+                        bias_val = fx.memref_load_vec(bias_reg)[0]
                     vec_f32 = Vec(c_frag[mfma.idx(ti, tj)])
                     row_base = base_row + fx.Int64(ti * 16) + (lane_id // 16) * 4
 
@@ -664,7 +664,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                             # Route masked-off lanes one element past the end; the
                             # descriptor's num_records bound drops them in hardware.
                             off_i = fx.Int32(valid.select(off_ncdhw, fx.Int64(npq * k)))
-                            fx.memref_store_vec(Vec.filled(1, out.to(fx.BFloat16), fx.BFloat16), y_reg_1)
+                            fx.memref_store_vec(fx.full(1, out.to(fx.BFloat16), fx.BFloat16), y_reg_1)
                             fx.copy(y_atom_1, y_reg_1, fx.slice(y_div, (None, off_i)))
 
         wave_m_offset = wave_m * (N_TILES_A * 16)

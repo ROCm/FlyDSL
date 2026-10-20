@@ -291,9 +291,7 @@ def compile_preshuffle_gemm(
             arg_a, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes)
         )
         gB = fx.rocdl.make_buffer_tensor(arg_b)
-        gC = fx.rocdl.make_buffer_tensor(
-            arg_c, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(2)
-        )
+        gC = fx.rocdl.make_buffer_tensor(arg_c, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(N) * 2)
 
         tA = fx.flat_divide(gA, fx.make_tile(tile_m, tile_k))[None, None, bid_x, None]
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
@@ -563,7 +561,7 @@ def compile_preshuffle_gemm(
                 gpu.barrier()
 
         # ── Prologue ──────────────────────────────────────────────
-        acc_zero = Vec.filled(acc_size, 0, Int32) if const_expr(is_int8) else Vec.filled(acc_size, 0.0, Float32)
+        acc_zero = fx.full(acc_size, 0, Int32) if const_expr(is_int8) else fx.full(acc_size, 0.0, Float32)
         if const_expr(use_async_copy):
             dma_a_to_lds(fx.Int32(0), 0)
             fx.copy(buf_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])

@@ -191,14 +191,14 @@ class StoreC:
 
     def _load_scale_vec4(self, row):
         fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), self.reg_f32_4)
-        return Vec(fx.memref_load_vec(self.reg_f32_4))
+        return fx.memref_load_vec(self.reg_f32_4)
 
     def _load_scale_scalar(self, col):
         fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), self.reg_f32_1)
-        return Vec(fx.memref_load_vec(self.reg_f32_1))[0]
+        return fx.memref_load_vec(self.reg_f32_1)[0]
 
     def _store_bf16(self, value_bf16, c_index):
-        fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
+        fx.memref_store_vec(fx.full(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
         fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def store(self, c_frag, base_row, base_col):
@@ -239,7 +239,7 @@ def wait_barrier(count):
 class Mfma16x16x128:
     def __init__(self, n_tiles_a, n_tiles_b):
         self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+        self.zero_value = fx.full(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
 

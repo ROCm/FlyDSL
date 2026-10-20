@@ -551,7 +551,7 @@ def build_kimi_k3_monokernel(
 
         def store_i32(mailbox_rsrc, index, value):
             bo.buffer_store(
-                fx.Vector.from_elements([fx.Int32(value), tag], fx.Int32),
+                fx.Vector.from_elements([value, tag], fx.Int32),
                 mailbox_rsrc,
                 index * 2,
                 cache_modifier=CM_DEV,
@@ -780,9 +780,7 @@ def build_kimi_k3_monokernel(
                     inverse = nonzero.select(rcp(scale), fx.Float32(1.0))
                     q_low = fx.min(fx.max(rounded[0] * inverse, -FP8_MAX), FP8_MAX)
                     q_high = fx.min(fx.max(rounded[1] * inverse, -FP8_MAX), FP8_MAX)
-                    packed_fp8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q_low, q_high, fx.Int32(0), False)) & fx.Int32(
-                        0xFFFF
-                    )
+                    packed_fp8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q_low, q_high, fx.Int32(0), False)) & 0xFFFF
                     neighbor = xshfl(packed_fp8, 1)
                     if lane % 2 == 0:
                         bo.buffer_store(
@@ -1017,9 +1015,7 @@ def build_kimi_k3_monokernel(
                         inverse = nonzero.select(rcp(scale), fx.Float32(1.0))
                         q_low = fx.min(fx.max(rounded[0] * inverse, -FP8_MAX), FP8_MAX)
                         q_high = fx.min(fx.max(rounded[1] * inverse, -FP8_MAX), FP8_MAX)
-                        packed_fp8 = fx.Int32(
-                            rocdl.cvt_pk_fp8_f32(T.i32, q_low, q_high, fx.Int32(0), False)
-                        ) & fx.Int32(0xFFFF)
+                        packed_fp8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q_low, q_high, fx.Int32(0), False)) & 0xFFFF
                         neighbor = xshfl(packed_fp8, 1)
                         if lane % 2 == 0:
                             bo.buffer_store(
@@ -1235,20 +1231,23 @@ def build_kimi_k3_monokernel(
             lane_div16 = lane // 16
             lane_mod16 = lane % 16
             accumulator = fx.make_rmem_tensor(4, fx.Float32)
-            accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
+            accumulator.store(fx.full(4, 0.0, fx.Float32))
             valid_sample = lane_mod16 < sample_count
             sample = fx.min(lane_mod16, sample_count - 1)
             scale_lane = lane_div16 * 16 + lane_mod16
             for k256 in range_constexpr(k_scale_chunks):
-                activation_scale = fx.Int32(
-                    bo.buffer_load(
-                        quantized_moe_scale_rsrc,
-                        k256 * 64 + lane_div16 * 16 + sample_base + sample,
-                        vec_width=1,
-                        dtype=T.i32,
-                        cache_modifier=CM_DEV,
+                activation_scale = (
+                    fx.Int32(
+                        bo.buffer_load(
+                            quantized_moe_scale_rsrc,
+                            k256 * 64 + lane_div16 * 16 + sample_base + sample,
+                            vec_width=1,
+                            dtype=T.i32,
+                            cache_modifier=CM_DEV,
+                        )
                     )
-                ) & fx.Int32(0x00FF00FF)
+                    & 0x00FF00FF
+                )
                 weight_scale = fx.Int32(
                     bo.buffer_load(
                         scale_rsrc,
@@ -1401,7 +1400,7 @@ def build_kimi_k3_monokernel(
                 )
             )
             scales = [
-                ((packed_scale.shrui(fx.Int32(step * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+                ((packed_scale.shrui(fx.Int32(step * 8)) & 0xFF) << 23).bitcast(fx.Float32)
                 for step in range_constexpr(4)
             ]
             return raw, scales
@@ -1414,7 +1413,7 @@ def build_kimi_k3_monokernel(
                     x + input_word + (lane // 16) * 4 + step * 16,
                     result_type=fx.Vector.make_type(4, fx.Float32),
                 ).bitcast(fx.BFloat16)
-                partial = fx.Vector.filled(4, 0.0, fx.Float32)
+                partial = fx.full(4, 0.0, fx.Float32)
                 partial = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [lhs, rhs, partial]))
                 if const_expr(coefficient is None):
                     accumulator = [accumulator[item] + partial[item] for item in range_constexpr(4)]
@@ -1433,7 +1432,7 @@ def build_kimi_k3_monokernel(
         ):
             k_chunks = k_dim // 64
             chunks_per_wave = k_chunks // split_waves
-            accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+            accumulator = fx.full(4, 0.0, fx.Float32)
             for local_chunk in range_constexpr(chunks_per_wave):
                 chunk = split_wave * chunks_per_wave + local_chunk
                 for step_index in range_constexpr(2):
@@ -1461,8 +1460,8 @@ def build_kimi_k3_monokernel(
                         )
                     )
                     scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
-                    scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
-                    scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
+                    scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & 0xFF
+                    scale = (scale_byte << 23).bitcast(fx.Float32)
                     lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
                     rhs = fx.ptr_load(
                         x + activation_word_base + (chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,
@@ -1653,7 +1652,7 @@ def build_kimi_k3_monokernel(
             if tid < 4 * _HEAD_DIM:
                 gate_row = tid // 4
                 gate_split = tid % 4
-                gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                gate_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                 for feature_group in range_constexpr(0, _HEAD_DIM, 4 * _VALUES_PER_THREAD):
                     feature_base = feature_group + gate_split * _VALUES_PER_THREAD
                     features = fx.ptr_load(
@@ -1716,7 +1715,7 @@ def build_kimi_k3_monokernel(
                     )
                 ).to(fx.Float32)
                 values = fx.Vector.from_elements(
-                    [fx.Float32(state0), fx.Float32(state1), fx.Float32(state2), current],
+                    [state0, state1, state2, current],
                     fx.Float32,
                 )
                 convolution = (values * weights).reduce(fx.ReductionOp.ADD)
@@ -1824,18 +1823,18 @@ def build_kimi_k3_monokernel(
                 query_inverse_norm = rsq(subgroup_sum(query_square) + fx.Float32(1.0e-6))
                 key_inverse_norm = rsq(subgroup_sum(key_square) + fx.Float32(1.0e-6))
                 for k_iter in range_constexpr(_K_ITERS):
-                    query_vectors[k_iter] = query_vectors[k_iter] * fx.Vector.filled(
+                    query_vectors[k_iter] = query_vectors[k_iter] * fx.full(
                         _VALUES_PER_THREAD,
                         query_inverse_norm * fx.Float32(_Q_SCALE),
                         fx.Float32,
                     )
-                    key_vectors[k_iter] = key_vectors[k_iter] * fx.Vector.filled(
+                    key_vectors[k_iter] = key_vectors[k_iter] * fx.full(
                         _VALUES_PER_THREAD,
                         key_inverse_norm,
                         fx.Float32,
                     )
 
-                dot_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                dot_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                 for k_iter in range_constexpr(_K_ITERS):
                     dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
                 dot_key_query = subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
@@ -1859,8 +1858,8 @@ def build_kimi_k3_monokernel(
 
                 for v_iter in range_constexpr(_V_ITERS):
                     value_index = wave * _V_LANES + v_lane + v_iter * _V_TILE
-                    state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                    state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    state_key_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    state_query_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                     for k_iter in range_constexpr(_K_ITERS):
                         index = v_iter * _K_ITERS + k_iter
                         decayed = state_vectors[index] * decay_vectors[k_iter]
@@ -1871,7 +1870,7 @@ def build_kimi_k3_monokernel(
                     state_query = subgroup_sum(state_query_parts.reduce(fx.ReductionOp.ADD))
                     value_input = fx.Float32(fx.ptr_load(shared_value + value_index))
                     value_new = (value_input - state_key) * beta_value
-                    value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
+                    value_new_vector = fx.full(_VALUES_PER_THREAD, value_new, fx.Float32)
                     for k_iter in range_constexpr(_K_ITERS):
                         index = v_iter * _K_ITERS + k_iter
                         state_vectors[index] = fx.math.fma(key_vectors[k_iter], value_new_vector, state_vectors[index])
@@ -2038,9 +2037,9 @@ def build_kimi_k3_monokernel(
                     key_square = fx.Float32(0.0)
                     for k_iter in range_constexpr(mtp_k_iters):
                         k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
-                        query_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                        key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                        gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        query_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        key_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        gate_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                         if local_qkvg:
                             query_vector = fx.ptr_load(
                                 shared_query + k_base,
@@ -2116,25 +2115,25 @@ def build_kimi_k3_monokernel(
                     query_inverse_norm = rsq(mtp_subgroup_sum(query_square) + fx.Float32(1.0e-6))
                     key_inverse_norm = rsq(mtp_subgroup_sum(key_square) + fx.Float32(1.0e-6))
                     for k_iter in range_constexpr(mtp_k_iters):
-                        query_vectors[k_iter] = query_vectors[k_iter] * fx.Vector.filled(
+                        query_vectors[k_iter] = query_vectors[k_iter] * fx.full(
                             _VALUES_PER_THREAD,
                             query_inverse_norm * fx.Float32(_Q_SCALE),
                             fx.Float32,
                         )
-                        key_vectors[k_iter] = key_vectors[k_iter] * fx.Vector.filled(
+                        key_vectors[k_iter] = key_vectors[k_iter] * fx.full(
                             _VALUES_PER_THREAD,
                             key_inverse_norm,
                             fx.Float32,
                         )
 
-                    dot_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    dot_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                     for k_iter in range_constexpr(mtp_k_iters):
                         dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
                     dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
 
                     state_vectors = [None] * mtp_k_iters
-                    state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                    state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    state_key_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    state_query_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                     for k_iter in range_constexpr(mtp_k_iters):
                         k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
                         state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
@@ -2169,7 +2168,7 @@ def build_kimi_k3_monokernel(
                             )
                         )
                     value_new = (value_input - state_key) * beta_value
-                    value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
+                    value_new_vector = fx.full(_VALUES_PER_THREAD, value_new, fx.Float32)
                     for k_iter in range_constexpr(mtp_k_iters):
                         k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
                         state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
@@ -2226,9 +2225,7 @@ def build_kimi_k3_monokernel(
                 k_lane = lane % mtp_k_lanes
                 value_index = value_split * mtp_rows_per_split + wave * mtp_v_lanes + lane // mtp_k_lanes
                 input_slot = uniform(bo.buffer_load(indices_rsrc, sample_base, vec_width=1, dtype=T.i32))
-                state_vectors = [
-                    fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32) for _ in range_constexpr(mtp_k_iters)
-                ]
+                state_vectors = [fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32) for _ in range_constexpr(mtp_k_iters)]
                 if input_slot >= 0:
                     state_rsrc = rsrc(recurrent_state + fx.Int64(input_slot) * fx.Int64(_STATE_SLOT_BYTES))
                     for k_iter in range_constexpr(mtp_k_iters):
@@ -2288,9 +2285,9 @@ def build_kimi_k3_monokernel(
                         key_square = fx.Float32(0.0)
                         for k_iter in range_constexpr(mtp_k_iters):
                             k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
-                            query_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                            key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                            gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            query_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            key_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            gate_vector = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                             if local_qkvg:
                                 query_vector = fx.ptr_load(
                                     shared_query + k_base,
@@ -2358,24 +2355,24 @@ def build_kimi_k3_monokernel(
                         query_inverse_norm = rsq(mtp_pair_subgroup_sum(query_square) + fx.Float32(1.0e-6))
                         key_inverse_norm = rsq(mtp_pair_subgroup_sum(key_square) + fx.Float32(1.0e-6))
                         for k_iter in range_constexpr(mtp_k_iters):
-                            query_vectors[k_iter] = query_vectors[k_iter] * fx.Vector.filled(
+                            query_vectors[k_iter] = query_vectors[k_iter] * fx.full(
                                 _VALUES_PER_THREAD,
                                 query_inverse_norm * fx.Float32(_Q_SCALE),
                                 fx.Float32,
                             )
-                            key_vectors[k_iter] = key_vectors[k_iter] * fx.Vector.filled(
+                            key_vectors[k_iter] = key_vectors[k_iter] * fx.full(
                                 _VALUES_PER_THREAD,
                                 key_inverse_norm,
                                 fx.Float32,
                             )
 
-                        dot_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        dot_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                         for k_iter in range_constexpr(mtp_k_iters):
                             dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
                         dot_key_query = mtp_pair_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
 
-                        state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                        state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        state_key_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        state_query_parts = fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
                         for k_iter in range_constexpr(mtp_k_iters):
                             next_state_vectors[k_iter] = loop_args[k_iter] * decay_vectors[k_iter]
                             state_key_parts = fx.math.fma(
@@ -2406,7 +2403,7 @@ def build_kimi_k3_monokernel(
                                 )
                             )
                         value_new = (value_input - state_key) * beta_value
-                        value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
+                        value_new_vector = fx.full(_VALUES_PER_THREAD, value_new, fx.Float32)
                         for k_iter in range_constexpr(mtp_k_iters):
                             k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
                             state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
@@ -3205,7 +3202,7 @@ def build_kimi_k3_monokernel(
                         )
                         values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
                         gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
-                        gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+                        gains = fx.full(1, gain_word, fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
                         lds_store(
                             x,
                             shared_pairs + pair,

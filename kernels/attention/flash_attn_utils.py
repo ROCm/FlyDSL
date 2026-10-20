@@ -224,7 +224,7 @@ def _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype):
 
 def _packed_o_128_vec(traits, v_o, dc, g, lane_div_32, elem_dtype):
     return Vec.from_elements(
-        [fx.Int32(w) for w in _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype)],
+        _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype),
         fx.Int32,
     )
 
@@ -322,7 +322,7 @@ def _scale_v_p(traits, v_p, scale_scalar, elem_dtype, fm_fast):
     p_all = _v_p_to_vec32(v_p)
     p_all_f32_op = llvm.FPExtOp(v32f32_type, as_mlir_value(p_all))
     p_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(traits.PV_K_STEPS * 2 * 8)
+    scale_vec = fx.full(traits.PV_K_STEPS * 2 * 8, fx.Float32(scale_scalar), fx.Float32)
     p_scaled_f32 = as_mlir_value(scale_vec * Vec(p_all_f32_op.result))
     p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
     p_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
@@ -434,8 +434,8 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None, e
 
         lo, hi = _center(s_lo), _center(s_hi)
     else:
-        scale_v = Vec.from_elements([scale], fx.Float32).broadcast_to(16)
-        nsm_v = Vec.from_elements([neg_scaled_max], fx.Float32).broadcast_to(16)
+        scale_v = fx.full(16, fx.Float32(scale), fx.Float32)
+        nsm_v = fx.full(16, fx.Float32(neg_scaled_max), fx.Float32)
         lo = fx.fma(Vec(s_lo), scale_v, nsm_v, fastmath=fm_fast)
         hi = fx.fma(Vec(s_hi), scale_v, nsm_v, fastmath=fm_fast)
     return as_mlir_value(lo), as_mlir_value(hi)
@@ -481,7 +481,7 @@ def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
 
 
 def _scale_o_accs(v_o, scale_scalar, traits, fm_fast):
-    scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
+    scale_vec = fx.full(16, fx.Float32(scale_scalar), fx.Float32)
     for dc in range_constexpr(traits.D_CHUNKS):
         v_o[dc] = Vec(v_o[dc]) * scale_vec
 
@@ -565,7 +565,7 @@ def _dualwave_lds_noalias_scopes(name, scope_names):
 def _cu_load(div, idx, cu_atom, cu_v1i32):
     """Load cu_seqlens[idx] into an SGPR. ``idx`` must be wave-uniform."""
     v = fly.copy_atom_call_ssa([cu_v1i32], cu_atom, fx.slice(div, (None, fx.Int32(idx))))
-    return fx.Index(rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))))
+    return fx.Index(rocdl.readfirstlane(T.i32, as_mlir_value(Vec(v, (1,), fx.Int32)[0])))
 
 
 def _make_page_view(
@@ -611,8 +611,8 @@ def _make_raw_buffer_rsrc(tensor):
         [
             base_lo,
             base_hi,
-            fx.Int32(0xFFFFFFFF),
-            fx.Int32(buffer_ops._get_buffer_flags()),
+            0xFFFFFFFF,
+            buffer_ops._get_buffer_flags(),
         ],
         fx.Int32,
     ).ir_value()
@@ -743,7 +743,7 @@ def _ws_store_f32(f32_val, local_elem_index, rsrc):
 
 def _ws_store_quad_i32(dwords, local_elem_index, rsrc):
     """128-bit i32x4 store (buffer_store_dwordx4) into a per-split-z workspace region."""
-    vec_ir = Vec.from_elements([fx.Int32(v) for v in dwords], fx.Int32).ir_value()
+    vec_ir = Vec.from_elements(dwords, fx.Int32).ir_value()
     buffer_ops.buffer_store(vec_ir, rsrc, as_mlir_value(fx.Int32(local_elem_index)))
 
 
@@ -2338,7 +2338,7 @@ class GenericFlashAttnContext:
         self.c_zero_i32 = fx.Int32(0)
         self.c_sm_scale = fx.Float32(sm_scale)
         self.c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
-        self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        self.c_zero_v16f32 = fx.full(16, 0.0, fx.Float32)
         self.width_i32 = fx.Int32(traits.WARP_SIZE)
         self.shuf_32_i32 = fx.Int32(32)
         self.lane_xor_32_byte = (fx.Int32(self.lane) ^ self.shuf_32_i32) * fx.Int32(4)
@@ -2644,7 +2644,7 @@ class GenericKvGmemToLdsLoader:
                 elem = Vec(vec)[_e]
                 vt_d = ctx.load_col_base + _e
                 vt_idx = v_base + vt_d * traits.VT_STRIDE + lds_row
-                fx.ptr_store(Vec.from_elements([elem], ctx.elem_dtype), ctx.lds_kv + fx.Int64(vt_idx))
+                fx.ptr_store(fx.full(1, elem, ctx.elem_dtype), ctx.lds_kv + fx.Int64(vt_idx))
 
     def coop_load_v(self, tile_start, buf_id=0):
         """Cooperative V load, storing row-major or transposed per USE_HW_TR."""
@@ -3115,10 +3115,10 @@ class GenericSoftmaxHelper:
         # Physical KV column base per lane; KV_VECTORIZED applies sigma(kv) in the K load.
         ctx = self.ctx
         if const_expr(ctx.traits.KV_VECTORIZED):
-            lane_off = fx.Int32(ctx.lane_div_32) * fx.Int32(8)
+            lane_off = fx.Int32(ctx.lane_div_32) * 8
             moff = (0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23)
         else:
-            lane_off = fx.Int32(ctx.lane_div_32) * fx.Int32(4)
+            lane_off = fx.Int32(ctx.lane_div_32) * 4
             moff = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
         return kv_start_i32 + lane_off, moff
 
@@ -3222,7 +3222,7 @@ class GenericSoftmaxHelper:
     def rescale_o_accs(self, o_accs, corr):
         ctx = self.ctx
         traits = ctx.traits
-        corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(16)
+        corr_vec = fx.full(16, fx.Float32(corr), fx.Float32)
         if const_expr(not traits.USE_HW_TR):
             o_accs[0] = Vec(o_accs[0]) * corr_vec
         else:
@@ -3333,14 +3333,14 @@ class GenericStoreHelper:
         ctx = self.ctx
         traits = ctx.traits
         if const_expr(traits.USE_PERMLANE_OSTORE):
-            zero_pack = Vec.filled(4, 0, fx.Int32)
+            zero_pack = fx.full(4, 0, fx.Int32)
             for dc in range_constexpr(traits.D_CHUNKS):
                 for g in range_constexpr(2):
                     d_col = fx.Index(dc * traits.D_CHUNK) + (fx.Index(2 * g) + ctx.lane_div_32) * fx.Index(8)
                     o_global = ctx.global_idx_q(q_row, d_col)
                     buffer_ops.buffer_store(zero_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
         else:
-            zero_pack = Vec.filled(2, 0, fx.Int32)
+            zero_pack = fx.full(2, 0, fx.Int32)
             for dc in range_constexpr(traits.D_CHUNKS):
                 for grp in range_constexpr(4):
                     d_col = fx.Index(dc * traits.D_CHUNK) + ctx.lane_div_32 * fx.Index(4) + fx.Index(grp * 8)
@@ -3394,7 +3394,7 @@ class GenericStoreHelper:
             inv_l = (fx.Float32(l_final) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
         else:
             inv_l = inv_l_rcp
-        inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
+        inv_l_vec = fx.full(16, fx.Float32(inv_l), fx.Float32)
         v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(traits.D_CHUNKS)]
 
         if const_expr(traits.USE_PERMLANE_OSTORE):
@@ -3434,7 +3434,7 @@ class GenericStoreHelper:
                 w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
                 w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
                 w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
-                o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
+                o_pack = Vec.from_elements([w0, w1, w2, w3], fx.Int32)
                 d_col = fx.Index(dc * traits.D_CHUNK) + (fx.Index(2 * g) + ctx.lane_div_32) * fx.Index(8)
                 o_global = ctx.global_idx_q(q_row, d_col)
                 buffer_ops.buffer_store(o_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
@@ -3515,7 +3515,7 @@ class DualwaveKernelContext:
         self.c_neg_inf = fx.Float32(float("-inf"))
         self.c_neg_floor = fx.Float32(-3.0e38)
         self.c_zero_f = fx.Float32(0.0)
-        self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        self.c_zero_v16f32 = fx.full(16, 0.0, fx.Float32)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
         # LSE store folds the log2->ln conversion (m_row is sm_scale*log2e-scaled).
@@ -3848,7 +3848,7 @@ class DualwavePageIdLoader(DualwaveKernelContext):
                     if tile_idx < num_kv_tiles:
                         row_idx = batch_idx * block_table_stride_v + tile_idx
                         v = fly.copy_atom_call_ssa([bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx))))
-                        page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
+                        page_id_i32 = as_mlir_value(Vec(v, (1,), fx.Int32)[0])
                         llvm.StoreOp(page_id_i32, dst)
 
         _load_block_table_to_lds()
@@ -3932,9 +3932,7 @@ class DualwaveQLoader(DualwaveKernelContext):
         q_all_f32_op = llvm.FPExtOp(v64f32_type, as_mlir_value(q_all_bf16))
         q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
         q_all_f32 = q_all_f32_op.result
-        scale_vec = Vec.from_elements([self.c_sm_scale_log2e], fx.Float32).broadcast_to(
-            traits.K_STEPS_QK * traits.MFMA_LANE_K
-        )
+        scale_vec = fx.full(traits.K_STEPS_QK * traits.MFMA_LANE_K, fx.Float32(self.c_sm_scale_log2e), fx.Float32)
         q_all_scaled_f32 = as_mlir_value(scale_vec * Vec(q_all_f32))
         q_all_scaled_bf16_op = llvm.FPTruncOp(v64bf16_type, q_all_scaled_f32)
         q_all_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
@@ -4104,7 +4102,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         lane_n_off = 8 if traits.KV_VECTORIZED else 4
         lane_off_i32 = fx.Int32(self.lane_div_32) * fx.Int32(lane_n_off)
         rel_lo_i32 = fx.Int32(q_row_i32 + self.delta_i32 - kv_start_i32 - lane_off_i32)
-        rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
+        rel_hi_i32 = rel_lo_i32 - 32
         neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
 
         pair_thresholds = _causal_pair_thresholds(traits.KV_VECTORIZED)
@@ -4624,7 +4622,7 @@ class DualwaveFp8KernelContext:
         self.c_neg_floor = fx.Float32(-3.0e38)
         self.c_zero_f = fx.Float32(0.0)
         self.c_rescale_thr_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
-        self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        self.c_zero_v16f32 = fx.full(16, 0.0, fx.Float32)
 
     def init_runtime_indices(self):
         traits = self.traits
@@ -4865,12 +4863,12 @@ class DualwaveFp8KernelContext:
             self.ws_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
 
     def ws_store_f32(self, f32_val, elem_index):
-        pack = Vec.from_elements([fx.Float32(f32_val)], fx.Float32).bitcast(fx.Int32)
+        pack = Vec.from_elements([f32_val], fx.Float32).bitcast(fx.Int32)
         fx.memref_store_vec(pack, self.ws_store_reg_32)
         fx.copy(self.ws_store_atom_32, self.ws_store_reg_32, fx.slice(self.ws_div, (None, fx.Int32(elem_index))))
 
     def ws_store_quad_i32(self, dwords, elem_index):
-        pack = Vec.from_elements([fx.Int32(v) for v in dwords], fx.Int32)
+        pack = Vec.from_elements(dwords, fx.Int32)
         fx.memref_store_vec(pack, self.ws_store_reg_128)
         fx.copy(self.store_atom_128, self.ws_store_reg_128, fx.slice(self.ws_div, (None, fx.Int32(elem_index))))
 
@@ -4918,7 +4916,7 @@ class DualwaveFp8KernelContext:
         # Do not issue an out-of-allocation load before selecting zero padding.
         safe_offset = valid.select(fx.Int64(byte_offset), fx.Int64(0))
         loaded = fx.generic_load(fx.add_offset(base_iter, safe_offset), dtype=fx.Int32, count=4)
-        return valid.select(loaded, fx.Vector.filled(4, 0, fx.Int32)).ir_value()
+        return valid.select(loaded, fx.full(4, 0, fx.Int32)).ir_value()
 
     def buffer_load_lds_128(self, src_div, lds_byte_addr, src_elem, soffset_elems):
         _buffer_load_lds_128(
@@ -5106,9 +5104,9 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
     def _v_concat_i32x8(self, v_v, dc):
         words = []
         for ks in range_constexpr(4):
-            v2 = Vec.from_elements([fx.Int64(v_v[ks][dc])], fx.Int64).bitcast(fx.Int32)
-            words.append(fx.Int32(v2[0]))
-            words.append(fx.Int32(v2[1]))
+            v2 = Vec.from_elements([v_v[ks][dc]], fx.Int64).bitcast(fx.Int32)
+            words.append(v2[0])
+            words.append(v2[1])
         return Vec.from_elements(words, fx.Int32).ir_value()
 
     def _load_q_wide_lds(self):
@@ -5214,7 +5212,7 @@ def _transpose_v_fp8_16x16(source, lane, stages=4):
                 else:
                     updated.append(lane_bit.select(peer, words[word]))
         words = updated
-    return Vec.from_elements([fx.Int32(word) for word in words], fx.Int32)
+    return Vec.from_elements(words, fx.Int32)
 
 
 class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
@@ -5402,9 +5400,9 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             grp = slot // fx.Index(slots_per_group)
             rem = slot % fx.Index(slots_per_group)
             dest_n = fx.Int32(grp * fx.Index(8) + rem % fx.Index(8))
-            w16 = dest_n % fx.Int32(16)
-            c_add = (w16 >= fx.Int32(4)) & (w16 < fx.Int32(8))
-            c_sub = (w16 >= fx.Int32(8)) & (w16 < fx.Int32(12))
+            w16 = dest_n % 16
+            c_add = (w16 >= 4) & (w16 < 8)
+            c_sub = (w16 >= 8) & (w16 < 12)
             n = dest_n + c_add.select(fx.Int32(4), fx.Int32(0)) - c_sub.select(fx.Int32(4), fx.Int32(0))
             d_block = rem // fx.Index(8)
             src_elem = self.v_gmem_elem_offset + fx.Index(n) * self.stride_v_n_v + d_block * fx.Index(16)
@@ -5444,10 +5442,10 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         )
         return Vec.from_elements(
             [
-                fx.Int32(llvm.extractvalue(T.i32, pair_lo, [0])),
-                fx.Int32(llvm.extractvalue(T.i32, pair_lo, [1])),
-                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [0])),
-                fx.Int32(llvm.extractvalue(T.i32, pair_hi, [1])),
+                llvm.extractvalue(T.i32, pair_lo, [0]),
+                llvm.extractvalue(T.i32, pair_lo, [1]),
+                llvm.extractvalue(T.i32, pair_hi, [0]),
+                llvm.extractvalue(T.i32, pair_hi, [1]),
             ],
             fx.Int32,
         )
@@ -5465,7 +5463,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         packed = Vec(source)
         full_words = fx.Int32(self.seqlen_kv_v) >> 2
         tail_bits = (fx.Uint32(self.seqlen_kv_v) & 3) * 8
-        tail_mask = (fx.Uint32(1) << tail_bits) - 1
+        tail_mask = (1 << tail_bits) - 1
         group_word = fx.Int32(fx.Int64(token_start) >> 2)
         words = []
         for word in range_constexpr(packed.numel):
@@ -5834,11 +5832,11 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         kv_start_i32 = fx.Int32(kv_tile_start)
         # Vectorized-K sigma arranges wide FP8 scores in four-token groups
         # (0..3, 8..11, ...), matching dense FP8 but not vectorized BF16.
-        lane_off_i32 = fx.Int32(self.lane_div_32) * fx.Int32(4)
+        lane_off_i32 = fx.Int32(self.lane_div_32) * 4
         # q_row_i32 is set by init_q_row (called after helper construction), so read
         # it from the live ctx.
         rel_lo_i32 = fx.Int32(self.ctx_ref.q_row_i32 + self.delta_i32 - kv_start_i32 - lane_off_i32)
-        rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
+        rel_hi_i32 = rel_lo_i32 - 32
         neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
         pair_thresholds = _causal_pair_thresholds(False)
         if const_expr(self.traits.PAGED):
@@ -5903,11 +5901,11 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def _seq_pad_mask_inplace(self, v_s_lists, tile_idx):
         traits = self.traits
         s_lo, s_hi = v_s_lists
-        col_base = fx.Int32(tile_idx * traits.BLOCK_N) + fx.Int32(self.lane_div_32) * fx.Int32(4)
+        col_base = fx.Int32(tile_idx * traits.BLOCK_N) + fx.Int32(self.lane_div_32) * 4
         for r in range_constexpr(16):
             thr = (r // 4) * 8 + (r % 4)
             col_lo = col_base + fx.Int32(thr)
-            col_hi = col_lo + fx.Int32(32)
+            col_hi = col_lo + 32
             s_lo[r] = (col_lo < self.seqlen_kv_i32).select(s_lo[r], self.c_neg_inf)
             s_hi[r] = (col_hi < self.seqlen_kv_i32).select(s_hi[r], self.c_neg_inf)
 
@@ -5986,7 +5984,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         for src, dst in ((p_lo, out_lo), (p_hi, out_hi)):
             for pk in src:
                 f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), as_mlir_value(pk)).result, (8,), fx.Float32)
-                scaled = [fx.Float32(f32[i]) * scale_scalar for i in range(8)]
+                scaled = [f32[i] * scale_scalar for i in range(8)]
                 dst.append(self.bf16_trunc_pack_v8(scaled))
         return out_lo, out_hi
 
@@ -6121,7 +6119,7 @@ class DualwaveFp8StoreHelper(DualwaveFp8KernelContext):
         return w0, w1, w2, w3
 
     def _packed_o_128_vec(self, v_o, dc, g):
-        return Vec.from_elements([fx.Int32(w) for w in self._packed_o_128_dwords(v_o, dc, g)], fx.Int32)
+        return Vec.from_elements(self._packed_o_128_dwords(v_o, dc, g), fx.Int32)
 
     def store_final_o(self, v_o, q_row):
         for dc in range_constexpr(self.traits.D_CHUNKS):
@@ -6217,7 +6215,7 @@ class DualwaveSplitKCombineContext:
         self.elem_dtype = dtype_to_elem_type(self.out_dtype_str)
         self.fm_fast = fx.arith.FastMathFlags.fast
         self.c_zero_f = fx.Float32(0.0)
-        self.c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+        self.c_zero_v4f32 = fx.full(4, 0.0, fx.Float32)
         # LSE store folds the log2->ln conversion (m_max is sm_scale*log2e-scaled).
         self.c_ln2_f = fx.Float32(1.0 / _LOG2E)
 
@@ -6355,7 +6353,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
 
         @flyc.jit
         def _accum_split(acc, den):
-            if fx.Float32(l_i) > fx.Float32(0.0):
+            if fx.Float32(l_i) > 0.0:
                 w = rocdl.exp2(T.f32, as_mlir_value(m_i - m_max))
                 wl = w * l_i
                 den = den + wl
@@ -6366,7 +6364,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
                     dtype=T.i32,
                 )
                 o4 = Vec(o2_raw, (2,), fx.Int32).bitcast(self.elem_dtype).to(fx.Float32)
-                w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
+                w4 = fx.full(4, fx.Float32(wl), fx.Float32)
                 acc = acc + w4 * o4
             return acc, den
 
@@ -6381,7 +6379,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
     def pack_output(self, acc, den):
         inv_rcp = rocdl.rcp(T.f32, den)
         inv = (fx.Float32(den) > self.c_zero_f).select(inv_rcp, self.c_zero_f)
-        inv4 = Vec.from_elements([fx.Float32(inv)], fx.Float32).broadcast_to(4)
+        inv4 = fx.full(4, fx.Float32(inv), fx.Float32)
         out4 = Vec(acc * inv4, (4,), fx.Float32)
         if const_expr(self.out_dtype_str == "bf16"):
             lo = rocdl.cvt_pk_bf16_f32(out4[0], out4[1])
@@ -6389,10 +6387,10 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         else:
             o_f16 = []
             for i in range_constexpr(4):
-                o_f16.append(fx.Float32(out4[i]).to(self.elem_dtype))
+                o_f16.append(out4[i].to(self.elem_dtype))
             pack = Vec.from_elements(o_f16, self.elem_dtype).bitcast(fx.Int32)
             lo, hi = as_mlir_value(pack[0]), as_mlir_value(pack[1])
-        return Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
+        return Vec.from_elements([lo, hi], fx.Int32)
 
     def store_lse(self, m_max, den):
         # Combined LSE = m_max * ln2 + ln(den); den = sum_s 2^(m_s - m_max) * l_s
@@ -6455,7 +6453,7 @@ def _stagger_extra_barrier_if_zero(stagger_i32):
 @flyc.jit
 def _stagger_extra_barrier_if_one(stagger_i32):
     """Emit `sched_barrier(0); s_barrier;` only when stagger == 1."""
-    if fx.Int32(stagger_i32) != fx.Int32(0):
+    if fx.Int32(stagger_i32) != 0:
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
@@ -6467,7 +6465,7 @@ def _debug_atomic_inc_lazy_count(byte_offset, debug_counts_rsrc):
 @flyc.jit
 def _debug_count_lazy_branch(traits, all_below, debug_counts_rsrc, lane):
     if const_expr(traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS):
-        if fx.Int32(lane) == fx.Int32(0):
+        if fx.Int32(lane) == 0:
             if fx.Boolean(all_below):
                 _debug_atomic_inc_lazy_count(0, debug_counts_rsrc=debug_counts_rsrc)
             else:

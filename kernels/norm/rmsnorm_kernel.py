@@ -1154,7 +1154,7 @@ def _build_rmsnorm_quant_module(
         # Vector path for every complete f16/bf16 vec8 row.
         if const_expr(USE_VEC_N):
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
+            abs_mask = fx.full(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -1523,7 +1523,7 @@ def _build_fused_add_rmsnorm_quant_module(
         # Vector path for every complete f16/bf16 vec8 row.
         if const_expr(USE_VEC_N):
             quant_half_width = VEC_WIDTH // 2
-            abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
+            abs_mask = fx.full(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)

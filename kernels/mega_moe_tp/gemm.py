@@ -167,7 +167,7 @@ def build_gemm(kc: KernelCtx) -> dict:
         for m in range_constexpr(MTE):
             row = i32(m * 16) + lane % i32(16)
             af = a_frag(abuf, row, k, lane // i32(16))
-            sa = fx.Int32(lds_ld(asbuf, row * i32(4) + lane // i32(16), T.i8, 1)) & i32(0xFF)
+            sa = fx.Int32(lds_ld(asbuf, row * i32(4) + lane // i32(16), T.i8, 1)) & 0xFF
             for t in range_constexpr(4):
                 j = o + (t // 2) * 2 * MTE + m * 2 + t % 2
                 acc[j] = mfma(b[t], af, acc[j], sc[t], sa, a8)
@@ -209,11 +209,11 @@ def build_gemm(kc: KernelCtx) -> dict:
 
         for kk in range_constexpr(nsk):
             issue_b(i32(kk), kk)
-        zero = fx.Vector.filled(4, 0.0, fx.Float32)
+        zero = fx.full(4, 0.0, fx.Float32)
         for grp_ in range(i32(0), nnb // i32(P), i32(1)):
             grp = i32(grp_)
             init = [zero] * (4 * MTE * P)
-            for g0_, st in range(grp * i32(GS), (grp + i32(1)) * i32(GS), i32(IL), init=init):
+            for g0_, st in range(grp * i32(GS), (grp + 1) * i32(GS), i32(IL), init=init):
                 g0 = i32(g0_)
                 acc = list(st)
                 qb = qbase + grp * i32(NCH) + (g0 - grp * i32(GS)) // i32(P * KCS)
@@ -316,7 +316,7 @@ def build_gemm(kc: KernelCtx) -> dict:
                 for k in range_constexpr(KCS):
                     for j in range_constexpr(NSC_BLK):
                         dst = L + i32(L_AS) + b * i32(KCS * NSC_BLK * 64 * 4) + i32((k * NSC_BLK + j) * 64 * 4)
-                        dma4(dst, rxs, ascl[j], cc * i32(8) + i32(k * 4), sys=True)
+                        dma4(dst, rxs, ascl[j], cc * 8 + i32(k * 4), sys=True)
                 _loader_advance(L, lane, q)
             wait_vm(0)
             _loader_flush(L, lane)
@@ -340,7 +340,7 @@ def build_gemm(kc: KernelCtx) -> dict:
             q = lds_ld_i32(L, L_CTL + C_LQ * 4)
             for p_ in range(pub, q, i32(1)):
                 p = i32(p_)
-                lds_st_rel(L, L_CTL + C_ASEQ * 4 + (p % i32(NAB)) * i32(4), p + i32(1))
+                lds_st_rel(L, L_CTL + C_ASEQ * 4 + (p % i32(NAB)) * 4, p + 1)
             lds_st(L, L_CTL + C_LPUB * 4, q)
         rocdl.sched_barrier(0)
 
@@ -364,7 +364,7 @@ def build_gemm(kc: KernelCtx) -> dict:
             am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))
             e8, qs = _e8m0_from_amax(am, max_norm=448.0)
             d += [fp8x4_pack(f[0:4], qs), fp8x4_pack(f[4:8], qs)]
-            e8s.append(fx.Int32(e8) & i32(0xFF))
+            e8s.append(fx.Int32(e8) & 0xFF)
         d0, d1 = swap16(d[0], d[1])
         d2, d3 = swap16(d[2], d[3])
         d0, d2 = swap32(d0, d2)
@@ -554,7 +554,7 @@ def build_gemm(kc: KernelCtx) -> dict:
                 issue(g_lo * i32(NKS) + i32(qq), qq)
         if const_expr(pre is not None):
             pre()
-        zero = fx.Vector.filled(4, 0.0, fx.Float32)
+        zero = fx.full(4, 0.0, fx.Float32)
 
         row_meta = []
         for m in range_constexpr(MTE):
@@ -618,7 +618,7 @@ def build_gemm(kc: KernelCtx) -> dict:
                                     1,
                                 )
                             )
-                            & i32(0xFF)
+                            & 0xFF
                         )
                     rocdl.sched_barrier(0)
                     rocdl.s_setprio(1)
