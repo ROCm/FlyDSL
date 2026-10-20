@@ -28,7 +28,7 @@ case "$ACTION" in
     docker network create "$NAME-egress" >/dev/null
     # `-e VAR` without a value copies VAR from this environment, so the key is on no command line.
     docker run -d --rm --name "$GW" --network "$NAME" --user 65534:65534 --read-only --cap-drop ALL \
-      --security-opt no-new-privileges -e API_KEY -e API_URL -e API_USER \
+      --security-opt no-new-privileges --cpus 1 --memory 256m --pids-limit 64 -e API_KEY -e API_URL -e API_USER \
       -v "$SKILL/gateway.py:/gateway.py:ro" --entrypoint python3 "$FLYDSL_REVIEW_SANDBOX_IMAGE" /gateway.py \
       >/dev/null
     # gateway.py binds the address it has now, before the egress network is attached.

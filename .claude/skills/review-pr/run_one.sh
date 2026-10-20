@@ -64,7 +64,9 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
       [ -n "${!v:-}" ] && env_args+=(-e "$v")
     done
     # The placeholder key only satisfies the CLI's start-up check; the gateway supplies the real one.
+    # The caps bound a runaway agent: a full review measured 0.01 cores on average, 1 core at peak, 160 MiB.
     timeout "$TIMEOUT" docker run --rm --network "${FLYDSL_REVIEW_SANDBOX_NETWORK:-host}" --user "$(id -u):$(id -g)" \
+      --cpus 2 --memory 2g --pids-limit 256 \
       -e HOME="$W/.home" -e ANTHROPIC_API_KEY=sandbox-has-no-credential "${env_args[@]}" \
       -v "$PROJ:$PROJ:ro" -v "$W:$W" -v "$bin:/usr/local/bin/review-agent:ro" -w "$PROJ" \
       --entrypoint /usr/local/bin/review-agent "$FLYDSL_REVIEW_SANDBOX_IMAGE" \
