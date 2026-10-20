@@ -277,12 +277,8 @@ def _build_kernel(
         sin_div = fx.logical_divide(sin_row, rope_lay)
 
         def wave_reduce_add(x):
-            w = fx.Float32(x)
-            for sh_exp in range_constexpr(int(math.log2(BLOCK_THREADS))):
-                off = BLOCK_THREADS // (2 << sh_exp)
-                peer = w.shuffle_xor(off, BLOCK_THREADS)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
+            with fx.fastmath(fm_fast):
+                return fx.coop.warp_reduce(fx.Float32(x), fx.ReductionOp.ADD, width=BLOCK_THREADS)
 
         def emit_body(
             *,

@@ -617,12 +617,11 @@ def compile_pa_decode_sw_reduce(
     assert block_threads > 0, "head_size must be positive"
     assert block_threads <= 1024, "head_size must fit in one workgroup"
     reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
-    reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
-    red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, block_threads]
 
     @fx.struct
     class SharedStorage:
-        red: fx.Array[fx.Float32, red_slots, 16]
+        red: BlockReduce.SharedStorage
         part_weights: fx.Array[fx.Float32, max_context_partition_num, 16]
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
@@ -650,7 +649,6 @@ def compile_pa_decode_sw_reduce(
         eqgs_idx = fx.Int32(gpu.block_id("z"))
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        red_scratch = lds.red.view(fx.make_layout(red_slots, 1))
         if const_expr(max_context_partition_num > WARP_SIZE):
             part_weights_lds = lds.part_weights.view(fx.make_layout(max_context_partition_num, 1))
 
@@ -686,72 +684,24 @@ def compile_pa_decode_sw_reduce(
         c_log2e = fx.Float32(LOG2E)
         fm_fast = arith.FastMathFlags.fast
 
-        c_w = fx.Int32(WARP_SIZE)
-        c_wave_mask = fx.Int32(WARP_SIZE - 1)
-        c_red_slots = fx.Int32(red_slots)
-        lane = tid & c_wave_mask
-        wave = tid >> 6
+        lane = tid % WARP_SIZE
 
-        def _wave_reduce_max_full(val):
-            red = val
-            for sh in [32, 16, 8, 4, 2, 1]:
-                red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
-            return red
-
-        def _wave_reduce_sum_full(val):
-            red = val
-            for sh in [32, 16, 8, 4, 2, 1]:
-                red = red.addf(
-                    red.shuffle_xor(fx.Int32(sh), c_w),
-                    fastmath=fm_fast,
-                )
-            return red
-
-        def _block_reduce(val, mode):
-            if const_expr(red_slots == 1):
-                return _wave_reduce_max_full(val) if const_expr(mode == "max") else _wave_reduce_sum_full(val)
-
-            neutral = c_neg_inf if const_expr(mode == "max") else c_zero_f
-            w = _wave_reduce_max_full(val) if const_expr(mode == "max") else _wave_reduce_sum_full(val)
-
-            if lane == 0:
-                wave_idx = wave
-                fx.memref_store(w, red_scratch, wave_idx)
+        def _block_reduce(val, op):
+            # The chunk loop reuses these slots for successive max/sum reductions.
             gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < c_red_slots
-                lane_safe = in_range.select(lane, 0)
-                lane_safe_idx = fx.Int32(lane_safe)
-                red_val = fx.memref_load(red_scratch, lane_safe_idx)
-                red_val = in_range.select(red_val, neutral)
-                red_val = (
-                    _wave_reduce_max_full(red_val) if const_expr(mode == "max") else _wave_reduce_sum_full(red_val)
-                )
-                if lane == 0:
-                    fx.memref_store(red_val, red_scratch, 0)
-            gpu.barrier()
-
-            return fx.memref_load(red_scratch, 0)
+            with fx.fastmath(fm_fast if op == fx.ReductionOp.ADD else arith.FastMathFlags.none):
+                return BlockReduce(val, op, storage=lds.red)
 
         if const_expr(max_context_partition_num <= WARP_SIZE):
             c_part_num = fx.Int32(max_context_partition_num)
             c_reduce_width = fx.Int32(reduce_width)
 
             def _wave_reduce_max(val):
-                red = val
-                for sh in reduce_shuffle_offsets:
-                    red = red.maximumf(red.shuffle_xor(fx.Int32(sh), c_w))
-                return red
+                return fx.coop.warp_reduce(val, fx.ReductionOp.MAX, width=reduce_width)
 
             def _wave_reduce_sum(val):
-                red = val
-                for sh in reduce_shuffle_offsets:
-                    red = red.addf(
-                        red.shuffle_xor(fx.Int32(sh), c_w),
-                        fastmath=fm_fast,
-                    )
-                return red
+                with fx.fastmath(fm_fast):
+                    return fx.coop.warp_reduce(val, fx.ReductionOp.ADD, width=reduce_width)
 
             lane_in_range = lane < c_part_num
             lane_in_reduce = lane < c_reduce_width
@@ -777,14 +727,11 @@ def compile_pa_decode_sw_reduce(
             safe_global_exp_sum = (global_exp_sum > c_zero_f).select(global_exp_sum, c_one_f)
             inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
             weight_local = scaled_sum * inv_global_exp_sum
-            weight_local_i32 = fx.Float32(weight_local).bitcast(fx.Int32)
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):
                 part_i32 = fx.Int32(part_idx)
-                bcast_addr = part_i32 * 4
-                weight_i32 = rocdl.ds_bpermute(T.i32, bcast_addr.ir_value(), weight_local_i32.ir_value())
-                weight = fx.Int32(weight_i32).bitcast(fx.Float32)
+                weight = fx.coop.warp_broadcast(weight_local, part_idx, width=WARP_SIZE)
                 logits_off = (
                     batch_idx * stride_logits_seq
                     + kv_head_idx * stride_logits_head
@@ -812,7 +759,7 @@ def compile_pa_decode_sw_reduce(
                 )
                 part_max_raw = _copy_load(max_logits, es_off, copy_f32, f32_register)[0]
                 part_max = in_chunk.select(part_max_raw, c_neg_inf)
-                chunk_max = _block_reduce(part_max, "max")
+                chunk_max = _block_reduce(part_max, fx.ReductionOp.MAX)
                 global_max = global_max.maximumf(chunk_max)
 
             global_exp_sum = c_zero_f
@@ -833,7 +780,7 @@ def compile_pa_decode_sw_reduce(
                 part_sum = in_chunk.select(part_sum_raw, c_zero_f)
                 part_max = in_chunk.select(part_max_raw, c_neg_inf)
                 part_scale = in_chunk.select(exp2_f32_fast((part_max - global_max) * c_log2e), c_zero_f)
-                chunk_sum = _block_reduce(part_sum * part_scale, "sum")
+                chunk_sum = _block_reduce(part_sum * part_scale, fx.ReductionOp.ADD)
                 global_exp_sum = global_exp_sum + chunk_sum
 
             safe_global_exp_sum = (global_exp_sum > c_zero_f).select(global_exp_sum, c_one_f)

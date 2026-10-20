@@ -26,7 +26,7 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, as_ir_value, range_constexpr
+from flydsl.expr import arith, range_constexpr
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E, dtype_to_elem_type, get_warp_size
@@ -198,18 +198,9 @@ def _emit_topk_gating_softmax_body(
     in_range = global_token < i32_num_tokens
     global_token_safe = in_range.select(global_token, fx.Int32(0))
 
-    def group_reduce(x, mode):
-        """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
-        width_i32 = c_tpt
-        w = x
-        for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-            off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-            peer = w.shuffle_xor(off, width_i32)
-            if mode == "max":
-                w = fx.max(w, peer)
-            else:
-                w = w.addf(peer, fastmath=fm_fast)
-        return w
+    def group_reduce(x, op):
+        with fx.fastmath(fm_fast if op == fx.ReductionOp.ADD else arith.FastMathFlags.none):
+            return fx.coop.warp_reduce(x, op, width=THREADS_PER_TOKEN)
 
     def group_reduce_argmax(val, idx):
         """Butterfly argmax within a THREADS_PER_TOKEN sub-warp group.
@@ -316,7 +307,7 @@ def _emit_topk_gating_softmax_body(
             x_list.append(xv)
             thread_max = fx.max(thread_max, xv)
 
-    group_max = group_reduce(thread_max, "max")
+    group_max = group_reduce(thread_max, fx.ReductionOp.MAX)
 
     # Pass 2: exp(x - max) and per-token sum
     thread_sum = c_zero_f
@@ -328,7 +319,7 @@ def _emit_topk_gating_softmax_body(
         exp_list.append(ev)
         thread_sum = thread_sum + ev
 
-    group_sum = group_reduce(thread_sum, "sum")
+    group_sum = group_reduce(thread_sum, fx.ReductionOp.ADD)
 
     # Pass 3: normalise -> softmax probabilities (kept in registers)
     inv_sum = c_one_f / group_sum
@@ -419,7 +410,6 @@ def _build_topk_gating_softmax_module(
     ATOM_BITS = layout["ATOM_BITS"]
     ELEMS_PER_ATOM = layout["ELEMS_PER_ATOM"]
     ATOMS_PER_THREAD = layout["ATOMS_PER_THREAD"]
-    USE_DPP = max_vpt == 8 and ballot_argmax
 
     # No shared memory used — every reduction stays inside a sub-warp lane group.
 
@@ -462,28 +452,9 @@ def _build_topk_gating_softmax_module(
         global_token_safe = in_range.select(global_token, fx.Int32(0))
 
         # Sub-warp reductions over the THREADS_PER_TOKEN-lane group
-        def group_reduce(x, mode):
-            """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
-            width_i32 = c_tpt
-            w = x
-            for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-                offset = THREADS_PER_TOKEN // (2 << _sh)
-                off = fx.Int32(offset)
-                peer = w
-                if USE_DPP and offset in (1, 2):
-                    # Quad permutations preserve the fixed XOR1/2 lane map
-                    # without a DS instruction and its dependency wait.
-                    ctrl = 0xB1 if offset == 1 else 0x4E
-                    bits = fx.Float32(w).bitcast(fx.Int32)
-                    peer_bits = fx.rocdl.update_dpp(T.i32, as_ir_value(bits), as_ir_value(bits), ctrl, 0xF, 0xF, True)
-                    peer = fx.Int32(peer_bits).bitcast(fx.Float32)
-                else:
-                    peer = w.shuffle_xor(off, width_i32)
-                if mode == "max":
-                    w = fx.max(w, peer)
-                else:
-                    w = w.addf(peer, fastmath=fm_fast)
-            return w
+        def group_reduce(x, op):
+            with fx.fastmath(fm_fast if op == fx.ReductionOp.ADD else arith.FastMathFlags.none):
+                return fx.coop.warp_reduce(x, op, width=THREADS_PER_TOKEN)
 
         def group_reduce_argmax(val, idx):
             """Reduce probability, then identify its lowest-index lane."""
@@ -492,7 +463,7 @@ def _build_topk_gating_softmax_module(
                 # A lane owns a contiguous, increasing expert interval. The
                 # lowest lane among equal maxima therefore owns the lowest
                 # expert index, including ties caused by probability underflow.
-                winner_val = group_reduce(val, "max")
+                winner_val = group_reduce(val, fx.ReductionOp.MAX)
                 contenders = fx.Int64(fx.rocdl.ballot(T.i64, val == winner_val))
                 group_base = lane - expert_lane
                 group_bits = contenders.shrui(fx.Int64(group_base)) & fx.Int64((1 << THREADS_PER_TOKEN) - 1)
@@ -588,7 +559,7 @@ def _build_topk_gating_softmax_module(
                 x_list.append(xv)
                 thread_max = fx.max(thread_max, xv)
 
-        group_max = group_reduce(thread_max, "max")
+        group_max = group_reduce(thread_max, fx.ReductionOp.MAX)
 
         # Pass 2: exp(x - max) and per-token sum
         thread_sum = c_zero_f
@@ -600,7 +571,7 @@ def _build_topk_gating_softmax_module(
             exp_list.append(ev)
             thread_sum = thread_sum + ev
 
-        group_sum = group_reduce(thread_sum, "sum")
+        group_sum = group_reduce(thread_sum, fx.ReductionOp.ADD)
 
         # Pass 3: Normalize -> softmax probabilities (kept in registers)
         inv_sum = c_one_f / group_sum
