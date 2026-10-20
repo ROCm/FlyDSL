@@ -12,8 +12,13 @@
         "file": "rocdl-waves-per-eu-range.patch",
         "description": "Support waves_per_eu min,max range attribute for full VGPR utilization.",
         "upstream_status": "merged into upstream: 4d5db577f969519703c348b8c7b02ee22987bd94"
+      }, 
+      {
+        "file": "schedule-bank-and-gpr.patch",
+        "description": "Support schedule bank and vgpr/agpr/sgpr hint",
+        "upstream_status": "not yet submitted"
       }
-    ],
-    "extensions": []
+    ]
   }
+
 }

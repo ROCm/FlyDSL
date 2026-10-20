@@ -1,0 +1,4225 @@
+diff --git a/clang/include/clang/Basic/BuiltinsAMDGPU.td b/clang/include/clang/Basic/BuiltinsAMDGPU.td
+index 794fa517016a..98e18e5ed198 100644
+--- a/clang/include/clang/Basic/BuiltinsAMDGPU.td
++++ b/clang/include/clang/Basic/BuiltinsAMDGPU.td
+@@ -982,6 +982,12 @@ def __builtin_amdgcn_cvt_sr_f16_f32 : AMDGPUBuiltin<"_ExtVector<2, _Float16>(_Ex
+ // GFX1250+ only builtins.
+ //===----------------------------------------------------------------------===//
+ def __builtin_amdgcn_s_cluster_barrier : AMDGPUBuiltin<"void()", [], "gfx1250-insts">;
++def __builtin_amdgcn_sched_bank : AMDGPUBuiltin<"int(int, _Constant int, _Constant bool)", [Const, CustomTypeChecking], "gfx1250-insts">;
++
++// Exact GPR register scheduling hints.
++def __builtin_amdgcn_sched_vgpr : AMDGPUBuiltin<"int(int, _Constant int, _Constant bool)", [Const, CustomTypeChecking]>;
++def __builtin_amdgcn_sched_sgpr : AMDGPUBuiltin<"int(int, _Constant int, _Constant bool)", [Const, CustomTypeChecking]>;
++def __builtin_amdgcn_sched_agpr : AMDGPUBuiltin<"int(int, _Constant int, _Constant bool)", [Const, CustomTypeChecking], "mai-insts">;
+ 
+ def __builtin_amdgcn_flat_prefetch : AMDGPUBuiltin<"void(void const address_space<0> *, _Constant int)", [Const], "vmem-pref-insts">;
+ def __builtin_amdgcn_global_prefetch : AMDGPUBuiltin<"void(void const address_space<1> *, _Constant int)", [Const], "vmem-pref-insts">;
+diff --git a/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp b/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp
+index 667c6508040a..eea73ae6f502 100644
+--- a/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp
++++ b/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp
+@@ -2289,6 +2289,48 @@ Value *CodeGenFunction::EmitAMDGPUBuiltinExpr(unsigned BuiltinID,
+   case AMDGPU::BI__builtin_amdgcn_permlane_xor:
+     return emitBuiltinWithOneOverloadedType<3>(*this, E,
+                                                Intrinsic::amdgcn_permlane_xor);
++  case AMDGPU::BI__builtin_amdgcn_sched_bank: {
++    llvm::Value *Val = EmitScalarExpr(E->getArg(0));
++    llvm::Value *Bank = EmitScalarExpr(E->getArg(1));
++    llvm::Value *EncodedBank;
++    if (E->getNumArgs() > 2) {
++      llvm::Value *Strict = EmitScalarExpr(E->getArg(2));
++      Strict = Builder.CreateZExt(Strict, Bank->getType());
++      EncodedBank = Builder.CreateOr(Bank, Builder.CreateShl(Strict, 2));
++    } else {
++      // Default: strict (bank | 4)
++      EncodedBank = Builder.CreateOr(Bank, Builder.getInt32(4));
++    }
++    llvm::Function *F = CGM.getIntrinsic(Intrinsic::amdgcn_sched_bank,
++                                         Val->getType());
++    return Builder.CreateCall(F, {Val, EncodedBank});
++  }
++  case AMDGPU::BI__builtin_amdgcn_sched_vgpr:
++  case AMDGPU::BI__builtin_amdgcn_sched_sgpr:
++  case AMDGPU::BI__builtin_amdgcn_sched_agpr: {
++    llvm::Value *Val = EmitScalarExpr(E->getArg(0));
++    llvm::Value *RegNum = EmitScalarExpr(E->getArg(1));
++    llvm::Value *Strict;
++    if (E->getNumArgs() > 2) {
++      Strict = EmitScalarExpr(E->getArg(2));
++      Strict = Builder.CreateZExt(Strict, RegNum->getType());
++    } else {
++      // Default: strict
++      Strict = Builder.getInt32(1);
++    }
++    Intrinsic::ID IID;
++    switch (BuiltinID) {
++    case AMDGPU::BI__builtin_amdgcn_sched_vgpr:
++      IID = Intrinsic::amdgcn_sched_vgpr; break;
++    case AMDGPU::BI__builtin_amdgcn_sched_sgpr:
++      IID = Intrinsic::amdgcn_sched_sgpr; break;
++    case AMDGPU::BI__builtin_amdgcn_sched_agpr:
++      IID = Intrinsic::amdgcn_sched_agpr; break;
++    default: llvm_unreachable("unexpected builtin");
++    }
++    llvm::Function *F = CGM.getIntrinsic(IID, Val->getType());
++    return Builder.CreateCall(F, {Val, RegNum, Strict});
++  }
+   default:
+     return nullptr;
+   }
+diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
+index 0bda851b0c1c..a2c46878e723 100644
+--- a/clang/lib/Sema/SemaAMDGPU.cpp
++++ b/clang/lib/Sema/SemaAMDGPU.cpp
+@@ -448,6 +448,53 @@ bool SemaAMDGPU::CheckAMDGCNBuiltinFunctionCall(unsigned BuiltinID,
+                                            /*High=*/0) ||
+            SemaRef.BuiltinConstantArgRange(TheCall, /*ArgNum=*/2, /*Low=*/0,
+                                            /*High=*/0);
++  case AMDGPU::BI__builtin_amdgcn_sched_bank: {
++    if (SemaRef.checkArgCountRange(TheCall, 2, 3))
++      return true;
++    Expr *DataArg = TheCall->getArg(0);
++    QualType DataTy = DataArg->getType();
++    if (DataTy->isAnyComplexType() ||
++        !(DataTy->isArithmeticType() ||
++          (DataTy->isVectorType() &&
++           DataTy->castAs<VectorType>()
++               ->getElementType()
++               ->isArithmeticType()))) {
++      SemaRef.Diag(DataArg->getBeginLoc(),
++                   diag::err_typecheck_cond_expect_int_float)
++          << DataTy << DataArg->getSourceRange();
++      return true;
++    }
++    TheCall->setType(DataTy);
++    return SemaRef.BuiltinConstantArgRange(TheCall, 1, 0, 3);
++  }
++  case AMDGPU::BI__builtin_amdgcn_sched_vgpr:
++  case AMDGPU::BI__builtin_amdgcn_sched_sgpr:
++  case AMDGPU::BI__builtin_amdgcn_sched_agpr: {
++    if (SemaRef.checkArgCountRange(TheCall, 2, 3))
++      return true;
++    Expr *DataArg = TheCall->getArg(0);
++    QualType DataTy = DataArg->getType();
++    if (DataTy->isAnyComplexType() ||
++        !(DataTy->isArithmeticType() ||
++          (DataTy->isVectorType() &&
++           DataTy->castAs<VectorType>()
++               ->getElementType()
++               ->isArithmeticType()))) {
++      SemaRef.Diag(DataArg->getBeginLoc(),
++                   diag::err_typecheck_cond_expect_int_float)
++          << DataTy << DataArg->getSourceRange();
++      return true;
++    }
++    TheCall->setType(DataTy);
++    int MaxReg;
++    switch (BuiltinID) {
++    case AMDGPU::BI__builtin_amdgcn_sched_vgpr: MaxReg = 1023; break;
++    case AMDGPU::BI__builtin_amdgcn_sched_sgpr: MaxReg = 105;  break;
++    case AMDGPU::BI__builtin_amdgcn_sched_agpr: MaxReg = 255;  break;
++    default: llvm_unreachable("unexpected builtin");
++    }
++    return SemaRef.BuiltinConstantArgRange(TheCall, 1, 0, MaxReg);
++  }
+   default:
+     return false;
+   }
+diff --git a/clang/test/CodeGenOpenCL/builtins-amdgcn-gfx1250-sched-bank.cl b/clang/test/CodeGenOpenCL/builtins-amdgcn-gfx1250-sched-bank.cl
+new file mode 100644
+index 000000000000..69ae4f7f0db8
+--- /dev/null
++++ b/clang/test/CodeGenOpenCL/builtins-amdgcn-gfx1250-sched-bank.cl
+@@ -0,0 +1,71 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -cl-std=CL2.0 -O0 -triple amdgcn-unknown-unknown -target-cpu gfx1250 -emit-llvm -o - %s | FileCheck %s
++// REQUIRES: amdgpu-registered-target
++
++typedef int __attribute__((ext_vector_type(2))) int2;
++typedef int __attribute__((ext_vector_type(4))) int4;
++typedef int __attribute__((ext_vector_type(8))) int8;
++typedef float __attribute__((ext_vector_type(2))) float2;
++typedef float __attribute__((ext_vector_type(4))) float4;
++
++// CHECK-LABEL: @test_sched_bank_i32
++// CHECK: call i32 @llvm.amdgcn.sched.bank.i32(i32 %{{.*}}, i32 2)
++void test_sched_bank_i32(global int *out, int x) {
++  *out = __builtin_amdgcn_sched_bank(x, 2, false);
++}
++
++// CHECK-LABEL: @test_sched_bank_f32
++// CHECK: call float @llvm.amdgcn.sched.bank.f32(float %{{.*}}, i32 3)
++void test_sched_bank_f32(global float *out, float x) {
++  *out = __builtin_amdgcn_sched_bank(x, 3, false);
++}
++
++// CHECK-LABEL: @test_sched_bank_i64
++// CHECK: call i64 @llvm.amdgcn.sched.bank.i64(i64 %{{.*}}, i32 0)
++void test_sched_bank_i64(global long *out, long x) {
++  *out = __builtin_amdgcn_sched_bank(x, 0, false);
++}
++
++// CHECK-LABEL: @test_sched_bank_f64_strict
++// CHECK: call double @llvm.amdgcn.sched.bank.f64(double %{{.*}}, i32 7)
++void test_sched_bank_f64_strict(global double *out, double x) {
++  *out = __builtin_amdgcn_sched_bank(x, 3, true);
++}
++
++// CHECK-LABEL: @test_sched_bank_v2i32
++// CHECK: call <2 x i32> @llvm.amdgcn.sched.bank.v2i32(<2 x i32> %{{.*}}, i32 1)
++void test_sched_bank_v2i32(global int2 *out, int2 x) {
++  *out = __builtin_amdgcn_sched_bank(x, 1, false);
++}
++
++// CHECK-LABEL: @test_sched_bank_v4i32_strict
++// CHECK: call <4 x i32> @llvm.amdgcn.sched.bank.v4i32(<4 x i32> %{{.*}}, i32 5)
++void test_sched_bank_v4i32_strict(global int4 *out, int4 x) {
++  *out = __builtin_amdgcn_sched_bank(x, 1, true);
++}
++
++// CHECK-LABEL: @test_sched_bank_v8i32_strict
++// CHECK: call <8 x i32> @llvm.amdgcn.sched.bank.v8i32(<8 x i32> %{{.*}}, i32 6)
++void test_sched_bank_v8i32_strict(global int8 *out, int8 x) {
++  *out = __builtin_amdgcn_sched_bank(x, 2, true);
++}
++
++// CHECK-LABEL: @test_sched_bank_v4f32_strict
++// CHECK: call <4 x float> @llvm.amdgcn.sched.bank.v4f32(<4 x float> %{{.*}}, i32 4)
++void test_sched_bank_v4f32_strict(global float4 *out, float4 x) {
++  *out = __builtin_amdgcn_sched_bank(x, 0, true);
++}
++
++// CHECK-LABEL: @test_sched_bank_default_strict
++// CHECK: call i32 @llvm.amdgcn.sched.bank.i32(i32 %{{.*}}, i32 6)
++void test_sched_bank_default_strict(global int *out, int x) {
++  // 2 args: strict=true by default, bank 2 → encoded as 6
++  *out = __builtin_amdgcn_sched_bank(x, 2);
++}
++
++// CHECK-LABEL: @test_sched_bank_explicit_soft
++// CHECK: call i32 @llvm.amdgcn.sched.bank.i32(i32 %{{.*}}, i32 2)
++void test_sched_bank_explicit_soft(global int *out, int x) {
++  // 3 args: explicit soft, bank 2 → encoded as 2
++  *out = __builtin_amdgcn_sched_bank(x, 2, false);
++}
+diff --git a/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl b/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl
+new file mode 100644
+index 000000000000..2d889f27f38a
+--- /dev/null
++++ b/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl
+@@ -0,0 +1,68 @@
++// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
++// RUN: %clang_cc1 -cl-std=CL2.0 -O0 -triple amdgcn-unknown-unknown -target-cpu gfx1250 -emit-llvm -o - %s | FileCheck %s
++// REQUIRES: amdgpu-registered-target
++
++typedef int __attribute__((ext_vector_type(2))) int2;
++typedef int __attribute__((ext_vector_type(4))) int4;
++typedef int __attribute__((ext_vector_type(8))) int8;
++typedef float __attribute__((ext_vector_type(2))) float2;
++typedef float __attribute__((ext_vector_type(4))) float4;
++
++// === sched_vgpr tests ===
++
++// CHECK-LABEL: @test_sched_vgpr_i32
++// CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 42, i32 0)
++void test_sched_vgpr_i32(global int *out, int x) {
++  *out = __builtin_amdgcn_sched_vgpr(x, 42, false);
++}
++
++// CHECK-LABEL: @test_sched_vgpr_f32_strict
++// CHECK: call float @llvm.amdgcn.sched.vgpr.f32(float %{{.*}}, i32 100, i32 1)
++void test_sched_vgpr_f32_strict(global float *out, float x) {
++  *out = __builtin_amdgcn_sched_vgpr(x, 100, true);
++}
++
++// CHECK-LABEL: @test_sched_vgpr_i64
++// CHECK: call i64 @llvm.amdgcn.sched.vgpr.i64(i64 %{{.*}}, i32 200, i32 0)
++void test_sched_vgpr_i64(global long *out, long x) {
++  *out = __builtin_amdgcn_sched_vgpr(x, 200, false);
++}
++
++// CHECK-LABEL: @test_sched_vgpr_v2i32
++// CHECK: call <2 x i32> @llvm.amdgcn.sched.vgpr.v2i32(<2 x i32> %{{.*}}, i32 50, i32 1)
++void test_sched_vgpr_v2i32(global int2 *out, int2 x) {
++  *out = __builtin_amdgcn_sched_vgpr(x, 50, true);
++}
++
++// CHECK-LABEL: @test_sched_vgpr_v4i32
++// CHECK: call <4 x i32> @llvm.amdgcn.sched.vgpr.v4i32(<4 x i32> %{{.*}}, i32 512, i32 1)
++void test_sched_vgpr_v4i32(global int4 *out, int4 x) {
++  *out = __builtin_amdgcn_sched_vgpr(x, 512, true);
++}
++
++// CHECK-LABEL: @test_sched_vgpr_default_strict
++// CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 42, i32 1)
++void test_sched_vgpr_default_strict(global int *out, int x) {
++  // 2 args: strict=true by default
++  *out = __builtin_amdgcn_sched_vgpr(x, 42);
++}
++
++// === sched_sgpr tests ===
++
++// CHECK-LABEL: @test_sched_sgpr_i32
++// CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 10, i32 0)
++void test_sched_sgpr_i32(global int *out, int x) {
++  *out = __builtin_amdgcn_sched_sgpr(x, 10, false);
++}
++
++// CHECK-LABEL: @test_sched_sgpr_i32_strict
++// CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 50, i32 1)
++void test_sched_sgpr_i32_strict(global int *out, int x) {
++  *out = __builtin_amdgcn_sched_sgpr(x, 50, true);
++}
++
++// CHECK-LABEL: @test_sched_sgpr_default_strict
++// CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 20, i32 1)
++void test_sched_sgpr_default_strict(global int *out, int x) {
++  *out = __builtin_amdgcn_sched_sgpr(x, 20);
++}
+diff --git a/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250-param.cl b/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250-param.cl
+index 8c60b567ddc2..3d5dc44eeed5 100644
+--- a/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250-param.cl
++++ b/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250-param.cl
+@@ -216,3 +216,12 @@ void test_pk_add_min_max(global short2 *out, global ushort2 *uout, short2 a, sho
+   *out = __builtin_amdgcn_pk_add_min_i16(a, b, c, clamp); // expected-error {{'__builtin_amdgcn_pk_add_min_i16' must be a constant integer}}
+   *uout = __builtin_amdgcn_pk_add_min_u16(ua, ub, uc, clamp); // expected-error {{'__builtin_amdgcn_pk_add_min_u16' must be a constant integer}}
+ }
++
++void test_sched_bank_non_const(int x, int b) {
++  __builtin_amdgcn_sched_bank(x, b, false); // expected-error {{'__builtin_amdgcn_sched_bank' must be a constant integer}}
++}
++
++void test_sched_bank_out_of_range(int x) {
++  __builtin_amdgcn_sched_bank(x, 4, false); // expected-error {{argument value 4 is outside the valid range [0, 3]}}
++  __builtin_amdgcn_sched_bank(x, -1, true); // expected-error {{argument value -1 is outside the valid range [0, 3]}}
++}
+diff --git a/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250.cl b/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250.cl
+index 87110d4d977d..4a973d215919 100644
+--- a/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250.cl
++++ b/clang/test/SemaOpenCL/builtins-amdgcn-error-gfx1250.cl
+@@ -20,4 +20,5 @@ void test(global int* out, global short2 *s2out, global ushort2 *us2out,
+   *us2out = __builtin_amdgcn_pk_add_max_u16(us2a, us2b, us2c, true); // expected-error {{'__builtin_amdgcn_pk_add_max_u16' needs target feature pk-add-min-max-insts}}
+   *s2out = __builtin_amdgcn_pk_add_min_i16(s2a, s2b, s2c, false); // expected-error {{'__builtin_amdgcn_pk_add_min_i16' needs target feature pk-add-min-max-insts}}
+   *us2out = __builtin_amdgcn_pk_add_min_u16(us2a, us2b, us2c, true); // expected-error {{'__builtin_amdgcn_pk_add_min_u16' needs target feature pk-add-min-max-insts}}
++  *out = __builtin_amdgcn_sched_bank(a, 2, false); // expected-error {{'__builtin_amdgcn_sched_bank' needs target feature gfx1250-insts}}
+ }
+diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+index b321b9155a19..935ab09d09c5 100644
+--- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
++++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+@@ -4379,4 +4379,38 @@ def int_amdgcn_addrspacecast_nonnull : DefaultAttrsIntrinsic<
+ /// incoming block.
+ def int_amdgcn_dead: DefaultAttrsIntrinsic<[llvm_any_ty], [],
+     [IntrNoMem]>;
++
++// Hint the register allocator to place the result in a specific VGPR bank on
++// targets with 1024 addressable VGPRs (gfx1250). The bank operand is a
++// compile-time constant in [0, 3]:
++//   bank 0 = v0-v255, bank 1 = v256-v511, bank 2 = v512-v767, bank 3 = v768-v1023.
++// This is an identity function at the IR level; the bank argument is consumed by
++// the pre-RA AMDGPUSchedBank pass which attaches a register allocation hint.
++// The hint is advisory: the allocator honors it only when the bank has free
++// registers, and never spills to satisfy it.
++def int_amdgcn_sched_bank : DefaultAttrsIntrinsic<
++  [llvm_any_ty], [LLVMMatchType<0>, llvm_i32_ty],
++  [IntrNoMem, IntrSpeculatable, IntrWillReturn, ImmArg<ArgIndex<1>>]>;
++
++// Hint the register allocator to place the result in a specific VGPR/SGPR/AGPR
++// register number. These are identity functions at the IR level; the register
++// number and strict flag arguments are consumed by the pre-RA AMDGPUSchedBank
++// pass which attaches a register allocation hint.
++//   regnum: the target HW register index (e.g., 42 means v42/s42/a42).
++//   strict: 1 = allocator must obey if possible, 0 = advisory hint.
++// For wide values (64/128/256 bit), regnum is the starting register index.
++def int_amdgcn_sched_vgpr : DefaultAttrsIntrinsic<
++  [llvm_any_ty], [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty],
++  [IntrNoMem, IntrSpeculatable, IntrWillReturn,
++   ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>]>;
++
++def int_amdgcn_sched_sgpr : DefaultAttrsIntrinsic<
++  [llvm_any_ty], [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty],
++  [IntrNoMem, IntrSpeculatable, IntrWillReturn,
++   ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>]>;
++
++def int_amdgcn_sched_agpr : DefaultAttrsIntrinsic<
++  [llvm_any_ty], [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty],
++  [IntrNoMem, IntrSpeculatable, IntrWillReturn,
++   ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>]>;
+ }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.h b/llvm/lib/Target/AMDGPU/AMDGPU.h
+index 9fe4123a27bb..cfe671d8256e 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPU.h
++++ b/llvm/lib/Target/AMDGPU/AMDGPU.h
+@@ -182,6 +182,9 @@ private:
+ void initializeAMDGPUPrepareAGPRAllocLegacyPass(PassRegistry &);
+ extern char &AMDGPUPrepareAGPRAllocLegacyID;
+ 
++void initializeAMDGPUSchedBankPass(PassRegistry &);
++extern char &AMDGPUSchedBankID;
++
+ void initializeAMDGPUReserveWWMRegsLegacyPass(PassRegistry &);
+ extern char &AMDGPUReserveWWMRegsLegacyID;
+ 
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp
+index 744bde043e16..257461ba3655 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp
+@@ -3319,6 +3319,88 @@ void AMDGPUDAGToDAGISel::SelectINTRINSIC_WO_CHAIN(SDNode *N) {
+   case Intrinsic::amdgcn_interp_p1_f16:
+     SelectInterpP1F16(N);
+     return;
++  case Intrinsic::amdgcn_sched_bank: {
++    SDValue Src = N->getOperand(1);
++    auto *BankC = dyn_cast<ConstantSDNode>(N->getOperand(2));
++    // Bank must be a constant; fall back (and error) otherwise.
++    if (!BankC) {
++      SelectCode(N);
++      return;
++    }
++    unsigned PseudoOpc;
++    switch (N->getValueType(0).getSizeInBits()) {
++    case 32:  PseudoOpc = AMDGPU::V_SCHEDULE_BANK_B32;  break;
++    case 64:  PseudoOpc = AMDGPU::V_SCHEDULE_BANK_B64;  break;
++    case 128: PseudoOpc = AMDGPU::V_SCHEDULE_BANK_B128; break;
++    case 256: PseudoOpc = AMDGPU::V_SCHEDULE_BANK_B256; break;
++    default:
++      // Unsupported width: drop the hint, forward the value unchanged.
++      ReplaceUses(SDValue(N, 0), Src);
++      CurDAG->RemoveDeadNode(N);
++      return;
++    }
++    SDValue BankImm = CurDAG->getTargetConstant(BankC->getZExtValue(), SDLoc(N),
++                                                MVT::i32);
++    CurDAG->SelectNodeTo(N, PseudoOpc, N->getVTList(), {Src, BankImm});
++    return;
++  }
++  case Intrinsic::amdgcn_sched_vgpr:
++  case Intrinsic::amdgcn_sched_sgpr:
++  case Intrinsic::amdgcn_sched_agpr: {
++    SDValue Src = N->getOperand(1);
++    auto *RegNumC = dyn_cast<ConstantSDNode>(N->getOperand(2));
++    auto *StrictC = dyn_cast<ConstantSDNode>(N->getOperand(3));
++    if (!RegNumC || !StrictC) {
++      SelectCode(N);
++      return;
++    }
++    unsigned Bits = N->getValueType(0).getSizeInBits();
++    unsigned PseudoOpc;
++    if (IntrID == Intrinsic::amdgcn_sched_vgpr) {
++      switch (Bits) {
++      case 32:  PseudoOpc = AMDGPU::V_SCHEDULE_VGPR_B32;  break;
++      case 64:  PseudoOpc = AMDGPU::V_SCHEDULE_VGPR_B64;  break;
++      case 128: PseudoOpc = AMDGPU::V_SCHEDULE_VGPR_B128; break;
++      case 256: PseudoOpc = AMDGPU::V_SCHEDULE_VGPR_B256; break;
++      case 512: PseudoOpc = AMDGPU::V_SCHEDULE_VGPR_B512; break;
++      default:
++        ReplaceUses(SDValue(N, 0), Src);
++        CurDAG->RemoveDeadNode(N);
++        return;
++      }
++    } else if (IntrID == Intrinsic::amdgcn_sched_sgpr) {
++      switch (Bits) {
++      case 32:  PseudoOpc = AMDGPU::S_SCHEDULE_SGPR_B32;  break;
++      case 64:  PseudoOpc = AMDGPU::S_SCHEDULE_SGPR_B64;  break;
++      case 128: PseudoOpc = AMDGPU::S_SCHEDULE_SGPR_B128; break;
++      case 256: PseudoOpc = AMDGPU::S_SCHEDULE_SGPR_B256; break;
++      case 512: PseudoOpc = AMDGPU::S_SCHEDULE_SGPR_B512; break;
++      default:
++        ReplaceUses(SDValue(N, 0), Src);
++        CurDAG->RemoveDeadNode(N);
++        return;
++      }
++    } else {
++      switch (Bits) {
++      case 32:  PseudoOpc = AMDGPU::A_SCHEDULE_AGPR_B32;  break;
++      case 64:  PseudoOpc = AMDGPU::A_SCHEDULE_AGPR_B64;  break;
++      case 128: PseudoOpc = AMDGPU::A_SCHEDULE_AGPR_B128; break;
++      case 256: PseudoOpc = AMDGPU::A_SCHEDULE_AGPR_B256; break;
++      case 512: PseudoOpc = AMDGPU::A_SCHEDULE_AGPR_B512; break;
++      default:
++        ReplaceUses(SDValue(N, 0), Src);
++        CurDAG->RemoveDeadNode(N);
++        return;
++      }
++    }
++    SDValue RegNumImm = CurDAG->getTargetConstant(RegNumC->getZExtValue(),
++                                                   SDLoc(N), MVT::i32);
++    SDValue StrictImm = CurDAG->getTargetConstant(StrictC->getZExtValue(),
++                                                   SDLoc(N), MVT::i32);
++    CurDAG->SelectNodeTo(N, PseudoOpc, N->getVTList(),
++                         {Src, RegNumImm, StrictImm});
++    return;
++  }
+   case Intrinsic::amdgcn_permlane16_swap:
+   case Intrinsic::amdgcn_permlane32_swap: {
+     if ((IntrID == Intrinsic::amdgcn_permlane16_swap &&
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
+index 6da139ea0b59..bf861d8a6d64 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
++++ b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
+@@ -130,6 +130,7 @@ MACHINE_FUNCTION_PASS("amdgpu-set-wave-priority", AMDGPUSetWavePriorityPass())
+ MACHINE_FUNCTION_PASS("amdgpu-pre-ra-optimizations", GCNPreRAOptimizationsPass())
+ MACHINE_FUNCTION_PASS("amdgpu-preload-kern-arg-prolog", AMDGPUPreloadKernArgPrologPass())
+ MACHINE_FUNCTION_PASS("amdgpu-prepare-agpr-alloc", AMDGPUPrepareAGPRAllocPass())
++MACHINE_FUNCTION_PASS("amdgpu-sched-bank", AMDGPUSchedBankPass())
+ MACHINE_FUNCTION_PASS("amdgpu-nsa-reassign", GCNNSAReassignPass())
+ MACHINE_FUNCTION_PASS("amdgpu-wait-sgpr-hazards", AMDGPUWaitSGPRHazardsPass())
+ MACHINE_FUNCTION_PASS("gcn-create-vopd", GCNCreateVOPDPass())
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
+new file mode 100644
+index 000000000000..de712d4569f8
+--- /dev/null
++++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
+@@ -0,0 +1,266 @@
++//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++/// \file
++/// Lower the V_SCHEDULE_BANK_B* pseudos produced from llvm.amdgcn.sched.bank,
++/// and the V_SCHEDULE_VGPR_B*, S_SCHEDULE_SGPR_B*, A_SCHEDULE_AGPR_B* pseudos
++/// from llvm.amdgcn.schedule.{vgpr,sgpr,agpr}.
++///
++/// For each pseudo this pass:
++///   1. reads the requested bank or register number from the immediate operand,
++///   2. attaches an appropriate register allocation hint to the destination
++///      (and source) vreg so the allocator prefers the target bank or register,
++///   3. propagates the hint through COPY / REG_SEQUENCE / INSERT_SUBREG /
++///      SUBREG_TO_REG so it survives coalescing, and
++///   4. replaces the pseudo with a plain COPY.
++///
++/// The hint is advisory: SIRegisterInfo::getRegAllocationHints only reorders the
++/// allocation candidates, so a full bank (or unavailable register) falls back to
++/// the default order and the pass never forces a spill.
++//
++//===----------------------------------------------------------------------===//
++
++#include "AMDGPUSchedBank.h"
++#include "AMDGPU.h"
++#include "GCNSubtarget.h"
++#include "SIInstrInfo.h"
++#include "SIRegisterInfo.h"
++#include "llvm/ADT/DenseSet.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineInstrBuilder.h"
++#include "llvm/CodeGen/MachineRegisterInfo.h"
++#include "llvm/InitializePasses.h"
++
++using namespace llvm;
++
++#define DEBUG_TYPE "amdgpu-sched-bank"
++
++/// Classification of schedule-hint pseudos.
++enum ScheduleHintKind { SHK_None, SHK_Bank, SHK_VGPR, SHK_SGPR, SHK_AGPR };
++
++static ScheduleHintKind getScheduleHintKind(unsigned Opcode) {
++  switch (Opcode) {
++  case AMDGPU::V_SCHEDULE_BANK_B32:
++  case AMDGPU::V_SCHEDULE_BANK_B64:
++  case AMDGPU::V_SCHEDULE_BANK_B128:
++  case AMDGPU::V_SCHEDULE_BANK_B256:
++    return SHK_Bank;
++  case AMDGPU::V_SCHEDULE_VGPR_B32:
++  case AMDGPU::V_SCHEDULE_VGPR_B64:
++  case AMDGPU::V_SCHEDULE_VGPR_B128:
++  case AMDGPU::V_SCHEDULE_VGPR_B256:
++  case AMDGPU::V_SCHEDULE_VGPR_B512:
++    return SHK_VGPR;
++  case AMDGPU::S_SCHEDULE_SGPR_B32:
++  case AMDGPU::S_SCHEDULE_SGPR_B64:
++  case AMDGPU::S_SCHEDULE_SGPR_B128:
++  case AMDGPU::S_SCHEDULE_SGPR_B256:
++  case AMDGPU::S_SCHEDULE_SGPR_B512:
++    return SHK_SGPR;
++  case AMDGPU::A_SCHEDULE_AGPR_B32:
++  case AMDGPU::A_SCHEDULE_AGPR_B64:
++  case AMDGPU::A_SCHEDULE_AGPR_B128:
++  case AMDGPU::A_SCHEDULE_AGPR_B256:
++  case AMDGPU::A_SCHEDULE_AGPR_B512:
++    return SHK_AGPR;
++  default:
++    return SHK_None;
++  }
++}
++
++/// Walk the SSA use chain of \p Reg and propagate the hint through
++/// value-preserving pseudos so the preference reaches the vregs that survive
++/// coalescing.
++static void propagateHint(MachineRegisterInfo &MRI, Register Reg,
++                          unsigned HintValue, unsigned HintKind,
++                          SmallDenseSet<unsigned, 32> &Visited) {
++  if (!Reg.isVirtual() || !Visited.insert(Reg.id()).second)
++    return;
++
++  for (MachineInstr &UseMI : MRI.use_nodbg_instructions(Reg)) {
++    Register DefReg;
++    switch (UseMI.getOpcode()) {
++    case TargetOpcode::COPY:
++    case TargetOpcode::REG_SEQUENCE:
++    case TargetOpcode::INSERT_SUBREG:
++    case TargetOpcode::SUBREG_TO_REG:
++      DefReg = UseMI.getOperand(0).getReg();
++      break;
++    default:
++      continue;
++    }
++    if (!DefReg.isVirtual())
++      continue;
++
++    // Do not clobber an existing, conflicting hint.
++    std::pair<unsigned, Register> Existing = MRI.getRegAllocationHint(DefReg);
++    if (Existing.first != 0 &&
++        (Existing.first != HintKind || Existing.second != HintValue))
++      continue;
++
++    MRI.setRegAllocationHint(DefReg, HintKind, HintValue);
++    propagateHint(MRI, DefReg, HintValue, HintKind, Visited);
++  }
++}
++
++// Shared implementation used by both the legacy and new-PM passes.
++static bool runScheduleBank(MachineFunction &MF) {
++  const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  const SIInstrInfo *TII = ST.getInstrInfo();
++  bool Changed = false;
++
++  SmallVector<MachineInstr *, 16> ToErase;
++
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : MBB) {
++      ScheduleHintKind Kind = getScheduleHintKind(MI.getOpcode());
++      if (Kind == SHK_None)
++        continue;
++
++      Register DstReg = MI.getOperand(0).getReg();
++      const MachineOperand &SrcMO = MI.getOperand(1);
++      Register SrcReg = SrcMO.getReg();
++
++      unsigned HintKind;
++      unsigned HintValue;
++
++      if (Kind == SHK_Bank) {
++        // Bank pseudos are only valid on targets with 1024 addressable VGPRs.
++        if (!ST.has1024AddressableVGPRs()) {
++          // Replace with COPY and skip hint setup.
++          BuildMI(MBB, MI, MI.getDebugLoc(), TII->get(TargetOpcode::COPY),
++                  DstReg)
++              .addReg(SrcReg, getRegState(SrcMO), SrcMO.getSubReg());
++          ToErase.push_back(&MI);
++          Changed = true;
++          continue;
++        }
++
++        unsigned EncodedBank = MI.getOperand(2).getImm();
++        bool Strict = EncodedBank & 0x4;
++        unsigned Bank = EncodedBank & 0x3;
++
++        if (EncodedBank > 7) {
++          Bank = 0;
++          Strict = false;
++        }
++
++        HintKind = Strict ? AMDGPURI::StrictBankHint : AMDGPURI::BankHint;
++        HintValue = Bank;
++
++        LLVM_DEBUG(dbgs() << "  sched.bank: " << printReg(DstReg) << " <- "
++                          << printReg(SrcReg) << " bank " << Bank
++                          << " strict " << Strict << '\n');
++      } else {
++        // Exact register pseudos: operand 2 = regnum, operand 3 = strict.
++        unsigned RegNum = MI.getOperand(2).getImm();
++        bool Strict = MI.getOperand(3).getImm() != 0;
++
++        switch (Kind) {
++        case SHK_VGPR:
++          HintKind = Strict ? AMDGPURI::StrictVGPRRegHint
++                            : AMDGPURI::VGPRRegHint;
++          break;
++        case SHK_SGPR:
++          HintKind = Strict ? AMDGPURI::StrictSGPRRegHint
++                            : AMDGPURI::SGPRRegHint;
++          break;
++        case SHK_AGPR:
++          HintKind = Strict ? AMDGPURI::StrictAGPRRegHint
++                            : AMDGPURI::AGPRRegHint;
++          break;
++        default:
++          llvm_unreachable("unexpected schedule hint kind");
++        }
++        HintValue = RegNum;
++
++        LLVM_DEBUG(dbgs() << "  schedule."
++                          << (Kind == SHK_VGPR   ? "vgpr"
++                              : Kind == SHK_SGPR ? "sgpr"
++                                                 : "agpr")
++                          << ": " << printReg(DstReg) << " <- "
++                          << printReg(SrcReg) << " reg " << RegNum
++                          << " strict " << Strict << '\n');
++      }
++
++      // Hint both the destination and the source so the preference survives
++      // whichever side coalescing keeps. Don't overwrite a strict hint with a
++      // soft hint of the same category.
++      bool IsStrict = (HintKind == AMDGPURI::StrictBankHint ||
++                       HintKind == AMDGPURI::StrictVGPRRegHint ||
++                       HintKind == AMDGPURI::StrictSGPRRegHint ||
++                       HintKind == AMDGPURI::StrictAGPRRegHint);
++      // The strict variant is always HintKind | 1 for each category.
++      unsigned StrictVariant = HintKind | 1;
++
++      if (DstReg.isVirtual() &&
++          (IsStrict ||
++           MRI.getRegAllocationHint(DstReg).first != StrictVariant))
++        MRI.setRegAllocationHint(DstReg, HintKind, HintValue);
++      if (SrcReg.isVirtual() &&
++          (IsStrict ||
++           MRI.getRegAllocationHint(SrcReg).first != StrictVariant))
++        MRI.setRegAllocationHint(SrcReg, HintKind, HintValue);
++
++      SmallDenseSet<unsigned, 32> Visited;
++      if (DstReg.isVirtual())
++        propagateHint(MRI, DstReg, HintValue, HintKind, Visited);
++
++      // Replace the pseudo with a plain COPY.
++      BuildMI(MBB, MI, MI.getDebugLoc(), TII->get(TargetOpcode::COPY), DstReg)
++          .addReg(SrcReg, getRegState(SrcMO), SrcMO.getSubReg());
++
++      ToErase.push_back(&MI);
++      Changed = true;
++    }
++  }
++
++  for (MachineInstr *MI : ToErase)
++    MI->eraseFromParent();
++
++  return Changed;
++}
++
++namespace {
++
++class AMDGPUSchedBank : public MachineFunctionPass {
++public:
++  static char ID;
++
++  AMDGPUSchedBank() : MachineFunctionPass(ID) {}
++
++  bool runOnMachineFunction(MachineFunction &MF) override {
++    return runScheduleBank(MF);
++  }
++
++  StringRef getPassName() const override { return "AMDGPU Sched Bank"; }
++
++  void getAnalysisUsage(AnalysisUsage &AU) const override {
++    AU.setPreservesCFG();
++    MachineFunctionPass::getAnalysisUsage(AU);
++  }
++};
++
++} // end anonymous namespace
++
++INITIALIZE_PASS(AMDGPUSchedBank, DEBUG_TYPE, "AMDGPU Sched Bank",
++                false, false)
++
++char AMDGPUSchedBank::ID = 0;
++
++char &llvm::AMDGPUSchedBankID = AMDGPUSchedBank::ID;
++
++PreservedAnalyses
++AMDGPUSchedBankPass::run(MachineFunction &MF,
++                           MachineFunctionAnalysisManager &MFAM) {
++  if (!runScheduleBank(MF))
++    return PreservedAnalyses::all();
++
++  return getMachineFunctionPassPreservedAnalyses().preserveSet<CFGAnalyses>();
++}
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.h b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.h
+new file mode 100644
+index 000000000000..3a34c7933d6a
+--- /dev/null
++++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.h
+@@ -0,0 +1,23 @@
++//===- AMDGPUSchedBank.h -------------------------------------*- C++- *-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_LIB_TARGET_AMDGPU_AMDGPUSCHEDULEBANK_H
++#define LLVM_LIB_TARGET_AMDGPU_AMDGPUSCHEDULEBANK_H
++
++#include "llvm/CodeGen/MachinePassManager.h"
++
++namespace llvm {
++class AMDGPUSchedBankPass
++    : public OptionalPassInfoMixin<AMDGPUSchedBankPass> {
++public:
++  PreservedAnalyses run(MachineFunction &MF,
++                        MachineFunctionAnalysisManager &MFAM);
++};
++} // namespace llvm
++
++#endif // LLVM_LIB_TARGET_AMDGPU_AMDGPUSCHEDULEBANK_H
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
+index 9176adff039d..9093869109a4 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
+@@ -35,6 +35,7 @@
+ #include "AMDGPURemoveIncompatibleFunctions.h"
+ #include "AMDGPUReserveWWMRegs.h"
+ #include "AMDGPUResourceUsageAnalysis.h"
++#include "AMDGPUSchedBank.h"
+ #include "AMDGPUSplitModule.h"
+ #include "AMDGPUTargetObjectFile.h"
+ #include "AMDGPUTargetTransformInfo.h"
+@@ -200,13 +201,13 @@ public:
+ class SGPRRegisterRegAlloc : public RegisterRegAllocBase<SGPRRegisterRegAlloc> {
+ public:
+   SGPRRegisterRegAlloc(const char *N, const char *D, FunctionPassCtor C)
+-    : RegisterRegAllocBase(N, D, C) {}
++      : RegisterRegAllocBase(N, D, C) {}
+ };
+ 
+ class VGPRRegisterRegAlloc : public RegisterRegAllocBase<VGPRRegisterRegAlloc> {
+ public:
+   VGPRRegisterRegAlloc(const char *N, const char *D, FunctionPassCtor C)
+-    : RegisterRegAllocBase(N, D, C) {}
++      : RegisterRegAllocBase(N, D, C) {}
+ };
+ 
+ class WWMRegisterRegAlloc : public RegisterRegAllocBase<WWMRegisterRegAlloc> {
+@@ -249,19 +250,21 @@ static llvm::once_flag InitializeDefaultVGPRRegisterAllocatorFlag;
+ static llvm::once_flag InitializeDefaultWWMRegisterAllocatorFlag;
+ 
+ static SGPRRegisterRegAlloc
+-defaultSGPRRegAlloc("default",
+-                    "pick SGPR register allocator based on -O option",
+-                    useDefaultRegisterAllocator);
++    defaultSGPRRegAlloc("default",
++                        "pick SGPR register allocator based on -O option",
++                        useDefaultRegisterAllocator);
+ 
+ static cl::opt<SGPRRegisterRegAlloc::FunctionPassCtor, false,
+                RegisterPassParser<SGPRRegisterRegAlloc>>
+-SGPRRegAlloc("sgpr-regalloc", cl::Hidden, cl::init(&useDefaultRegisterAllocator),
+-             cl::desc("Register allocator to use for SGPRs"));
++    SGPRRegAlloc("sgpr-regalloc", cl::Hidden,
++                 cl::init(&useDefaultRegisterAllocator),
++                 cl::desc("Register allocator to use for SGPRs"));
+ 
+ static cl::opt<VGPRRegisterRegAlloc::FunctionPassCtor, false,
+                RegisterPassParser<VGPRRegisterRegAlloc>>
+-VGPRRegAlloc("vgpr-regalloc", cl::Hidden, cl::init(&useDefaultRegisterAllocator),
+-             cl::desc("Register allocator to use for VGPRs"));
++    VGPRRegAlloc("vgpr-regalloc", cl::Hidden,
++                 cl::init(&useDefaultRegisterAllocator),
++                 cl::desc("Register allocator to use for VGPRs"));
+ 
+ static cl::opt<WWMRegisterRegAlloc::FunctionPassCtor, false,
+                RegisterPassParser<WWMRegisterRegAlloc>>
+@@ -389,22 +392,25 @@ static FunctionPass *createFastWWMRegisterAllocator() {
+   return createFastRegisterAllocator(onlyAllocateWWMRegs, false);
+ }
+ 
+-static SGPRRegisterRegAlloc basicRegAllocSGPR(
+-  "basic", "basic register allocator", createBasicSGPRRegisterAllocator);
+-static SGPRRegisterRegAlloc greedyRegAllocSGPR(
+-  "greedy", "greedy register allocator", createGreedySGPRRegisterAllocator);
+-
+-static SGPRRegisterRegAlloc fastRegAllocSGPR(
+-  "fast", "fast register allocator", createFastSGPRRegisterAllocator);
++static SGPRRegisterRegAlloc basicRegAllocSGPR("basic",
++                                              "basic register allocator",
++                                              createBasicSGPRRegisterAllocator);
++static SGPRRegisterRegAlloc
++    greedyRegAllocSGPR("greedy", "greedy register allocator",
++                       createGreedySGPRRegisterAllocator);
+ 
++static SGPRRegisterRegAlloc fastRegAllocSGPR("fast", "fast register allocator",
++                                             createFastSGPRRegisterAllocator);
+ 
+-static VGPRRegisterRegAlloc basicRegAllocVGPR(
+-  "basic", "basic register allocator", createBasicVGPRRegisterAllocator);
+-static VGPRRegisterRegAlloc greedyRegAllocVGPR(
+-  "greedy", "greedy register allocator", createGreedyVGPRRegisterAllocator);
++static VGPRRegisterRegAlloc basicRegAllocVGPR("basic",
++                                              "basic register allocator",
++                                              createBasicVGPRRegisterAllocator);
++static VGPRRegisterRegAlloc
++    greedyRegAllocVGPR("greedy", "greedy register allocator",
++                       createGreedyVGPRRegisterAllocator);
+ 
+-static VGPRRegisterRegAlloc fastRegAllocVGPR(
+-  "fast", "fast register allocator", createFastVGPRRegisterAllocator);
++static VGPRRegisterRegAlloc fastRegAllocVGPR("fast", "fast register allocator",
++                                             createFastVGPRRegisterAllocator);
+ static WWMRegisterRegAlloc basicRegAllocWWMReg("basic",
+                                                "basic register allocator",
+                                                createBasicWWMRegisterAllocator);
+@@ -421,14 +427,14 @@ static bool isLTOPreLink(ThinOrFullLTOPhase Phase) {
+ } // anonymous namespace
+ 
+ static cl::opt<bool>
+-EnableEarlyIfConversion("amdgpu-early-ifcvt", cl::Hidden,
+-                        cl::desc("Run early if-conversion"),
+-                        cl::init(false));
++    EnableEarlyIfConversion("amdgpu-early-ifcvt", cl::Hidden,
++                            cl::desc("Run early if-conversion"),
++                            cl::init(false));
+ 
+ static cl::opt<bool>
+-OptExecMaskPreRA("amdgpu-opt-exec-mask-pre-ra", cl::Hidden,
+-            cl::desc("Run pre-RA exec mask optimizations"),
+-            cl::init(true));
++    OptExecMaskPreRA("amdgpu-opt-exec-mask-pre-ra", cl::Hidden,
++                     cl::desc("Run pre-RA exec mask optimizations"),
++                     cl::init(true));
+ 
+ static cl::opt<bool>
+     LowerCtorDtor("amdgpu-lower-global-ctor-dtor",
+@@ -436,32 +442,27 @@ static cl::opt<bool>
+                   cl::init(true), cl::Hidden);
+ 
+ // Option to disable vectorizer for tests.
+-static cl::opt<bool> EnableLoadStoreVectorizer(
+-  "amdgpu-load-store-vectorizer",
+-  cl::desc("Enable load store vectorizer"),
+-  cl::init(true),
+-  cl::Hidden);
++static cl::opt<bool>
++    EnableLoadStoreVectorizer("amdgpu-load-store-vectorizer",
++                              cl::desc("Enable load store vectorizer"),
++                              cl::init(true), cl::Hidden);
+ 
+ // Option to control global loads scalarization
+-static cl::opt<bool> ScalarizeGlobal(
+-  "amdgpu-scalarize-global-loads",
+-  cl::desc("Enable global load scalarization"),
+-  cl::init(true),
+-  cl::Hidden);
++static cl::opt<bool>
++    ScalarizeGlobal("amdgpu-scalarize-global-loads",
++                    cl::desc("Enable global load scalarization"),
++                    cl::init(true), cl::Hidden);
+ 
+ // Option to run internalize pass.
+ static cl::opt<bool> InternalizeSymbols(
+-  "amdgpu-internalize-symbols",
+-  cl::desc("Enable elimination of non-kernel functions and unused globals"),
+-  cl::init(false),
+-  cl::Hidden);
++    "amdgpu-internalize-symbols",
++    cl::desc("Enable elimination of non-kernel functions and unused globals"),
++    cl::init(false), cl::Hidden);
+ 
+ // Option to inline all early.
+-static cl::opt<bool> EarlyInlineAll(
+-  "amdgpu-early-inline-all",
+-  cl::desc("Inline all functions early"),
+-  cl::init(false),
+-  cl::Hidden);
++static cl::opt<bool> EarlyInlineAll("amdgpu-early-inline-all",
++                                    cl::desc("Inline all functions early"),
++                                    cl::init(false), cl::Hidden);
+ 
+ static cl::opt<bool> RemoveIncompatibleFunctions(
+     "amdgpu-enable-remove-incompatible-functions", cl::Hidden,
+@@ -469,20 +470,19 @@ static cl::opt<bool> RemoveIncompatibleFunctions(
+              "use features not supported by the target GPU"),
+     cl::init(true));
+ 
+-static cl::opt<bool> EnableSDWAPeephole(
+-  "amdgpu-sdwa-peephole",
+-  cl::desc("Enable SDWA peepholer"),
+-  cl::init(true));
++static cl::opt<bool> EnableSDWAPeephole("amdgpu-sdwa-peephole",
++                                        cl::desc("Enable SDWA peepholer"),
++                                        cl::init(true));
+ 
+-static cl::opt<bool> EnableDPPCombine(
+-  "amdgpu-dpp-combine",
+-  cl::desc("Enable DPP combiner"),
+-  cl::init(true));
++static cl::opt<bool> EnableDPPCombine("amdgpu-dpp-combine",
++                                      cl::desc("Enable DPP combiner"),
++                                      cl::init(true));
+ 
+ // Enable address space based alias analysis
+-static cl::opt<bool> EnableAMDGPUAliasAnalysis("enable-amdgpu-aa", cl::Hidden,
+-  cl::desc("Enable AMDGPU Alias Analysis"),
+-  cl::init(true));
++static cl::opt<bool>
++    EnableAMDGPUAliasAnalysis("enable-amdgpu-aa", cl::Hidden,
++                              cl::desc("Enable AMDGPU Alias Analysis"),
++                              cl::init(true));
+ 
+ static cl::opt<bool>
+     XnackSetting("amdgpu-xnack",
+@@ -495,23 +495,20 @@ static cl::opt<bool>
+                    cl::ReallyHidden);
+ 
+ // Enable lib calls simplifications
+-static cl::opt<bool> EnableLibCallSimplify(
+-  "amdgpu-simplify-libcall",
+-  cl::desc("Enable amdgpu library simplifications"),
+-  cl::init(true),
+-  cl::Hidden);
++static cl::opt<bool>
++    EnableLibCallSimplify("amdgpu-simplify-libcall",
++                          cl::desc("Enable amdgpu library simplifications"),
++                          cl::init(true), cl::Hidden);
+ 
+ static cl::opt<bool> EnableLowerKernelArguments(
+-  "amdgpu-ir-lower-kernel-arguments",
+-  cl::desc("Lower kernel argument loads in IR pass"),
+-  cl::init(true),
+-  cl::Hidden);
++    "amdgpu-ir-lower-kernel-arguments",
++    cl::desc("Lower kernel argument loads in IR pass"), cl::init(true),
++    cl::Hidden);
+ 
+ static cl::opt<bool> EnableRegReassign(
+-  "amdgpu-reassign-regs",
+-  cl::desc("Enable register reassign optimizations on gfx10+"),
+-  cl::init(true),
+-  cl::Hidden);
++    "amdgpu-reassign-regs",
++    cl::desc("Enable register reassign optimizations on gfx10+"),
++    cl::init(true), cl::Hidden);
+ 
+ static cl::opt<bool> OptVGPRLiveRange(
+     "amdgpu-opt-vgpr-liverange",
+@@ -529,11 +526,10 @@ static cl::opt<ScanOptions> AMDGPUAtomicOptimizerStrategy(
+         clEnumValN(ScanOptions::None, "None", "Disable atomic optimizer")));
+ 
+ // Enable Mode register optimization
+-static cl::opt<bool> EnableSIModeRegisterPass(
+-  "amdgpu-mode-register",
+-  cl::desc("Enable mode register pass"),
+-  cl::init(true),
+-  cl::Hidden);
++static cl::opt<bool>
++    EnableSIModeRegisterPass("amdgpu-mode-register",
++                             cl::desc("Enable mode register pass"),
++                             cl::init(true), cl::Hidden);
+ 
+ // Enable GFX11+ s_delay_alu insertion
+ static cl::opt<bool>
+@@ -549,19 +545,16 @@ static cl::opt<bool>
+ 
+ // Option is used in lit tests to prevent deadcoding of patterns inspected.
+ static cl::opt<bool>
+-EnableDCEInRA("amdgpu-dce-in-ra",
+-    cl::init(true), cl::Hidden,
+-    cl::desc("Enable machine DCE inside regalloc"));
++    EnableDCEInRA("amdgpu-dce-in-ra", cl::init(true), cl::Hidden,
++                  cl::desc("Enable machine DCE inside regalloc"));
+ 
+ static cl::opt<bool> EnableSetWavePriority("amdgpu-set-wave-priority",
+                                            cl::desc("Adjust wave priority"),
+                                            cl::init(false), cl::Hidden);
+ 
+-static cl::opt<bool> EnableScalarIRPasses(
+-  "amdgpu-scalar-ir-passes",
+-  cl::desc("Enable scalar IR passes"),
+-  cl::init(true),
+-  cl::Hidden);
++static cl::opt<bool> EnableScalarIRPasses("amdgpu-scalar-ir-passes",
++                                          cl::desc("Enable scalar IR passes"),
++                                          cl::init(true), cl::Hidden);
+ 
+ static cl::opt<bool> EnableLowerExecSync(
+     "amdgpu-enable-lower-exec-sync",
+@@ -585,10 +578,10 @@ static cl::opt<bool, true> EnableLowerModuleLDS(
+     cl::location(AMDGPUTargetMachine::EnableLowerModuleLDS), cl::init(true),
+     cl::Hidden);
+ 
+-static cl::opt<bool> EnablePreRAOptimizations(
+-    "amdgpu-enable-pre-ra-optimizations",
+-    cl::desc("Enable Pre-RA optimizations pass"), cl::init(true),
+-    cl::Hidden);
++static cl::opt<bool>
++    EnablePreRAOptimizations("amdgpu-enable-pre-ra-optimizations",
++                             cl::desc("Enable Pre-RA optimizations pass"),
++                             cl::init(true), cl::Hidden);
+ 
+ static cl::opt<bool> EnablePromoteKernelArguments(
+     "amdgpu-enable-promote-kernel-arguments",
+@@ -647,10 +640,10 @@ static cl::opt<bool> EnableRewritePartialRegUses(
+     cl::desc("Enable rewrite partial reg uses pass"), cl::init(true),
+     cl::Hidden);
+ 
+-static cl::opt<bool> EnableHipStdPar(
+-  "amdgpu-enable-hipstdpar",
+-  cl::desc("Enable HIP Standard Parallelism Offload support"), cl::init(false),
+-  cl::Hidden);
++static cl::opt<bool>
++    EnableHipStdPar("amdgpu-enable-hipstdpar",
++                    cl::desc("Enable HIP Standard Parallelism Offload support"),
++                    cl::init(false), cl::Hidden);
+ 
+ static cl::opt<bool>
+     EnableAMDGPUAttributor("amdgpu-attributor-enable",
+@@ -685,6 +678,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAMDGPUTarget() {
+   initializeAMDGPUAsmPrinterPass(*PR);
+   initializeAMDGPUDAGToDAGISelLegacyPass(*PR);
+   initializeAMDGPUPrepareAGPRAllocLegacyPass(*PR);
++  initializeAMDGPUSchedBankPass(*PR);
+   initializeGCNDPPCombineLegacyPass(*PR);
+   initializeSILowerI1CopiesLegacyPass(*PR);
+   initializeAMDGPUGlobalISelDivergenceLoweringLegacyPass(*PR);
+@@ -771,8 +765,8 @@ static ScheduleDAGInstrs *createSIMachineScheduler(MachineSchedContext *C) {
+ static ScheduleDAGInstrs *
+ createGCNMaxOccupancyMachineScheduler(MachineSchedContext *C) {
+   const GCNSubtarget &ST = C->MF->getSubtarget<GCNSubtarget>();
+-  ScheduleDAGMILive *DAG =
+-    new GCNScheduleDAGMILive(C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
++  ScheduleDAGMILive *DAG = new GCNScheduleDAGMILive(
++      C, std::make_unique<GCNMaxOccupancySchedStrategy>(C));
+   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
+   if (ST.shouldClusterStores())
+     DAG->addMutation(createStoreClusterDAGMutation(DAG->TII, DAG->TRI));
+@@ -837,14 +831,13 @@ createIterativeILPMachineScheduler(MachineSchedContext *C) {
+   return DAG;
+ }
+ 
+-static MachineSchedRegistry
+-SISchedRegistry("si", "Run SI's custom scheduler",
+-                createSIMachineScheduler);
++static MachineSchedRegistry SISchedRegistry("si", "Run SI's custom scheduler",
++                                            createSIMachineScheduler);
+ 
+ static MachineSchedRegistry
+-GCNMaxOccupancySchedRegistry("gcn-max-occupancy",
+-                             "Run GCN scheduler to maximize occupancy",
+-                             createGCNMaxOccupancyMachineScheduler);
++    GCNMaxOccupancySchedRegistry("gcn-max-occupancy",
++                                 "Run GCN scheduler to maximize occupancy",
++                                 createGCNMaxOccupancyMachineScheduler);
+ 
+ static MachineSchedRegistry
+     GCNMaxILPSchedRegistry("gcn-max-ilp", "Run GCN scheduler to maximize ilp",
+@@ -1623,7 +1616,7 @@ void AMDGPUPassConfig::addIRPasses() {
+                                              AAResults &AAR) {
+         if (auto *WrapperPass = P.getAnalysisIfAvailable<AMDGPUAAWrapperPass>())
+           AAR.addAAResult(WrapperPass->getResult());
+-        }));
++      }));
+     }
+ 
+     if (TM.getTargetTriple().isAMDGCN()) {
+@@ -1834,6 +1827,7 @@ void GCNPassConfig::addFastRegAlloc() {
+ }
+ 
+ void GCNPassConfig::addPreRegAlloc() {
++  addPass(&AMDGPUSchedBankID);
+   if (getOptLevel() != CodeGenOptLevel::None)
+     addPass(&AMDGPUPrepareAGPRAllocLegacyID);
+ }
+@@ -2234,8 +2228,8 @@ bool GCNTargetMachine::parseMachineFunctionInfo(
+                              AMDGPU::SGPR_32RegClass,
+                              MFI->ArgInfo.PrivateSegmentSize, 0, 0) ||
+        parseAndCheckArgument(YamlMFI.ArgInfo->LDSKernelId,
+-                             AMDGPU::SGPR_32RegClass,
+-                             MFI->ArgInfo.LDSKernelId, 0, 1) ||
++                             AMDGPU::SGPR_32RegClass, MFI->ArgInfo.LDSKernelId,
++                             0, 1) ||
+        parseAndCheckArgument(YamlMFI.ArgInfo->WorkGroupIDX,
+                              AMDGPU::SGPR_32RegClass, MFI->ArgInfo.WorkGroupIDX,
+                              0, 1) ||
+@@ -2258,14 +2252,14 @@ bool GCNTargetMachine::parseMachineFunctionInfo(
+                              AMDGPU::SReg_64RegClass,
+                              MFI->ArgInfo.ImplicitBufferPtr, 2, 0) ||
+        parseAndCheckArgument(YamlMFI.ArgInfo->WorkItemIDX,
+-                             AMDGPU::VGPR_32RegClass,
+-                             MFI->ArgInfo.WorkItemIDX, 0, 0) ||
++                             AMDGPU::VGPR_32RegClass, MFI->ArgInfo.WorkItemIDX,
++                             0, 0) ||
+        parseAndCheckArgument(YamlMFI.ArgInfo->WorkItemIDY,
+-                             AMDGPU::VGPR_32RegClass,
+-                             MFI->ArgInfo.WorkItemIDY, 0, 0) ||
++                             AMDGPU::VGPR_32RegClass, MFI->ArgInfo.WorkItemIDY,
++                             0, 0) ||
+        parseAndCheckArgument(YamlMFI.ArgInfo->WorkItemIDZ,
+-                             AMDGPU::VGPR_32RegClass,
+-                             MFI->ArgInfo.WorkItemIDZ, 0, 0)))
++                             AMDGPU::VGPR_32RegClass, MFI->ArgInfo.WorkItemIDZ,
++                             0, 0)))
+     return true;
+ 
+   // Parse FirstKernArgPreloadReg separately, since it's a Register,
+@@ -2642,6 +2636,7 @@ Error AMDGPUCodeGenPassBuilder::addOptimizedRegAlloc(PassManagerWrapper &PMW) {
+ }
+ 
+ void AMDGPUCodeGenPassBuilder::addPreRegAlloc(PassManagerWrapper &PMW) {
++  addMachineFunctionPass(AMDGPUSchedBankPass(), PMW);
+   if (getOptLevel() != CodeGenOptLevel::None)
+     addMachineFunctionPass(AMDGPUPrepareAGPRAllocPass(), PMW);
+ }
+diff --git a/llvm/lib/Target/AMDGPU/CMakeLists.txt b/llvm/lib/Target/AMDGPU/CMakeLists.txt
+index b7e679a69a80..c93c322eb785 100644
+--- a/llvm/lib/Target/AMDGPU/CMakeLists.txt
++++ b/llvm/lib/Target/AMDGPU/CMakeLists.txt
+@@ -80,6 +80,7 @@ add_llvm_target(AMDGPUCodeGen
+   AMDGPULowerKernelAttributes.cpp
+   AMDGPULowerModuleLDSPass.cpp
+   AMDGPUPrepareAGPRAlloc.cpp
++  AMDGPUSchedBank.cpp
+   AMDGPULowerExecSync.cpp
+   AMDGPUSwLowerLDS.cpp
+   AMDGPUMachineFunctionInfo.cpp
+diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/SIInstructions.td
+index c2fe75037152..83803e126538 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstructions.td
++++ b/llvm/lib/Target/AMDGPU/SIInstructions.td
+@@ -129,6 +129,39 @@ def V_CNDMASK_B64_PSEUDO : VOP3Common <(outs VReg_64:$vdst),
+   let usesCustomInserter = 1;
+ }
+ 
++// VGPR bank hint pseudos carrying a target bank number in [0, 3]. These are
++// identity copies produced by lowering llvm.amdgcn.sched.bank. A pre-RA pass
++// (AMDGPUSchedBank) reads the bank operand, sets a register allocation hint
++// on the destination vreg, and replaces the pseudo with a COPY.
++let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
++    mayLoad = 0, mayStore = 0, Size = 0 in {
++  def V_SCHEDULE_BANK_B32  : VPseudoInstSI<(outs VGPR_32:$vdst),
++                                           (ins VGPR_32:$src, i32imm:$bank)>;
++  def V_SCHEDULE_BANK_B64  : VPseudoInstSI<(outs VReg_64:$vdst),
++                                           (ins VReg_64:$src, i32imm:$bank)>;
++  def V_SCHEDULE_BANK_B128 : VPseudoInstSI<(outs VReg_128:$vdst),
++                                           (ins VReg_128:$src, i32imm:$bank)>;
++  def V_SCHEDULE_BANK_B256 : VPseudoInstSI<(outs VReg_256:$vdst),
++                                           (ins VReg_256:$src, i32imm:$bank)>;
++}
++
++// Exact VGPR register hint pseudos. Identity copies carrying a target VGPR
++// register number and strict flag. The pre-RA AMDGPUSchedBank pass reads
++// these operands, sets a register allocation hint, and replaces with COPY.
++let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
++    mayLoad = 0, mayStore = 0, Size = 0 in {
++  def V_SCHEDULE_VGPR_B32  : VPseudoInstSI<(outs VGPR_32:$vdst),
++                                            (ins VGPR_32:$src, i32imm:$regnum, i32imm:$strict)>;
++  def V_SCHEDULE_VGPR_B64  : VPseudoInstSI<(outs VReg_64:$vdst),
++                                            (ins VReg_64:$src, i32imm:$regnum, i32imm:$strict)>;
++  def V_SCHEDULE_VGPR_B128 : VPseudoInstSI<(outs VReg_128:$vdst),
++                                            (ins VReg_128:$src, i32imm:$regnum, i32imm:$strict)>;
++  def V_SCHEDULE_VGPR_B256 : VPseudoInstSI<(outs VReg_256:$vdst),
++                                            (ins VReg_256:$src, i32imm:$regnum, i32imm:$strict)>;
++  def V_SCHEDULE_VGPR_B512 : VPseudoInstSI<(outs VReg_512:$vdst),
++                                            (ins VReg_512:$src, i32imm:$regnum, i32imm:$strict)>;
++}
++
+ // 64-bit vector move instruction. This is mainly used by the
+ // SIFoldOperands pass to enable folding of inline immediates.
+ def V_MOV_B64_PSEUDO : VPseudoInstSI <(outs VReg_64:$vdst),
+@@ -217,6 +250,37 @@ def STRICT_WQM : PseudoInstSI <(outs unknown:$vdst), (ins unknown:$src0)>;
+ 
+ } // End let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [EXEC]
+ 
++// Exact SGPR register hint pseudos. Placed outside the Uses = [EXEC] block
++// because SGPR operations do not use EXEC.
++let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
++    mayLoad = 0, mayStore = 0, Size = 0 in {
++  def S_SCHEDULE_SGPR_B32  : SPseudoInstSI<(outs SGPR_32:$sdst),
++                                            (ins SGPR_32:$src, i32imm:$regnum, i32imm:$strict)>;
++  def S_SCHEDULE_SGPR_B64  : SPseudoInstSI<(outs SGPR_64:$sdst),
++                                            (ins SGPR_64:$src, i32imm:$regnum, i32imm:$strict)>;
++  def S_SCHEDULE_SGPR_B128 : SPseudoInstSI<(outs SGPR_128:$sdst),
++                                            (ins SGPR_128:$src, i32imm:$regnum, i32imm:$strict)>;
++  def S_SCHEDULE_SGPR_B256 : SPseudoInstSI<(outs SGPR_256:$sdst),
++                                            (ins SGPR_256:$src, i32imm:$regnum, i32imm:$strict)>;
++  def S_SCHEDULE_SGPR_B512 : SPseudoInstSI<(outs SGPR_512:$sdst),
++                                            (ins SGPR_512:$src, i32imm:$regnum, i32imm:$strict)>;
++}
++
++// Exact AGPR register hint pseudos. Only valid on targets with MAI instructions.
++let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
++    mayLoad = 0, mayStore = 0, Size = 0 in {
++  def A_SCHEDULE_AGPR_B32  : VPseudoInstSI<(outs AGPR_32:$vdst),
++                                            (ins AGPR_32:$src, i32imm:$regnum, i32imm:$strict)>;
++  def A_SCHEDULE_AGPR_B64  : VPseudoInstSI<(outs AReg_64:$vdst),
++                                            (ins AReg_64:$src, i32imm:$regnum, i32imm:$strict)>;
++  def A_SCHEDULE_AGPR_B128 : VPseudoInstSI<(outs AReg_128:$vdst),
++                                            (ins AReg_128:$src, i32imm:$regnum, i32imm:$strict)>;
++  def A_SCHEDULE_AGPR_B256 : VPseudoInstSI<(outs AReg_256:$vdst),
++                                            (ins AReg_256:$src, i32imm:$regnum, i32imm:$strict)>;
++  def A_SCHEDULE_AGPR_B512 : VPseudoInstSI<(outs AReg_512:$vdst),
++                                            (ins AReg_512:$src, i32imm:$regnum, i32imm:$strict)>;
++}
++
+ def WWM_COPY : SPseudoInstSI <
+   (outs unknown:$dst), (ins unknown:$src)> {
+   let hasSideEffects = 0;
+diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+index 2b0d9fd38079..7dee2c3ed7c7 100644
+--- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+@@ -11,13 +11,13 @@
+ //
+ //===----------------------------------------------------------------------===//
+ 
++#include "SIRegisterInfo.h"
+ #include "AMDGPU.h"
+ #include "AMDGPURegisterBankInfo.h"
+ #include "GCNSubtarget.h"
+ #include "MCTargetDesc/AMDGPUInstPrinter.h"
+ #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+ #include "SIMachineFunctionInfo.h"
+-#include "SIRegisterInfo.h"
+ #include "llvm/CodeGen/LiveIntervals.h"
+ #include "llvm/CodeGen/LiveRegUnits.h"
+ #include "llvm/CodeGen/MachineDominators.h"
+@@ -29,11 +29,10 @@ using namespace llvm;
+ #define GET_REGINFO_TARGET_DESC
+ #include "AMDGPUGenRegisterInfo.inc"
+ 
+-static cl::opt<bool> EnableSpillSGPRToVGPR(
+-  "amdgpu-spill-sgpr-to-vgpr",
+-  cl::desc("Enable spilling SGPRs to VGPRs"),
+-  cl::ReallyHidden,
+-  cl::init(true));
++static cl::opt<bool>
++    EnableSpillSGPRToVGPR("amdgpu-spill-sgpr-to-vgpr",
++                          cl::desc("Enable spilling SGPRs to VGPRs"),
++                          cl::ReallyHidden, cl::init(true));
+ 
+ static cl::opt<bool> EnableSpillCFISavedRegs(
+     "amdgpu-spill-cfi-saved-regs",
+@@ -52,6 +51,11 @@ static cl::opt<unsigned> StressSGPRLimit(
+     "amdgpu-stress-sgpr", cl::Hidden, cl::init(0),
+     cl::desc("Limit SGPRs to N registers by reserving the rest"));
+ 
++static cl::opt<bool> StrictVGPRBankHints(
++    "amdgpu-strict-vgpr-bank-hints",
++    cl::desc("Restrict sched.bank values to the requested VGPR bank"),
++    cl::Hidden, cl::init(false));
++
+ std::array<std::vector<int16_t>, 32> SIRegisterInfo::RegSplitParts;
+ std::array<std::array<uint16_t, 32>, 9> SIRegisterInfo::SubRegFromChannelTable;
+ 
+@@ -325,10 +329,12 @@ struct SGPRSpillBuilder {
+       TRI.buildVGPRSpillLoadStore(*this, Index, Offset, IsLoad,
+                                   /*IsKill*/ false);
+       // Spill inactive lanes
+-      auto Not0 = BuildMI(*MBB, MI, DL, TII.get(NotOpc), ExecReg).addReg(ExecReg);
++      auto Not0 =
++          BuildMI(*MBB, MI, DL, TII.get(NotOpc), ExecReg).addReg(ExecReg);
+       Not0->getOperand(2).setIsDead(); // Mark SCC as dead.
+       TRI.buildVGPRSpillLoadStore(*this, Index, Offset, IsLoad);
+-      auto Not1 = BuildMI(*MBB, MI, DL, TII.get(NotOpc), ExecReg).addReg(ExecReg);
++      auto Not1 =
++          BuildMI(*MBB, MI, DL, TII.get(NotOpc), ExecReg).addReg(ExecReg);
+       Not1->getOperand(2).setIsDead(); // Mark SCC as dead.
+     }
+   }
+@@ -352,8 +358,9 @@ SIRegisterInfo::SIRegisterInfo(const GCNSubtarget &ST)
+   assert(getSubRegIndexLaneMask(AMDGPU::sub0).getAsInteger() == 3 &&
+          getSubRegIndexLaneMask(AMDGPU::sub31).getAsInteger() == (3ULL << 62) &&
+          (getSubRegIndexLaneMask(AMDGPU::lo16) |
+-          getSubRegIndexLaneMask(AMDGPU::hi16)).getAsInteger() ==
+-           getSubRegIndexLaneMask(AMDGPU::sub0).getAsInteger() &&
++          getSubRegIndexLaneMask(AMDGPU::hi16))
++                 .getAsInteger() ==
++             getSubRegIndexLaneMask(AMDGPU::sub0).getAsInteger() &&
+          "getNumCoveredRegs() will not work with generated subreg masks!");
+ 
+   RegPressureIgnoredUnits.resize(getNumRegUnits());
+@@ -417,8 +424,8 @@ void SIRegisterInfo::reserveRegisterTuples(BitVector &Reserved,
+ }
+ 
+ // Forced to be here by one .inc
+-const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
+-  const MachineFunction *MF) const {
++const MCPhysReg *
++SIRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
+   CallingConv::ID CC = MF->getFunction().getCallingConv();
+   switch (CC) {
+   case CallingConv::C:
+@@ -592,7 +599,7 @@ SIRegisterInfo::getAlignedHighSGPRForRC(const MachineFunction &MF,
+ }
+ 
+ MCRegister SIRegisterInfo::reservedPrivateSegmentBufferReg(
+-  const MachineFunction &MF) const {
++    const MachineFunction &MF) const {
+   return getAlignedHighSGPRForRC(MF, /*Align=*/4, &AMDGPU::SGPR_128RegClass);
+ }
+ 
+@@ -795,7 +802,8 @@ bool SIRegisterInfo::shouldRealignStack(const MachineFunction &MF) const {
+   return TargetRegisterInfo::shouldRealignStack(MF);
+ }
+ 
+-bool SIRegisterInfo::requiresRegisterScavenging(const MachineFunction &Fn) const {
++bool SIRegisterInfo::requiresRegisterScavenging(
++    const MachineFunction &Fn) const {
+   const SIMachineFunctionInfo *Info = Fn.getInfo<SIMachineFunctionInfo>();
+   if (Info->isEntryFunction()) {
+     const MachineFrameInfo &MFI = Fn.getFrameInfo();
+@@ -807,7 +815,7 @@ bool SIRegisterInfo::requiresRegisterScavenging(const MachineFunction &Fn) const
+ }
+ 
+ bool SIRegisterInfo::requiresFrameIndexScavenging(
+-  const MachineFunction &MF) const {
++    const MachineFunction &MF) const {
+   // Do not use frame virtual registers. They used to be used for SGPRs, but
+   // once we reach PrologEpilogInserter, we can no longer spill SGPRs. If the
+   // scavenger fails, we can increment/decrement the necessary SGPRs to avoid a
+@@ -816,13 +824,13 @@ bool SIRegisterInfo::requiresFrameIndexScavenging(
+ }
+ 
+ bool SIRegisterInfo::requiresFrameIndexReplacementScavenging(
+-  const MachineFunction &MF) const {
++    const MachineFunction &MF) const {
+   const MachineFrameInfo &MFI = MF.getFrameInfo();
+   return MFI.hasStackObjects();
+ }
+ 
+ bool SIRegisterInfo::requiresVirtualBaseRegisters(
+-  const MachineFunction &) const {
++    const MachineFunction &) const {
+   // There are no special dedicated stack or frame pointers.
+   return true;
+ }
+@@ -830,8 +838,8 @@ bool SIRegisterInfo::requiresVirtualBaseRegisters(
+ int64_t SIRegisterInfo::getScratchInstrOffset(const MachineInstr *MI) const {
+   assert(SIInstrInfo::isMUBUF(*MI) || SIInstrInfo::isFLATScratch(*MI));
+ 
+-  int OffIdx = AMDGPU::getNamedOperandIdx(MI->getOpcode(),
+-                                          AMDGPU::OpName::offset);
++  int OffIdx =
++      AMDGPU::getNamedOperandIdx(MI->getOpcode(), AMDGPU::OpName::offset);
+   return MI->getOperand(OffIdx).getImm();
+ }
+ 
+@@ -859,8 +867,8 @@ int64_t SIRegisterInfo::getFrameIndexInstrOffset(const MachineInstr *MI,
+ 
+   assert((Idx == AMDGPU::getNamedOperandIdx(MI->getOpcode(),
+                                             AMDGPU::OpName::vaddr) ||
+-         (Idx == AMDGPU::getNamedOperandIdx(MI->getOpcode(),
+-                                            AMDGPU::OpName::saddr))) &&
++          (Idx == AMDGPU::getNamedOperandIdx(MI->getOpcode(),
++                                             AMDGPU::OpName::saddr))) &&
+          "Should never see frame index on non-address operand");
+ 
+   return getScratchInstrOffset(MI);
+@@ -954,8 +962,7 @@ Register SIRegisterInfo::materializeFrameBaseRegister(MachineBasicBlock *MBB,
+                                  : &AMDGPU::VGPR_32RegClass);
+ 
+   if (Offset == 0) {
+-    BuildMI(*MBB, Ins, DL, TII->get(MovOpc), BaseReg)
+-      .addFrameIndex(FrameIdx);
++    BuildMI(*MBB, Ins, DL, TII->get(MovOpc), BaseReg).addFrameIndex(FrameIdx);
+     return BaseReg;
+   }
+ 
+@@ -965,10 +972,8 @@ Register SIRegisterInfo::materializeFrameBaseRegister(MachineBasicBlock *MBB,
+                                                  ? &AMDGPU::SReg_32_XM0RegClass
+                                                  : &AMDGPU::VGPR_32RegClass);
+ 
+-  BuildMI(*MBB, Ins, DL, TII->get(AMDGPU::S_MOV_B32), OffsetReg)
+-    .addImm(Offset);
+-  BuildMI(*MBB, Ins, DL, TII->get(MovOpc), FIReg)
+-    .addFrameIndex(FrameIdx);
++  BuildMI(*MBB, Ins, DL, TII->get(AMDGPU::S_MOV_B32), OffsetReg).addImm(Offset);
++  BuildMI(*MBB, Ins, DL, TII->get(MovOpc), FIReg).addFrameIndex(FrameIdx);
+ 
+   if (ST.hasFlatScratchEnabled()) {
+     // FIXME: Make sure scc isn't live in.
+@@ -980,9 +985,9 @@ Register SIRegisterInfo::materializeFrameBaseRegister(MachineBasicBlock *MBB,
+   }
+ 
+   TII->getAddNoCarry(*MBB, Ins, DL, BaseReg)
+-    .addReg(OffsetReg, RegState::Kill)
+-    .addReg(FIReg)
+-    .addImm(0); // clamp bit
++      .addReg(OffsetReg, RegState::Kill)
++      .addReg(FIReg)
++      .addImm(0); // clamp bit
+ 
+   return BaseReg;
+ }
+@@ -1075,7 +1080,7 @@ void SIRegisterInfo::resolveFrameIndex(MachineInstr &MI, Register BaseReg,
+ #ifndef NDEBUG
+   // FIXME: Is it possible to be storing a frame index to itself?
+   bool SeenFI = false;
+-  for (const MachineOperand &MO: MI.operands()) {
++  for (const MachineOperand &MO : MI.operands()) {
+     if (MO.isFI()) {
+       if (SeenFI)
+         llvm_unreachable("should not see multiple frame indices");
+@@ -1085,9 +1090,8 @@ void SIRegisterInfo::resolveFrameIndex(MachineInstr &MI, Register BaseReg,
+   }
+ #endif
+ 
+-  MachineOperand *FIOp =
+-      TII->getNamedOperand(MI, IsFlat ? AMDGPU::OpName::saddr
+-                                      : AMDGPU::OpName::vaddr);
++  MachineOperand *FIOp = TII->getNamedOperand(
++      MI, IsFlat ? AMDGPU::OpName::saddr : AMDGPU::OpName::vaddr);
+ 
+   MachineOperand *OffsetOp = TII->getNamedOperand(MI, AMDGPU::OpName::offset);
+   int64_t NewOffset = OffsetOp->getImm() + Offset;
+@@ -1341,7 +1345,8 @@ static unsigned getNumSubRegsForSpillOp(const MachineInstr &MI,
+   case AMDGPU::SI_SPILL_V16_SAVE:
+   case AMDGPU::SI_SPILL_V16_RESTORE:
+     return 1;
+-  default: llvm_unreachable("Invalid spill opcode");
++  default:
++    llvm_unreachable("Invalid spill opcode");
+   }
+ }
+ 
+@@ -1477,7 +1482,7 @@ spillVGPRtoAGPR(const GCNSubtarget &ST, MachineBasicBlock &MBB,
+ 
+   bool IsStore = MI->mayStore();
+   MachineRegisterInfo &MRI = MF->getRegInfo();
+-  auto *TRI = static_cast<const SIRegisterInfo*>(MRI.getTargetRegisterInfo());
++  auto *TRI = static_cast<const SIRegisterInfo *>(MRI.getTargetRegisterInfo());
+ 
+   unsigned Dst = IsStore ? Reg : ValueReg;
+   unsigned Src = IsStore ? ValueReg : Reg;
+@@ -1510,8 +1515,7 @@ spillVGPRtoAGPR(const GCNSubtarget &ST, MachineBasicBlock &MBB,
+ // need to handle the case where an SGPR may need to be spilled while spilling.
+ static bool buildMUBUFOffsetLoadStore(const GCNSubtarget &ST,
+                                       MachineFrameInfo &MFI,
+-                                      MachineBasicBlock::iterator MI,
+-                                      int Index,
++                                      MachineBasicBlock::iterator MI, int Index,
+                                       int64_t Offset) {
+   const SIInstrInfo *TII = ST.getInstrInfo();
+   MachineBasicBlock *MBB = MI->getParent();
+@@ -1519,8 +1523,8 @@ static bool buildMUBUFOffsetLoadStore(const GCNSubtarget &ST,
+   bool IsStore = MI->mayStore();
+ 
+   unsigned Opc = MI->getOpcode();
+-  int LoadStoreOp = IsStore ?
+-    getOffsetMUBUFStore(Opc) : getOffsetMUBUFLoad(Opc);
++  int LoadStoreOp =
++      IsStore ? getOffsetMUBUFStore(Opc) : getOffsetMUBUFLoad(Opc);
+   if (LoadStoreOp == -1)
+     return false;
+ 
+@@ -1539,8 +1543,8 @@ static bool buildMUBUFOffsetLoadStore(const GCNSubtarget &ST,
+           .addImm(0) // swz
+           .cloneMemRefs(*MI);
+ 
+-  const MachineOperand *VDataIn = TII->getNamedOperand(*MI,
+-                                                       AMDGPU::OpName::vdata_in);
++  const MachineOperand *VDataIn =
++      TII->getNamedOperand(*MI, AMDGPU::OpName::vdata_in);
+   if (VDataIn)
+     NewMI.add(*VDataIn);
+   return true;
+@@ -1696,20 +1700,20 @@ void SIRegisterInfo::buildSpillLoadStore(
+ 
+       if (ST.getConstantBusLimit(AMDGPU::V_ADD_U32_e64) >= 2) {
+         BuildMI(MBB, MI, DL, TII->get(AMDGPU::V_ADD_U32_e64), TmpVGPR)
+-          .addReg(SGPRBase)
+-          .addImm(VOffset)
+-          .addImm(0); // clamp
++            .addReg(SGPRBase)
++            .addImm(VOffset)
++            .addImm(0); // clamp
+       } else {
+         BuildMI(MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpVGPR)
+-          .addReg(SGPRBase);
++            .addReg(SGPRBase);
+         BuildMI(MBB, MI, DL, TII->get(AMDGPU::V_ADD_U32_e32), TmpVGPR)
+-          .addImm(VOffset)
+-          .addReg(TmpOffsetVGPR);
++            .addImm(VOffset)
++            .addReg(TmpOffsetVGPR);
+       }
+     } else {
+       assert(TmpOffsetVGPR);
+       BuildMI(MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpVGPR)
+-        .addImm(VOffset);
++          .addImm(VOffset);
+     }
+   };
+ 
+@@ -1725,7 +1729,8 @@ void SIRegisterInfo::buildSpillLoadStore(
+     // TODO: Clobbering SCC is not necessary for scratch instructions in the
+     // entry.
+     if (RS) {
+-      SOffset = RS->scavengeRegisterBackwards(AMDGPU::SGPR_32RegClass, MI, false, 0, false);
++      SOffset = RS->scavengeRegisterBackwards(AMDGPU::SGPR_32RegClass, MI,
++                                              false, 0, false);
+ 
+       // Piggy back on the liveness scan we just did see if SCC is dead.
+       CanClobberSCC = !RS->isRegUsed(AMDGPU::SCC);
+@@ -1746,7 +1751,8 @@ void SIRegisterInfo::buildSpillLoadStore(
+       UseVGPROffset = true;
+ 
+       if (RS) {
+-        TmpOffsetVGPR = RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass, MI, false, 0);
++        TmpOffsetVGPR = RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass,
++                                                      MI, false, 0);
+       } else {
+         assert(LiveUnits);
+         for (MCRegister Reg : AMDGPU::VGPR_32RegClass) {
+@@ -1795,8 +1801,8 @@ void SIRegisterInfo::buildSpillLoadStore(
+     } else {
+       assert(Offset != 0);
+       auto Add = BuildMI(MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), SOffset)
+-          .addReg(ScratchOffsetReg)
+-          .addImm(Offset);
++                     .addReg(ScratchOffsetReg)
++                     .addImm(Offset);
+       Add->getOperand(3).setIsDead(); // Mark SCC as dead.
+     }
+ 
+@@ -1804,8 +1810,8 @@ void SIRegisterInfo::buildSpillLoadStore(
+   }
+ 
+   if (IsFlat && SOffset == AMDGPU::NoRegister) {
+-    assert(AMDGPU::getNamedOperandIdx(LoadStoreOp, AMDGPU::OpName::vaddr) < 0
+-           && "Unexpected vaddr for flat scratch with a FI operand");
++    assert(AMDGPU::getNamedOperandIdx(LoadStoreOp, AMDGPU::OpName::vaddr) < 0 &&
++           "Unexpected vaddr for flat scratch with a FI operand");
+ 
+     if (UseVGPROffset) {
+       LoadStoreOp = AMDGPU::getFlatScratchInstSVfromSS(LoadStoreOp);
+@@ -1859,10 +1865,10 @@ void SIRegisterInfo::buildSpillLoadStore(
+     }
+ 
+     unsigned NumRegs = EltSize / 4;
+-    Register SubReg = e == 1
+-            ? ValueReg
+-            : Register(getSubReg(ValueReg,
+-                                 getSubRegFromChannel(RegOffset / 4, NumRegs)));
++    Register SubReg =
++        e == 1 ? ValueReg
++               : Register(getSubReg(
++                     ValueReg, getSubRegFromChannel(RegOffset / 4, NumRegs)));
+ 
+     RegState SOffsetRegState = {};
+     RegState SrcDstRegState = getDefRegState(!IsStore);
+@@ -1893,18 +1899,20 @@ void SIRegisterInfo::buildSpillLoadStore(
+              LaneE = RegOffset / 4;
+          Lane >= LaneE; --Lane) {
+       bool IsSubReg = e > 1 || EltSize > 4;
+-      Register Sub = IsSubReg
+-             ? Register(getSubReg(ValueReg, getSubRegFromChannel(Lane)))
+-             : ValueReg;
++      Register Sub =
++          IsSubReg ? Register(getSubReg(ValueReg, getSubRegFromChannel(Lane)))
++                   : ValueReg;
+       auto MIB =
+           spillVGPRtoAGPR(ST, MBB, MI, Index, Lane, Sub, IsKill, NeedsCFI);
+       if (!MIB.getInstr())
+         break;
+-      if (NeedSuperRegDef || (IsSubReg && IsStore && Lane == LaneS && IsFirstSubReg)) {
++      if (NeedSuperRegDef ||
++          (IsSubReg && IsStore && Lane == LaneS && IsFirstSubReg)) {
+         MIB.addReg(ValueReg, RegState::ImplicitDefine);
+         NeedSuperRegDef = false;
+       }
+-      if ((IsSubReg || NeedSuperRegImpOperand) && (IsFirstSubReg || IsLastSubReg)) {
++      if ((IsSubReg || NeedSuperRegImpOperand) &&
++          (IsFirstSubReg || IsLastSubReg)) {
+         NeedSuperRegImpOperand = true;
+         RegState State = SrcDstRegState;
+         if (!IsLastSubReg || (Lane != LaneE))
+@@ -1923,8 +1931,8 @@ void SIRegisterInfo::buildSpillLoadStore(
+       assert(IsFlat && EltSize > 4);
+ 
+       unsigned NumRegs = RemEltSize / 4;
+-      SubReg = Register(getSubReg(ValueReg,
+-                        getSubRegFromChannel(RegOffset / 4, NumRegs)));
++      SubReg = Register(
++          getSubReg(ValueReg, getSubRegFromChannel(RegOffset / 4, NumRegs)));
+       unsigned Opc = getFlatScratchSpillOpcode(TII, LoadStoreOp, RemEltSize);
+       Desc = &TII->get(Opc);
+     }
+@@ -1939,10 +1947,10 @@ void SIRegisterInfo::buildSpillLoadStore(
+         assert(MF->getRegInfo().isReserved(TmpIntermediateVGPR));
+       }
+       if (IsStore) {
+-        auto AccRead = BuildMI(MBB, MI, DL,
+-                               TII->get(AMDGPU::V_ACCVGPR_READ_B32_e64),
+-                               TmpIntermediateVGPR)
+-                           .addReg(SubReg, getKillRegState(IsKill));
++        auto AccRead =
++            BuildMI(MBB, MI, DL, TII->get(AMDGPU::V_ACCVGPR_READ_B32_e64),
++                    TmpIntermediateVGPR)
++                .addReg(SubReg, getKillRegState(IsKill));
+         if (NeedSuperRegDef)
+           AccRead.addReg(ValueReg, RegState::ImplicitDefine);
+         if (NeedSuperRegImpOperand && (IsFirstSubReg || IsLastSubReg))
+@@ -2211,7 +2219,6 @@ bool SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI, int Index,
+       bool IsLastSubreg = i == SB.NumSubRegs - 1;
+       bool UseKill = SB.IsKill && IsLastSubreg;
+ 
+-
+       // Mark the "old value of vgpr" input undef only if this is the first sgpr
+       // spill to this specific vgpr in the first basic block.
+       auto MIB = BuildMI(*SB.MBB, MI, SB.DL,
+@@ -2538,8 +2545,8 @@ bool SIRegisterInfo::eliminateSGPRToVGPRSpillFrameIndex(
+ }
+ 
+ bool SIRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator MI,
+-                                        int SPAdj, unsigned FIOperandNum,
+-                                        RegScavenger *RS) const {
++                                         int SPAdj, unsigned FIOperandNum,
++                                         RegScavenger *RS) const {
+   MachineFunction *MF = MI->getMF();
+   MachineBasicBlock *MBB = MI->getParent();
+   SIMachineFunctionInfo *MFI = MF->getInfo<SIMachineFunctionInfo>();
+@@ -2576,1024 +2583,1011 @@ bool SIRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator MI,
+     NeedsCFI = true;
+     [[fallthrough]];
+   }
+-    case AMDGPU::SI_SPILL_S1024_SAVE:
+-    case AMDGPU::SI_SPILL_S512_SAVE:
+-    case AMDGPU::SI_SPILL_S384_SAVE:
+-    case AMDGPU::SI_SPILL_S352_SAVE:
+-    case AMDGPU::SI_SPILL_S320_SAVE:
+-    case AMDGPU::SI_SPILL_S288_SAVE:
+-    case AMDGPU::SI_SPILL_S256_SAVE:
+-    case AMDGPU::SI_SPILL_S224_SAVE:
+-    case AMDGPU::SI_SPILL_S192_SAVE:
+-    case AMDGPU::SI_SPILL_S160_SAVE:
+-    case AMDGPU::SI_SPILL_S128_SAVE:
+-    case AMDGPU::SI_SPILL_S96_SAVE:
+-    case AMDGPU::SI_SPILL_S64_SAVE:
+-    case AMDGPU::SI_SPILL_S32_SAVE: {
+-      return spillSGPR(MI, Index, RS, nullptr, nullptr,
+-                       FrameInfo.getStackID(Index) == TargetStackID::SGPRSpill,
+-                       false, NeedsCFI);
+-    }
+-
+-    // SGPR register restore
+-    case AMDGPU::SI_SPILL_S1024_RESTORE:
+-    case AMDGPU::SI_SPILL_S512_RESTORE:
+-    case AMDGPU::SI_SPILL_S384_RESTORE:
+-    case AMDGPU::SI_SPILL_S352_RESTORE:
+-    case AMDGPU::SI_SPILL_S320_RESTORE:
+-    case AMDGPU::SI_SPILL_S288_RESTORE:
+-    case AMDGPU::SI_SPILL_S256_RESTORE:
+-    case AMDGPU::SI_SPILL_S224_RESTORE:
+-    case AMDGPU::SI_SPILL_S192_RESTORE:
+-    case AMDGPU::SI_SPILL_S160_RESTORE:
+-    case AMDGPU::SI_SPILL_S128_RESTORE:
+-    case AMDGPU::SI_SPILL_S96_RESTORE:
+-    case AMDGPU::SI_SPILL_S64_RESTORE:
+-    case AMDGPU::SI_SPILL_S32_RESTORE: {
+-      return restoreSGPR(MI, Index, RS, nullptr, nullptr,
+-                         FrameInfo.getStackID(Index) ==
+-                             TargetStackID::SGPRSpill);
+-    }
+-
+-    // VGPR register spill
+-    case AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V1024_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V512_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V256_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V224_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V192_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V160_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V128_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V96_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V64_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_V32_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A1024_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A512_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A256_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A224_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A192_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A160_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A128_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A96_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A64_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_A32_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV1024_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV512_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV256_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV224_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV192_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV160_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV128_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV96_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV64_CFI_SAVE:
+-    case AMDGPU::SI_SPILL_AV32_CFI_SAVE:
+-      NeedsCFI = true;
+-      [[fallthrough]];
+-    case AMDGPU::SI_BLOCK_SPILL_V1024_SAVE:
+-    case AMDGPU::SI_SPILL_V1024_SAVE:
+-    case AMDGPU::SI_SPILL_V512_SAVE:
+-    case AMDGPU::SI_SPILL_V384_SAVE:
+-    case AMDGPU::SI_SPILL_V352_SAVE:
+-    case AMDGPU::SI_SPILL_V320_SAVE:
+-    case AMDGPU::SI_SPILL_V288_SAVE:
+-    case AMDGPU::SI_SPILL_V256_SAVE:
+-    case AMDGPU::SI_SPILL_V224_SAVE:
+-    case AMDGPU::SI_SPILL_V192_SAVE:
+-    case AMDGPU::SI_SPILL_V160_SAVE:
+-    case AMDGPU::SI_SPILL_V128_SAVE:
+-    case AMDGPU::SI_SPILL_V96_SAVE:
+-    case AMDGPU::SI_SPILL_V64_SAVE:
+-    case AMDGPU::SI_SPILL_V32_SAVE:
+-    case AMDGPU::SI_SPILL_V16_SAVE:
+-    case AMDGPU::SI_SPILL_A1024_SAVE:
+-    case AMDGPU::SI_SPILL_A512_SAVE:
+-    case AMDGPU::SI_SPILL_A384_SAVE:
+-    case AMDGPU::SI_SPILL_A352_SAVE:
+-    case AMDGPU::SI_SPILL_A320_SAVE:
+-    case AMDGPU::SI_SPILL_A288_SAVE:
+-    case AMDGPU::SI_SPILL_A256_SAVE:
+-    case AMDGPU::SI_SPILL_A224_SAVE:
+-    case AMDGPU::SI_SPILL_A192_SAVE:
+-    case AMDGPU::SI_SPILL_A160_SAVE:
+-    case AMDGPU::SI_SPILL_A128_SAVE:
+-    case AMDGPU::SI_SPILL_A96_SAVE:
+-    case AMDGPU::SI_SPILL_A64_SAVE:
+-    case AMDGPU::SI_SPILL_A32_SAVE:
+-    case AMDGPU::SI_SPILL_AV1024_SAVE:
+-    case AMDGPU::SI_SPILL_AV512_SAVE:
+-    case AMDGPU::SI_SPILL_AV384_SAVE:
+-    case AMDGPU::SI_SPILL_AV352_SAVE:
+-    case AMDGPU::SI_SPILL_AV320_SAVE:
+-    case AMDGPU::SI_SPILL_AV288_SAVE:
+-    case AMDGPU::SI_SPILL_AV256_SAVE:
+-    case AMDGPU::SI_SPILL_AV224_SAVE:
+-    case AMDGPU::SI_SPILL_AV192_SAVE:
+-    case AMDGPU::SI_SPILL_AV160_SAVE:
+-    case AMDGPU::SI_SPILL_AV128_SAVE:
+-    case AMDGPU::SI_SPILL_AV96_SAVE:
+-    case AMDGPU::SI_SPILL_AV64_SAVE:
+-    case AMDGPU::SI_SPILL_AV32_SAVE:
+-    case AMDGPU::SI_SPILL_WWM_V32_SAVE:
+-    case AMDGPU::SI_SPILL_WWM_AV32_SAVE: {
+-      assert(
+-          MI->getOpcode() != AMDGPU::SI_BLOCK_SPILL_V1024_SAVE &&
+-          "block spill does not currenty support spilling non-CSR registers");
+-
+-      if (MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE)
+-        // Put mask into M0.
+-        BuildMI(*MBB, MI, MI->getDebugLoc(), TII->get(AMDGPU::S_MOV_B32),
+-                AMDGPU::M0)
+-            .add(*TII->getNamedOperand(*MI, AMDGPU::OpName::mask));
+-
+-      const MachineOperand *VData = TII->getNamedOperand(*MI,
+-                                                         AMDGPU::OpName::vdata);
+-      if (VData->isUndef()) {
+-        MI->eraseFromParent();
+-        return true;
+-      }
+-
+-      assert(TII->getNamedOperand(*MI, AMDGPU::OpName::soffset)->getReg() ==
+-             MFI->getStackPtrOffsetReg());
++  case AMDGPU::SI_SPILL_S1024_SAVE:
++  case AMDGPU::SI_SPILL_S512_SAVE:
++  case AMDGPU::SI_SPILL_S384_SAVE:
++  case AMDGPU::SI_SPILL_S352_SAVE:
++  case AMDGPU::SI_SPILL_S320_SAVE:
++  case AMDGPU::SI_SPILL_S288_SAVE:
++  case AMDGPU::SI_SPILL_S256_SAVE:
++  case AMDGPU::SI_SPILL_S224_SAVE:
++  case AMDGPU::SI_SPILL_S192_SAVE:
++  case AMDGPU::SI_SPILL_S160_SAVE:
++  case AMDGPU::SI_SPILL_S128_SAVE:
++  case AMDGPU::SI_SPILL_S96_SAVE:
++  case AMDGPU::SI_SPILL_S64_SAVE:
++  case AMDGPU::SI_SPILL_S32_SAVE: {
++    return spillSGPR(MI, Index, RS, nullptr, nullptr,
++                     FrameInfo.getStackID(Index) == TargetStackID::SGPRSpill,
++                     false, NeedsCFI);
++  }
+ 
+-      unsigned Opc;
+-      if (MI->getOpcode() == AMDGPU::SI_SPILL_V16_SAVE) {
+-        assert(ST.hasFlatScratchEnabled() && "Flat Scratch is not enabled!");
+-        Opc = AMDGPU::SCRATCH_STORE_SHORT_SADDR_t16;
+-      } else {
+-        Opc = MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE
+-                  ? AMDGPU::SCRATCH_STORE_BLOCK_SADDR
+-              : ST.hasFlatScratchEnabled() ? AMDGPU::SCRATCH_STORE_DWORD_SADDR
+-                                           : AMDGPU::BUFFER_STORE_DWORD_OFFSET;
+-      }
++  // SGPR register restore
++  case AMDGPU::SI_SPILL_S1024_RESTORE:
++  case AMDGPU::SI_SPILL_S512_RESTORE:
++  case AMDGPU::SI_SPILL_S384_RESTORE:
++  case AMDGPU::SI_SPILL_S352_RESTORE:
++  case AMDGPU::SI_SPILL_S320_RESTORE:
++  case AMDGPU::SI_SPILL_S288_RESTORE:
++  case AMDGPU::SI_SPILL_S256_RESTORE:
++  case AMDGPU::SI_SPILL_S224_RESTORE:
++  case AMDGPU::SI_SPILL_S192_RESTORE:
++  case AMDGPU::SI_SPILL_S160_RESTORE:
++  case AMDGPU::SI_SPILL_S128_RESTORE:
++  case AMDGPU::SI_SPILL_S96_RESTORE:
++  case AMDGPU::SI_SPILL_S64_RESTORE:
++  case AMDGPU::SI_SPILL_S32_RESTORE: {
++    return restoreSGPR(MI, Index, RS, nullptr, nullptr,
++                       FrameInfo.getStackID(Index) == TargetStackID::SGPRSpill);
++  }
+ 
+-      auto *MBB = MI->getParent();
+-      bool IsWWMRegSpill = TII->isWWMRegSpillOpcode(MI->getOpcode());
+-      if (IsWWMRegSpill) {
+-        TII->insertScratchExecCopy(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy(),
+-                                   RS->isRegUsed(AMDGPU::SCC));
+-      }
+-      buildSpillLoadStore(
+-          *MBB, MI, DL, Opc, Index, VData->getReg(), VData->isKill(), FrameReg,
+-          TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm(),
+-          *MI->memoperands_begin(), RS, nullptr, NeedsCFI);
+-      MFI->addToSpilledVGPRs(getNumSubRegsForSpillOp(*MI, TII));
+-      if (IsWWMRegSpill)
+-        TII->restoreExec(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy());
++  // VGPR register spill
++  case AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V1024_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V512_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V256_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V224_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V192_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V160_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V128_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V96_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V64_CFI_SAVE:
++  case AMDGPU::SI_SPILL_V32_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A1024_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A512_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A256_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A224_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A192_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A160_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A128_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A96_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A64_CFI_SAVE:
++  case AMDGPU::SI_SPILL_A32_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV1024_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV512_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV256_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV224_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV192_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV160_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV128_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV96_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV64_CFI_SAVE:
++  case AMDGPU::SI_SPILL_AV32_CFI_SAVE:
++    NeedsCFI = true;
++    [[fallthrough]];
++  case AMDGPU::SI_BLOCK_SPILL_V1024_SAVE:
++  case AMDGPU::SI_SPILL_V1024_SAVE:
++  case AMDGPU::SI_SPILL_V512_SAVE:
++  case AMDGPU::SI_SPILL_V384_SAVE:
++  case AMDGPU::SI_SPILL_V352_SAVE:
++  case AMDGPU::SI_SPILL_V320_SAVE:
++  case AMDGPU::SI_SPILL_V288_SAVE:
++  case AMDGPU::SI_SPILL_V256_SAVE:
++  case AMDGPU::SI_SPILL_V224_SAVE:
++  case AMDGPU::SI_SPILL_V192_SAVE:
++  case AMDGPU::SI_SPILL_V160_SAVE:
++  case AMDGPU::SI_SPILL_V128_SAVE:
++  case AMDGPU::SI_SPILL_V96_SAVE:
++  case AMDGPU::SI_SPILL_V64_SAVE:
++  case AMDGPU::SI_SPILL_V32_SAVE:
++  case AMDGPU::SI_SPILL_V16_SAVE:
++  case AMDGPU::SI_SPILL_A1024_SAVE:
++  case AMDGPU::SI_SPILL_A512_SAVE:
++  case AMDGPU::SI_SPILL_A384_SAVE:
++  case AMDGPU::SI_SPILL_A352_SAVE:
++  case AMDGPU::SI_SPILL_A320_SAVE:
++  case AMDGPU::SI_SPILL_A288_SAVE:
++  case AMDGPU::SI_SPILL_A256_SAVE:
++  case AMDGPU::SI_SPILL_A224_SAVE:
++  case AMDGPU::SI_SPILL_A192_SAVE:
++  case AMDGPU::SI_SPILL_A160_SAVE:
++  case AMDGPU::SI_SPILL_A128_SAVE:
++  case AMDGPU::SI_SPILL_A96_SAVE:
++  case AMDGPU::SI_SPILL_A64_SAVE:
++  case AMDGPU::SI_SPILL_A32_SAVE:
++  case AMDGPU::SI_SPILL_AV1024_SAVE:
++  case AMDGPU::SI_SPILL_AV512_SAVE:
++  case AMDGPU::SI_SPILL_AV384_SAVE:
++  case AMDGPU::SI_SPILL_AV352_SAVE:
++  case AMDGPU::SI_SPILL_AV320_SAVE:
++  case AMDGPU::SI_SPILL_AV288_SAVE:
++  case AMDGPU::SI_SPILL_AV256_SAVE:
++  case AMDGPU::SI_SPILL_AV224_SAVE:
++  case AMDGPU::SI_SPILL_AV192_SAVE:
++  case AMDGPU::SI_SPILL_AV160_SAVE:
++  case AMDGPU::SI_SPILL_AV128_SAVE:
++  case AMDGPU::SI_SPILL_AV96_SAVE:
++  case AMDGPU::SI_SPILL_AV64_SAVE:
++  case AMDGPU::SI_SPILL_AV32_SAVE:
++  case AMDGPU::SI_SPILL_WWM_V32_SAVE:
++  case AMDGPU::SI_SPILL_WWM_AV32_SAVE: {
++    assert(MI->getOpcode() != AMDGPU::SI_BLOCK_SPILL_V1024_SAVE &&
++           "block spill does not currenty support spilling non-CSR registers");
+ 
+-      MI->eraseFromParent();
+-      return true;
+-    }
+-    case AMDGPU::SI_BLOCK_SPILL_V1024_RESTORE: {
++    if (MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE)
+       // Put mask into M0.
+       BuildMI(*MBB, MI, MI->getDebugLoc(), TII->get(AMDGPU::S_MOV_B32),
+               AMDGPU::M0)
+           .add(*TII->getNamedOperand(*MI, AMDGPU::OpName::mask));
+-      [[fallthrough]];
++
++    const MachineOperand *VData =
++        TII->getNamedOperand(*MI, AMDGPU::OpName::vdata);
++    if (VData->isUndef()) {
++      MI->eraseFromParent();
++      return true;
+     }
+-    case AMDGPU::SI_SPILL_V16_RESTORE:
+-    case AMDGPU::SI_SPILL_V32_RESTORE:
+-    case AMDGPU::SI_SPILL_V64_RESTORE:
+-    case AMDGPU::SI_SPILL_V96_RESTORE:
+-    case AMDGPU::SI_SPILL_V128_RESTORE:
+-    case AMDGPU::SI_SPILL_V160_RESTORE:
+-    case AMDGPU::SI_SPILL_V192_RESTORE:
+-    case AMDGPU::SI_SPILL_V224_RESTORE:
+-    case AMDGPU::SI_SPILL_V256_RESTORE:
+-    case AMDGPU::SI_SPILL_V288_RESTORE:
+-    case AMDGPU::SI_SPILL_V320_RESTORE:
+-    case AMDGPU::SI_SPILL_V352_RESTORE:
+-    case AMDGPU::SI_SPILL_V384_RESTORE:
+-    case AMDGPU::SI_SPILL_V512_RESTORE:
+-    case AMDGPU::SI_SPILL_V1024_RESTORE:
+-    case AMDGPU::SI_SPILL_A32_RESTORE:
+-    case AMDGPU::SI_SPILL_A64_RESTORE:
+-    case AMDGPU::SI_SPILL_A96_RESTORE:
+-    case AMDGPU::SI_SPILL_A128_RESTORE:
+-    case AMDGPU::SI_SPILL_A160_RESTORE:
+-    case AMDGPU::SI_SPILL_A192_RESTORE:
+-    case AMDGPU::SI_SPILL_A224_RESTORE:
+-    case AMDGPU::SI_SPILL_A256_RESTORE:
+-    case AMDGPU::SI_SPILL_A288_RESTORE:
+-    case AMDGPU::SI_SPILL_A320_RESTORE:
+-    case AMDGPU::SI_SPILL_A352_RESTORE:
+-    case AMDGPU::SI_SPILL_A384_RESTORE:
+-    case AMDGPU::SI_SPILL_A512_RESTORE:
+-    case AMDGPU::SI_SPILL_A1024_RESTORE:
+-    case AMDGPU::SI_SPILL_AV32_RESTORE:
+-    case AMDGPU::SI_SPILL_AV64_RESTORE:
+-    case AMDGPU::SI_SPILL_AV96_RESTORE:
+-    case AMDGPU::SI_SPILL_AV128_RESTORE:
+-    case AMDGPU::SI_SPILL_AV160_RESTORE:
+-    case AMDGPU::SI_SPILL_AV192_RESTORE:
+-    case AMDGPU::SI_SPILL_AV224_RESTORE:
+-    case AMDGPU::SI_SPILL_AV256_RESTORE:
+-    case AMDGPU::SI_SPILL_AV288_RESTORE:
+-    case AMDGPU::SI_SPILL_AV320_RESTORE:
+-    case AMDGPU::SI_SPILL_AV352_RESTORE:
+-    case AMDGPU::SI_SPILL_AV384_RESTORE:
+-    case AMDGPU::SI_SPILL_AV512_RESTORE:
+-    case AMDGPU::SI_SPILL_AV1024_RESTORE:
+-    case AMDGPU::SI_SPILL_WWM_V32_RESTORE:
+-    case AMDGPU::SI_SPILL_WWM_AV32_RESTORE: {
+-      const MachineOperand *VData = TII->getNamedOperand(*MI,
+-                                                         AMDGPU::OpName::vdata);
+-      assert(TII->getNamedOperand(*MI, AMDGPU::OpName::soffset)->getReg() ==
+-             MFI->getStackPtrOffsetReg());
+-
+-      unsigned Opc;
+-      if (MI->getOpcode() == AMDGPU::SI_SPILL_V16_RESTORE) {
+-        assert(ST.hasFlatScratchEnabled() && "Flat Scratch is not enabled!");
+-        Opc = ST.d16PreservesUnusedBits()
+-                  ? AMDGPU::SCRATCH_LOAD_SHORT_D16_SADDR_t16
+-                  : AMDGPU::SCRATCH_LOAD_USHORT_SADDR;
+-      } else {
+-        Opc = MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_RESTORE
+-                  ? AMDGPU::SCRATCH_LOAD_BLOCK_SADDR
+-              : ST.hasFlatScratchEnabled() ? AMDGPU::SCRATCH_LOAD_DWORD_SADDR
+-                                           : AMDGPU::BUFFER_LOAD_DWORD_OFFSET;
+-      }
+ 
+-      auto *MBB = MI->getParent();
+-      bool IsWWMRegSpill = TII->isWWMRegSpillOpcode(MI->getOpcode());
+-      if (IsWWMRegSpill) {
+-        TII->insertScratchExecCopy(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy(),
+-                                   RS->isRegUsed(AMDGPU::SCC));
+-      }
++    assert(TII->getNamedOperand(*MI, AMDGPU::OpName::soffset)->getReg() ==
++           MFI->getStackPtrOffsetReg());
+ 
+-      buildSpillLoadStore(
+-          *MBB, MI, DL, Opc, Index, VData->getReg(), VData->isKill(), FrameReg,
+-          TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm(),
+-          *MI->memoperands_begin(), RS);
++    unsigned Opc;
++    if (MI->getOpcode() == AMDGPU::SI_SPILL_V16_SAVE) {
++      assert(ST.hasFlatScratchEnabled() && "Flat Scratch is not enabled!");
++      Opc = AMDGPU::SCRATCH_STORE_SHORT_SADDR_t16;
++    } else {
++      Opc = MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_CFI_SAVE
++                ? AMDGPU::SCRATCH_STORE_BLOCK_SADDR
++            : ST.hasFlatScratchEnabled() ? AMDGPU::SCRATCH_STORE_DWORD_SADDR
++                                         : AMDGPU::BUFFER_STORE_DWORD_OFFSET;
++    }
+ 
+-      if (IsWWMRegSpill)
+-        TII->restoreExec(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy());
++    auto *MBB = MI->getParent();
++    bool IsWWMRegSpill = TII->isWWMRegSpillOpcode(MI->getOpcode());
++    if (IsWWMRegSpill) {
++      TII->insertScratchExecCopy(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy(),
++                                 RS->isRegUsed(AMDGPU::SCC));
++    }
++    buildSpillLoadStore(
++        *MBB, MI, DL, Opc, Index, VData->getReg(), VData->isKill(), FrameReg,
++        TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm(),
++        *MI->memoperands_begin(), RS, nullptr, NeedsCFI);
++    MFI->addToSpilledVGPRs(getNumSubRegsForSpillOp(*MI, TII));
++    if (IsWWMRegSpill)
++      TII->restoreExec(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy());
++
++    MI->eraseFromParent();
++    return true;
++  }
++  case AMDGPU::SI_BLOCK_SPILL_V1024_RESTORE: {
++    // Put mask into M0.
++    BuildMI(*MBB, MI, MI->getDebugLoc(), TII->get(AMDGPU::S_MOV_B32),
++            AMDGPU::M0)
++        .add(*TII->getNamedOperand(*MI, AMDGPU::OpName::mask));
++    [[fallthrough]];
++  }
++  case AMDGPU::SI_SPILL_V16_RESTORE:
++  case AMDGPU::SI_SPILL_V32_RESTORE:
++  case AMDGPU::SI_SPILL_V64_RESTORE:
++  case AMDGPU::SI_SPILL_V96_RESTORE:
++  case AMDGPU::SI_SPILL_V128_RESTORE:
++  case AMDGPU::SI_SPILL_V160_RESTORE:
++  case AMDGPU::SI_SPILL_V192_RESTORE:
++  case AMDGPU::SI_SPILL_V224_RESTORE:
++  case AMDGPU::SI_SPILL_V256_RESTORE:
++  case AMDGPU::SI_SPILL_V288_RESTORE:
++  case AMDGPU::SI_SPILL_V320_RESTORE:
++  case AMDGPU::SI_SPILL_V352_RESTORE:
++  case AMDGPU::SI_SPILL_V384_RESTORE:
++  case AMDGPU::SI_SPILL_V512_RESTORE:
++  case AMDGPU::SI_SPILL_V1024_RESTORE:
++  case AMDGPU::SI_SPILL_A32_RESTORE:
++  case AMDGPU::SI_SPILL_A64_RESTORE:
++  case AMDGPU::SI_SPILL_A96_RESTORE:
++  case AMDGPU::SI_SPILL_A128_RESTORE:
++  case AMDGPU::SI_SPILL_A160_RESTORE:
++  case AMDGPU::SI_SPILL_A192_RESTORE:
++  case AMDGPU::SI_SPILL_A224_RESTORE:
++  case AMDGPU::SI_SPILL_A256_RESTORE:
++  case AMDGPU::SI_SPILL_A288_RESTORE:
++  case AMDGPU::SI_SPILL_A320_RESTORE:
++  case AMDGPU::SI_SPILL_A352_RESTORE:
++  case AMDGPU::SI_SPILL_A384_RESTORE:
++  case AMDGPU::SI_SPILL_A512_RESTORE:
++  case AMDGPU::SI_SPILL_A1024_RESTORE:
++  case AMDGPU::SI_SPILL_AV32_RESTORE:
++  case AMDGPU::SI_SPILL_AV64_RESTORE:
++  case AMDGPU::SI_SPILL_AV96_RESTORE:
++  case AMDGPU::SI_SPILL_AV128_RESTORE:
++  case AMDGPU::SI_SPILL_AV160_RESTORE:
++  case AMDGPU::SI_SPILL_AV192_RESTORE:
++  case AMDGPU::SI_SPILL_AV224_RESTORE:
++  case AMDGPU::SI_SPILL_AV256_RESTORE:
++  case AMDGPU::SI_SPILL_AV288_RESTORE:
++  case AMDGPU::SI_SPILL_AV320_RESTORE:
++  case AMDGPU::SI_SPILL_AV352_RESTORE:
++  case AMDGPU::SI_SPILL_AV384_RESTORE:
++  case AMDGPU::SI_SPILL_AV512_RESTORE:
++  case AMDGPU::SI_SPILL_AV1024_RESTORE:
++  case AMDGPU::SI_SPILL_WWM_V32_RESTORE:
++  case AMDGPU::SI_SPILL_WWM_AV32_RESTORE: {
++    const MachineOperand *VData =
++        TII->getNamedOperand(*MI, AMDGPU::OpName::vdata);
++    assert(TII->getNamedOperand(*MI, AMDGPU::OpName::soffset)->getReg() ==
++           MFI->getStackPtrOffsetReg());
++
++    unsigned Opc;
++    if (MI->getOpcode() == AMDGPU::SI_SPILL_V16_RESTORE) {
++      assert(ST.hasFlatScratchEnabled() && "Flat Scratch is not enabled!");
++      Opc = ST.d16PreservesUnusedBits()
++                ? AMDGPU::SCRATCH_LOAD_SHORT_D16_SADDR_t16
++                : AMDGPU::SCRATCH_LOAD_USHORT_SADDR;
++    } else {
++      Opc = MI->getOpcode() == AMDGPU::SI_BLOCK_SPILL_V1024_RESTORE
++                ? AMDGPU::SCRATCH_LOAD_BLOCK_SADDR
++            : ST.hasFlatScratchEnabled() ? AMDGPU::SCRATCH_LOAD_DWORD_SADDR
++                                         : AMDGPU::BUFFER_LOAD_DWORD_OFFSET;
++    }
+ 
+-      MI->eraseFromParent();
+-      return true;
++    auto *MBB = MI->getParent();
++    bool IsWWMRegSpill = TII->isWWMRegSpillOpcode(MI->getOpcode());
++    if (IsWWMRegSpill) {
++      TII->insertScratchExecCopy(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy(),
++                                 RS->isRegUsed(AMDGPU::SCC));
+     }
++
++    buildSpillLoadStore(
++        *MBB, MI, DL, Opc, Index, VData->getReg(), VData->isKill(), FrameReg,
++        TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm(),
++        *MI->memoperands_begin(), RS);
++
++    if (IsWWMRegSpill)
++      TII->restoreExec(*MF, *MBB, MI, DL, MFI->getSGPRForEXECCopy());
++
++    MI->eraseFromParent();
++    return true;
++  }
++  case AMDGPU::V_ADD_U32_e32:
++  case AMDGPU::V_ADD_U32_e64:
++  case AMDGPU::V_ADD_CO_U32_e32:
++  case AMDGPU::V_ADD_CO_U32_e64: {
++    // TODO: Handle sub, and, or.
++    unsigned NumDefs = MI->getNumExplicitDefs();
++    unsigned Src0Idx = NumDefs;
++
++    bool HasClamp = false;
++    MachineOperand *VCCOp = nullptr;
++
++    switch (MI->getOpcode()) {
+     case AMDGPU::V_ADD_U32_e32:
++      break;
+     case AMDGPU::V_ADD_U32_e64:
++      HasClamp = MI->getOperand(3).getImm();
++      break;
+     case AMDGPU::V_ADD_CO_U32_e32:
+-    case AMDGPU::V_ADD_CO_U32_e64: {
+-      // TODO: Handle sub, and, or.
+-      unsigned NumDefs = MI->getNumExplicitDefs();
+-      unsigned Src0Idx = NumDefs;
++      VCCOp = &MI->getOperand(3);
++      break;
++    case AMDGPU::V_ADD_CO_U32_e64:
++      VCCOp = &MI->getOperand(1);
++      HasClamp = MI->getOperand(4).getImm();
++      break;
++    default:
++      break;
++    }
++    bool DeadVCC = !VCCOp || VCCOp->isDead();
++    MachineOperand &DstOp = MI->getOperand(0);
++    Register DstReg = DstOp.getReg();
+ 
+-      bool HasClamp = false;
+-      MachineOperand *VCCOp = nullptr;
++    unsigned OtherOpIdx = FIOperandNum == Src0Idx ? FIOperandNum + 1 : Src0Idx;
++    MachineOperand *OtherOp = &MI->getOperand(OtherOpIdx);
+ 
+-      switch (MI->getOpcode()) {
+-      case AMDGPU::V_ADD_U32_e32:
+-        break;
+-      case AMDGPU::V_ADD_U32_e64:
+-        HasClamp = MI->getOperand(3).getImm();
+-        break;
+-      case AMDGPU::V_ADD_CO_U32_e32:
+-        VCCOp = &MI->getOperand(3);
+-        break;
+-      case AMDGPU::V_ADD_CO_U32_e64:
+-        VCCOp = &MI->getOperand(1);
+-        HasClamp = MI->getOperand(4).getImm();
+-        break;
+-      default:
++    unsigned Src1Idx = Src0Idx + 1;
++    Register MaterializedReg = FrameReg;
++    Register ScavengedVGPR;
++
++    int64_t Offset = FrameInfo.getObjectOffset(Index);
++    // For the non-immediate case, we could fall through to the default
++    // handling, but we do an in-place update of the result register here to
++    // avoid scavenging another register.
++    if (OtherOp->isImm()) {
++      int64_t TotalOffset = OtherOp->getImm() + Offset;
++
++      if (!ST.hasVOP3Literal() && SIInstrInfo::isVOP3(*MI) &&
++          !AMDGPU::isInlinableIntLiteral(TotalOffset)) {
++        // If we can't support a VOP3 literal in the VALU instruction, we
++        // can't specially fold into the add.
++        // TODO: Handle VOP3->VOP2 shrink to support the fold.
+         break;
+       }
+-      bool DeadVCC = !VCCOp || VCCOp->isDead();
+-      MachineOperand &DstOp = MI->getOperand(0);
+-      Register DstReg = DstOp.getReg();
+ 
+-      unsigned OtherOpIdx =
+-          FIOperandNum == Src0Idx ? FIOperandNum + 1 : Src0Idx;
+-      MachineOperand *OtherOp = &MI->getOperand(OtherOpIdx);
+-
+-      unsigned Src1Idx = Src0Idx + 1;
+-      Register MaterializedReg = FrameReg;
+-      Register ScavengedVGPR;
+-
+-      int64_t Offset = FrameInfo.getObjectOffset(Index);
+-      // For the non-immediate case, we could fall through to the default
+-      // handling, but we do an in-place update of the result register here to
+-      // avoid scavenging another register.
+-      if (OtherOp->isImm()) {
+-        int64_t TotalOffset = OtherOp->getImm() + Offset;
+-
+-        if (!ST.hasVOP3Literal() && SIInstrInfo::isVOP3(*MI) &&
+-            !AMDGPU::isInlinableIntLiteral(TotalOffset)) {
+-          // If we can't support a VOP3 literal in the VALU instruction, we
+-          // can't specially fold into the add.
+-          // TODO: Handle VOP3->VOP2 shrink to support the fold.
+-          break;
+-        }
++      OtherOp->setImm(TotalOffset);
++      Offset = 0;
++    }
+ 
+-        OtherOp->setImm(TotalOffset);
+-        Offset = 0;
+-      }
++    if (FrameReg && !ST.hasFlatScratchEnabled()) {
++      // We should just do an in-place update of the result register. However,
++      // the value there may also be used by the add, in which case we need a
++      // temporary register.
++      //
++      // FIXME: The scavenger is not finding the result register in the
++      // common case where the add does not read the register.
++
++      ScavengedVGPR = RS->scavengeRegisterBackwards(
++          AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false, /*SPAdj=*/0);
++
++      // TODO: If we have a free SGPR, it's sometimes better to use a scalar
++      // shift.
++      BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64))
++          .addDef(ScavengedVGPR, RegState::Renamable)
++          .addImm(ST.getWavefrontSizeLog2())
++          .addReg(FrameReg);
++      MaterializedReg = ScavengedVGPR;
++    }
+ 
+-      if (FrameReg && !ST.hasFlatScratchEnabled()) {
+-        // We should just do an in-place update of the result register. However,
+-        // the value there may also be used by the add, in which case we need a
+-        // temporary register.
++    if ((!OtherOp->isImm() || OtherOp->getImm() != 0) && MaterializedReg) {
++      if (ST.hasFlatScratchEnabled() &&
++          !TII->isOperandLegal(*MI, Src1Idx, OtherOp)) {
++        // We didn't need the shift above, so we have an SGPR for the frame
++        // register, but may have a VGPR only operand.
+         //
+-        // FIXME: The scavenger is not finding the result register in the
+-        // common case where the add does not read the register.
++        // TODO: On gfx10+, we can easily change the opcode to the e64 version
++        // and use the higher constant bus restriction to avoid this copy.
+ 
+-        ScavengedVGPR = RS->scavengeRegisterBackwards(
+-            AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false, /*SPAdj=*/0);
++        if (!ScavengedVGPR) {
++          ScavengedVGPR = RS->scavengeRegisterBackwards(
++              AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false,
++              /*SPAdj=*/0);
++        }
+ 
+-        // TODO: If we have a free SGPR, it's sometimes better to use a scalar
+-        // shift.
+-        BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64))
+-            .addDef(ScavengedVGPR, RegState::Renamable)
+-            .addImm(ST.getWavefrontSizeLog2())
+-            .addReg(FrameReg);
++        assert(ScavengedVGPR != DstReg);
++
++        BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), ScavengedVGPR)
++            .addReg(MaterializedReg,
++                    getKillRegState(MaterializedReg != FrameReg));
+         MaterializedReg = ScavengedVGPR;
+       }
+ 
+-      if ((!OtherOp->isImm() || OtherOp->getImm() != 0) && MaterializedReg) {
+-        if (ST.hasFlatScratchEnabled() &&
+-            !TII->isOperandLegal(*MI, Src1Idx, OtherOp)) {
+-          // We didn't need the shift above, so we have an SGPR for the frame
+-          // register, but may have a VGPR only operand.
+-          //
+-          // TODO: On gfx10+, we can easily change the opcode to the e64 version
+-          // and use the higher constant bus restriction to avoid this copy.
+-
+-          if (!ScavengedVGPR) {
+-            ScavengedVGPR = RS->scavengeRegisterBackwards(
+-                AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false,
+-                /*SPAdj=*/0);
+-          }
++      // TODO: In the flat scratch case, if this is an add of an SGPR, and SCC
++      // is not live, we could use a scalar add + vector add instead of 2
++      // vector adds.
++      auto AddI32 = BuildMI(*MBB, *MI, DL, TII->get(MI->getOpcode()))
++                        .addDef(DstReg, RegState::Renamable);
++      if (NumDefs == 2)
++        AddI32.add(MI->getOperand(1));
++
++      RegState MaterializedRegFlags =
++          getKillRegState(MaterializedReg != FrameReg);
++
++      if (isVGPRClass(getPhysRegBaseClass(MaterializedReg))) {
++        // If we know we have a VGPR already, it's more likely the other
++        // operand is a legal vsrc0.
++        AddI32.add(*OtherOp).addReg(MaterializedReg, MaterializedRegFlags);
++      } else {
++        // Commute operands to avoid violating VOP2 restrictions. This will
++        // typically happen when using scratch.
++        AddI32.addReg(MaterializedReg, MaterializedRegFlags).add(*OtherOp);
++      }
+ 
+-          assert(ScavengedVGPR != DstReg);
++      if (MI->getOpcode() == AMDGPU::V_ADD_CO_U32_e64 ||
++          MI->getOpcode() == AMDGPU::V_ADD_U32_e64)
++        AddI32.addImm(0); // clamp
+ 
+-          BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), ScavengedVGPR)
+-              .addReg(MaterializedReg,
+-                      getKillRegState(MaterializedReg != FrameReg));
+-          MaterializedReg = ScavengedVGPR;
+-        }
++      if (MI->getOpcode() == AMDGPU::V_ADD_CO_U32_e32)
++        AddI32.setOperandDead(3); // Dead vcc
+ 
+-        // TODO: In the flat scratch case, if this is an add of an SGPR, and SCC
+-        // is not live, we could use a scalar add + vector add instead of 2
+-        // vector adds.
+-        auto AddI32 = BuildMI(*MBB, *MI, DL, TII->get(MI->getOpcode()))
+-                          .addDef(DstReg, RegState::Renamable);
+-        if (NumDefs == 2)
+-          AddI32.add(MI->getOperand(1));
++      MaterializedReg = DstReg;
+ 
+-        RegState MaterializedRegFlags =
+-            getKillRegState(MaterializedReg != FrameReg);
++      OtherOp->ChangeToRegister(MaterializedReg, false);
++      OtherOp->setIsKill(true);
++      FIOp->ChangeToImmediate(Offset);
++      Offset = 0;
++    } else if (Offset != 0) {
++      assert(!MaterializedReg);
++      FIOp->ChangeToImmediate(Offset);
++      Offset = 0;
++    } else {
++      if (DeadVCC && !HasClamp) {
++        assert(Offset == 0);
+ 
+-        if (isVGPRClass(getPhysRegBaseClass(MaterializedReg))) {
+-          // If we know we have a VGPR already, it's more likely the other
+-          // operand is a legal vsrc0.
+-          AddI32
+-            .add(*OtherOp)
+-            .addReg(MaterializedReg, MaterializedRegFlags);
+-        } else {
+-          // Commute operands to avoid violating VOP2 restrictions. This will
+-          // typically happen when using scratch.
+-          AddI32
+-            .addReg(MaterializedReg, MaterializedRegFlags)
+-            .add(*OtherOp);
++        // TODO: Losing kills and implicit operands. Just mutate to copy and
++        // let lowerCopy deal with it?
++        if (OtherOp->isReg() && OtherOp->getReg() == DstReg) {
++          // Folded to an identity copy.
++          MI->eraseFromParent();
++          return true;
+         }
+ 
+-        if (MI->getOpcode() == AMDGPU::V_ADD_CO_U32_e64 ||
+-            MI->getOpcode() == AMDGPU::V_ADD_U32_e64)
+-          AddI32.addImm(0); // clamp
++        // The immediate value should be in OtherOp
++        MI->setDesc(TII->get(AMDGPU::V_MOV_B32_e32));
++        MI->removeOperand(FIOperandNum);
+ 
+-        if (MI->getOpcode() == AMDGPU::V_ADD_CO_U32_e32)
+-          AddI32.setOperandDead(3); // Dead vcc
++        unsigned NumOps = MI->getNumOperands();
++        for (unsigned I = NumOps - 2; I >= NumDefs + 1; --I)
++          MI->removeOperand(I);
+ 
+-        MaterializedReg = DstReg;
+-
+-        OtherOp->ChangeToRegister(MaterializedReg, false);
+-        OtherOp->setIsKill(true);
+-        FIOp->ChangeToImmediate(Offset);
+-        Offset = 0;
+-      } else if (Offset != 0) {
+-        assert(!MaterializedReg);
+-        FIOp->ChangeToImmediate(Offset);
+-        Offset = 0;
+-      } else {
+-        if (DeadVCC && !HasClamp) {
+-          assert(Offset == 0);
+-
+-          // TODO: Losing kills and implicit operands. Just mutate to copy and
+-          // let lowerCopy deal with it?
+-          if (OtherOp->isReg() && OtherOp->getReg() == DstReg) {
+-            // Folded to an identity copy.
+-            MI->eraseFromParent();
+-            return true;
+-          }
++        if (NumDefs == 2)
++          MI->removeOperand(1);
+ 
+-          // The immediate value should be in OtherOp
+-          MI->setDesc(TII->get(AMDGPU::V_MOV_B32_e32));
+-          MI->removeOperand(FIOperandNum);
++        // The code below can't deal with a mov.
++        return true;
++      }
+ 
+-          unsigned NumOps = MI->getNumOperands();
+-          for (unsigned I = NumOps - 2; I >= NumDefs + 1; --I)
+-            MI->removeOperand(I);
++      // This folded to a constant, but we have to keep the add around for
++      // pointless implicit defs or clamp modifier.
++      FIOp->ChangeToImmediate(0);
++    }
+ 
+-          if (NumDefs == 2)
+-            MI->removeOperand(1);
++    // Try to improve legality by commuting.
++    if (!TII->isOperandLegal(*MI, Src1Idx) && TII->commuteInstruction(*MI)) {
++      std::swap(FIOp, OtherOp);
++      std::swap(FIOperandNum, OtherOpIdx);
++    }
+ 
+-          // The code below can't deal with a mov.
+-          return true;
++    // We need at most one mov to satisfy the operand constraints. Prefer to
++    // move the FI operand first, as it may be a literal in a VOP3
++    // instruction.
++    for (unsigned SrcIdx : {FIOperandNum, OtherOpIdx}) {
++      if (!TII->isOperandLegal(*MI, SrcIdx)) {
++        // If commuting didn't make the operands legal, we need to materialize
++        // in a register.
++        // TODO: Can use SGPR on gfx10+ in some cases.
++        if (!ScavengedVGPR) {
++          ScavengedVGPR = RS->scavengeRegisterBackwards(
++              AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false,
++              /*SPAdj=*/0);
+         }
+ 
+-        // This folded to a constant, but we have to keep the add around for
+-        // pointless implicit defs or clamp modifier.
+-        FIOp->ChangeToImmediate(0);
+-      }
+-
+-      // Try to improve legality by commuting.
+-      if (!TII->isOperandLegal(*MI, Src1Idx) && TII->commuteInstruction(*MI)) {
+-        std::swap(FIOp, OtherOp);
+-        std::swap(FIOperandNum, OtherOpIdx);
+-      }
+-
+-      // We need at most one mov to satisfy the operand constraints. Prefer to
+-      // move the FI operand first, as it may be a literal in a VOP3
+-      // instruction.
+-      for (unsigned SrcIdx : {FIOperandNum, OtherOpIdx}) {
+-        if (!TII->isOperandLegal(*MI, SrcIdx)) {
+-          // If commuting didn't make the operands legal, we need to materialize
+-          // in a register.
+-          // TODO: Can use SGPR on gfx10+ in some cases.
+-          if (!ScavengedVGPR) {
+-            ScavengedVGPR = RS->scavengeRegisterBackwards(
+-                AMDGPU::VGPR_32RegClass, MI, /*RestoreAfter=*/false,
+-                /*SPAdj=*/0);
+-          }
+-
+-          assert(ScavengedVGPR != DstReg);
++        assert(ScavengedVGPR != DstReg);
+ 
+-          MachineOperand &Src = MI->getOperand(SrcIdx);
+-          BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), ScavengedVGPR)
+-              .add(Src);
++        MachineOperand &Src = MI->getOperand(SrcIdx);
++        BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), ScavengedVGPR)
++            .add(Src);
+ 
+-          Src.ChangeToRegister(ScavengedVGPR, false);
+-          Src.setIsKill(true);
+-          break;
+-        }
++        Src.ChangeToRegister(ScavengedVGPR, false);
++        Src.setIsKill(true);
++        break;
+       }
++    }
+ 
+-      // Fold out add of 0 case that can appear in kernels.
+-      if (FIOp->isImm() && FIOp->getImm() == 0 && DeadVCC && !HasClamp) {
+-        if (OtherOp->isReg() && OtherOp->getReg() != DstReg) {
+-          BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::COPY), DstReg).add(*OtherOp);
+-        }
+-
+-        MI->eraseFromParent();
++    // Fold out add of 0 case that can appear in kernels.
++    if (FIOp->isImm() && FIOp->getImm() == 0 && DeadVCC && !HasClamp) {
++      if (OtherOp->isReg() && OtherOp->getReg() != DstReg) {
++        BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::COPY), DstReg).add(*OtherOp);
+       }
+ 
+-      return true;
++      MI->eraseFromParent();
+     }
+-    case AMDGPU::S_ADD_I32:
+-    case AMDGPU::S_ADD_U32: {
+-      // TODO: Handle s_or_b32, s_and_b32.
+-      unsigned OtherOpIdx = FIOperandNum == 1 ? 2 : 1;
+-      MachineOperand &OtherOp = MI->getOperand(OtherOpIdx);
+-
+-      assert(FrameReg || MFI->isBottomOfStack());
+-
+-      MachineOperand &DstOp = MI->getOperand(0);
+-      const DebugLoc &DL = MI->getDebugLoc();
+-      Register MaterializedReg = FrameReg;
+-
+-      // Defend against live scc, which should never happen in practice.
+-      bool DeadSCC = MI->getOperand(3).isDead();
+-
+-      Register TmpReg;
+-
+-      // FIXME: Scavenger should figure out that the result register is
+-      // available. Also should do this for the v_add case.
+-      if (OtherOp.isReg() && OtherOp.getReg() != DstOp.getReg())
+-        TmpReg = DstOp.getReg();
+-
+-      if (FrameReg && !ST.hasFlatScratchEnabled()) {
+-        // FIXME: In the common case where the add does not also read its result
+-        // (i.e. this isn't a reg += fi), it's not finding the dest reg as
+-        // available.
+-        if (!TmpReg)
+-          TmpReg = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
+-                                                 MI, /*RestoreAfter=*/false, 0,
+-                                                 /*AllowSpill=*/false);
+-        if (TmpReg) {
+-          BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::S_LSHR_B32))
+-              .addDef(TmpReg, RegState::Renamable)
+-              .addReg(FrameReg)
+-              .addImm(ST.getWavefrontSizeLog2())
+-              .setOperandDead(3); // Set SCC dead
+-        }
+-        MaterializedReg = TmpReg;
++
++    return true;
++  }
++  case AMDGPU::S_ADD_I32:
++  case AMDGPU::S_ADD_U32: {
++    // TODO: Handle s_or_b32, s_and_b32.
++    unsigned OtherOpIdx = FIOperandNum == 1 ? 2 : 1;
++    MachineOperand &OtherOp = MI->getOperand(OtherOpIdx);
++
++    assert(FrameReg || MFI->isBottomOfStack());
++
++    MachineOperand &DstOp = MI->getOperand(0);
++    const DebugLoc &DL = MI->getDebugLoc();
++    Register MaterializedReg = FrameReg;
++
++    // Defend against live scc, which should never happen in practice.
++    bool DeadSCC = MI->getOperand(3).isDead();
++
++    Register TmpReg;
++
++    // FIXME: Scavenger should figure out that the result register is
++    // available. Also should do this for the v_add case.
++    if (OtherOp.isReg() && OtherOp.getReg() != DstOp.getReg())
++      TmpReg = DstOp.getReg();
++
++    if (FrameReg && !ST.hasFlatScratchEnabled()) {
++      // FIXME: In the common case where the add does not also read its result
++      // (i.e. this isn't a reg += fi), it's not finding the dest reg as
++      // available.
++      if (!TmpReg)
++        TmpReg = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass, MI,
++                                               /*RestoreAfter=*/false, 0,
++                                               /*AllowSpill=*/false);
++      if (TmpReg) {
++        BuildMI(*MBB, *MI, DL, TII->get(AMDGPU::S_LSHR_B32))
++            .addDef(TmpReg, RegState::Renamable)
++            .addReg(FrameReg)
++            .addImm(ST.getWavefrontSizeLog2())
++            .setOperandDead(3); // Set SCC dead
+       }
++      MaterializedReg = TmpReg;
++    }
+ 
+-      int64_t Offset = FrameInfo.getObjectOffset(Index);
++    int64_t Offset = FrameInfo.getObjectOffset(Index);
+ 
+-      // For the non-immediate case, we could fall through to the default
+-      // handling, but we do an in-place update of the result register here to
+-      // avoid scavenging another register.
+-      if (OtherOp.isImm()) {
+-        OtherOp.setImm(OtherOp.getImm() + Offset);
+-        Offset = 0;
++    // For the non-immediate case, we could fall through to the default
++    // handling, but we do an in-place update of the result register here to
++    // avoid scavenging another register.
++    if (OtherOp.isImm()) {
++      OtherOp.setImm(OtherOp.getImm() + Offset);
++      Offset = 0;
+ 
+-        if (MaterializedReg)
+-          FIOp->ChangeToRegister(MaterializedReg, false);
+-        else
+-          FIOp->ChangeToImmediate(0);
+-      } else if (MaterializedReg) {
+-        // If we can't fold the other operand, do another increment.
+-        Register DstReg = DstOp.getReg();
+-
+-        if (!TmpReg && MaterializedReg == FrameReg) {
+-          TmpReg = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
+-                                                 MI, /*RestoreAfter=*/false, 0,
+-                                                 /*AllowSpill=*/false);
+-          DstReg = TmpReg;
+-        }
++      if (MaterializedReg)
++        FIOp->ChangeToRegister(MaterializedReg, false);
++      else
++        FIOp->ChangeToImmediate(0);
++    } else if (MaterializedReg) {
++      // If we can't fold the other operand, do another increment.
++      Register DstReg = DstOp.getReg();
+ 
+-        if (TmpReg) {
+-          auto AddI32 = BuildMI(*MBB, *MI, DL, MI->getDesc())
+-                            .addDef(DstReg, RegState::Renamable)
+-                            .addReg(MaterializedReg, RegState::Kill)
+-                            .add(OtherOp);
+-          if (DeadSCC)
+-            AddI32.setOperandDead(3);
++      if (!TmpReg && MaterializedReg == FrameReg) {
++        TmpReg = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass, MI,
++                                               /*RestoreAfter=*/false, 0,
++                                               /*AllowSpill=*/false);
++        DstReg = TmpReg;
++      }
+ 
+-          MaterializedReg = DstReg;
++      if (TmpReg) {
++        auto AddI32 = BuildMI(*MBB, *MI, DL, MI->getDesc())
++                          .addDef(DstReg, RegState::Renamable)
++                          .addReg(MaterializedReg, RegState::Kill)
++                          .add(OtherOp);
++        if (DeadSCC)
++          AddI32.setOperandDead(3);
+ 
+-          OtherOp.ChangeToRegister(MaterializedReg, false);
+-          OtherOp.setIsKill(true);
+-          OtherOp.setIsRenamable(true);
+-        }
+-        FIOp->ChangeToImmediate(Offset);
+-      } else {
+-        // If we don't have any other offset to apply, we can just directly
+-        // interpret the frame index as the offset.
+-        FIOp->ChangeToImmediate(Offset);
+-      }
++        MaterializedReg = DstReg;
+ 
+-      if (DeadSCC && OtherOp.isImm() && OtherOp.getImm() == 0) {
+-        assert(Offset == 0);
+-        MI->removeOperand(3);
+-        MI->removeOperand(OtherOpIdx);
+-        MachineOperand &Src = MI->getOperand(1);
+-        MI->setDesc(TII->get(Src.isReg() ? AMDGPU::COPY : AMDGPU::S_MOV_B32));
+-      } else if (DeadSCC && FIOp->isImm() && FIOp->getImm() == 0) {
+-        assert(Offset == 0);
+-        MI->removeOperand(3);
+-        MI->removeOperand(FIOperandNum);
+-        MachineOperand &Src = MI->getOperand(1);
+-        MI->setDesc(TII->get(Src.isReg() ? AMDGPU::COPY : AMDGPU::S_MOV_B32));
++        OtherOp.ChangeToRegister(MaterializedReg, false);
++        OtherOp.setIsKill(true);
++        OtherOp.setIsRenamable(true);
+       }
+-
+-      assert(!FIOp->isFI());
+-      return true;
+-    }
+-    default: {
+-      break;
++      FIOp->ChangeToImmediate(Offset);
++    } else {
++      // If we don't have any other offset to apply, we can just directly
++      // interpret the frame index as the offset.
++      FIOp->ChangeToImmediate(Offset);
+     }
++
++    if (DeadSCC && OtherOp.isImm() && OtherOp.getImm() == 0) {
++      assert(Offset == 0);
++      MI->removeOperand(3);
++      MI->removeOperand(OtherOpIdx);
++      MachineOperand &Src = MI->getOperand(1);
++      MI->setDesc(TII->get(Src.isReg() ? AMDGPU::COPY : AMDGPU::S_MOV_B32));
++    } else if (DeadSCC && FIOp->isImm() && FIOp->getImm() == 0) {
++      assert(Offset == 0);
++      MI->removeOperand(3);
++      MI->removeOperand(FIOperandNum);
++      MachineOperand &Src = MI->getOperand(1);
++      MI->setDesc(TII->get(Src.isReg() ? AMDGPU::COPY : AMDGPU::S_MOV_B32));
+     }
+ 
+-    int64_t Offset = FrameInfo.getObjectOffset(Index);
+-    if (ST.hasFlatScratchEnabled()) {
+-      if (TII->isFLATScratch(*MI)) {
+-        assert(
+-            (int16_t)FIOperandNum ==
+-            AMDGPU::getNamedOperandIdx(MI->getOpcode(), AMDGPU::OpName::saddr));
++    assert(!FIOp->isFI());
++    return true;
++  }
++  default: {
++    break;
++  }
++  }
+ 
+-        // The offset is always swizzled, just replace it
++  int64_t Offset = FrameInfo.getObjectOffset(Index);
++  if (ST.hasFlatScratchEnabled()) {
++    if (TII->isFLATScratch(*MI)) {
++      assert(
++          (int16_t)FIOperandNum ==
++          AMDGPU::getNamedOperandIdx(MI->getOpcode(), AMDGPU::OpName::saddr));
++
++      // The offset is always swizzled, just replace it
++      if (FrameReg)
++        FIOp->ChangeToRegister(FrameReg, false);
++
++      MachineOperand *OffsetOp =
++          TII->getNamedOperand(*MI, AMDGPU::OpName::offset);
++      int64_t NewOffset = Offset + OffsetOp->getImm();
++      if (TII->isLegalFLATOffset(NewOffset, AMDGPUAS::PRIVATE_ADDRESS,
++                                 AMDGPU::FlatAddrSpace::FlatScratch)) {
++        OffsetOp->setImm(NewOffset);
+         if (FrameReg)
+-          FIOp->ChangeToRegister(FrameReg, false);
+-
+-        MachineOperand *OffsetOp =
+-            TII->getNamedOperand(*MI, AMDGPU::OpName::offset);
+-        int64_t NewOffset = Offset + OffsetOp->getImm();
+-        if (TII->isLegalFLATOffset(NewOffset, AMDGPUAS::PRIVATE_ADDRESS,
+-                                   AMDGPU::FlatAddrSpace::FlatScratch)) {
+-          OffsetOp->setImm(NewOffset);
+-          if (FrameReg)
+-            return false;
+-          Offset = 0;
+-        }
+-
+-        if (!Offset) {
+-          unsigned Opc = MI->getOpcode();
+-          int NewOpc = -1;
+-          if (AMDGPU::hasNamedOperand(Opc, AMDGPU::OpName::vaddr)) {
+-            NewOpc = AMDGPU::getFlatScratchInstSVfromSVS(Opc);
+-          } else if (ST.hasFlatScratchSTMode()) {
+-            // On GFX10 we have ST mode to use no registers for an address.
+-            // Otherwise we need to materialize 0 into an SGPR.
+-            NewOpc = AMDGPU::getFlatScratchInstSTfromSS(Opc);
+-          }
++          return false;
++        Offset = 0;
++      }
+ 
+-          if (NewOpc != -1) {
+-            // removeOperand doesn't fixup tied operand indexes as it goes, so
+-            // it asserts. Untie vdst_in for now and retie them afterwards.
+-            int VDstIn =
+-                AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst_in);
+-            bool TiedVDst = VDstIn != -1 && MI->getOperand(VDstIn).isReg() &&
+-                            MI->getOperand(VDstIn).isTied();
+-            if (TiedVDst)
+-              MI->untieRegOperand(VDstIn);
+-
+-            MI->removeOperand(
+-                AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::saddr));
+-
+-            if (TiedVDst) {
+-              int NewVDst =
+-                  AMDGPU::getNamedOperandIdx(NewOpc, AMDGPU::OpName::vdst);
+-              int NewVDstIn =
+-                  AMDGPU::getNamedOperandIdx(NewOpc, AMDGPU::OpName::vdst_in);
+-              assert(NewVDst != -1 && NewVDstIn != -1 && "Must be tied!");
+-              MI->tieOperands(NewVDst, NewVDstIn);
+-            }
+-            MI->setDesc(TII->get(NewOpc));
+-            return false;
+-          }
++      if (!Offset) {
++        unsigned Opc = MI->getOpcode();
++        int NewOpc = -1;
++        if (AMDGPU::hasNamedOperand(Opc, AMDGPU::OpName::vaddr)) {
++          NewOpc = AMDGPU::getFlatScratchInstSVfromSVS(Opc);
++        } else if (ST.hasFlatScratchSTMode()) {
++          // On GFX10 we have ST mode to use no registers for an address.
++          // Otherwise we need to materialize 0 into an SGPR.
++          NewOpc = AMDGPU::getFlatScratchInstSTfromSS(Opc);
+         }
+-      }
+ 
+-      if (!FrameReg) {
+-        FIOp->ChangeToImmediate(Offset);
+-        if (TII->isImmOperandLegal(*MI, FIOperandNum, *FIOp))
++        if (NewOpc != -1) {
++          // removeOperand doesn't fixup tied operand indexes as it goes, so
++          // it asserts. Untie vdst_in for now and retie them afterwards.
++          int VDstIn = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst_in);
++          bool TiedVDst = VDstIn != -1 && MI->getOperand(VDstIn).isReg() &&
++                          MI->getOperand(VDstIn).isTied();
++          if (TiedVDst)
++            MI->untieRegOperand(VDstIn);
++
++          MI->removeOperand(
++              AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::saddr));
++
++          if (TiedVDst) {
++            int NewVDst =
++                AMDGPU::getNamedOperandIdx(NewOpc, AMDGPU::OpName::vdst);
++            int NewVDstIn =
++                AMDGPU::getNamedOperandIdx(NewOpc, AMDGPU::OpName::vdst_in);
++            assert(NewVDst != -1 && NewVDstIn != -1 && "Must be tied!");
++            MI->tieOperands(NewVDst, NewVDstIn);
++          }
++          MI->setDesc(TII->get(NewOpc));
+           return false;
++        }
+       }
++    }
+ 
+-      // We need to use register here. Check if we can use an SGPR or need
+-      // a VGPR.
+-      FIOp->ChangeToRegister(AMDGPU::M0, false);
+-      bool UseSGPR = TII->isOperandLegal(*MI, FIOperandNum, FIOp);
+-
+-      if (!Offset && FrameReg && UseSGPR) {
+-        FIOp->setReg(FrameReg);
++    if (!FrameReg) {
++      FIOp->ChangeToImmediate(Offset);
++      if (TII->isImmOperandLegal(*MI, FIOperandNum, *FIOp))
+         return false;
+-      }
++    }
+ 
+-      const TargetRegisterClass *RC =
+-          UseSGPR ? &AMDGPU::SReg_32_XM0RegClass : &AMDGPU::VGPR_32RegClass;
++    // We need to use register here. Check if we can use an SGPR or need
++    // a VGPR.
++    FIOp->ChangeToRegister(AMDGPU::M0, false);
++    bool UseSGPR = TII->isOperandLegal(*MI, FIOperandNum, FIOp);
+ 
+-      Register TmpReg =
+-          RS->scavengeRegisterBackwards(*RC, MI, false, 0, !UseSGPR);
+-      FIOp->setReg(TmpReg);
+-      FIOp->setIsKill();
++    if (!Offset && FrameReg && UseSGPR) {
++      FIOp->setReg(FrameReg);
++      return false;
++    }
+ 
+-      if ((!FrameReg || !Offset) && TmpReg) {
+-        unsigned Opc = UseSGPR ? AMDGPU::S_MOV_B32 : AMDGPU::V_MOV_B32_e32;
+-        auto MIB = BuildMI(*MBB, MI, DL, TII->get(Opc), TmpReg);
+-        if (FrameReg)
+-          MIB.addReg(FrameReg);
+-        else
+-          MIB.addImm(Offset);
++    const TargetRegisterClass *RC =
++        UseSGPR ? &AMDGPU::SReg_32_XM0RegClass : &AMDGPU::VGPR_32RegClass;
+ 
+-        return false;
+-      }
++    Register TmpReg =
++        RS->scavengeRegisterBackwards(*RC, MI, false, 0, !UseSGPR);
++    FIOp->setReg(TmpReg);
++    FIOp->setIsKill();
+ 
+-      bool NeedSaveSCC = (RS->isRegUsed(AMDGPU::SCC) &&
+-                          !MI->definesRegister(AMDGPU::SCC, /*TRI=*/nullptr)) ||
+-                         MI->readsRegister(AMDGPU::SCC, /*TRI=*/nullptr);
+-
+-      Register TmpSReg =
+-          UseSGPR ? TmpReg
+-                  : RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
+-                                                  MI, false, 0, !UseSGPR);
+-
+-      // If no SGPR was scavenged but a frame register is available, fall
+-      // through to reuse it as the temporary (computed in place, restored
+-      // after). Only bail out when there is no frame register, or a VGPR
+-      // operand is needed but none could be scavenged.
+-      if ((!TmpSReg && !FrameReg) || (!TmpReg && !UseSGPR)) {
+-        int SVOpcode = AMDGPU::getFlatScratchInstSVfromSS(MI->getOpcode());
+-        if (ST.hasFlatScratchSVSMode() && SVOpcode != -1) {
+-          // SV form encodes only the offset in vaddr; an SS-form scratch op
+-          // keeps its FI in the SGPR saddr, so this is only reached with no
+-          // frame register.
+-          assert(!FrameReg &&
+-                 "SV-form fallback cannot encode a frame register");
+-          Register TmpVGPR = RS->scavengeRegisterBackwards(
+-              AMDGPU::VGPR_32RegClass, MI, false, 0, /*AllowSpill=*/true);
++    if ((!FrameReg || !Offset) && TmpReg) {
++      unsigned Opc = UseSGPR ? AMDGPU::S_MOV_B32 : AMDGPU::V_MOV_B32_e32;
++      auto MIB = BuildMI(*MBB, MI, DL, TII->get(Opc), TmpReg);
++      if (FrameReg)
++        MIB.addReg(FrameReg);
++      else
++        MIB.addImm(Offset);
+ 
+-          // Fold as much of the constant offset as possible into the SV form
+-          // instruction's immediate offset field, and materialize the
+-          // remainder (plus the frame register, if any) into the scavenged
+-          // VGPR used as the vaddr.
+-          int64_t FullOffset =
+-              Offset +
+-              TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm();
+-          auto [ImmOffset, RemainderOffset] =
+-              TII->splitFlatOffset(FullOffset, AMDGPUAS::PRIVATE_ADDRESS,
+-                                   AMDGPU::FlatAddrSpace::FlatScratch);
+-          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpVGPR)
+-              .addImm(RemainderOffset);
+-          BuildMI(*MBB, MI, DL, TII->get(SVOpcode))
+-              .add(MI->getOperand(0)) // $vdata
+-              .addReg(TmpVGPR)        // $vaddr
+-              .addImm(ImmOffset)      // $offset
+-              .add(*TII->getNamedOperand(*MI, AMDGPU::OpName::cpol));
+-          MI->eraseFromParent();
+-          return true;
+-        }
+-        report_fatal_error("Cannot scavenge register in FI elimination!");
+-      }
++      return false;
++    }
+ 
+-      if (!TmpSReg) {
+-        // Use frame register and restore it after.
+-        TmpSReg = FrameReg;
+-        FIOp->setReg(FrameReg);
+-        FIOp->setIsKill(false);
++    bool NeedSaveSCC = (RS->isRegUsed(AMDGPU::SCC) &&
++                        !MI->definesRegister(AMDGPU::SCC, /*TRI=*/nullptr)) ||
++                       MI->readsRegister(AMDGPU::SCC, /*TRI=*/nullptr);
++
++    Register TmpSReg =
++        UseSGPR ? TmpReg
++                : RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass, MI,
++                                                false, 0, !UseSGPR);
++
++    // If no SGPR was scavenged but a frame register is available, fall
++    // through to reuse it as the temporary (computed in place, restored
++    // after). Only bail out when there is no frame register, or a VGPR
++    // operand is needed but none could be scavenged.
++    if ((!TmpSReg && !FrameReg) || (!TmpReg && !UseSGPR)) {
++      int SVOpcode = AMDGPU::getFlatScratchInstSVfromSS(MI->getOpcode());
++      if (ST.hasFlatScratchSVSMode() && SVOpcode != -1) {
++        // SV form encodes only the offset in vaddr; an SS-form scratch op
++        // keeps its FI in the SGPR saddr, so this is only reached with no
++        // frame register.
++        assert(!FrameReg && "SV-form fallback cannot encode a frame register");
++        Register TmpVGPR = RS->scavengeRegisterBackwards(
++            AMDGPU::VGPR_32RegClass, MI, false, 0, /*AllowSpill=*/true);
++
++        // Fold as much of the constant offset as possible into the SV form
++        // instruction's immediate offset field, and materialize the
++        // remainder (plus the frame register, if any) into the scavenged
++        // VGPR used as the vaddr.
++        int64_t FullOffset =
++            Offset +
++            TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm();
++        auto [ImmOffset, RemainderOffset] =
++            TII->splitFlatOffset(FullOffset, AMDGPUAS::PRIVATE_ADDRESS,
++                                 AMDGPU::FlatAddrSpace::FlatScratch);
++        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpVGPR)
++            .addImm(RemainderOffset);
++        BuildMI(*MBB, MI, DL, TII->get(SVOpcode))
++            .add(MI->getOperand(0)) // $vdata
++            .addReg(TmpVGPR)        // $vaddr
++            .addImm(ImmOffset)      // $offset
++            .add(*TII->getNamedOperand(*MI, AMDGPU::OpName::cpol));
++        MI->eraseFromParent();
++        return true;
+       }
++      report_fatal_error("Cannot scavenge register in FI elimination!");
++    }
+ 
+-      if (NeedSaveSCC) {
+-        assert(!(Offset & 0x1) && "Flat scratch offset must be aligned!");
+-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADDC_U32), TmpSReg)
+-            .addReg(FrameReg)
+-            .addImm(Offset);
+-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BITCMP1_B32))
+-            .addReg(TmpSReg)
+-            .addImm(0);
+-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BITSET0_B32), TmpSReg)
++    if (!TmpSReg) {
++      // Use frame register and restore it after.
++      TmpSReg = FrameReg;
++      FIOp->setReg(FrameReg);
++      FIOp->setIsKill(false);
++    }
++
++    if (NeedSaveSCC) {
++      assert(!(Offset & 0x1) && "Flat scratch offset must be aligned!");
++      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADDC_U32), TmpSReg)
++          .addReg(FrameReg)
++          .addImm(Offset);
++      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BITCMP1_B32))
++          .addReg(TmpSReg)
++          .addImm(0);
++      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BITSET0_B32), TmpSReg)
++          .addImm(0)
++          .addReg(TmpSReg);
++    } else {
++      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), TmpSReg)
++          .addReg(FrameReg)
++          .addImm(Offset);
++    }
++
++    if (!UseSGPR)
++      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpReg)
++          .addReg(TmpSReg, RegState::Kill);
++
++    if (TmpSReg == FrameReg) {
++      // Undo frame register modification.
++      if (NeedSaveSCC && !MI->registerDefIsDead(AMDGPU::SCC, /*TRI=*/nullptr)) {
++        MachineBasicBlock::iterator I =
++            BuildMI(*MBB, std::next(MI), DL, TII->get(AMDGPU::S_ADDC_U32),
++                    TmpSReg)
++                .addReg(FrameReg)
++                .addImm(-Offset);
++        I = BuildMI(*MBB, std::next(I), DL, TII->get(AMDGPU::S_BITCMP1_B32))
++                .addReg(TmpSReg)
++                .addImm(0);
++        BuildMI(*MBB, std::next(I), DL, TII->get(AMDGPU::S_BITSET0_B32),
++                TmpSReg)
+             .addImm(0)
+             .addReg(TmpSReg);
+       } else {
+-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), TmpSReg)
++        BuildMI(*MBB, std::next(MI), DL, TII->get(AMDGPU::S_ADD_I32), FrameReg)
+             .addReg(FrameReg)
+-            .addImm(Offset);
++            .addImm(-Offset);
+       }
++    }
+ 
+-      if (!UseSGPR)
+-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpReg)
+-            .addReg(TmpSReg, RegState::Kill);
+-
+-      if (TmpSReg == FrameReg) {
+-        // Undo frame register modification.
+-        if (NeedSaveSCC &&
+-            !MI->registerDefIsDead(AMDGPU::SCC, /*TRI=*/nullptr)) {
+-          MachineBasicBlock::iterator I =
+-              BuildMI(*MBB, std::next(MI), DL, TII->get(AMDGPU::S_ADDC_U32),
+-                      TmpSReg)
+-                  .addReg(FrameReg)
+-                  .addImm(-Offset);
+-          I = BuildMI(*MBB, std::next(I), DL, TII->get(AMDGPU::S_BITCMP1_B32))
+-                  .addReg(TmpSReg)
+-                  .addImm(0);
+-          BuildMI(*MBB, std::next(I), DL, TII->get(AMDGPU::S_BITSET0_B32),
+-                  TmpSReg)
+-              .addImm(0)
+-              .addReg(TmpSReg);
++    return false;
++  }
++
++  bool IsMUBUF = TII->isMUBUF(*MI);
++
++  if (!IsMUBUF && !MFI->isBottomOfStack()) {
++    // Convert to a swizzled stack address by scaling by the wave size.
++    // In an entry function/kernel the offset is already swizzled.
++    bool IsSALU = isSGPRClass(TII->getRegClass(MI->getDesc(), FIOperandNum));
++    bool LiveSCC = RS->isRegUsed(AMDGPU::SCC) &&
++                   !MI->definesRegister(AMDGPU::SCC, /*TRI=*/nullptr);
++    const TargetRegisterClass *RC = IsSALU && !LiveSCC
++                                        ? &AMDGPU::SReg_32RegClass
++                                        : &AMDGPU::VGPR_32RegClass;
++    bool IsCopy = MI->getOpcode() == AMDGPU::V_MOV_B32_e32 ||
++                  MI->getOpcode() == AMDGPU::V_MOV_B32_e64 ||
++                  MI->getOpcode() == AMDGPU::S_MOV_B32;
++    Register ResultReg = IsCopy
++                             ? MI->getOperand(0).getReg()
++                             : RS->scavengeRegisterBackwards(*RC, MI, false, 0);
++
++    int64_t Offset = FrameInfo.getObjectOffset(Index);
++
++    // The carry-out lane of Add is unused, so it is safe to write with
++    // S_MOV_B32 even into a VGPR.
++    auto MaterializeCarryOutOffset = [&](MachineInstrBuilder &Add) {
++      Register ConstOffsetReg =
++          isWave32 ? Add.getReg(1)
++                   : Register(getSubReg(Add.getReg(1), AMDGPU::sub0));
++      BuildMI(*MBB, *Add, DL, TII->get(AMDGPU::S_MOV_B32), ConstOffsetReg)
++          .addImm(Offset);
++      return ConstOffsetReg;
++    };
++
++    if (Offset == 0) {
++      unsigned OpCode =
++          IsSALU && !LiveSCC ? AMDGPU::S_LSHR_B32 : AMDGPU::V_LSHRREV_B32_e64;
++      Register TmpResultReg = ResultReg;
++      if (IsSALU && LiveSCC) {
++        TmpResultReg = RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass,
++                                                     MI, false, 0);
++      }
++
++      auto Shift = BuildMI(*MBB, MI, DL, TII->get(OpCode), TmpResultReg);
++      if (OpCode == AMDGPU::V_LSHRREV_B32_e64)
++        // For V_LSHRREV, the operands are reversed (the shift count goes
++        // first).
++        Shift.addImm(ST.getWavefrontSizeLog2()).addReg(FrameReg);
++      else
++        Shift.addReg(FrameReg).addImm(ST.getWavefrontSizeLog2());
++      if (IsSALU && !LiveSCC)
++        Shift.getInstr()->getOperand(3).setIsDead(); // Mark SCC as dead.
++      if (IsSALU && LiveSCC) {
++        Register NewDest;
++        if (IsCopy) {
++          assert(ResultReg.isPhysical());
++          NewDest = ResultReg;
+         } else {
+-          BuildMI(*MBB, std::next(MI), DL, TII->get(AMDGPU::S_ADD_I32),
+-                  FrameReg)
+-              .addReg(FrameReg)
+-              .addImm(-Offset);
++          NewDest = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
++                                                  Shift, false, 0);
+         }
++        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_READFIRSTLANE_B32), NewDest)
++            .addReg(TmpResultReg);
++        ResultReg = NewDest;
+       }
++    } else {
++      MachineInstrBuilder MIB;
++      if (!IsSALU) {
++        if ((MIB = TII->getAddNoCarry(*MBB, MI, DL, ResultReg, *RS)) !=
++            nullptr) {
++          // Reuse ResultReg in intermediate step.
++          Register ScaledReg = ResultReg;
++
++          BuildMI(*MBB, *MIB, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
++                  ScaledReg)
++              .addImm(ST.getWavefrontSizeLog2())
++              .addReg(FrameReg);
+ 
+-      return false;
+-    }
+-
+-    bool IsMUBUF = TII->isMUBUF(*MI);
+-
+-    if (!IsMUBUF && !MFI->isBottomOfStack()) {
+-      // Convert to a swizzled stack address by scaling by the wave size.
+-      // In an entry function/kernel the offset is already swizzled.
+-      bool IsSALU = isSGPRClass(TII->getRegClass(MI->getDesc(), FIOperandNum));
+-      bool LiveSCC = RS->isRegUsed(AMDGPU::SCC) &&
+-                     !MI->definesRegister(AMDGPU::SCC, /*TRI=*/nullptr);
+-      const TargetRegisterClass *RC = IsSALU && !LiveSCC
+-                                          ? &AMDGPU::SReg_32RegClass
+-                                          : &AMDGPU::VGPR_32RegClass;
+-      bool IsCopy = MI->getOpcode() == AMDGPU::V_MOV_B32_e32 ||
+-                    MI->getOpcode() == AMDGPU::V_MOV_B32_e64 ||
+-                    MI->getOpcode() == AMDGPU::S_MOV_B32;
+-      Register ResultReg =
+-          IsCopy ? MI->getOperand(0).getReg()
+-                 : RS->scavengeRegisterBackwards(*RC, MI, false, 0);
+-
+-      int64_t Offset = FrameInfo.getObjectOffset(Index);
+-
+-      // The carry-out lane of Add is unused, so it is safe to write with
+-      // S_MOV_B32 even into a VGPR.
+-      auto MaterializeCarryOutOffset = [&](MachineInstrBuilder &Add) {
+-        Register ConstOffsetReg =
+-            isWave32 ? Add.getReg(1)
+-                     : Register(getSubReg(Add.getReg(1), AMDGPU::sub0));
+-        BuildMI(*MBB, *Add, DL, TII->get(AMDGPU::S_MOV_B32), ConstOffsetReg)
+-            .addImm(Offset);
+-        return ConstOffsetReg;
+-      };
+-
+-      if (Offset == 0) {
+-        unsigned OpCode =
+-            IsSALU && !LiveSCC ? AMDGPU::S_LSHR_B32 : AMDGPU::V_LSHRREV_B32_e64;
+-        Register TmpResultReg = ResultReg;
+-        if (IsSALU && LiveSCC) {
+-          TmpResultReg = RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass,
+-                                                       MI, false, 0);
+-        }
++          const bool IsVOP2 = MIB->getOpcode() == AMDGPU::V_ADD_U32_e32;
+ 
+-        auto Shift = BuildMI(*MBB, MI, DL, TII->get(OpCode), TmpResultReg);
+-        if (OpCode == AMDGPU::V_LSHRREV_B32_e64)
+-          // For V_LSHRREV, the operands are reversed (the shift count goes
+-          // first).
+-          Shift.addImm(ST.getWavefrontSizeLog2()).addReg(FrameReg);
+-        else
+-          Shift.addReg(FrameReg).addImm(ST.getWavefrontSizeLog2());
+-        if (IsSALU && !LiveSCC)
+-          Shift.getInstr()->getOperand(3).setIsDead(); // Mark SCC as dead.
+-        if (IsSALU && LiveSCC) {
+-          Register NewDest;
+-          if (IsCopy) {
+-            assert(ResultReg.isPhysical());
+-            NewDest = ResultReg;
++          // TODO: Fold if use instruction is another add of a constant.
++          if (IsVOP2 ||
++              AMDGPU::isInlinableLiteral32(Offset, ST.hasInv2PiInlineImm())) {
++            // FIXME: This can fail
++            MIB.addImm(Offset);
++            MIB.addReg(ScaledReg, RegState::Kill);
++            if (!IsVOP2)
++              MIB.addImm(0); // clamp bit
+           } else {
+-            NewDest = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
+-                                                    Shift, false, 0);
++            assert(MIB->getOpcode() == AMDGPU::V_ADD_CO_U32_e64 &&
++                   "Need to reuse carry out register");
++
++            MIB.addReg(MaterializeCarryOutOffset(MIB), RegState::Kill);
++            MIB.addReg(ScaledReg, RegState::Kill);
++            MIB.addImm(0); // clamp bit
+           }
+-          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_READFIRSTLANE_B32), NewDest)
+-              .addReg(TmpResultReg);
+-          ResultReg = NewDest;
+         }
+-      } else {
+-        MachineInstrBuilder MIB;
+-        if (!IsSALU) {
+-          if ((MIB = TII->getAddNoCarry(*MBB, MI, DL, ResultReg, *RS)) !=
+-              nullptr) {
+-            // Reuse ResultReg in intermediate step.
+-            Register ScaledReg = ResultReg;
+-
+-            BuildMI(*MBB, *MIB, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
+-                    ScaledReg)
++      }
++      if (!MIB || IsSALU) {
++        // We have to produce a carry out, and there isn't a free SGPR pair
++        // for it. We can keep the whole computation on the SALU to avoid
++        // clobbering an additional register at the cost of an extra mov.
++
++        // We may have 1 free scratch SGPR even though a carry out is
++        // unavailable. Only one additional mov is needed.
++        Register TmpScaledReg =
++            IsCopy && IsSALU
++                ? ResultReg
++                : RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass, MI,
++                                                false, 0, /*AllowSpill=*/false);
++        Register ScaledReg = TmpScaledReg.isValid() ? TmpScaledReg : FrameReg;
++        Register TmpResultReg = ScaledReg;
++
++        if (!LiveSCC) {
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_LSHR_B32), TmpResultReg)
++              .addReg(FrameReg)
++              .addImm(ST.getWavefrontSizeLog2());
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), TmpResultReg)
++              .addReg(TmpResultReg, RegState::Kill)
++              .addImm(Offset);
++        } else {
++          TmpResultReg = RS->scavengeRegisterBackwards(
++              AMDGPU::VGPR_32RegClass, MI, false, 0, /*AllowSpill=*/true);
++
++          MachineInstrBuilder Add;
++          if ((Add = TII->getAddNoCarry(*MBB, MI, DL, TmpResultReg, *RS))) {
++            BuildMI(*MBB, *Add, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
++                    TmpResultReg)
+                 .addImm(ST.getWavefrontSizeLog2())
+                 .addReg(FrameReg);
+-
+-            const bool IsVOP2 = MIB->getOpcode() == AMDGPU::V_ADD_U32_e32;
+-
+-            // TODO: Fold if use instruction is another add of a constant.
+-            if (IsVOP2 ||
+-                AMDGPU::isInlinableLiteral32(Offset, ST.hasInv2PiInlineImm())) {
+-              // FIXME: This can fail
+-              MIB.addImm(Offset);
+-              MIB.addReg(ScaledReg, RegState::Kill);
+-              if (!IsVOP2)
+-                MIB.addImm(0); // clamp bit
+-            } else {
+-              assert(MIB->getOpcode() == AMDGPU::V_ADD_CO_U32_e64 &&
+-                     "Need to reuse carry out register");
+-
+-              MIB.addReg(MaterializeCarryOutOffset(MIB), RegState::Kill);
+-              MIB.addReg(ScaledReg, RegState::Kill);
+-              MIB.addImm(0); // clamp bit
+-            }
+-          }
+-        }
+-        if (!MIB || IsSALU) {
+-          // We have to produce a carry out, and there isn't a free SGPR pair
+-          // for it. We can keep the whole computation on the SALU to avoid
+-          // clobbering an additional register at the cost of an extra mov.
+-
+-          // We may have 1 free scratch SGPR even though a carry out is
+-          // unavailable. Only one additional mov is needed.
+-          Register TmpScaledReg = IsCopy && IsSALU
+-                                      ? ResultReg
+-                                      : RS->scavengeRegisterBackwards(
+-                                            AMDGPU::SReg_32_XM0RegClass, MI,
+-                                            false, 0, /*AllowSpill=*/false);
+-          Register ScaledReg = TmpScaledReg.isValid() ? TmpScaledReg : FrameReg;
+-          Register TmpResultReg = ScaledReg;
+-
+-          if (!LiveSCC) {
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_LSHR_B32), TmpResultReg)
+-                .addReg(FrameReg)
+-                .addImm(ST.getWavefrontSizeLog2());
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), TmpResultReg)
+-                .addReg(TmpResultReg, RegState::Kill)
+-                .addImm(Offset);
++            if (Add->getOpcode() == AMDGPU::V_ADD_CO_U32_e64) {
++              Add.addReg(MaterializeCarryOutOffset(Add), RegState::Kill)
++                  .addReg(TmpResultReg, RegState::Kill)
++                  .addImm(0);
++            } else
++              Add.addImm(Offset).addReg(TmpResultReg, RegState::Kill);
+           } else {
+-            TmpResultReg = RS->scavengeRegisterBackwards(
+-                AMDGPU::VGPR_32RegClass, MI, false, 0, /*AllowSpill=*/true);
+-
+-            MachineInstrBuilder Add;
+-            if ((Add = TII->getAddNoCarry(*MBB, MI, DL, TmpResultReg, *RS))) {
+-              BuildMI(*MBB, *Add, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
+-                      TmpResultReg)
+-                  .addImm(ST.getWavefrontSizeLog2())
+-                  .addReg(FrameReg);
+-              if (Add->getOpcode() == AMDGPU::V_ADD_CO_U32_e64) {
+-                Add.addReg(MaterializeCarryOutOffset(Add), RegState::Kill)
+-                    .addReg(TmpResultReg, RegState::Kill)
+-                    .addImm(0);
+-              } else
+-                Add.addImm(Offset).addReg(TmpResultReg, RegState::Kill);
+-            } else {
+-              assert(Offset > 0 && isUInt<24>(2 * ST.getMaxWaveScratchSize()) &&
+-                     "offset is unsafe for v_mad_u32_u24");
+-
+-              // We start with a frame pointer with a wave space value, and
+-              // an offset in lane-space. We are materializing a lane space
+-              // value. We can either do a right shift of the frame pointer
+-              // to get to lane space, or a left shift of the offset to get
+-              // to wavespace. We can right shift after the computation to
+-              // get back to the desired per-lane value. We are using the
+-              // mad_u32_u24 primarily as an add with no carry out clobber.
+-              bool IsInlinableLiteral =
+-                  AMDGPU::isInlinableLiteral32(Offset, ST.hasInv2PiInlineImm());
+-              if (!IsInlinableLiteral) {
+-                BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32),
+-                        TmpResultReg)
+-                    .addImm(Offset);
+-              }
+-
+-              Add = BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MAD_U32_U24_e64),
+-                            TmpResultReg);
+-
+-              if (!IsInlinableLiteral) {
+-                Add.addReg(TmpResultReg, RegState::Kill);
+-              } else {
+-                // We fold the offset into mad itself if its inlinable.
+-                Add.addImm(Offset);
+-              }
+-              Add.addImm(ST.getWavefrontSize()).addReg(FrameReg).addImm(0);
+-              BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
++            assert(Offset > 0 && isUInt<24>(2 * ST.getMaxWaveScratchSize()) &&
++                   "offset is unsafe for v_mad_u32_u24");
++
++            // We start with a frame pointer with a wave space value, and
++            // an offset in lane-space. We are materializing a lane space
++            // value. We can either do a right shift of the frame pointer
++            // to get to lane space, or a left shift of the offset to get
++            // to wavespace. We can right shift after the computation to
++            // get back to the desired per-lane value. We are using the
++            // mad_u32_u24 primarily as an add with no carry out clobber.
++            bool IsInlinableLiteral =
++                AMDGPU::isInlinableLiteral32(Offset, ST.hasInv2PiInlineImm());
++            if (!IsInlinableLiteral) {
++              BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32),
+                       TmpResultReg)
+-                  .addImm(ST.getWavefrontSizeLog2())
+-                  .addReg(TmpResultReg);
++                  .addImm(Offset);
+             }
+ 
+-            Register NewDest;
+-            if (IsCopy) {
+-              NewDest = ResultReg;
++            Add = BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MAD_U32_U24_e64),
++                          TmpResultReg);
++
++            if (!IsInlinableLiteral) {
++              Add.addReg(TmpResultReg, RegState::Kill);
+             } else {
+-              NewDest = RS->scavengeRegisterBackwards(
+-                  AMDGPU::SReg_32_XM0RegClass, *Add, false, 0,
+-                  /*AllowSpill=*/true);
++              // We fold the offset into mad itself if its inlinable.
++              Add.addImm(Offset);
+             }
+-
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_READFIRSTLANE_B32),
+-                    NewDest)
++            Add.addImm(ST.getWavefrontSize()).addReg(FrameReg).addImm(0);
++            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_LSHRREV_B32_e64),
++                    TmpResultReg)
++                .addImm(ST.getWavefrontSizeLog2())
+                 .addReg(TmpResultReg);
+-            ResultReg = NewDest;
+           }
+-          if (!IsSALU)
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), ResultReg)
+-                .addReg(TmpResultReg, RegState::Kill);
+-          // If there were truly no free SGPRs, we need to undo everything.
+-          if (!TmpScaledReg.isValid()) {
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), ScaledReg)
+-                .addReg(ScaledReg, RegState::Kill)
+-                .addImm(-Offset);
+-            BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_LSHL_B32), ScaledReg)
+-                .addReg(FrameReg)
+-                .addImm(ST.getWavefrontSizeLog2());
++
++          Register NewDest;
++          if (IsCopy) {
++            NewDest = ResultReg;
++          } else {
++            NewDest = RS->scavengeRegisterBackwards(AMDGPU::SReg_32_XM0RegClass,
++                                                    *Add, false, 0,
++                                                    /*AllowSpill=*/true);
+           }
++
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_READFIRSTLANE_B32), NewDest)
++              .addReg(TmpResultReg);
++          ResultReg = NewDest;
++        }
++        if (!IsSALU)
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), ResultReg)
++              .addReg(TmpResultReg, RegState::Kill);
++        // If there were truly no free SGPRs, we need to undo everything.
++        if (!TmpScaledReg.isValid()) {
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_ADD_I32), ScaledReg)
++              .addReg(ScaledReg, RegState::Kill)
++              .addImm(-Offset);
++          BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_LSHL_B32), ScaledReg)
++              .addReg(FrameReg)
++              .addImm(ST.getWavefrontSizeLog2());
+         }
+       }
++    }
+ 
+-      // Don't introduce an extra copy if we're just materializing in a mov.
+-      if (IsCopy) {
+-        MI->eraseFromParent();
+-        return true;
+-      }
+-      FIOp->ChangeToRegister(ResultReg, false, false, true);
+-      return false;
++    // Don't introduce an extra copy if we're just materializing in a mov.
++    if (IsCopy) {
++      MI->eraseFromParent();
++      return true;
+     }
++    FIOp->ChangeToRegister(ResultReg, false, false, true);
++    return false;
++  }
+ 
+-    if (IsMUBUF) {
+-      // Disable offen so we don't need a 0 vgpr base.
+-      assert(
+-          static_cast<int>(FIOperandNum) ==
+-          AMDGPU::getNamedOperandIdx(MI->getOpcode(), AMDGPU::OpName::vaddr));
++  if (IsMUBUF) {
++    // Disable offen so we don't need a 0 vgpr base.
++    assert(static_cast<int>(FIOperandNum) ==
++           AMDGPU::getNamedOperandIdx(MI->getOpcode(), AMDGPU::OpName::vaddr));
+ 
+-      auto &SOffset = *TII->getNamedOperand(*MI, AMDGPU::OpName::soffset);
+-      assert((SOffset.isImm() && SOffset.getImm() == 0));
++    auto &SOffset = *TII->getNamedOperand(*MI, AMDGPU::OpName::soffset);
++    assert((SOffset.isImm() && SOffset.getImm() == 0));
+ 
+-      if (FrameReg != AMDGPU::NoRegister)
+-        SOffset.ChangeToRegister(FrameReg, false);
++    if (FrameReg != AMDGPU::NoRegister)
++      SOffset.ChangeToRegister(FrameReg, false);
+ 
+-      int64_t Offset = FrameInfo.getObjectOffset(Index);
+-      int64_t OldImm =
+-          TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm();
+-      int64_t NewOffset = OldImm + Offset;
++    int64_t Offset = FrameInfo.getObjectOffset(Index);
++    int64_t OldImm =
++        TII->getNamedOperand(*MI, AMDGPU::OpName::offset)->getImm();
++    int64_t NewOffset = OldImm + Offset;
+ 
+-      if (TII->isLegalMUBUFImmOffset(NewOffset) &&
+-          buildMUBUFOffsetLoadStore(ST, FrameInfo, MI, Index, NewOffset)) {
+-        MI->eraseFromParent();
+-        return true;
+-      }
++    if (TII->isLegalMUBUFImmOffset(NewOffset) &&
++        buildMUBUFOffsetLoadStore(ST, FrameInfo, MI, Index, NewOffset)) {
++      MI->eraseFromParent();
++      return true;
+     }
++  }
+ 
+-    // If the offset is simply too big, don't convert to a scratch wave offset
+-    // relative index.
++  // If the offset is simply too big, don't convert to a scratch wave offset
++  // relative index.
+ 
+-    FIOp->ChangeToImmediate(Offset);
+-    if (!TII->isImmOperandLegal(*MI, FIOperandNum, *FIOp)) {
+-      Register TmpReg =
+-          RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass, MI, false, 0);
+-      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpReg)
+-          .addImm(Offset);
+-      FIOp->ChangeToRegister(TmpReg, false, false, true);
+-    }
++  FIOp->ChangeToImmediate(Offset);
++  if (!TII->isImmOperandLegal(*MI, FIOperandNum, *FIOp)) {
++    Register TmpReg =
++        RS->scavengeRegisterBackwards(AMDGPU::VGPR_32RegClass, MI, false, 0);
++    BuildMI(*MBB, MI, DL, TII->get(AMDGPU::V_MOV_B32_e32), TmpReg)
++        .addImm(Offset);
++    FIOp->ChangeToRegister(TmpReg, false, false, true);
++  }
+ 
+   return false;
+ }
+@@ -4021,8 +4015,9 @@ bool SIRegisterInfo::isUniformReg(const MachineRegisterInfo &MRI,
+   return !RBI.isDivergentRegBank(RB);
+ }
+ 
+-ArrayRef<int16_t> SIRegisterInfo::getRegSplitParts(const TargetRegisterClass *RC,
+-                                                   unsigned EltSize) const {
++ArrayRef<int16_t>
++SIRegisterInfo::getRegSplitParts(const TargetRegisterClass *RC,
++                                 unsigned EltSize) const {
+   const unsigned RegBitWidth = AMDGPU::getRegBitWidth(*RC);
+   assert(RegBitWidth >= 32 && RegBitWidth <= 1024 && EltSize >= 2);
+ 
+@@ -4036,7 +4031,7 @@ ArrayRef<int16_t> SIRegisterInfo::getRegSplitParts(const TargetRegisterClass *RC
+   return ArrayRef(Parts.data(), NumParts);
+ }
+ 
+-const TargetRegisterClass*
++const TargetRegisterClass *
+ SIRegisterInfo::getRegClassForReg(const MachineRegisterInfo &MRI,
+                                   Register Reg) const {
+   return Reg.isVirtual() ? MRI.getRegClass(Reg) : getPhysRegBaseClass(Reg);
+@@ -4098,7 +4093,7 @@ unsigned SIRegisterInfo::getRegPressureSetLimit(const MachineFunction &MF,
+ }
+ 
+ const int *SIRegisterInfo::getRegUnitPressureSets(MCRegUnit RegUnit) const {
+-  static const int Empty[] = { -1 };
++  static const int Empty[] = {-1};
+ 
+   if (RegPressureIgnoredUnits[static_cast<unsigned>(RegUnit)])
+     return Empty;
+@@ -4167,13 +4162,87 @@ bool SIRegisterInfo::getRegAllocationHints(Register VirtReg,
+     }
+     return false;
+   }
++  case AMDGPURI::SameBank: {
++    const auto *HintInfo = MRI.getRegAllocationHints(VirtReg);
++    if (!HintInfo || !VRM)
++      return TargetRegisterInfo::getRegAllocationHints(VirtReg, Order, Hints,
++                                                       MF, VRM);
++
++    // Determine the target bank from any already-assigned hint register.
++    int TargetBank = -1;
++    for (Register HintReg : HintInfo->second) {
++      MCPhysReg PhysHint = 0;
++      if (HintReg.isPhysical())
++        PhysHint = HintReg;
++      else if (VRM->hasPhys(HintReg))
++        PhysHint = VRM->getPhys(HintReg);
++      if (PhysHint) {
++        TargetBank = static_cast<int>(getHWRegIndex(PhysHint) >> 8);
++        break;
++      }
++    }
++
++    if (TargetBank < 0)
++      return TargetRegisterInfo::getRegAllocationHints(VirtReg, Order, Hints,
++                                                       MF, VRM);
++
++    for (MCPhysReg PhysReg : Order) {
++      if (MRI.isReserved(PhysReg))
++        continue;
++      unsigned RegBank = getHWRegIndex(PhysReg) >> 8;
++      if (static_cast<int>(RegBank) == TargetBank)
++        Hints.push_back(PhysReg);
++    }
++    return false;
++  }
++  case AMDGPURI::BankHint:
++  case AMDGPURI::StrictBankHint: {
++    // Absolute bank preference from llvm.amdgcn.sched.bank. The bank number
++    // (0-3) is carried in Hint.second. Prefer physregs whose HW index falls in
++    // the requested 256-register bank. Advisory only: we return false so the
++    // default order still applies when the bank is full.
++    unsigned Bank = Hint.second;
++    if (Bank > 3)
++      return false;
++    unsigned BankStart = Bank * 256;
++    unsigned BankEnd = BankStart + 256;
++    for (MCPhysReg PhysReg : Order) {
++      if (MRI.isReserved(PhysReg))
++        continue;
++      unsigned HWIdx = getHWRegIndex(PhysReg);
++      if (HWIdx >= BankStart && HWIdx < BankEnd)
++        Hints.push_back(PhysReg);
++    }
++    return StrictVGPRBankHints || Hint.first == AMDGPURI::StrictBankHint;
++  }
++  case AMDGPURI::VGPRRegHint:
++  case AMDGPURI::StrictVGPRRegHint:
++  case AMDGPURI::SGPRRegHint:
++  case AMDGPURI::StrictSGPRRegHint:
++  case AMDGPURI::AGPRRegHint:
++  case AMDGPURI::StrictAGPRRegHint: {
++    // Exact register preference from llvm.amdgcn.schedule.{vgpr,sgpr,agpr}.
++    // The target HW register index is carried in Hint.second. Prefer the
++    // physreg whose HW index matches.
++    unsigned TargetIdx = Hint.second;
++    for (MCPhysReg PhysReg : Order) {
++      if (MRI.isReserved(PhysReg))
++        continue;
++      if (getHWRegIndex(PhysReg) == TargetIdx)
++        Hints.push_back(PhysReg);
++    }
++    return Hint.first == AMDGPURI::StrictVGPRRegHint ||
++           Hint.first == AMDGPURI::StrictSGPRRegHint ||
++           Hint.first == AMDGPURI::StrictAGPRRegHint;
++  }
+   default:
+     return TargetRegisterInfo::getRegAllocationHints(VirtReg, Order, Hints, MF,
+                                                      VRM);
+   }
+ }
+ 
+-MCRegister SIRegisterInfo::getReturnAddressReg(const MachineFunction &MF) const {
++MCRegister
++SIRegisterInfo::getReturnAddressReg(const MachineFunction &MF) const {
+   // Not a callee saved register.
+   return AMDGPU::SGPR30_SGPR31;
+ }
+@@ -4197,9 +4266,8 @@ SIRegisterInfo::getRegClassForSizeOnBank(unsigned Size,
+   }
+ }
+ 
+-const TargetRegisterClass *
+-SIRegisterInfo::getConstrainedRegClassForOperand(const MachineOperand &MO,
+-                                         const MachineRegisterInfo &MRI) const {
++const TargetRegisterClass *SIRegisterInfo::getConstrainedRegClassForOperand(
++    const MachineOperand &MO, const MachineRegisterInfo &MRI) const {
+   const RegClassOrRegBank &RCOrRB = MRI.getRegClassOrRegBank(MO.getReg());
+   if (const RegisterBank *RB = dyn_cast<const RegisterBank *>(RCOrRB))
+     return getRegClassForTypeOnBank(MRI.getType(MO.getReg()), *RB);
+@@ -4287,9 +4355,9 @@ MCPhysReg SIRegisterInfo::get32BitRegister(MCPhysReg Reg) const {
+     if (MCPhysReg Super = getMatchingSuperReg(Reg, AMDGPU::lo16, RC))
+       return Super;
+   }
+-  if (MCPhysReg Super = getMatchingSuperReg(Reg, AMDGPU::hi16,
+-                                            &AMDGPU::VGPR_32RegClass)) {
+-      return Super;
++  if (MCPhysReg Super =
++          getMatchingSuperReg(Reg, AMDGPU::hi16, &AMDGPU::VGPR_32RegClass)) {
++    return Super;
+   }
+ 
+   return AMDGPU::NoRegister;
+diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
+index e464c9334ffe..f030019ef82f 100644
+--- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
++++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
+@@ -33,7 +33,19 @@ struct SGPRSpillBuilder;
+ /// Register allocation hint types. Helps eliminate unneeded COPY with True16
+ namespace AMDGPURI {
+ 
+-enum { Size16 = 1, Size32 = 2 };
++enum {
++  Size16 = 1,
++  Size32 = 2,
++  SameBank = 3,
++  BankHint = 4,
++  StrictBankHint = 5,
++  VGPRRegHint = 6,
++  StrictVGPRRegHint = 7,
++  SGPRRegHint = 8,
++  StrictSGPRRegHint = 9,
++  AGPRRegHint = 10,
++  StrictAGPRRegHint = 11,
++};
+ 
+ } // end namespace AMDGPURI
+ 
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-bank-hints.mir b/llvm/test/CodeGen/AMDGPU/sched-bank-hints.mir
+new file mode 100644
+index 000000000000..b1b5b9bc054f
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-bank-hints.mir
+@@ -0,0 +1,35 @@
++# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
++
++# The AMDGPUSchedBank pass attaches a bank register-allocation hint (not
++# printed in MIR) and lowers each V_SCHEDULE_BANK_B* pseudo to a plain COPY.
++
++---
++# CHECK-LABEL: name: lower_sched_bank_b32
++# CHECK: %1:vgpr_32 = COPY %0
++# CHECK-NOT: V_SCHEDULE_BANK_B32
++name: lower_sched_bank_b32
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0
++    %0:vgpr_32 = COPY $vgpr0
++    %1:vgpr_32 = V_SCHEDULE_BANK_B32 %0, 2, implicit $exec
++    %2:vgpr_32 = V_ADD_U32_e32 1, %1, implicit $exec
++    $vgpr0 = COPY %2
++    SI_RETURN_TO_EPILOG $vgpr0
++...
++
++---
++# CHECK-LABEL: name: lower_sched_bank_b64
++# CHECK: %1:vreg_64_align2 = COPY %0
++# CHECK-NOT: V_SCHEDULE_BANK_B64
++name: lower_sched_bank_b64
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0_vgpr1
++    %0:vreg_64_align2 = COPY $vgpr0_vgpr1
++    %1:vreg_64_align2 = V_SCHEDULE_BANK_B64 %0, 3, implicit $exec
++    $vgpr0_vgpr1 = COPY %1
++    SI_RETURN_TO_EPILOG $vgpr0_vgpr1
++...
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-bank.ll b/llvm/test/CodeGen/AMDGPU/sched-bank.ll
+new file mode 100644
+index 000000000000..c60a73ff8c6f
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-bank.ll
+@@ -0,0 +1,32 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
++
++; Verify that llvm.amdgcn.sched.bank steers register allocation into the
++; requested 256-register bank. The kernel is pinned to occupancy 1
++; (waves-per-eu=1,1 with a single-wave workgroup) so the whole 1024-VGPR file is
++; addressable and the high banks are actually available to the allocator.
++
++declare i32 @llvm.amdgcn.sched.bank.i32(i32, i32)
++
++; A bank-2 hint places the value in v512-v767 and forces an s_set_vgpr_msb that
++; latches bank 2 (src1=2) around its use.
++; GCN-LABEL: {{^}}bank2:
++; GCN: v_mov_b32_e32 v0 /*v512*/, s2
++; GCN: s_set_vgpr_msb 0x8008
++define amdgpu_kernel void @bank2(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.bank.i32(i32 %x, i32 2)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; Without the hint the value stays in bank 0 and no bank switch is emitted.
++; GCN-LABEL: {{^}}nohint:
++; GCN-NOT: s_set_vgpr_msb
++; GCN: s_endpgm
++define amdgpu_kernel void @nohint(ptr addrspace(1) %out, i32 %x) #0 {
++  %y = add i32 %x, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
+new file mode 100644
+index 000000000000..d480eea0ce59
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
+@@ -0,0 +1,66 @@
++# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
++
++# The AMDGPUSchedBank pass attaches exact register allocation hints (not
++# printed in MIR) and lowers each schedule pseudo to a plain COPY.
++
++---
++# CHECK-LABEL: name: lower_sched_vgpr_b32
++# CHECK: %1:vgpr_32 = COPY %0
++# CHECK-NOT: V_SCHEDULE_VGPR_B32
++name: lower_sched_vgpr_b32
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0
++    %0:vgpr_32 = COPY $vgpr0
++    %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 42, 1, implicit $exec
++    %2:vgpr_32 = V_ADD_U32_e32 1, %1, implicit $exec
++    $vgpr0 = COPY %2
++    SI_RETURN_TO_EPILOG $vgpr0
++...
++
++---
++# CHECK-LABEL: name: lower_sched_vgpr_b64
++# CHECK: %1:vreg_64_align2 = COPY %0
++# CHECK-NOT: V_SCHEDULE_VGPR_B64
++name: lower_sched_vgpr_b64
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0_vgpr1
++    %0:vreg_64_align2 = COPY $vgpr0_vgpr1
++    %1:vreg_64_align2 = V_SCHEDULE_VGPR_B64 %0, 100, 0, implicit $exec
++    $vgpr0_vgpr1 = COPY %1
++    SI_RETURN_TO_EPILOG $vgpr0_vgpr1
++...
++
++---
++# CHECK-LABEL: name: lower_sched_sgpr_b32
++# CHECK: %1:sgpr_32 = COPY %0
++# CHECK-NOT: S_SCHEDULE_SGPR_B32
++name: lower_sched_sgpr_b32
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $sgpr0
++    %0:sgpr_32 = COPY $sgpr0
++    %1:sgpr_32 = S_SCHEDULE_SGPR_B32 %0, 10, 1
++    %2:sgpr_32 = S_ADD_I32 %1, 1, implicit-def $scc
++    $sgpr0 = COPY %2
++    SI_RETURN_TO_EPILOG $sgpr0
++...
++
++---
++# CHECK-LABEL: name: lower_sched_sgpr_b64
++# CHECK: %1:sgpr_64 = COPY %0
++# CHECK-NOT: S_SCHEDULE_SGPR_B64
++name: lower_sched_sgpr_b64
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $sgpr0_sgpr1
++    %0:sgpr_64 = COPY $sgpr0_sgpr1
++    %1:sgpr_64 = S_SCHEDULE_SGPR_B64 %0, 20, 0
++    $sgpr0_sgpr1 = COPY %1
++    SI_RETURN_TO_EPILOG $sgpr0_sgpr1
++...
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
+new file mode 100644
+index 000000000000..ed048ba35ff0
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
+@@ -0,0 +1,99 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
++
++; Verify that llvm.amdgcn.schedule.{vgpr,sgpr} steer register allocation to
++; the exact requested register number. Kernels are pinned to occupancy 1
++; (waves-per-eu=1,1 with a single-wave workgroup) so the whole 1024-VGPR file
++; is addressable and high-numbered registers are available to the allocator.
++
++declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
++declare i64 @llvm.amdgcn.sched.vgpr.i64(i64, i32, i32)
++declare <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float>, i32, i32)
++
++; --------------------------------------------------------------------------
++; sched_vgpr: strict hint to v42
++
++; GCN-LABEL: {{^}}vgpr42:
++; GCN: v42
++define amdgpu_kernel void @vgpr42(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %x, i32 42, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: strict hint to v100
++
++; GCN-LABEL: {{^}}vgpr100:
++; GCN: v100
++define amdgpu_kernel void @vgpr100(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %x, i32 100, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: strict hint to v0
++
++; GCN-LABEL: {{^}}vgpr0:
++; GCN: v0,
++define amdgpu_kernel void @vgpr0(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %x, i32 0, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: strict hint to v512 (bank 2 territory)
++
++; GCN-LABEL: {{^}}vgpr512:
++; GCN: v512
++define amdgpu_kernel void @vgpr512(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %x, i32 512, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: 64-bit value, strict hint to v[200:201]
++
++; GCN-LABEL: {{^}}vgpr200_64:
++; GCN: v[200:201]
++define amdgpu_kernel void @vgpr200_64(ptr addrspace(1) %out, i64 %x) #0 {
++  %h = call i64 @llvm.amdgcn.sched.vgpr.i64(i64 %x, i32 200, i32 1)
++  %y = add i64 %h, 1
++  store i64 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: 512-bit value (v16f32), strict hint to v[512:527]
++
++; GCN-LABEL: {{^}}vgpr512_v16f32:
++; GCN: v[512:527]
++define amdgpu_kernel void @vgpr512_v16f32(ptr addrspace(1) %out, ptr addrspace(1) %in) #0 {
++  %x = load <16 x float>, ptr addrspace(1) %in
++  %h = call <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float> %x, i32 512, i32 1)
++  store <16 x float> %h, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; Without hint: register allocator uses default low-numbered registers.
++; Verify no high-numbered VGPRs appear.
++
++; GCN-LABEL: {{^}}nohint:
++; GCN-NOT: v42
++; GCN-NOT: v100
++; GCN-NOT: v512
++; GCN: s_endpgm
++define amdgpu_kernel void @nohint(ptr addrspace(1) %out, i32 %x) #0 {
++  %y = add i32 %x, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
+index c7330dd36af9..99eff341a36b 100644
+--- a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
++++ b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
+@@ -812,6 +812,115 @@ def ROCDL_IglpOpt : ROCDL_ConcreteNonMemIntrOp<"iglp.opt", [], 0, [0], ["variant
+   }];
+ }
+ 
++def ROCDL_ScheduleBankOp : ROCDL_IntrOp<"sched.bank", [], [0],
++    [AllTypesMatch<["res", "value"]>], 1, 0, 0, 0, [], []>,
++  Arguments<(ins LLVM_Type:$value, I32Attr:$bank,
++             OptionalAttr<UnitAttr>:$soft)> {
++  let results = (outs LLVM_Type:$res);
++  let assemblyFormat = [{
++    $value `,` $bank (`soft` $soft^)? attr-dict `:` type($value)
++  }];
++  string llvmBuilder = [{
++    auto schedOp = cast<ROCDL::ScheduleBankOp>(opInst);
++    auto *value = moduleTranslation.lookupValue(schedOp.getValue());
++    int32_t bank = schedOp.getBank();
++    int32_t encodedBank = schedOp.getSoftAttr() ? bank : (bank | 4);
++    auto *fn = llvm::Intrinsic::getOrInsertDeclaration(
++        moduleTranslation.getLLVMModule(),
++        llvm::Intrinsic::amdgcn_sched_bank,
++        {value->getType()});
++    auto *inst = builder.CreateCall(fn,
++        {value, builder.getInt32(encodedBank)});
++    moduleTranslation.mapValue(opInst.getResult(0), inst);
++  }];
++  let description = [{
++    VGPR bank scheduling hint (gfx1250). Identity at runtime; guides the
++    register allocator to place `value` in the requested 256-register bank.
++
++    Bank 0-3. Default is strict (allocator must obey). Pass `soft` for an
++    advisory hint that the allocator may ignore.
++
++    Example:
++    ```mlir
++    %0 = rocdl.sched.bank %val, 2 : f32        // strict bank 2 (default)
++    %1 = rocdl.sched.bank %val, 1 soft : f32   // soft bank 1
++    ```
++  }];
++}
++
++class ROCDL_ScheduleGPROp<string mnemonic, string intrName, string gprKind>
++  : ROCDL_IntrOp<mnemonic, [], [0],
++    [AllTypesMatch<["res", "value"]>], 1, 0, 0, 0, [], []>,
++  Arguments<(ins LLVM_Type:$value, I32Attr:$regnum,
++             OptionalAttr<UnitAttr>:$soft)> {
++  let results = (outs LLVM_Type:$res);
++  let assemblyFormat = [{
++    $value `,` $regnum (`soft` $soft^)? attr-dict `:` type($value)
++  }];
++  string llvmBuilder = [{
++    auto schedOp = cast<ROCDL::Schedule}] # gprKind # [{Op>(opInst);
++    auto *value = moduleTranslation.lookupValue(schedOp.getValue());
++    int32_t regnum = schedOp.getRegnum();
++    int32_t strict = schedOp.getSoftAttr() ? 0 : 1;
++    auto *fn = llvm::Intrinsic::getOrInsertDeclaration(
++        moduleTranslation.getLLVMModule(),
++        llvm::Intrinsic::amdgcn_sched_}] # intrName # [{,
++        {value->getType()});
++    auto *inst = builder.CreateCall(fn,
++        {value, builder.getInt32(regnum), builder.getInt32(strict)});
++    moduleTranslation.mapValue(opInst.getResult(0), inst);
++  }];
++}
++
++def ROCDL_ScheduleVGPROp : ROCDL_ScheduleGPROp<"sched.vgpr", "vgpr", "VGPR"> {
++  let description = [{
++    VGPR register scheduling hint. Identity at runtime; guides the register
++    allocator to place `value` in the specified VGPR register number.
++
++    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
++
++    Example:
++    ```mlir
++    %0 = rocdl.sched.vgpr %val, 42 : f32        // strict: allocate to v42
++    %1 = rocdl.sched.vgpr %val, 10 soft : f32   // soft: prefer v10
++    ```
++  }];
++}
++
++def ROCDL_ScheduleSGPROp : ROCDL_ScheduleGPROp<"sched.sgpr", "sgpr", "SGPR"> {
++  let description = [{
++    SGPR register scheduling hint. Identity at runtime; guides the register
++    allocator to place `value` in the specified SGPR register number.
++
++    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
++
++    Example:
++    ```mlir
++    %0 = rocdl.sched.sgpr %val, 10 : i32        // strict: allocate to s10
++    %1 = rocdl.sched.sgpr %val, 4 soft : i32    // soft: prefer s4
++    ```
++  }];
++}
++
++def ROCDL_ScheduleAGPROp : ROCDL_ScheduleGPROp<"sched.agpr", "agpr", "AGPR"> {
++  let description = [{
++    AGPR register scheduling hint. Identity at runtime; guides the register
++    allocator to place `value` in the specified AGPR register number.
++    Only valid on targets with MAI instructions (e.g., gfx90a, gfx940).
++
++    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
++
++    Example:
++    ```mlir
++    %0 = rocdl.sched.agpr %val, 8 : f32         // strict: allocate to a8
++    %1 = rocdl.sched.agpr %val, 0 soft : f32    // soft: prefer a0
++    ```
++  }];
++}
++
+ //===---------------------------------------------------------------------===//
+ // Xdlops intrinsics
+ 
+diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocdl.mlir
+index addb03600afc..d4d6c751bae4 100644
+--- a/mlir/test/Dialect/LLVMIR/rocdl.mlir
++++ b/mlir/test/Dialect/LLVMIR/rocdl.mlir
+@@ -168,6 +168,38 @@ func.func @rocdl_iglp_opt() {
+   llvm.return
+ }
+ 
++func.func @rocdl_sched_bank(%val : f32, %ival : i32) -> f32 {
++  // CHECK: rocdl.sched.bank %{{.*}}, 2 : f32
++  %0 = rocdl.sched.bank %val, 2 : f32
++  // CHECK: rocdl.sched.bank %{{.*}}, 1 soft : i32
++  %1 = rocdl.sched.bank %ival, 1 soft : i32
++  llvm.return %0 : f32
++}
++
++func.func @rocdl_sched_vgpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK: rocdl.sched.vgpr %{{.*}}, 42 : f32
++  %0 = rocdl.sched.vgpr %val, 42 : f32
++  // CHECK: rocdl.sched.vgpr %{{.*}}, 10 soft : i32
++  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  llvm.return %0 : f32
++}
++
++func.func @rocdl_sched_sgpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK: rocdl.sched.sgpr %{{.*}}, 20 : f32
++  %0 = rocdl.sched.sgpr %val, 20 : f32
++  // CHECK: rocdl.sched.sgpr %{{.*}}, 5 soft : i32
++  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  llvm.return %0 : f32
++}
++
++func.func @rocdl_sched_agpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK: rocdl.sched.agpr %{{.*}}, 8 : f32
++  %0 = rocdl.sched.agpr %val, 8 : f32
++  // CHECK: rocdl.sched.agpr %{{.*}}, 0 soft : i32
++  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  llvm.return %0 : f32
++}
++
+ func.func @rocdl.setprio() {
+   // CHECK: rocdl.s.setprio
+   rocdl.s.setprio 0
+diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.mlir
+index c6c4d173039f..d397a59c110c 100644
+--- a/mlir/test/Target/LLVMIR/rocdl.mlir
++++ b/mlir/test/Target/LLVMIR/rocdl.mlir
+@@ -444,6 +444,46 @@ llvm.func @rocdl.iglp.opt() {
+   llvm.return
+ }
+ 
++llvm.func @rocdl.sched.bank(%val : f32, %ival : i32) -> f32 {
++  // CHECK-LABEL: rocdl.sched.bank
++  // strict (default): bank 2 → encoded as 6 (2 | 4)
++  // CHECK: call float @llvm.amdgcn.sched.bank.f32(float %{{.*}}, i32 6)
++  %0 = rocdl.sched.bank %val, 2 : f32
++  // soft: bank 1 → encoded as 1
++  // CHECK: call i32 @llvm.amdgcn.sched.bank.i32(i32 %{{.*}}, i32 1)
++  %1 = rocdl.sched.bank %ival, 1 soft : i32
++  llvm.return %0 : f32
++}
++
++llvm.func @rocdl.sched.vgpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK-LABEL: rocdl.sched.vgpr
++  // strict (default): regnum 42, strict 1
++  // CHECK: call float @llvm.amdgcn.sched.vgpr.f32(float %{{.*}}, i32 42, i32 1)
++  %0 = rocdl.sched.vgpr %val, 42 : f32
++  // soft: regnum 10, strict 0
++  // CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 10, i32 0)
++  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  llvm.return %0 : f32
++}
++
++llvm.func @rocdl.sched.sgpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK-LABEL: rocdl.sched.sgpr
++  // CHECK: call float @llvm.amdgcn.sched.sgpr.f32(float %{{.*}}, i32 20, i32 1)
++  %0 = rocdl.sched.sgpr %val, 20 : f32
++  // CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 5, i32 0)
++  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  llvm.return %0 : f32
++}
++
++llvm.func @rocdl.sched.agpr(%val : f32, %ival : i32) -> f32 {
++  // CHECK-LABEL: rocdl.sched.agpr
++  // CHECK: call float @llvm.amdgcn.sched.agpr.f32(float %{{.*}}, i32 8, i32 1)
++  %0 = rocdl.sched.agpr %val, 8 : f32
++  // CHECK: call i32 @llvm.amdgcn.sched.agpr.i32(i32 %{{.*}}, i32 0, i32 0)
++  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  llvm.return %0 : f32
++}
++
+ llvm.func @rocdl.xdlops(%arg0 : f32, %arg1 : f32,
+                    %arg2 : vector<32 x f32>, %arg3: i32,
+                    %arg4 : vector<16 x f32>, %arg5 : vector<4xf32>,

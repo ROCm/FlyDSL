@@ -88,6 +88,7 @@ def _run_apply(work, pin, ext_dir, extensions=(), required=(), no_ext="0"):
                 f'LLVM_REF="{pin}"',
                 f'LLVM_EXT_DIR="{ext_dir}"',
                 f'LLVM_NO_EXT="{no_ext}"',
+                'LLVM_SOURCE="upstream"',
                 "LLVM_FETCH_ARGS=(--depth 1)",
                 array("REQUIRED_PATCHES", required),
                 array("LLVM_EXTENSIONS", extensions),
@@ -241,8 +242,8 @@ def _pin(**series):
 def _load_series(tmp_path, text):
     """Run build_llvm.sh's JSON loader on `text`; return (exit code, required, extensions)."""
     lines = _BUILD_LLVM.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith('LLVM_PATCH_LIST="$(python3'))
-    end = next(i for i, line in enumerate(lines) if line == 'done <<< "${LLVM_PATCH_LIST}"')
+    start = next(i for i, line in enumerate(lines) if line.lstrip().startswith('LLVM_PATCH_LIST="$(python3'))
+    end = next(i for i, line in enumerate(lines) if line.lstrip() == 'done <<< "${LLVM_PATCH_LIST}"')
     info = tmp_path / "info.json"
     info.write_text(text)
     runner = tmp_path / "load.sh"
