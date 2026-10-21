@@ -24,6 +24,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import ReductionOp, full
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
+from kernels.norm.softmax_common import _load_vec, _store_vec
 
 KERNEL_NAME = "softmax_bwd_kernel"
 
@@ -129,22 +130,6 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
             buffer_dy = N <= MAX_RESIDENT_COLS
             buffer_y = N <= 2 * MAX_RESIDENT_COLS
 
-            dy_div = fx.logical_divide(row_dy, fx.make_layout(vec_width, 1))
-            y_div = fx.logical_divide(row_y, fx.make_layout(vec_width, 1))
-            dx_div = fx.logical_divide(row_dx, fx.make_layout(vec_width, 1))
-
-            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-
-            def _load_vec(div_tensor, idx):
-                r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
-            def _store_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.memref_store_vec(val, r)
-                fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
-
             # 1. Load both operands, accumulate the row dot product in fp32.
             #    Buffered in native dtype; widened only for the arithmetic.
             dy_buffer = []
@@ -153,8 +138,8 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
 
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                dy_vec = _load_vec(dy_div, idx)
-                y_vec = _load_vec(y_div, idx)
+                dy_vec = _load_vec(row_dy, idx, vec_width, dtype_str, mask=fx.Boolean(True))
+                y_vec = _load_vec(row_y, idx, vec_width, dtype_str, mask=fx.Boolean(True))
                 if const_expr(buffer_dy):
                     dy_buffer.append(dy_vec)
                 if const_expr(buffer_y):
@@ -170,15 +155,15 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
                 if const_expr(buffer_dy):
                     dy_f = dy_buffer[tile_i].to(fx.Float32)
                 else:
-                    dy_f = _load_vec(dy_div, idx).to(fx.Float32)
+                    dy_f = _load_vec(row_dy, idx, vec_width, dtype_str, mask=fx.Boolean(True)).to(fx.Float32)
                 if const_expr(buffer_y):
                     y_f = y_buffer[tile_i].to(fx.Float32)
                 else:
-                    y_f = _load_vec(y_div, idx).to(fx.Float32)
+                    y_f = _load_vec(row_y, idx, vec_width, dtype_str, mask=fx.Boolean(True)).to(fx.Float32)
 
                 dx_vec = y_f * (dy_f - dot)
                 out_e = dx_vec if dtype_str == "f32" else dx_vec.to(elem_dtype)
-                _store_vec(out_e, dx_div, idx)
+                _store_vec(row_dx, idx, out_e, vec_width, dtype_str, mask=fx.Boolean(True))
 
         else:
             # ==============================================================
