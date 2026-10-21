@@ -88,14 +88,33 @@ def _warp_gather(
 class WarpExchange(WarpPrimitive):
     """Exchange blocked, striped and ranked logical-warp ownership.
 
-    Specialize with ``[dtype, width, items_per_thread, algorithm]``. The final
-    policy is optional and defaults to ``WarpExchangeAlgorithm.Shared``.
-    ``None`` selects the target's physical warp width. All participating lanes
+    Specialize with ``WarpExchange[dtype, width, items_per_thread, algorithm]``. The
+    parameters below are compile-time positional arguments to ``WarpExchange[...]``, in
+    bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required positive Python int giving the number of complete items
+            owned by each lane; the logical-warp tile has width * items_per_thread items.
+            Element components/fields do not increase this count. SHUFFLE requires
+            items_per_thread == width.
+        algorithm: Optional member of WarpExchangeAlgorithm selecting the implementation
+            policy. Defaults to ``WarpExchangeAlgorithm.SHARED`` when omitted; member calls
+            use this fixed policy.
+
+    All participating lanes
     use the same specialization and per-call options. Algorithm selection is
     part of the operator type; member functions do not accept an algorithm.
-    Shared requires one SharedStorage instance per logical warp. SHUFFLE needs
+    SHARED requires one SharedStorage instance per logical warp. SHUFFLE needs
     an empty SharedStorage and requires items_per_thread == width. Synchronize each group
-    before reusing its scratch; scatter is supported only by Shared.
+    before reusing its scratch; scatter is supported only by SHARED.
 
     Examples:
         P = fx.coop.WarpExchange[fx.Int32, 8, 2]

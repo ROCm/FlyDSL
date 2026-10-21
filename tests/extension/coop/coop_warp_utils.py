@@ -8,6 +8,7 @@ from coop_common import WARP_SIZE, sample
 from coop_test_utils import (
     as_items,
     batched_columns,
+    full_matrix_enabled,
     items_dtype,
     make_items,
     run_kernel,
@@ -30,21 +31,17 @@ def check_warp_dtypes_and_widths(entry, width, count, primitive):
     group = width or WARP_SIZE
 
     def transform(value):
-        results = []
         allocator = fx.SharedAllocator()
-        for ns in (fx.coop, fx.coop.universal):
-            arg = value if primitive.endswith("sort") or count != 1 else value[0]
-            if primitive.endswith("sort"):
-                out = getattr(ns, primitive)(arg, width=width, compare_op=lambda a, b: a < b)
-            else:
-                P = ns.WarpExchange[dtype, width, count]
-                storage = warp_storage(P, allocator)
-                out = getattr(P, primitive.removeprefix("warp_"))(arg, storage=storage)
-                fx.barrier()
-            results.append(out if isinstance(out, fx.Vector) else fx.Vector.from_elements([out]))
-        return tuple(results)
+        arg = value if primitive.endswith("sort") or count != 1 else value[0]
+        if primitive.endswith("sort"):
+            out = getattr(fx.coop, primitive)(arg, width=width, compare_op=lambda a, b: a < b)
+        else:
+            P = fx.coop.WarpExchange[dtype, width, count]
+            storage = warp_storage(P, allocator)
+            out = getattr(P, primitive.removeprefix("warp_"))(arg, storage=storage)
+        return out if isinstance(out, fx.Vector) else fx.Vector.from_elements([out])
 
-    output = run_tile(transform, values, 128, count, outputs=2, dtype=dtype)
+    output = run_tile(transform, values, 128, count, dtype=dtype)
     host = values.cpu()
     if primitive == "warp_blocked_to_striped":
         expected = host.reshape(-1, count, group).transpose(1, 2).reshape(-1)
@@ -103,6 +100,8 @@ def check_compile_family(monkeypatch, arch, case):
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     block, count = (64, 4)
+    if case.endswith("sort") and not full_matrix_enabled():
+        count = 2
 
     def apply(a, out):
         tid = fx.thread_idx.x

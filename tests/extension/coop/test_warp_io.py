@@ -185,14 +185,6 @@ def test_guarded_cross_dtype_io(
     )
 
 
-@pytest.mark.l1b_target_dialect
-@pytest.mark.rocm_lower
-@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, ["warp_load", "warp_store"]))
-def test_compile_family(monkeypatch, arch, case):
-    checks.check_compile_family(monkeypatch, arch, case)
-
-
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")

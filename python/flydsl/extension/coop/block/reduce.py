@@ -212,34 +212,7 @@ class _BlockReduceMeta(BlockAlgorithmMeta):
         valid_items: int | Integer | None = None,
         identity=None,
     ):
-        """Reduce a flattened blocked input sequence and broadcast the aggregate.
-
-        All block threads must participate. Ordered policies preserve operand
-        order, while commutative policies may reorder it. Synchronize before
-        reusing the shared allocation.
-
-        Args:
-            value: One element or a nonempty list/tuple/Vector of consecutive
-                elements, converted to the specialized dtype. All threads must
-                provide the same item count; arrays form one block-wide task.
-            op: Associative ReductionOp or binary callable returning the element
-                dtype. Values that need a custom operation require a callable. Commutative policies
-                require ReductionOp or a callable with ``commutative = True``.
-            storage: Shared instance of the specialization's ``SharedStorage``.
-            valid_items: Uniform number of leading contributing threads in
-                ``[0, block_threads]``, or ``None`` for all inputs. Only the
-                single-item overload accepts this argument; omit it for an
-                item range. Runtime bounds are the caller's responsibility.
-            identity: Optional neutral element or callable ``identity(dtype)`` used
-                for masking a valid prefix. Overrides a built-in identity or
-                ``op.identity``. Without one, nonempty prefixes are still supported
-                and the empty reduction has an unspecified result.
-
-        Returns:
-            One aggregate value of the specialized dtype in every
-            participating thread, regardless of the per-thread input tile length.
-            An empty valid prefix returns the identity when available.
-        """
+        """Implement :meth:`BlockReduce.__call__`."""
         if cls.block_threads is None:
             raise TypeError("specialize first, e.g. BlockReduce[fx.Float32, 256]")
         commutative = cls.algorithm is BlockReduceAlgorithm.RAKING_COMMUTATIVE_ONLY
@@ -295,13 +268,27 @@ class _BlockReduceMeta(BlockAlgorithmMeta):
 class BlockReduce(metaclass=_BlockReduceMeta):
     """Reduce a block's input values in blocked per-thread order.
 
-    Specialize as ``BlockReduce[dtype, block_size, algorithm]``. The default
-    policy is ``WARP_REDUCTIONS``. ``block_size`` is a positive thread count or
-    positive ``(x, y, z)`` extents. ``dtype`` specifies one element's type,
-    including structured or vector elements. A bare Vector is one element
+    Specialize with ``BlockReduce[dtype, block_size, algorithm]``. The parameters below are
+    compile-time positional arguments to ``BlockReduce[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype. The aggregate has this
+            type. Structured elements require a callable operator.
+        block_size: Required launch shape: a positive Python int for (x, 1, 1), or three
+            positive Python int extents (x, y, z). Linear thread order varies x fastest. The
+            shape must match the kernel launch. A thread count smaller than the target
+            physical warp must be a power of two and becomes the logical warp width; other
+            counts must be multiples of the physical warp width. The launch and allocated
+            SharedStorage must fit the target limits.
+        algorithm: Optional member of BlockReduceAlgorithm selecting the implementation
+            policy. Defaults to ``BlockReduceAlgorithm.WARP_REDUCTIONS`` when omitted. It
+            fixes the specialization and its SharedStorage layout.
+
+    A bare Vector is one element
     for a Vector dtype, and a scalar item range for a Numeric dtype.
-    A list/tuple of vector elements
-    keeps each vector intact. Structured elements require a callable operator.
+    A list/tuple of vector elements keeps each vector intact. Structured elements require a callable operator.
     Tile lengths are inferred from inputs and must be uniform.
 
     Every thread receives the aggregate. Item ranges follow blocked order:
@@ -316,11 +303,6 @@ class BlockReduce(metaclass=_BlockReduceMeta):
     when available; without an identity its result is unspecified. Every block
     thread must enter the collective with uniform options. Use one shared
     allocation of ``SharedStorage`` and synchronize before reusing it.
-
-    A block smaller than the target's physical warp (64 on CDNA, 32 on RDNA)
-    must have a power-of-two thread count; its logical warp narrows to that
-    count. Larger blocks must contain complete physical warps. valid_items
-    controls a partial input tile; all launched threads still participate.
 
     Attributes:
         dtype: Specialized reduction element type.
@@ -350,3 +332,48 @@ class BlockReduce(metaclass=_BlockReduceMeta):
     num_warps = None
     SharedStorage = None
     warp_ops = _dispatched_warp
+
+    @classmethod
+    def __call__(
+        cls,
+        value,
+        op,
+        *,
+        storage,
+        valid_items: int | Integer | None = None,
+        identity=None,
+    ):
+        """Reduce a flattened blocked input sequence and broadcast the aggregate.
+
+        All block threads must participate. Ordered policies preserve operand
+        order, while commutative policies may reorder it. Synchronize before
+        reusing the shared allocation.
+
+        Args:
+            value: One element or a nonempty list/tuple/Vector of consecutive
+                elements, converted to the specialized dtype. All threads must
+                provide the same item count; arrays form one block-wide task.
+            op: Associative ReductionOp or binary callable returning the element
+                dtype. Values that need a custom operation require a callable. Commutative policies
+                require ReductionOp or a callable with ``commutative = True``.
+            storage: Shared instance of the specialization's ``SharedStorage``.
+            valid_items: Uniform number of leading contributing threads in
+                ``[0, block_threads]``, or ``None`` for all inputs. Only the
+                single-item overload accepts this argument; omit it for an
+                item range. Runtime bounds are the caller's responsibility.
+            identity: Optional neutral element or callable ``identity(dtype)`` used
+                for masking a valid prefix. Overrides a built-in identity or
+                ``op.identity``. Without one, nonempty prefixes are still supported
+                and the empty reduction has an unspecified result.
+
+        Returns:
+            One aggregate value of the specialized dtype in every
+            participating thread, regardless of the per-thread input tile length.
+            An empty valid prefix returns the identity when available.
+
+        Raises:
+            TypeError: The operator must be specialized with ``BlockReduce[...]`` before use.
+        """
+        if cls.block_threads is None:
+            raise TypeError(f"specialize {cls.__name__} first, e.g. {cls.__name__}[dtype, block_size]")
+        return type(cls).__call__(cls, value, op, storage=storage, valid_items=valid_items, identity=identity)

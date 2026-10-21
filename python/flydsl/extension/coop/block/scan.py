@@ -251,9 +251,24 @@ class _BlockScanMeta(BlockAlgorithmMeta):
 class BlockScan(metaclass=_BlockScanMeta):
     """Scan input values in blocked order.
 
-    Specialize as ``BlockScan[dtype, block_size, algorithm]``; ``algorithm``
-    defaults to ``WARP_SCANS``. ``block_size`` is a positive thread count or
-    positive ``(x, y, z)`` extents.
+    Specialize with ``BlockScan[dtype, block_size, algorithm]``. The parameters below are
+    compile-time positional arguments to ``BlockScan[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype. Prefixes, seeds and the
+            aggregate use this type. Structured elements require a callable operator.
+        block_size: Required launch shape: a positive Python int for (x, 1, 1), or three
+            positive Python int extents (x, y, z). Linear thread order varies x fastest. The
+            shape must match the kernel launch. A thread count smaller than the target
+            physical warp must be a power of two and becomes the logical warp width; other
+            counts must be multiples of the physical warp width. The launch and allocated
+            SharedStorage must fit the target limits.
+        algorithm: Optional member of BlockScanAlgorithm selecting the implementation
+            policy. Defaults to ``BlockScanAlgorithm.WARP_SCANS`` when omitted. It fixes the
+            specialization and its SharedStorage layout.
+
     The declared dtype is one complete element. A bare Vector is one element
     for a Vector dtype, and a scalar item sequence for a Numeric dtype.
     Prefixes preserve the input item count; seeds and aggregate are one dtype.
@@ -280,11 +295,6 @@ class BlockScan(metaclass=_BlockScanMeta):
     All threads must participate with uniform options and a common allocation
     of ``SharedStorage``. Synchronize the block before reusing storage for
     another collective. Result values retain the input item count and shape.
-
-    A block smaller than the target's physical warp (64 on CDNA, 32 on RDNA)
-    must have a power-of-two thread count; its logical warp narrows to that
-    count. Larger blocks must contain complete physical warps. valid_items
-    controls a partial input tile; all launched threads still participate.
 
     Attributes:
         dtype: Specialized scan element type.

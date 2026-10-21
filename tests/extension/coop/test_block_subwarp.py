@@ -8,7 +8,7 @@ import math
 import pytest
 import torch
 from coop_common import SUB_WARP_BLOCK_THREADS, linear_tid
-from coop_test_utils import as_items, matrix_cases, run_kernel
+from coop_test_utils import ARCHES, as_items, matrix_cases, run_kernel
 from coop_test_utils import coop_default_device as coop_default_device
 
 import flydsl.expr as fx
@@ -31,7 +31,7 @@ POLICIES = [("reduce", p) for p in fx.coop.BlockReduceAlgorithm] + [("scan", p) 
         )
     ],
 )
-def test_subwarp_block_collectives(shape, count, universal, family, policy):
+def test_subwarp_block_collectives(shape, count, universal, family, policy, compile_only=False):
     shape = (shape, 1, 1) if isinstance(shape, int) else shape
     threads = math.prod(shape)
     size = threads * count
@@ -68,9 +68,16 @@ def test_subwarp_block_collectives(shape, count, universal, family, policy):
             fx.barrier()
 
     host = torch.arange(1, size + 1, device="cpu", dtype=torch.int32)
-    actual = run_kernel(apply, host.to(device="cuda"), result_size * len(partial_cases), shape).reshape(
-        len(partial_cases), result_size
+    actual = run_kernel(
+        apply,
+        host.to(device="cpu" if compile_only else "cuda"),
+        result_size * len(partial_cases),
+        shape,
+        compile_only=compile_only,
     )
+    if compile_only:
+        return
+    actual = actual.reshape(len(partial_cases), result_size)
     for partial in partial_cases:
         expected_items = host.clone()
         if partial:
@@ -82,3 +89,16 @@ def test_subwarp_block_collectives(shape, count, universal, family, policy):
             prefix = expected_items.cumsum(0, dtype=torch.int32)
             expected = torch.cat((prefix + 7, prefix - expected_items + 7, total))
         torch.testing.assert_close(actual[int(partial)], expected)
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("arch,count", matrix_cases(ARCHES, [1, 3]))
+def test_subwarp_compile(monkeypatch, arch, count):
+    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    for family, policy in (
+        ("reduce", fx.coop.BlockReduceAlgorithm.RAKING),
+        ("scan", fx.coop.BlockScanAlgorithm.RAKING),
+    ):
+        test_subwarp_block_collectives((2, 2, 2), count, False, family, policy, compile_only=True)

@@ -19,7 +19,7 @@ def _block_shape(block_size):
     if len(dims) != 3:
         raise TypeError(f"block_size must be an int or a 3-tuple, got {block_size!r}")
     for name, dim in zip(("block_dim_x", "block_dim_y", "block_dim_z"), dims):
-        if not isinstance(dim, int) or dim < 1:
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 1:
             raise TypeError(f"{name} must be a positive Python int, got {dim!r}")
     return dims
 
@@ -81,6 +81,7 @@ class BlockAlgorithmMeta(type):
                 f"{cls.__name__} block_size must contain a multiple of the target warp size "
                 f"({warp_threads}) threads, got {block_threads}"
             )
+        warp_threads = min(block_threads, warp_threads)
         key_dtype, value_dtype = dtype, None
         if isinstance(dtype, tuple):
             if not cls._supports_pairs or len(dtype) != 2:
@@ -171,6 +172,7 @@ class BlockPrimitive:
         SharedStorage: DSL type describing the caller-allocated shared memory.
     """
 
+    _supports_subwarp = True
     dtype = None
     key_dtype = None
     value_dtype = None
