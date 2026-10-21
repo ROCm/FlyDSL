@@ -9,7 +9,7 @@
 #                                  with python3); API_USER is optional. Prints the
 #                                  FLYDSL_REVIEW_SANDBOX_NETWORK and ANTHROPIC_BASE_URL lines
 #                                  run_one.sh needs, in KEY=value form.
-#        gateway.sh stop <name>    removes the gateway and its networks.
+#        gateway.sh stop <name>    prints the gateway's log, then removes the gateway and its networks.
 #
 # The agents join only the network <name>. It is internal, and its bridge has no host address, so
 # from it they reach neither the host nor the internet. The gateway also joins <name>-egress for the
@@ -46,6 +46,10 @@ case "$ACTION" in
     echo "ANTHROPIC_BASE_URL=http://$GW:8080"
     ;;
   stop)
+    # Request lines and upstream error bodies: the only record of why model calls failed.
+    if docker inspect "$GW" >/dev/null 2>&1; then
+      docker logs "$GW" 2>&1 | tail -n 50 || true
+    fi
     docker rm -f "$GW" >/dev/null 2>&1 || true
     docker network rm "$NAME" "$NAME-egress" >/dev/null 2>&1 || true
     ;;

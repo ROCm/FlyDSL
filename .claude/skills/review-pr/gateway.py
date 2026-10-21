@@ -20,8 +20,8 @@ import ssl
 import threading
 import urllib.parse
 
-KEY = os.environ["API_KEY"]
-USER = os.environ.get("API_USER", "")
+KEY = os.environ["API_KEY"].strip()
+USER = os.environ.get("API_USER", "").strip()
 UPSTREAM = urllib.parse.urlsplit(os.environ["API_URL"].rstrip("/"))
 PORT = 8080
 PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
@@ -52,9 +52,10 @@ class Gateway(http.server.BaseHTTPRequestHandler):
         try:
             upstream.request("POST", UPSTREAM.path + self.path, body, headers)
             reply = upstream.getresponse()
-        except (OSError, http.client.HTTPException) as exc:
+        # ValueError means the HTTP client rejected a header value; its message holds that value, maybe the key.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             upstream.close()
-            self.send_error(502, f"upstream unreachable: {type(exc).__name__}")
+            self.send_error(502, f"upstream request failed: {type(exc).__name__}")
             return
         try:
             self.send_response(reply.status)
@@ -64,8 +65,13 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                     self.send_header(name, value.replace("\r", "").replace("\n", ""))
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
+            logged = reply.status < 400
             # read1 returns what has arrived, so server-sent events reach the agent as they stream.
             while chunk := reply.read1(65536):
+                if not logged:
+                    text = chunk[:200].decode("utf-8", "replace").replace("\r", " ").replace("\n", " ")
+                    self.log_message("upstream %d: %s", reply.status, text)
+                    logged = True
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
@@ -81,6 +87,8 @@ def main():
     host = socket.gethostbyname(socket.gethostname())
     server = http.server.ThreadingHTTPServer((host, PORT), Gateway)
     threading.Timer(LIFETIME, os._exit, args=(0,)).start()
+    if KEY != os.environ["API_KEY"]:
+        print("API_KEY had surrounding whitespace, which was removed", flush=True)
     print(f"listening on {host}:{PORT}", flush=True)
     server.serve_forever()
 

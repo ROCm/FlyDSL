@@ -78,7 +78,11 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
   fi
   usage "$label" "$((SECONDS - started))" >> "$W/usage.txt"
   [ "$rc" -eq 124 ] && say "$label hit the ${TIMEOUT}s timeout"
-  [ -s "$out" ] || { say "$label wrote no $(basename "$out") (exit $rc); see $W/$label.log"; return 1; }
+  if [ ! -s "$out" ]; then
+    say "$label wrote no $(basename "$out") (exit $rc); see $W/$label.log"
+    say "$label's last message: $(result "$label")"
+    return 1
+  fi
   say "$label done (exit $rc): $(tail -1 "$W/usage.txt")"
 }
 
@@ -101,6 +105,20 @@ print(", ".join([
     f"{inp} input + {int(u.get('output_tokens') or 0)} output tokens" if u else "no usage record",
     f"${cost:.2f} as priced by the CLI" if isinstance(cost, (int, float)) else "cost not reported",
 ]))
+PY
+}
+
+result() {  # <label> -> the CLI's final message; for a failed agent it names the error
+  python3 - "$W/$1.json" <<'PY'
+import json, sys
+try:
+    data = json.loads(open(sys.argv[1]).read() or "null")
+except (OSError, ValueError):
+    data = None
+if isinstance(data, list):
+    data = next((x for x in reversed(data) if isinstance(x, dict) and x.get("type") == "result"), None)
+text = data.get("result") if isinstance(data, dict) else None
+print(" ".join(str(text or "none recorded").split())[:300])
 PY
 }
 
