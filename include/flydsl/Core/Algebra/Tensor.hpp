@@ -447,6 +447,25 @@ auto dice(const Coord &coord, const Tensor<Cat, Engine> &tensor) {
   return detail::transform_tensor(tensor, [&](const auto &layout) { return dice(coord, layout); });
 }
 
+namespace detail {
+
+/// `tensor` with its engine advanced by `offset`. A pointer advances only by an
+/// integer element count: the ratio or basis offset of a fractional or basis
+/// stride leaves the tensor invalid.
+template <class Cat, class Engine>
+Tensor<Cat, Engine> offset_tensor(const Tensor<Cat, Engine> &tensor, const IntTuple<Cat> &offset,
+                                  AnyLayout<Cat> layout) {
+  if constexpr (std::is_same_v<Engine, Pointer<Cat>>) {
+    auto ref = offset.asRef();
+    if (!ref.isLeaf() || !ref.getLeaf().isInt())
+      return Tensor<Cat, Engine>(tensor.data(),
+                                 Layout<Cat>::getError(ErrorCode::IncompatibleElementType));
+  }
+  return Tensor<Cat, Engine>(add_offset(tensor.data(), offset), std::move(layout));
+}
+
+} // namespace detail
+
 template <class Coord, class Cat, class Engine>
 auto slice(const Coord &coord, const Tensor<Cat, Engine> &tensor) {
   auto [newLayout, offset] = std::visit(
@@ -455,8 +474,7 @@ auto slice(const Coord &coord, const Tensor<Cat, Engine> &tensor) {
         return std::pair(AnyLayout<Cat>(std::move(result)), std::move(offset));
       },
       tensor.layout());
-  auto newEngine = add_offset(tensor.data(), offset);
-  return Tensor<Cat, Engine>(std::move(newEngine), std::move(newLayout));
+  return detail::offset_tensor(tensor, offset, std::move(newLayout));
 }
 
 template <class Cat, class Engine>
@@ -482,8 +500,7 @@ auto domain_offset(const Coord &coord, const Tensor<Cat, Engine> &tensor) {
         return std::pair(AnyLayout<Cat>(std::move(result)), std::move(offset));
       },
       tensor.layout());
-  auto newEngine = add_offset(tensor.data(), offset);
-  return Tensor<Cat, Engine>(std::move(newEngine), std::move(newLayout));
+  return detail::offset_tensor(tensor, offset, std::move(newLayout));
 }
 
 template <class Cat, class Engine>

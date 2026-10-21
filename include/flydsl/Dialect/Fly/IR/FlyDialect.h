@@ -18,6 +18,8 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "flydsl/Core/Trait.hpp"
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyEnums.h.inc"
 

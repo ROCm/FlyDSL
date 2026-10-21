@@ -8,7 +8,6 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 
 using namespace mlir;
@@ -23,6 +22,13 @@ namespace fly {
 
 namespace {
 
+Value getIter(OpBuilder &builder, Location loc, Value tensor) {
+  // TODO: is it possible that the tensor has a composed layout here?
+  if (auto view = tensor.getDefiningOp<MakeViewOp>())
+    return view.getIter();
+  return GetIterOp::create(builder, loc, tensor);
+}
+
 // A copy operand may be a coordinate tensor rather than a memref (it names a
 // position, not storage), and such an operand is never register-promotable.
 bool isEligibleToPromote(Type ty) {
@@ -34,15 +40,12 @@ bool isEligibleToPromote(Type ty) {
   auto layoutAttr = dyn_cast<LayoutAttr>(memRefTy.getLayout());
   if (!layoutAttr)
     return false;
-  LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
-  auto coalesced = layoutCoalesce(builder, layoutAttr);
-  // (TODO): Remove singleton unwrapping once meta layouts are introduced.
-  // Coalescing can retain singleton tuple nesting, e.g. (2):(1).
-  while (!coalesced.isLeaf() && coalesced.rank() == 1)
-    coalesced = coalesced.at(0);
-  if (!coalesced.isLeaf())
+  auto coalesced = core::coalesce(layoutAttr.getRef());
+  if (coalesced.isError())
     return false;
-  return coalesced.getStride().isLeafStaticValue(1) || coalesced.getShape().isLeafStaticValue(1);
+  if (!coalesced.shape().isLeaf())
+    return false;
+  return coalesced.stride().isOne() || coalesced.shape().isOne();
 }
 
 class FlyConvertAtomCallToSSAFormPass
@@ -94,7 +97,7 @@ public:
 
       Value srcVal = copyOp.getSrc();
       if (srcEligible) {
-        Value srcIter = srcVal.getDefiningOp<MakeViewOp>().getIter();
+        Value srcIter = getIter(builder, loc, srcVal);
         srcVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(srcTy, true), srcIter);
       }
 
@@ -102,14 +105,14 @@ public:
       if (pred) {
         auto predMemTy = cast<fly::MemRefType>(pred.getType());
         if (isEligibleToPromote(predMemTy)) {
-          Value predIter = pred.getDefiningOp<MakeViewOp>().getIter();
+          Value predIter = getIter(builder, loc, pred);
           pred = PtrLoadOp::create(builder, loc, RegMem2SSAType(predMemTy, true), predIter);
         }
       }
 
       if (dstEligible) {
         auto ssaTy = RegMem2SSAType(dstTy, true);
-        Value dstIter = copyOp.getDst().getDefiningOp<MakeViewOp>().getIter();
+        Value dstIter = getIter(builder, loc, copyOp.getDst());
         Value oldDst = pred ? PtrLoadOp::create(builder, loc, ssaTy, dstIter) : Value{};
         auto ssaOp =
             CopyAtomCallSSA::create(builder, loc, TypeRange{ssaTy}, copyOp.getCopyAtom(), srcVal,
@@ -136,7 +139,7 @@ public:
         for (Value operand : operands) {
           auto type = cast<fly::MemRefType>(operand.getType());
           if (isEligibleToPromote(type)) {
-            Value iter = operand.getDefiningOp<MakeViewOp>().getIter();
+            Value iter = getIter(builder, loc, operand);
             operand = PtrLoadOp::create(builder, loc, RegMem2SSAType(type, true), iter);
           }
           values.push_back(operand);
@@ -148,14 +151,14 @@ public:
       Value cVal = mmaOp.getC();
 
       if (cEligible) {
-        Value cIter = cVal.getDefiningOp<MakeViewOp>().getIter();
+        Value cIter = getIter(builder, loc, cVal);
         cVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(cTy, true), cIter).getResult();
       }
 
       if (dEligible) {
         auto ssaOp = MmaAtomCallSSA::create(builder, loc, TypeRange{RegMem2SSAType(dTy, true)},
                                             mmaOp.getMmaAtom(), /*d=*/nullptr, aVal, bVal, cVal);
-        Value dIter = mmaOp.getD().getDefiningOp<MakeViewOp>().getIter();
+        Value dIter = getIter(builder, loc, mmaOp.getD());
         PtrStoreOp::create(builder, loc, ssaOp.getResult(0), dIter);
       } else {
         MmaAtomCallSSA::create(builder, loc, TypeRange{}, mmaOp.getMmaAtom(), /*d=*/mmaOp.getD(),

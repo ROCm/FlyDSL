@@ -16,13 +16,6 @@ namespace mlir::fly {
 
 bool CopyOpUniversalCopyType::isStatic() const { return true; }
 
-Value CopyOpUniversalCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                  Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
-}
-
 Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpUniversalCopyType::getThrBitLayoutSrc() const {
@@ -36,14 +29,6 @@ Attribute CopyOpUniversalCopyType::getThrBitLayoutRef() const {
 }
 
 bool CopyOpUniversalAtomicType::isStatic() const { return true; }
-
-Value CopyOpUniversalAtomicType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                    Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  int32_t bits = getValType().getIntOrFloatBitWidth();
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, bits), bits);
-}
 
 Attribute CopyOpUniversalAtomicType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
@@ -62,16 +47,7 @@ Attribute CopyOpUniversalAtomicType::getThrBitLayoutRef() const {
 
 bool MmaOpUniversalFMAType::isStatic() const { return true; }
 
-Value MmaOpUniversalFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                Value currentValue) const {
-  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
-}
-
-Attribute MmaOpUniversalFMAType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
-}
+Attribute MmaOpUniversalFMAType::getShapeMNK() const { return FxT(FxC(1), FxC(1), FxC(1)); }
 
 Attribute MmaOpUniversalFMAType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
@@ -204,6 +180,7 @@ LogicalResult CopyOpUniversalCopyType::emitAtomCall(OpBuilder &builder, Location
                                                     Type dstMemTyArg, Type predMemTyArg,
                                                     Value atomVal, Value src, Value dst,
                                                     Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);
@@ -300,6 +277,7 @@ LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Locati
                                                       Type dstMemTyArg, Type predMemTyArg,
                                                       Value atomVal, Value src, Value dst,
                                                       Value pred) const {
+  OpBuilder::InsertionGuard guard(builder);
   auto predMemTy = cast<fly::MemRefType>(predMemTyArg);
   Value predVal = LLVM::LoadOp::create(builder, loc, predMemTy.getElemTy(), pred);
   auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, predVal, /*withElse=*/false);

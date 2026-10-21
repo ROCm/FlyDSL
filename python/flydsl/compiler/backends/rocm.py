@@ -86,7 +86,6 @@ class RocmBackend(BaseBackend):
             ktrace_fragments = ["convert-fly-ktrace-to-rocdl"]
 
         pre_binary_fragments = [
-            "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-rocdl-expand-ops",
             "fly-layout-lowering",

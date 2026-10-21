@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // MemRef load/store lowering tests:
 //   - Scalar: fly.memref.load/store -> llvm.getelementptr + llvm.load/store
@@ -324,6 +324,42 @@ func.func @test_store_vec_scalar(%mem: !fly.memref<f32, register, (2,3):(4,8)>, 
   return
 }
 
+// --- Size-1 modes ((1,4):(1,1), (4,1):(1,1)): the size-4 mode is the segment, single vector ---
+
+// CHECK-LABEL: @test_load_vec_unit_first
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>)
+func.func @test_load_vec_unit_first(%mem: !fly.memref<f32, register, (1,4):(1,1)>) -> vector<4xf32> {
+  // CHECK: %[[VEC:.*]] = llvm.load %{{.*}} {alignment = 4 : i64} : !llvm.ptr<5> -> vector<4xf32>
+  %vec = fly.memref.load_vec(%mem) : (!fly.memref<f32, register, (1,4):(1,1)>) -> vector<4xf32>
+  // CHECK: return %[[VEC]]
+  return %vec : vector<4xf32>
+}
+
+// CHECK-LABEL: @test_store_vec_unit_first
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>, %[[VEC:.*]]: vector<4xf32>)
+func.func @test_store_vec_unit_first(%mem: !fly.memref<f32, register, (1,4):(1,1)>, %vec: vector<4xf32>) {
+  // CHECK: llvm.store %[[VEC]], %{{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<5>
+  fly.memref.store_vec(%vec, %mem) : (vector<4xf32>, !fly.memref<f32, register, (1,4):(1,1)>) -> ()
+  return
+}
+
+// CHECK-LABEL: @test_load_vec_unit_last
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>)
+func.func @test_load_vec_unit_last(%mem: !fly.memref<f32, register, (4,1):(1,1)>) -> vector<4xf32> {
+  // CHECK: %[[VEC:.*]] = llvm.load %{{.*}} {alignment = 4 : i64} : !llvm.ptr<5> -> vector<4xf32>
+  %vec = fly.memref.load_vec(%mem) : (!fly.memref<f32, register, (4,1):(1,1)>) -> vector<4xf32>
+  // CHECK: return %[[VEC]]
+  return %vec : vector<4xf32>
+}
+
+// CHECK-LABEL: @test_store_vec_unit_last
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<5>, %[[VEC:.*]]: vector<4xf32>)
+func.func @test_store_vec_unit_last(%mem: !fly.memref<f32, register, (4,1):(1,1)>, %vec: vector<4xf32>) {
+  // CHECK: llvm.store %[[VEC]], %{{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<5>
+  fly.memref.store_vec(%vec, %mem) : (vector<4xf32>, !fly.memref<f32, register, (4,1):(1,1)>) -> ()
+  return
+}
+
 // -----
 
 // === load_vec on a CoordTensor (leaf-int base) ===
@@ -358,7 +394,7 @@ func.func @test_load_vec_coord_tensor_i64_stride(%stride: i64) -> vector<3xi64> 
   // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : i64
   // CHECK-DAG: %[[CST:.*]] = arith.constant dense<0> : vector<3xi64>
   // CHECK: %[[V1:.*]] = vector.insert %[[STRIDE]], %[[CST]] [1] : i64 into vector<3xi64>
-  // CHECK: %[[MUL:.*]] = arith.muli %[[STRIDE]], %[[C2]] : i64
+  // CHECK: %[[MUL:.*]] = arith.muli %[[STRIDE]], %[[C2]]{{( overflow<nsw>)?}} : i64
   // CHECK: %[[V2:.*]] = vector.insert %[[MUL]], %[[V1]] [2] : i64 into vector<3xi64>
   // CHECK: return %[[V2]] : vector<3xi64>
   %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (3) : (?{i64})>) -> vector<3xi64>

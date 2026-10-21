@@ -92,7 +92,7 @@ Value MmaOpGFX1250_WMMAScaleType::setAtomState(OpBuilder &builder, Location loc,
 Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+  return FxT(FxC(getM()), FxC(getN()), FxC(getK()));
 }
 
 Type MmaOpGFX1250_WMMAScaleType::getValTypeA() const { return getElemTyA(); }

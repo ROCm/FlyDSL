@@ -15,7 +15,6 @@
 #include <mlir/IR/Value.h>
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 #include "dlpack/dlpack.h"
 
