@@ -111,17 +111,13 @@ def build_softmax_module(
             row_a = fx.slice(A_buf, (row_safe, None))
             row_c = fx.slice(C_buf, (row_safe, None))
 
-            store_mask = fx.Boolean(True)
-            if const_expr(ROWS_PER_BLOCK > 1):
-                store_mask = row_valid
-
             # 1. Load + compute local max
             row_buffer = []
             thread_max = c_neg_inf
 
             for tile_i in range_constexpr(num_tiles):
                 idx = lane + tile_i * THREADS_PER_ROW
-                vec = _load_vec(row_a, idx, vec_width, dtype_str, mask=fx.Boolean(True))
+                vec = _load_vec(row_a, idx, vec_width, dtype_str)
                 x = vec.to(fx.Float32)
                 row_buffer.append(x)
                 red_max = x.reduce(ReductionOp.MAX)
@@ -150,7 +146,11 @@ def build_softmax_module(
                 out_e = norm_vec if dtype_str == "f32" else norm_vec.to(elem_dtype)
 
                 out_idx = lane + tile_i * THREADS_PER_ROW
-                _store_vec(row_c, out_idx, out_e, vec_width, dtype_str, mask=store_mask)
+                if const_expr(ROWS_PER_BLOCK == 1):
+                    _store_vec(row_c, out_idx, out_e, vec_width, dtype_str)
+                else:
+                    if row_valid:
+                        _store_vec(row_c, out_idx, out_e, vec_width, dtype_str)
 
         else:
             # ==============================================================

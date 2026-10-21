@@ -138,8 +138,8 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
 
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
-                dy_vec = _load_vec(row_dy, idx, vec_width, dtype_str, mask=fx.Boolean(True))
-                y_vec = _load_vec(row_y, idx, vec_width, dtype_str, mask=fx.Boolean(True))
+                dy_vec = _load_vec(row_dy, idx, vec_width, dtype_str)
+                y_vec = _load_vec(row_y, idx, vec_width, dtype_str)
                 if const_expr(buffer_dy):
                     dy_buffer.append(dy_vec)
                 if const_expr(buffer_y):
@@ -155,15 +155,15 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
                 if const_expr(buffer_dy):
                     dy_f = dy_buffer[tile_i].to(fx.Float32)
                 else:
-                    dy_f = _load_vec(row_dy, idx, vec_width, dtype_str, mask=fx.Boolean(True)).to(fx.Float32)
+                    dy_f = _load_vec(row_dy, idx, vec_width, dtype_str).to(fx.Float32)
                 if const_expr(buffer_y):
                     y_f = y_buffer[tile_i].to(fx.Float32)
                 else:
-                    y_f = _load_vec(row_y, idx, vec_width, dtype_str, mask=fx.Boolean(True)).to(fx.Float32)
+                    y_f = _load_vec(row_y, idx, vec_width, dtype_str).to(fx.Float32)
 
                 dx_vec = y_f * (dy_f - dot)
                 out_e = dx_vec if dtype_str == "f32" else dx_vec.to(elem_dtype)
-                _store_vec(row_dx, idx, out_e, vec_width, dtype_str, mask=fx.Boolean(True))
+                _store_vec(row_dx, idx, out_e, vec_width, dtype_str)
 
         else:
             # ==============================================================
