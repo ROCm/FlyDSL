@@ -3,8 +3,8 @@
 `kernels.monokernel` is the shared home for resident, fused decoder-layer
 kernels. Model ownership is explicit:
 
-- `glm/` contains GLM-5 scheduling, indexed attention, wrappers, and golden
-  references.
+- [`glm/`](glm/README.md) contains GLM-5 scheduling, indexed attention,
+  wrappers, golden references, and validation commands.
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
 
