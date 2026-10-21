@@ -62,6 +62,17 @@ struct Scalar {
   }
 };
 
+/// Whether a global mode is an axis the tile can move along: a statically size-1 or
+/// stride-0 leaf is not. `Geometry` stays indexed by the original tensor's leaves, so
+/// this normalization is carried as a predicate rather than a renumbering.
+inline bool isMovableMode(const Scalar &extent, const Scalar &stride) {
+  if (extent.isStatic && extent.value == 1)
+    return false;
+  if (stride.isStatic && stride.value == 0)
+    return false;
+  return true;
+}
+
 /// One descriptor dim.
 struct Dim {
   int32_t box = 1;            ///< full logical box extent along this dim
