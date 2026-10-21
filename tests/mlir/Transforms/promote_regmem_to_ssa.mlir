@@ -8,7 +8,7 @@
 //   - final register ptr.load is replaced by vector extract ops
 
 // CHECK-LABEL: gpu.func @promote_accumulator_to_vector_ssa
-// CHECK-SAME: (%[[OUT:.*]]: !fly.ptr<f32, global>)
+// CHECK-SAME: (%[[OUT:.*]]: !fly.ptr<f32, <global>>)
 // CHECK-NOT: register
 // CHECK-NOT: fly.mma_atom_call(
 // CHECK: %[[A_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
@@ -66,7 +66,7 @@ gpu.module @promote_rmem_to_vector_ssa {
 
     // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[TAIL_ACC]] offsets = [4], sizes = [4], strides = [1] : vector<8xf32> to vector<4xf32>
     // CHECK: %[[ELEM:.*]] = vector.extract %[[FINAL]][%{{.*}}] : f32 from vector<4xf32>
-    // CHECK: fly.ptr.store(%[[ELEM]], %[[OUT]]) : (f32, !fly.ptr<f32, global>) -> ()
+    // CHECK: fly.ptr.store(%[[ELEM]], %[[OUT]]) : (f32, !fly.ptr<f32, <global>>) -> ()
     %final = fly.ptr.load(%acc_slot) : (!fly.ptr<f32, register>) -> vector<4xf32>
     %elem0 = vector.extract %final[%c0] : f32 from vector<4xf32>
     fly.ptr.store(%elem0, %out) : (f32, !fly.ptr<f32, global>) -> ()
@@ -210,7 +210,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK: }
   // CHECK: %[[FINAL:.*]] = vector.extract %[[IF]]#1[0] : i32 from vector<1xi32>
   // CHECK: %[[SUM:.*]] = arith.addi %[[IF]]#0, %[[FINAL]] : i32
-  // CHECK: fly.ptr.store(%[[SUM]], %arg0) : (i32, !fly.ptr<i32, global>) -> ()
+  // CHECK: fly.ptr.store(%[[SUM]], %arg0) : (i32, !fly.ptr<i32, <global>>) -> ()
   gpu.func @promote_if_with_nested_while_preserves_results_and_state(%out: !fly.ptr<i32, global>, %pred: i1) kernel {
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
@@ -268,7 +268,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK: }
   // CHECK: %[[FINAL:.*]] = vector.extract %[[FOR]]#1[0] : i32 from vector<1xi32>
   // CHECK: %[[OUTVAL:.*]] = arith.addi %[[FOR]]#0, %[[FINAL]] : i32
-  // CHECK: fly.ptr.store(%[[OUTVAL]], %arg0) : (i32, !fly.ptr<i32, global>) -> ()
+  // CHECK: fly.ptr.store(%[[OUTVAL]], %arg0) : (i32, !fly.ptr<i32, <global>>) -> ()
   gpu.func @promote_for_with_nested_if_while_preserves_results_and_state(%out: !fly.ptr<i32, global>, %pred: i1) kernel {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -322,7 +322,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK:     scf.yield %[[WHILE]] : vector<1xi32>
   // CHECK:   }
   // CHECK:   %[[FINAL:.*]] = vector.extract %[[FOR]][0] : i32 from vector<1xi32>
-  // CHECK:   fly.ptr.store(%[[FINAL]], %arg0) : (i32, !fly.ptr<i32, global>) -> ()
+  // CHECK:   fly.ptr.store(%[[FINAL]], %arg0) : (i32, !fly.ptr<i32, <global>>) -> ()
   // CHECK:   scf.yield %{{.*}} : i32
   // CHECK: } else {
   // CHECK:   scf.yield %{{.*}} : i32

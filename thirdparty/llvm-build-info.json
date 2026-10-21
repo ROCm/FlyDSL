@@ -1,24 +1,9 @@
 {
   "upstream": {
-    "repository": "https://github.com/llvm/llvm-project.git",
-    "llvm_hash": "1df311a6f7d8af05d068ce835b60dfa5b199d2f8",
-    "required_patches": [
-      {
-        "file": "rocdl-lld-argv0.patch",
-        "description": "Pass the resolved lld path as argv[0] instead of the literal \"ld.lld\", so MLIR's ROCDL target finds the linker when it is not on PATH under that name.",
-        "upstream_status": "not yet submitted"
-      },
-      {
-        "file": "rocdl-waves-per-eu-range.patch",
-        "description": "Support waves_per_eu min,max range attribute for full VGPR utilization.",
-        "upstream_status": "merged into upstream: 4d5db577f969519703c348b8c7b02ee22987bd94"
-      },
-      {
-        "file": "xnack-any-codegen-override.patch",
-        "description": "Allow overriding xnack=any codegen to xnack- or xnack+ on gfx1250 via LLVM_GFX1250_ANY_XNACK_CODEGEN env var.",
-        "upstream_status": "experimental"
-      }
-    ],
+    "repository": "https://github.com/ROCm/llvm-project.git",
+    "branch": "aweinrau/xnack_test",
+    "llvm_hash": "6b3143b076a5b94181ce845c4a9eb5330b64dc22",
+    "required_patches": [],
     "extensions": []
   }
 }

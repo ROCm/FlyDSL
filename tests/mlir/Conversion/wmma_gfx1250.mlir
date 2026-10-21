@@ -43,9 +43,9 @@ func.func @test_wmma_iu4_signed_clamp(
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<i32, register, 8:1>
 
   // CHECK: rocdl.wmma.i32.16x16x32.iu4
-  // CHECK-SAME: clamp = true
   // CHECK-SAME: signA = true
   // CHECK-SAME: signB = true
+  // CHECK-SAME: clamp = true
   fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
   return
 }

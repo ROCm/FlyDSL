@@ -43,7 +43,7 @@ class Fly_EnumAttr<Fly_I32EnumAttr enumInfo, string attrMnemonic, list<Trait> tr
 class Fly_Op<string mnemonic, list<Trait> traits = []> 
     : Op<Fly_Dialect, mnemonic, traits> {
   // set default assembly format
-  let assemblyFormat = "`(` operands `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` operands `)` prop-dict attr-dict `:` functional-type(operands, results)";
 }
 
 

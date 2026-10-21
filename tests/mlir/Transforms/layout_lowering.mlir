@@ -15,11 +15,11 @@
 // CHECK-NOT: fly.copy(
 // CHECK: fly.copy_atom_call
 func.func @test_vector_buffer_atomic_copy(
-    %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
+    %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, vector<2xbf16>>, 16>,
     %src: !fly.memref<bf16, register, 2:1>,
     %dst: !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) {
   fly.copy(%atom, %src, %dst)
-      : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
+      : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, vector<2xbf16>>, 16>,
          !fly.memref<bf16, register, 2:1>,
          !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) -> ()
   return
@@ -79,7 +79,7 @@ func.func @test_get_layout(%ptr: !fly.ptr<f32, global>) -> !fly.layout<(4,8):(1,
 
 // get_iter forwards the iterator (ptr) from make_view; all Fly ops are eliminated.
 // CHECK-LABEL: @test_get_iter
-// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<f32, global>)
+// CHECK-SAME: (%[[PTR:.*]]: !fly.ptr<f32, <global>>)
 func.func @test_get_iter(%ptr: !fly.ptr<f32, global>) -> !fly.ptr<f32, global> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
@@ -257,7 +257,7 @@ func.func @test_decomposition_composed_outer(%ptr: !fly.ptr<f32, global>)
       -> !fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>
   // CHECK-NOT: fly.decomposition
   // CHECK: fly.make_int_tuple() : () -> !fly.int_tuple<52>
-  // CHECK: fly.make_view{{.*}} -> !fly.memref<f32, global, (4,8):(1,4)>
+  // CHECK: fly.make_view{{.*}} -> !fly.memref<f32, <global>, (4,8):(1,4)>
   %decomp = fly.decomposition(%view)
       : (!fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>)
       -> !fly.memref<f32, global, (4, 8) : (1, 4)>
@@ -501,8 +501,8 @@ func.func @test_add_offset_dyn_static_kept(%ptr: !fly.ptr<f32, shared>, %x: i32)
   %c = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   // The runtime offset must never be merged into an arith.addi with the constant.
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
+  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<64>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %c) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
@@ -515,8 +515,8 @@ func.func @test_add_offset_static_dyn_swapped(%ptr: !fly.ptr<f32, shared>, %x: i
   %c = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
+  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<64>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %c) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
@@ -529,7 +529,7 @@ func.func @test_add_offset_static_static_fused(%ptr: !fly.ptr<f32, shared>) -> f
   %a = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %b = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%{{.*}}, %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
+  // CHECK: fly.add_offset(%{{.*}}, %[[C]]) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<96>) -> !fly.ptr<f32, <shared>>
   // CHECK-NOT: fly.add_offset
   %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
@@ -559,9 +559,9 @@ func.func @test_add_offset_dyn_c1_c2(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f3
   %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
   // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
+  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<96>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p3 = fly.add_offset(%p2, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
@@ -577,9 +577,9 @@ func.func @test_add_offset_static_dyn_static(%ptr: !fly.ptr<f32, shared>, %x: i3
   %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
   %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
   // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
+  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<96>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p3 = fly.add_offset(%p2, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
@@ -595,9 +595,9 @@ func.func @test_add_offset_shared_runtime_base(%ptr: !fly.ptr<f32, shared>, %x: 
   %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<128>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<128>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
+  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<64>) -> !fly.ptr<f32, <shared>>
+  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<128>) -> !fly.ptr<f32, <shared>>
   %p0 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %pa = fly.add_offset(%p0, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %pb = fly.add_offset(%p0, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<128>) -> !fly.ptr<f32, shared>
@@ -615,8 +615,8 @@ func.func @test_add_offset_multi_use_inner_kept(%ptr: !fly.ptr<f32, shared>, %x:
   %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[P1:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[P2:.*]] = fly.add_offset(%[[P1]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[P1:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<64>) -> !fly.ptr<f32, <shared>>
+  // CHECK: %[[P2:.*]] = fly.add_offset(%[[P1]], %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
   // CHECK: fly.ptr.load(%[[P1]])
   // CHECK: fly.ptr.load(%[[P2]])
   %p1 = fly.add_offset(%ptr, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
@@ -635,9 +635,9 @@ func.func @test_add_offset_zero_and_negative(%ptr: !fly.ptr<f32, shared>, %x: i3
   %z = fly.make_int_tuple() : () -> !fly.int_tuple<0>
   %n = fly.make_int_tuple() : () -> !fly.int_tuple<-32>
   // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
+  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<?>) -> !fly.ptr<f32, <shared>>
   // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<-32>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<-32>) -> !fly.ptr<f32, shared>
+  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<-32>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %z) : (!fly.ptr<f32, shared>, !fly.int_tuple<0>) -> !fly.ptr<f32, shared>
   %p3 = fly.add_offset(%p2, %n) : (!fly.ptr<f32, shared>, !fly.int_tuple<-32>) -> !fly.ptr<f32, shared>
@@ -655,7 +655,7 @@ func.func @test_add_offset_multi_use_inner_still_fuses(%ptr: !fly.ptr<f32, share
   // The outer offset is folded into a single static tail off the base pointer,
   // even though %p1 is also loaded from directly.
   // CHECK: %[[C96:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%{{.*}}, %[[C96]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
+  // CHECK: fly.add_offset(%{{.*}}, %[[C96]]) : (!fly.ptr<f32, <shared>>, !fly.int_tuple<96>) -> !fly.ptr<f32, <shared>>
   %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
   %x = fly.ptr.load(%p1) : (!fly.ptr<f32, shared>) -> f32

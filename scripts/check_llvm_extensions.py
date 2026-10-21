@@ -92,6 +92,11 @@ def has_switch(text: str) -> bool:
 
 
 def main() -> int:
+    pin = json.loads(BUILD_INFO.read_text(encoding="utf-8"))["upstream"]
+    if not pin.get("llvm_hash") or pin.get("branch"):
+        print("  skipped (using external LLVM branch, no patch system)")
+        return 0
+
     required, extensions = load_series()
     failed = False
     for msg in missing_metadata(required + extensions):

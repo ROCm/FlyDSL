@@ -340,6 +340,9 @@ static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr ali
 //   * a dialect-qualified attribute (e.g. `#fly_rocdl.buffer_desc`) for
 //     target-specific spaces.
 static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
+  // Dialect-qualified attributes (e.g. #fly_rocdl.buffer_desc) start with '#'.
+  // Try them first; parseOptionalAttribute won't consume bare keywords when
+  // nothing starts with '#'.
   Attribute attr;
   OptionalParseResult opt = parser.parseOptionalAttribute(attr);
   if (opt.has_value()) {
@@ -347,10 +350,30 @@ static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
       return failure();
     return attr;
   }
-  auto enumAttr = FieldParser<AddressSpaceAttr>::parse(parser);
-  if (failed(enumAttr))
+  // Current printed form: <global>, <shared>, <register>.
+  if (succeeded(parser.parseOptionalLess())) {
+    StringRef keyword;
+    if (parser.parseKeyword(&keyword) || parser.parseGreater())
+      return failure();
+    auto sym = symbolizeAddressSpace(keyword);
+    if (sym)
+      return Attribute(AddressSpaceAttr::get(parser.getContext(), *sym));
+    parser.emitError(parser.getCurrentLocation(), "unknown address space keyword '")
+        << keyword << "'";
     return failure();
-  return Attribute(*enumAttr);
+  }
+  // Backward compat: accept bare keywords (global, shared, register) that
+  // older MLIR printed without the <…> envelope.
+  StringRef keyword;
+  if (succeeded(parser.parseOptionalKeyword(&keyword))) {
+    auto sym = symbolizeAddressSpace(keyword);
+    if (sym)
+      return Attribute(AddressSpaceAttr::get(parser.getContext(), *sym));
+    parser.emitError(parser.getCurrentLocation(), "unknown address space keyword '")
+        << keyword << "'";
+    return failure();
+  }
+  return failure();
 }
 
 static void printAddressSpaceAttribute(AsmPrinter &printer, Attribute attr) {
