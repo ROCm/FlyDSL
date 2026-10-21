@@ -1,0 +1,82 @@
+diff --git a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp
+index 613a1c9ac5ec..70b913b50f9e 100644
+--- a/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp
++++ b/llvm/lib/Transforms/Vectorize/SLPVectorizer.cpp
+@@ -173,6 +173,12 @@ static cl::opt<int>
+ ScheduleRegionSizeBudget("slp-schedule-budget", cl::init(100000), cl::Hidden,
+     cl::desc("Limit the size of the SLP scheduling region per block"));
+ 
++static cl::opt<bool> FlySLPOrderedReductionRefund(
++    "fly-slp-ordered-reduction-refund", cl::Hidden, cl::init(true),
++    cl::desc("FlyDSL: when the ordered reduction tried by tryToReduce "
++             "vectorizes nothing, give back the scheduling budget it spent "
++             "and do not retry its root"));
++
+ static cl::opt<int> MinVectorRegSizeOption(
+     "slp-min-reg-size", cl::init(128), cl::Hidden,
+     cl::desc("Attempt to vectorize for this register size in bits"));
+@@ -3058,6 +3064,22 @@ public:
+   void analyzedReductionVals(ArrayRef<Value *> VL) {
+     AnalyzedReductionVals.insert(hash_value(VL));
+   }
++  /// Scheduling budget left in each block that has a scheduling region.
++  using ScheduleBudgets = SmallDenseMap<BasicBlock *, int, 4>;
++  ScheduleBudgets saveScheduleBudgets() const {
++    ScheduleBudgets Budgets;
++    for (const auto &[BB, BS] : BlocksSchedules)
++      Budgets.try_emplace(BB, BS->ScheduleRegionSizeLimit -
++                                  BS->ScheduleRegionSize);
++    return Budgets;
++  }
++  /// Gives back the scheduling budget spent since \p Budgets was saved.
++  void restoreScheduleBudgets(const ScheduleBudgets &Budgets) {
++    for (auto &[BB, BS] : BlocksSchedules)
++      BS->ScheduleRegionSizeLimit =
++          Budgets.lookup_or(BB, ScheduleRegionSizeBudget) +
++          BS->ScheduleRegionSize;
++  }
+   /// Clear the list of the analyzed reduction root instructions.
+   void clearReductionData() {
+     AnalyzedReductionsRoots.clear();
+@@ -29143,6 +29165,12 @@ class HorizontalReduction {
+   /// Checks if instruction is associative and can be vectorized.
+   enum class ReductionOrdering { Unordered, Ordered, None };
+   ReductionOrdering RK = ReductionOrdering::None;
++
++public:
++  /// True if the matched reduction has to keep the order of its operations.
++  bool isOrdered() const { return RK == ReductionOrdering::Ordered; }
++
++private:
+   static ReductionOrdering isVectorizable(RecurKind Kind, Instruction *I,
+                                           bool TwoElementReduction = false) {
+     if (Kind == RecurKind::None)
+@@ -31821,12 +31849,26 @@ bool SLPVectorizerPass::vectorizeHorReduction(
+       return nullptr;
+     HorizontalReduction HorRdx;
+     Value *Res = nullptr;
+-    if (HorRdx.matchAssociativeReduction(R, Inst, *SE, *DT, *DL, *TTI, *TLI))
+-      if (Value *Red = HorRdx.tryToReduce(R, *DL, TTI, *TLI, AC, *DT)) {
++    if (HorRdx.matchAssociativeReduction(R, Inst, *SE, *DT, *DL, *TTI, *TLI)) {
++      // An ordered reduction can span a long chain, and each tree it tries is
++      // scheduled across that span. If it vectorizes nothing, that scheduling
++      // must not drain the budget of the block, or one failed attempt starves
++      // every later seed there. Give the budget back and do not retry the root.
++      bool Refund = FlySLPOrderedReductionRefund && HorRdx.isOrdered();
++      BoUpSLP::ScheduleBudgets Budgets;
++      if (Refund)
++        Budgets = R.saveScheduleBudgets();
++      Value *Red = HorRdx.tryToReduce(R, *DL, TTI, *TLI, AC, *DT);
++      if (Refund && !Red) {
++        R.restoreScheduleBudgets(Budgets);
++        R.analyzedReductionRoot(Inst);
++      }
++      if (Red) {
+         if (Red != Inst)
+           return Red;
+         Res = Red;
+       }
++    }
+     if (HorizontalReduction::isSupportedOrderedReductionOp(Inst)) {
+       if (HorRdx.matchOrderedReduction(R, Inst, /*MatchLHS=*/true))
+         if (Value *Red =

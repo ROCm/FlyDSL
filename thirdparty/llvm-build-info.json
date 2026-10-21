@@ -19,6 +19,12 @@
         "upstream_status": "experimental"
       }
     ],
-    "extensions": []
+    "extensions": [
+      {
+        "file": "slp-ordered-reduction-budget-refund.patch",
+        "description": "SLP: when the ordered reduction tried by HorizontalReduction::tryToReduce vectorizes nothing, give back the scheduling budget it spent and do not retry its root. Without this, the failed attempts that llvm/llvm-project@94e366ef2060 introduced exhaust the per-block budget in large unrolled kernels and block the vectorization that follows (ROCm/FlyDSL#1273). The tryToReduceOrdered path is not covered. Switch: -fly-slp-ordered-reduction-refund, on by default; a kernel turns it off with compile_hints={\"llvm_options\": {\"fly-slp-ordered-reduction-refund\": False}}.",
+        "upstream_status": "not yet submitted"
+      }
+    ]
   }
 }
