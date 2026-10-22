@@ -6,6 +6,8 @@ import os
 import subprocess
 from typing import Optional
 
+from ..utils import env
+
 _ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
 
 
@@ -138,3 +140,92 @@ def check_smem_capacity(allocated_bytes: int, arch: str = None):
         raise RuntimeError(
             f"Shared Memory Overflow: Requested {allocated_bytes} bytes, " f"but device {arch} limit is {limit} bytes."
         )
+
+
+_KFD_TOPOLOGY_ROOT = "/sys/class/kfd/kfd/topology/nodes"
+
+
+def _parse_kfd_properties(path: str) -> dict:
+    """Parse a KFD ``properties`` file into ``{key: first_value_token}``."""
+    result: dict = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    result[parts[0]] = parts[1]
+    except OSError:
+        pass
+    return result
+
+
+def _llc_bytes_from_kfd_node(node_dir: str) -> int:
+    """Max level-3 cache size (bytes) under one KFD topology node directory."""
+    caches_dir = os.path.join(node_dir, "caches")
+    try:
+        entries = os.listdir(caches_dir)
+    except OSError:
+        return 0
+    best = 0
+    for entry in entries:
+        props = _parse_kfd_properties(os.path.join(caches_dir, entry, "properties"))
+        if props.get("level") != "3":
+            continue
+        try:
+            size_kb = int(props["size"])
+        except (KeyError, ValueError):
+            continue
+        best = max(best, size_kb * 1024)
+    return best
+
+
+@functools.lru_cache(maxsize=None)
+def get_llc_cache_bytes(pci_bus_id: Optional[int] = None) -> int:
+    """Last-level (Infinity) cache size in bytes for one GPU, 0 if unknown.
+
+    Resolution order: ``FLYDSL_RUNTIME_LLC_CACHE_MB`` override, then KFD
+    topology sysfs matched by PCI bus id, then 0 ("unknown, do not assume a
+    size"). There is deliberately no arch-keyed fallback table: the same
+    ``gfx1100`` name covers both an 80 MB and a 96 MB LLC part (7900 XT vs
+    XTX), so a hardcoded guess is more dangerous than admitting the size is
+    unknown.
+
+    Cached via ``functools.lru_cache``. Pass a fresh ``pci_bus_id`` or call
+    ``get_llc_cache_bytes.cache_clear()`` after changing the environment
+    override or monkeypatching KFD sysfs in tests.
+    """
+    override_mb = env.runtime.llc_cache_mb
+    if override_mb:
+        return override_mb * 1024 * 1024
+
+    try:
+        node_names = os.listdir(_KFD_TOPOLOGY_ROOT)
+    except OSError:
+        return 0
+
+    candidates = []
+    for name in node_names:
+        node_dir = os.path.join(_KFD_TOPOLOGY_ROOT, name)
+        props = _parse_kfd_properties(os.path.join(node_dir, "properties"))
+        loc = props.get("location_id")
+        if loc is None:
+            continue
+        try:
+            loc_int = int(loc)
+        except ValueError:
+            continue
+        if loc_int == 0:
+            continue  # the CPU node
+        candidates.append((loc_int >> 8, node_dir))
+
+    if pci_bus_id is None:
+        if len(candidates) != 1:
+            return 0
+        node_dir = candidates[0][1]
+    else:
+        matches = [d for bus, d in candidates if bus == pci_bus_id]
+        if len(matches) != 1:
+            return 0
+        node_dir = matches[0]
+
+    return _llc_bytes_from_kfd_node(node_dir)
