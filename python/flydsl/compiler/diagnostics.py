@@ -51,16 +51,16 @@ def location_chain(loc) -> List[SourceFrame]:
     if loc is None:
         return []
     try:
-        if loc.is_a_callsite():
+        if isinstance(loc, ir.CallSiteLoc):
             return location_chain(loc.callee) + location_chain(loc.caller)
-        if loc.is_a_name():
+        if isinstance(loc, ir.NameLoc):
             return location_chain(loc.child_loc)
-        if loc.is_a_fused():
+        if isinstance(loc, ir.FusedLoc):
             out: List[SourceFrame] = []
             for child in loc.locations:
                 out.extend(location_chain(child))
             return out
-        if loc.is_a_file():
+        if isinstance(loc, ir.FileLineColLoc):
             filename, line = loc.filename, loc.start_line
             if not filename or filename.startswith("<") or not line:
                 return []  # synthetic source we cannot point a user at
