@@ -1121,9 +1121,11 @@ FLY_INFER_RETURN_TYPES(CompositionOp) {
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   Type innerTy = operands[1].getType();
   LayoutAttr inferred;
-  if (auto tileTy = dyn_cast<TileType>(innerTy))
+  if (auto tileTy = dyn_cast<TileType>(innerTy)) {
+    if (tileTy.getAttr().rank() > outerLayoutAttr.getShape().rank())
+      return emitOptionalError(location, "CompositionOp: tiler rank exceeds layout rank");
     inferred = layoutComposition(layoutBuilder, outerLayoutAttr, tileTy.getAttr());
-  else if (auto innerLayoutTy = dyn_cast<LayoutType>(innerTy))
+  } else if (auto innerLayoutTy = dyn_cast<LayoutType>(innerTy))
     inferred = layoutComposition(layoutBuilder, outerLayoutAttr, innerLayoutTy.getAttr());
   else
     return emitOptionalError(
