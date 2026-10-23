@@ -219,9 +219,13 @@ class SharedAllocator(Arena):
             nbytes = dsl_size_of(storable)
             align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
             self._bump(nbytes, align)
-            return self._build_static_tree(storable)
+            # `alignment` has to reach the leaves: they are what emit `make_ptr`, and the
+            # `allocAlign` attr on those ops is what becomes the LDS global's alignment.
+            # Passing it only to `_bump` would advance the bump pointer correctly while
+            # still emitting under-aligned globals.
+            return self._build_static_tree(storable, min_align=1 if alignment is None else alignment)
 
-    def _build_static_tree(self, type_spec):
+    def _build_static_tree(self, type_spec, min_align: int = 1):
         """Recursively build a Storage tree over per-leaf `make_ptr` ops.
 
         - struct  → recurse into each field; each field emits its own `make_ptr`
@@ -230,13 +234,19 @@ class SharedAllocator(Arena):
                     Each variant is wrapped as a re-typed view over the same
                     ptr.
         - leaf    → single `make_ptr`.
+
+        `min_align` is the caller's explicit `allocate(..., alignment=N)` request. In
+        static mode an allocation has no single base pointer -- every leaf lowers to its
+        own LDS global -- so the request is applied to each leaf, giving "every global
+        this allocate() emitted is at least N-aligned". It only ever raises alignment,
+        and defaults to 1 so allocations that did not ask for one are unchanged.
         """
 
         if type_spec is Empty:
             return Storage[Empty](None)
         if is_composite_type(type_spec) and type_spec.__dsl_composite_kind__ == CompositeKind.Sum:
             nbytes = dsl_size_of(type_spec)
-            align = dsl_align_of(type_spec)
+            align = max(dsl_align_of(type_spec), min_align)
             shared_ptr = self._allocate_static_shared(nbytes, align)
             prebuilt = {}
             for name, variant_ty in _effective_field_defs(type_spec):
@@ -249,11 +259,11 @@ class SharedAllocator(Arena):
             for name, field_ty in _effective_field_defs(type_spec):
                 if _is_constexpr_type(field_ty):
                     continue
-                prebuilt[name] = self._build_static_tree(field_ty)
+                prebuilt[name] = self._build_static_tree(field_ty, min_align=min_align)
             return Storage[type_spec](None, prebuilt=prebuilt)
         else:
             nbytes = dsl_size_of(type_spec)
-            align = dsl_align_of(type_spec)
+            align = max(dsl_align_of(type_spec), min_align)
             ptr = self._allocate_static_shared(nbytes, align)
             return Storage[type_spec](ptr)
 

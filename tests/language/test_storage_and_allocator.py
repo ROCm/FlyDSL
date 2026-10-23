@@ -45,6 +45,7 @@ from flydsl.compiler.protocol import (
     extract_to_ir_values,
     get_ir_types,
 )
+from flydsl.expr import range_constexpr
 from flydsl.expr.struct import _storage_layout
 
 # ###########################################################################
@@ -379,6 +380,53 @@ class TestVectorLeaf:
         if static:
             assert "allocAlign = 16" in text
 
+    @pytest.mark.parametrize("static", [True, False])
+    def test_explicit_alignment_argument_is_honored(self, static):
+        """`allocate(T, alignment=N)` is the argument form of `fx.Align[T, N]`.
+
+        It has to reach the emitted allocation, not just the bump pointer: in static
+        mode each leaf lowers to its own LDS global and `allocAlign` is what sets that
+        global's alignment. Applying it only to the bump offset leaves the global
+        under-aligned, which is silent -- the code still runs, it just stops the
+        backend from widening element loads (see the ds_read_b128 case below).
+        """
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(1)
+            storage = allocator.allocate(fx.Array[fx.Float32, 8], alignment=16)
+            assert storage._ptr.alignment >= 16
+            # 1 byte, then the array rounded up to a 16-byte boundary: 16 + 32.
+            assert allocator.allocated_bytes == 48
+
+        text = launch_ir(kernel)
+        if static:
+            assert "allocAlign = 16" in text
+
+    def test_explicit_alignment_argument_never_lowers_natural_alignment(self):
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator()
+            storage = allocator.allocate(fx.Array[fx.Float32, 4], alignment=2)
+            assert storage._ptr.alignment == 4
+
+        assert "allocAlign = 4" in launch_ir(kernel)
+
+    def test_explicit_alignment_argument_reaches_every_leaf_of_a_struct(self):
+        """A struct has no single base in static mode -- each field is its own global.
+
+        So the request applies to each of them: "everything this allocate() emitted is
+        at least N-aligned".
+        """
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator()
+            allocator.allocate(Pair, alignment=32)
+
+        assert launch_ir(kernel).count("allocAlign = 32") == 2
+
     @pytest.mark.parametrize(
         "target",
         [fx.Vector[fx.Index, 4], fx.Vector[fx.Int4, 3], fx.Vector[fx.Boolean, 1], fx.Vector[fx.Int4, ((1, 3),)]],
@@ -479,6 +527,64 @@ class TestVectorStorage:
         assert len(files) == 1
         isa = files[0].read_text()
         assert re.search(r"^\s*ds_read_b128\s", isa, re.MULTILINE), isa
+
+    @pytest.mark.l1b_target_dialect
+    def test_explicit_alignment_argument_widens_lds_access(self, monkeypatch, tmp_path):
+        """End-to-end guard: `allocate(..., alignment=N)` has to reach codegen.
+
+        The DSL emits an LDS access as scalar element loads/stores; the wide
+        `ds_read_b128` / `ds_write_b128` forms only appear because the backend's
+        LoadStoreVectorizer merges runs of them, and it merges only when it can prove
+        16-byte alignment. It derives that from the LDS global's alignment, so an
+        `alignment=` that stops at the bump pointer leaves the global at the element's
+        natural alignment (4 for f32) and every access degrades to the paired
+        `ds_read2_b32` / `ds_write2_b32` form -- same bytes, four times the LDS
+        transactions. Nothing fails, it just gets slower, so assert on the ISA.
+
+        The allocation is deliberately large and indexed by a runtime offset: for a
+        small one the backend picks an aligned LDS address anyway and the declared
+        alignment never binds, which is why this does not reuse the Float32x4 shape
+        above. Static mode only -- a dynamic allocation inherits the arena base
+        pointer's alignment, so it was never affected.
+        """
+        torch = pytest.importorskip("torch")
+        monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
+        monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
+        monkeypatch.setenv("ARCH", "gfx942")
+        monkeypatch.setenv("COMPILE_ONLY", "1")
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+        monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
+        monkeypatch.setenv("FLYDSL_DUMP_DIR", str(tmp_path))
+
+        numel = 16384
+
+        @flyc.kernel
+        def kernel(src: fx.Tensor, dst: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=True)
+            lds = allocator.allocate(fx.Array[fx.Float32, numel], alignment=16).peek()
+            # Four consecutive f32 per thread: one 16-byte run the vectorizer can merge.
+            for i in range_constexpr(4):
+                lds[tid * 4 + i] = fx.generic_load(src.iter + tid * 4 + i, dtype=fx.Float32)
+            fx.barrier()
+            # Read a neighbour's run so the LDS round-trip cannot be folded away.
+            for i in range_constexpr(4):
+                fx.generic_store(dst.iter + tid * 4 + i, lds[(tid + 1) * 4 + i])
+
+        @flyc.jit
+        def launch(src: fx.Tensor, dst: fx.Tensor):
+            kernel(src, dst).launch(grid=1, block=64)
+
+        # CPU tensors suffice for target compilation; this does not launch on a GPU.
+        empty = torch.empty(numel, dtype=torch.float32, device="cpu")
+        launch(empty, empty)
+        files = list(tmp_path.glob("*/*_final_isa.s"))
+        assert len(files) == 1
+        isa = files[0].read_text()
+        assert re.search(r"^\s*ds_read_b128\s", isa, re.MULTILINE), isa
+        assert re.search(r"^\s*ds_write_b128\s", isa, re.MULTILINE), isa
+        # The degraded pair form is what an ignored alignment= produces.
+        assert not re.search(r"^\s*ds_(?:read|write)2_b32\s", isa, re.MULTILINE), isa
 
     @pytest.mark.parametrize("static", [True, False])
     @pytest.mark.parametrize(
