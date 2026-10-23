@@ -14,7 +14,7 @@ from typing import List, Optional
 from .._mlir import ir
 from ..expr.meta import _is_framework_file
 from ..utils import env
-from .jit_argument import is_type_param_annotation
+from .jit_argument import JitArgumentRegistry, is_type_param_annotation
 from .protocol import DslType
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "diag_records_from_mlir_error",
     "dsl_ir_diagnostics",
     "install_excepthook",
+    "annotation_maps_to",
     "warn_annotation_value_mismatch",
     "warn_invalid_annotations",
 ]
@@ -47,20 +48,24 @@ def location_chain(loc) -> List[SourceFrame]:
     Handles call-site chains (``callee`` first, then ``caller`` recursively),
     name locations (unwrap ``child_loc``), and fused locations (each child in
     order).  Frames pointing at synthetic ``<...>`` sources are skipped.
+
+    These bindings have ``CallSiteLoc``, ``NameLoc``, ``FusedLoc``, and
+    ``FileLineColLoc``, and no ``Location.is_a_*``. Any other location, or a
+    walk that fails, returns no frames.
     """
     if loc is None:
         return []
     try:
-        if loc.is_a_callsite():
+        if isinstance(loc, ir.CallSiteLoc):
             return location_chain(loc.callee) + location_chain(loc.caller)
-        if loc.is_a_name():
+        if isinstance(loc, ir.NameLoc):
             return location_chain(loc.child_loc)
-        if loc.is_a_fused():
+        if isinstance(loc, ir.FusedLoc):
             out: List[SourceFrame] = []
             for child in loc.locations:
                 out.extend(location_chain(child))
             return out
-        if loc.is_a_file():
+        if isinstance(loc, ir.FileLineColLoc):
             filename, line = loc.filename, loc.start_line
             if not filename or filename.startswith("<") or not line:
                 return []  # synthetic source we cannot point a user at
@@ -68,7 +73,7 @@ def location_chain(loc) -> List[SourceFrame]:
             return [SourceFrame(filename, line, getattr(loc, "start_col", 0) or 0, end_col or None)]
     except Exception:
         return []
-    return []  # unknown / opaque location: nothing locatable
+    return []
 
 
 def diag_record_from_diagnostic(d) -> DiagRecord:
@@ -198,6 +203,30 @@ def warn_annotation_value_mismatch(param_name, annotation, actual_type, *, conte
     )
 
 
+def annotation_maps_to(annotation, actual_type) -> bool:
+    """True when ``annotation`` is registered as exactly ``actual_type``.
+
+    ``int`` is ``Int32``. ``Int64`` and ``Boolean`` are different types, so
+    they still warn.
+    """
+    if not isinstance(annotation, type) or not isinstance(actual_type, type):
+        return False
+    _ctor, dsl_type = JitArgumentRegistry.get(annotation)
+    return dsl_type is not None and actual_type is dsl_type
+
+
+def _annotation_is_accepted(ann) -> bool:
+    """Host types in the JIT registry are real annotations, not mistakes."""
+    if isinstance(ann, DslType) or is_type_param_annotation(ann):
+        return True
+    if not isinstance(ann, type):
+        return False
+    if issubclass(ann, SimpleNamespace):
+        return True
+    ctor, _dsl_type = JitArgumentRegistry.get(ann)
+    return ctor is not None
+
+
 def warn_invalid_annotations(sig, *, context):
     """Definition-time check: warn about runtime parameters whose annotation is not a DSL
     value type, or a Type[T] annotation.
@@ -207,14 +236,15 @@ def warn_invalid_annotations(sig, *, context):
     the per-call value/annotation consistency check (``warn_annotation_value_mismatch``):
     whether an annotation *is* a DslValue is a property of the definition; whether an actual
     value *matches* it is a property of the call.
+
+    Registered host types are valid: ``int`` is ``Int32``, ``float`` is
+    ``Float32``, ``bool`` is ``Boolean``, and tensors and streams use the
+    same registry. ``Type[T]`` is a compile-time parameter. Anything else
+    still warns. The annotation is not enforced; the traced type is used.
     """
     for name, param in sig.parameters.items():
         ann = param.annotation
-        if ann is inspect.Parameter.empty:
-            continue
-        if isinstance(ann, DslType) or is_type_param_annotation(ann):
-            continue
-        if isinstance(ann, type) and issubclass(ann, SimpleNamespace):
+        if ann is inspect.Parameter.empty or _annotation_is_accepted(ann):
             continue
         warnings.warn(
             f"{context} parameter '{name}' is annotated as '{getattr(ann, '__name__', repr(ann))}', which is not "
