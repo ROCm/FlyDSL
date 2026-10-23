@@ -316,6 +316,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     # ---- Constants ----
     c_neg_inf = fx.Float32(float("-inf"))
+    # Finite mask: the kernel is built with fast_fp_math (no-infs), which folds away a -inf select.
+    c_mask_neg = fx.Float32(-1e30)
     c_zero_f32 = fx.Float32(0.0)
     c_one_f32 = fx.Float32(1.0)
     c_zero_i32 = fx.Int32(0)
@@ -830,7 +832,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 is_oob = pos >= kv_end
                 if const_expr(check_boundary is not True):
                     is_oob = fx.Boolean(check_boundary) & fx.Boolean(is_oob)
-                result[i] = fx.Boolean(is_oob).select(_raw(c_neg_inf), result[i])
+                result[i] = fx.Boolean(is_oob).select(_raw(c_mask_neg), result[i])
         return result
 
     # ---- Helper: online softmax ----
