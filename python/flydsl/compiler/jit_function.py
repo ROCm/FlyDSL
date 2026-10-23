@@ -741,6 +741,13 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _kernel_dump_dir(asm: str, func_name: str) -> Path:
+    """Dump directory under FLYDSL_DUMP_DIR, named after the kernel when the module has exactly one."""
+    kernel_names = _infer_kernel_names_from_asm(asm)
+    subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+    return Path(env.debug.dump_dir).resolve() / _sanitize_path_component(subdir)
+
+
 def _extract_llvm_ir(module: ir.Module):
     """Extract LLVM IR text from the gpu.module inside *module* (must already be in LLVM dialect)."""
     try:
@@ -844,14 +851,11 @@ class MlirCompiler:
             log().info(f"Origin IR: \n{module}")
 
         dump_enabled = env.debug.dump_ir
-        dump_dir = Path(env.debug.dump_dir).resolve()
 
         with _llvm_ctx:
             if dump_enabled:
                 asm = module.operation.get_asm(enable_debug_info=True)
-                kernel_names = _infer_kernel_names_from_asm(asm)
-                subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
-                dump_dir = dump_dir / _sanitize_path_component(subdir)
+                dump_dir = _kernel_dump_dir(asm, func_name)
                 print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
                 out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
@@ -948,6 +952,35 @@ class MlirCompiler:
                         llvm_options=llvm_opts,
                     )
                     module.operation.verify()
+                elif env.debug.dump_asm:
+                    # Stop before serialization to dump the ISA, then finish. The split is at a
+                    # top-level fragment boundary, so the code object matches an unsplit run's.
+                    *pre_binary, binary = fragments
+                    assert binary.startswith("gpu-module-to-binary"), binary
+                    isa_dir = _kernel_dump_dir(module.operation.get_asm(enable_debug_info=True), func_name)
+                    _run_pipeline(
+                        module,
+                        pre_binary,
+                        verifier=env.debug.enable_verifier,
+                        print_after_all=env.debug.print_after_all,
+                    )
+                    isa_out = _dump_isa(
+                        dump_dir=isa_dir,
+                        ctx=module.context,
+                        asm=module.operation.get_asm(enable_debug_info=True),
+                        verify=env.debug.enable_verifier,
+                        stage_name="final_isa",
+                    )
+                    if isa_out is None:
+                        print(f"[flydsl.compile] FLYDSL_DEBUG_DUMP_ASM: dumping the ISA of {func_name!r} failed")
+                    else:
+                        print(f"[flydsl.compile] dump final_isa -> {isa_out}")
+                    _run_pipeline(
+                        module,
+                        [binary],
+                        verifier=env.debug.enable_verifier,
+                        print_after_all=env.debug.print_after_all,
+                    )
                 else:
                     _run_pipeline(
                         module,
@@ -1254,6 +1287,8 @@ class JitFunction:
         self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
+        self._asm_dumped = set()  # (cache_key, dump dir) FLYDSL_DEBUG_DUMP_ASM has written
+        self._superseded = []  # artifacts replaced to dump their ISA; may still back a launch
         self._extern_linkage_keys = set()
 
         # owner_cls -> first-compile snapshot of the used globals; RAISE on any
@@ -1363,6 +1398,11 @@ class JitFunction:
             raise ValueError(
                 "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
+            )
+        if run_only and env.debug.dump_asm:
+            raise ValueError(
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DEBUG_DUMP_ASM=1: "
+                "run-only mode never compiles, so there is no ISA to dump."
             )
 
         cache_root = env.runtime.cache_dir
@@ -1600,6 +1640,17 @@ class JitFunction:
 
             ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
+        # FLYDSL_DEBUG_DUMP_ASM dumps while compiling, so a specialization compiled earlier
+        # in this process, or dumped to another directory, is compiled again before any
+        # in-process cache can answer. The old artifact is kept alive rather than freed: a
+        # CallState holds only its function pointer, and a launch may still be using it.
+        dump_target = (cache_key, Path(env.debug.dump_dir).resolve()) if env.debug.dump_asm else None
+        if dump_target is not None and dump_target not in self._asm_dumped:
+            self._call_state_cache.pop(cache_key, None)
+            stale = self._mem_cache.pop(cache_key, None)
+            if stale is not None:
+                self._superseded.append(stale)
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
@@ -1634,8 +1685,11 @@ class JitFunction:
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         _rejected_link_libs = False
+        # FLYDSL_DEBUG_DUMP_ASM never reads the disk cache either. Unlike FLYDSL_DUMP_IR it
+        # still writes it, so the entry matches the dumped ISA.
+        dump_asm = dump_target is not None
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not env.debug.dump_ir and not dump_asm:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
@@ -1682,7 +1736,9 @@ class JitFunction:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(
                 str_key,
-                accept_cached=lambda artifact: not getattr(artifact, "_link_libs", None) and accept_cached(artifact),
+                accept_cached=lambda artifact: (
+                    not dump_asm and not getattr(artifact, "_link_libs", None) and accept_cached(artifact)
+                ),
             )
         else:
             _compile_lock_ctx = nullcontext((None, None))
@@ -1720,6 +1776,8 @@ class JitFunction:
                     # cache is disabled. This preserves code object lifetime for
                     # profiler/roctracer teardown and enables fast same-process reuse.
                     self._mem_cache[cache_key] = compiled_func
+                    if dump_asm:
+                        self._asm_dumped.add(dump_target)
                     if _cache_writer and not traced.extern_linked:
                         try:
                             _cache_writer(compiled_func)
