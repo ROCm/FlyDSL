@@ -605,7 +605,7 @@ FLY_INFER_RETURN_TYPES(IntTupleProductOp) {
     return emitOptionalError(location, "IntTupleProductOp: expected IntTupleType, got ",
                              operands[0].getType());
   IntTupleBuilder<IntTupleAttr> builder(context);
-  inferredReturnTypes.assign({IntTupleType::get(intTupleProduct(builder, inputTy.getAttr()))});
+  inferredReturnTypes.assign({IntTupleType::get(intTupleSize(builder, inputTy.getAttr()))});
   return success();
 }
 
@@ -952,7 +952,7 @@ FLY_INFER_RETURN_TYPES(DiceOp) {
 FLY_INFER_RETURN_TYPES(SizeOp) {
   if (auto intTupleTy = dyn_cast<IntTupleType>(operands[0].getType())) {
     IntTupleBuilder<IntTupleAttr> builder(context);
-    IntTupleAttr size = intTupleProduct(builder, intTupleTy.getAttr());
+    IntTupleAttr size = intTupleSize(builder, intTupleTy.getAttr());
     inferredReturnTypes.assign({IntTupleType::get(size)});
     return success();
   }
