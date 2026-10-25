@@ -103,6 +103,8 @@ axis value is covered without compiling its full Cartesian product. Set
 also when the shared default-device fixture covers both CPU and CUDA defaults.
 This switch is independent of `RUN_TESTS_FULL`, which continues to control
 `large_shape`.
+The PyPI release workflow runs the full coop matrix in separate GPU jobs and
+requires it to pass before publishing.
 
 ## MLIR FileCheck tests
 
