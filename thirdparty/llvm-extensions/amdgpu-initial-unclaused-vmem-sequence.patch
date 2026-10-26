@@ -1,0 +1,249 @@
+diff --git a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
+index b84b6c833a..6a8089a686 100644
+--- a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
++++ b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
+@@ -6984,8 +6984,8 @@ void AMDGPUAsmParser::doBeforeLabelEmit(MCSymbol *Symbol, SMLoc IDLoc) {
+ 
+ void AMDGPUAsmParser::checkKernelPrologues() {
+   if (getFeatureBits()[AMDGPU::FeatureRequiresInitialUnclausedVmem]) {
+-    static const unsigned Required[] = {GLOBAL_PREFETCH_B8_SADDR_gfx1250,
+-                                        V_NOP_e32_gfx12};
++    static const unsigned Required[] = {S_MOV_B64_gfx12, V_NOP_e32_gfx12,
++                                        GLOBAL_PREFETCH_B8_SADDR_gfx1250};
+     for (auto [Sym, Loc, Offset] : OpcodeStreamSymbols) {
+       if (!AMDHSAKernelSymbols.contains(Sym))
+         continue;
+@@ -6993,7 +6993,8 @@ void AMDGPUAsmParser::checkKernelPrologues() {
+       if (Prologue.take_front(std::size(Required)) != ArrayRef(Required)) {
+         Warning(Loc, "kernel '" + Sym->getName() +
+                          "' does not begin with the required prologue "
+-                         "sequence: GLOBAL_PREFETCH_B8 followed by V_NOP");
++                         "sequence: S_MOV_B64 followed by V_NOP and "
++                         "GLOBAL_PREFETCH_B8");
+       }
+     }
+   }
+diff --git a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+index 78c98320e8..16743201d9 100644
+--- a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+@@ -3707,15 +3707,19 @@ bool SIInsertWaitcnts::run() {
+ 
+   if (MFI->isEntryFunction() && ST.hasRequiresInitialUnclausedVmem()) {
+     // Hardware entrypoints must begin with a specific sequence:
+-    //   GLOBAL_PREFETCH_B8 V0, NULL SCOPE:SCOPE_SE
++    //   S_MOV_B64 S[64:65], 0
+     //   V_NOP
++    //   GLOBAL_PREFETCH_B8 V0, S[64:65] SCOPE:SCOPE_SE TH:TH_LOAD_RT
+     MachineBasicBlock::iterator I = EntryBB.begin();
++    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::S_MOV_B64),
++            AMDGPU::SGPR64_SGPR65)
++        .addImm(0);
++    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::V_NOP_e32));
+     BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::GLOBAL_PREFETCH_B8_SADDR))
+-        .addReg(AMDGPU::SGPR_NULL64)
++        .addReg(AMDGPU::SGPR64_SGPR65)
+         .addReg(AMDGPU::VGPR0, RegState::Undef)
+         .addImm(0)
+         .addImm(AMDGPU::CPol::SCOPE_SE | AMDGPU::CPol::TH_RT);
+-    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::V_NOP_e32));
+     Modified = true;
+   }
+ 
+diff --git a/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s b/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
+index 29c7063f41..10b3d4bd4e 100644
+--- a/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
++++ b/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
+@@ -1,6 +1,6 @@
+ // RUN: llvm-mc -triple=amdgpu12.50-amd-amdhsa %s -filetype=null 2>&1 | FileCheck %s -implicit-check-not=warning: -check-prefix=GFX1250
+ 
+-// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_before' does not begin with the required prologue sequence: GLOBAL_PREFETCH_B8 followed by V_NOP
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_before' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
+ test_wrong_before:
+   s_nop 1
+ 
+@@ -14,15 +14,26 @@ test_wrong_before:
+   .amdhsa_next_free_vgpr 0
+ .end_amdhsa_kernel
+ 
+-// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_after' does not begin with the required prologue sequence: GLOBAL_PREFETCH_B8 followed by V_NOP
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_after' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
+ test_wrong_after:
+   s_nop 2
+ 
+-.amdhsa_kernel test_correct
++.amdhsa_kernel test_old_sequence
+   .amdhsa_next_free_sgpr 0
+-  .amdhsa_next_free_vgpr 0
++  .amdhsa_next_free_vgpr 1
+ .end_amdhsa_kernel
+ 
+-test_correct:
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_old_sequence' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
++test_old_sequence:
+   global_prefetch_b8 v0, null scope:SCOPE_SE
+   v_nop
++
++.amdhsa_kernel test_correct
++  .amdhsa_next_free_sgpr 66
++  .amdhsa_next_free_vgpr 1
++.end_amdhsa_kernel
++
++test_correct:
++  s_mov_b64 s[64:65], 0
++  v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+diff --git a/llvm/test/MC/AMDGPU/hsa-gfx1250-v4.s b/llvm/test/MC/AMDGPU/hsa-gfx1250-v4.s
+index 9ade2b121f..7f80c9392d 100644
+--- a/llvm/test/MC/AMDGPU/hsa-gfx1250-v4.s
++++ b/llvm/test/MC/AMDGPU/hsa-gfx1250-v4.s
+@@ -70,43 +70,49 @@
+ .p2align 8
+ .type minimal,@function
+ minimal:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type complete,@function
+ complete:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type special_sgpr,@function
+ special_sgpr:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type disabled_user_sgpr,@function
+ disabled_user_sgpr:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type max_lds_size,@function
+ max_lds_size:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type max_vgprs,@function
+ max_vgprs:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .rodata
+@@ -278,14 +284,14 @@ max_vgprs:
+ .byte .amdgcn.next_free_vgpr
+ // ASM: .byte 1
+ .byte .amdgcn.next_free_sgpr
+-// ASM: .byte 0
++// ASM: .byte 66
+ 
+ v_mov_b32_e32 v16, s3
+ 
+ .byte .amdgcn.next_free_vgpr
+ // ASM: .byte 17
+ .byte .amdgcn.next_free_sgpr
+-// ASM: .byte 4
++// ASM: .byte 66
+ 
+ .set .amdgcn.next_free_vgpr, 0
+ .set .amdgcn.next_free_sgpr, 0
+diff --git a/llvm/test/MC/AMDGPU/hsa-gfx1251-v4.s b/llvm/test/MC/AMDGPU/hsa-gfx1251-v4.s
+index 2c8d2c3430..ccab72b10a 100644
+--- a/llvm/test/MC/AMDGPU/hsa-gfx1251-v4.s
++++ b/llvm/test/MC/AMDGPU/hsa-gfx1251-v4.s
+@@ -70,43 +70,49 @@
+ .p2align 8
+ .type minimal,@function
+ minimal:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type complete,@function
+ complete:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type special_sgpr,@function
+ special_sgpr:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type disabled_user_sgpr,@function
+ disabled_user_sgpr:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type max_lds_size,@function
+ max_lds_size:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .p2align 8
+ .type max_vgprs,@function
+ max_vgprs:
+-  global_prefetch_b8 v0, null scope:SCOPE_SE
++  s_mov_b64 s[64:65], 0
+   v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
+   s_endpgm
+ 
+ .rodata
+@@ -278,14 +284,14 @@ max_vgprs:
+ .byte .amdgcn.next_free_vgpr
+ // ASM: .byte 1
+ .byte .amdgcn.next_free_sgpr
+-// ASM: .byte 0
++// ASM: .byte 66
+ 
+ v_mov_b32_e32 v16, s3
+ 
+ .byte .amdgcn.next_free_vgpr
+ // ASM: .byte 17
+ .byte .amdgcn.next_free_sgpr
+-// ASM: .byte 4
++// ASM: .byte 66
+ 
+ .set .amdgcn.next_free_vgpr, 0
+ .set .amdgcn.next_free_sgpr, 0
