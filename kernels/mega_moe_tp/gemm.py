@@ -902,8 +902,8 @@ def build_bigm_unit(H, I, TOPK, RG, NAB, BST, BS2, act, swiglu_limit, R8):  # no
                         us_.append(fx.Float32(ua[v]))
                 xs_ = [fx.Float32(x).to(fx.BFloat16).to(fx.Float32) for x in act_batch(gs, us_)]
                 am = amax(xs_)
-                am = am.maximumf(am.shuffle_xor(i32(16), i32(64)))
-                am = am.maximumf(am.shuffle_xor(i32(32), i32(64)))
+                am = fx.max(am, am.shuffle_xor(i32(16), i32(64)))
+                am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))
                 e8, qs = _e8m0_from_amax(am, max_norm=6.0)
                 for t in range_constexpr(2):
                     col = p * i32(NW * 32) + w * i32(32) + i32(t * 16) + q4 * i32(4)
@@ -1021,8 +1021,8 @@ def build_bigm_unit(H, I, TOPK, RG, NAB, BST, BS2, act, swiglu_limit, R8):  # no
                             fx.Float32(fx.Vector(acc[m * 4 + 2 * half + h])[i]) * wt for h in range(2) for i in range(4)
                         ]
                         am = amax(f)
-                        am = am.maximumf(am.shuffle_xor(i32(16), i32(64)))
-                        am = am.maximumf(am.shuffle_xor(i32(32), i32(64)))
+                        am = fx.max(am, am.shuffle_xor(i32(16), i32(64)))
+                        am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))
                         e8, qs = _e8m0_from_amax(am, max_norm=448.0)
                         d += [fp8x4_pack(f[0:4], qs), fp8x4_pack(f[4:8], qs)]
                         e8s.append(fx.Int32(e8) & i32(0xFF))

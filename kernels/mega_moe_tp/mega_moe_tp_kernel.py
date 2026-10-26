@@ -789,14 +789,12 @@ def compile_bigm_kernel(
     def e_store(f, rd, drow, p, lane):
         if const_expr(E4):
             am = amax(f)
-            am = am.maximumf(am.shuffle_xor(i32(1), i32(64)))
-            am = am.maximumf(am.shuffle_xor(i32(2), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
             # QuickReduce CodecQ4's code (ATOM's INT4 MoE-output reduce-scatter): scale -amax / 8,
             # all 16 levels [-8, 7] (amax -> -8, -amax -> 8 clamped to 7); MoE output rel_l2 vs
             # torch 0.0856 (symmetric [-7, 7]: 0.0882)
-            sc = fx.Float32(
-                fx.Float32(am.maximumf(fx.Float32(1e-30)) / fx.Float32(-8.0)).to(fx.BFloat16).to(fx.Float32)
-            )
+            sc = fx.Float32(fx.Float32(fx.max(am, fx.Float32(1e-30)) / fx.Float32(-8.0)).to(fx.BFloat16).to(fx.Float32))
             bst(
                 i4x8_pack(f, fx.Float32(1.0) / sc),
                 rd,
@@ -818,10 +816,10 @@ def compile_bigm_kernel(
     @flyc.jit
     def i8_row_store(f, rd, drow, p, lane):
         am = amax(f)
-        am = am.maximumf(am.shuffle_xor(i32(1), i32(64)))
-        am = am.maximumf(am.shuffle_xor(i32(2), i32(64)))
+        am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
+        am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
         g = p // i32(4)
-        sc = am.maximumf(fx.Float32(1e-30)) / fx.Float32(127.0)
+        sc = fx.max(am, fx.Float32(1e-30)) / fx.Float32(127.0)
         inv = fx.Float32(1.0) / sc
         dv = fx.Vector.from_elements([i8x4_pack(f[0:4], inv), i8x4_pack(f[4:8], inv)], fx.Int32)
         bst(dv, rd, drow * i32(RB) + p * i32(8), 0, AUX_SYS)
@@ -1179,8 +1177,8 @@ def compile_bigm_kernel(
                     p = col(tid, kk)
                     y = bf16x8_to_f32(ld[ii][kk])
                     am = amax(y)
-                    am = am.maximumf(am.shuffle_xor(i32(1), i32(64)))
-                    am = am.maximumf(am.shuffle_xor(i32(2), i32(64)))
+                    am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
+                    am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
                     e8, qs = _e8m0_from_amax(am, max_norm=6.0)
                     bst(fp4_pack(y, qs), rq, row0 * i32(H // 2) + p * i32(4), 0, AUX_SYS)
                     if (lane & i32(3)) == i32(0):
@@ -1671,16 +1669,16 @@ def compile_bigm_kernel(
                     ]
                     live = own_col(tid, kk)
                     if const_expr(live is None):
-                        am = am.maximumf(amax(xk))
+                        am = fx.max(am, amax(xk))
                     else:
-                        am = am.maximumf(live.select(amax(xk), fx.Float32(0.0)))
+                        am = fx.max(am, live.select(amax(xk), fx.Float32(0.0)))
                     xs_.append(xk)
                 xss.append(xs_)
                 ams.append(am.bitcast(fx.Int32))
             amxs = blk_red_vec(L, tid, ams, f32_bits_max)
             for ii in range_constexpr(ZQ):
                 i = i0 + i32(ii)
-                scl = amxs[ii].bitcast(fx.Float32).maximumf(fx.Float32(1e-10)) / fx.Float32(448.0)
+                scl = fx.max(amxs[ii].bitcast(fx.Float32), fx.Float32(1e-10)) / fx.Float32(448.0)
                 inv = one / scl
                 g = rank * m + o + i
                 for kk in range_constexpr(PIT):
