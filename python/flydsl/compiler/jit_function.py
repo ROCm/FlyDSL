@@ -25,6 +25,7 @@ from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from ..utils.file import atomic_write
+from .aot import AOTExportResult
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend, get_ktrace_backend
 from .diagnostics import (
@@ -1875,7 +1876,14 @@ class CompiledFunction:
         """Max resident blocks of this kernel per CU on the current device, without launching it."""
         return self._keepalive.max_blocks_per_cu()
 
-    def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> None:
+    def export_to_c(
+        self,
+        file_path: str,
+        file_name: str,
+        function_prefix: str = "",
+        *,
+        return_metadata: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Export this specialization as a standalone ``.o`` and C header.
 
         The object embeds its backend adapter and only needs the backend's
@@ -1884,7 +1892,26 @@ class CompiledFunction:
         Host export currently requires 64-bit little-endian Linux ELF tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
-        self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
+        return self._get_aot_compiled()._export_to_c(
+            file_path,
+            file_name,
+            function_prefix,
+            return_metadata=return_metadata,
+        )
+
+    def export_aot(
+        self,
+        file_path: str,
+        file_name: str,
+        function_prefix: str = "",
+    ) -> AOTExportResult:
+        """Export a relocatable object, C header, and versioned manifest.
+
+        The returned manifest is the public build-system contract. It describes
+        the packed ABI, lifecycle symbols, target, link requirements, and
+        specialization identity without exposing compiler internals.
+        """
+        return self._get_aot_compiled()._export_aot(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):
         """Parse and validate export IR once, only when an export is requested."""

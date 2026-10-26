@@ -175,8 +175,26 @@ initialization/load/unload functions, and embedded ABI metadata. When
 ``function_prefix`` is omitted, ``file_name`` is also used as the exported C
 symbol.
 
+Build systems that need a stable packed-ABI and link contract should use
+``export_aot``:
+
+.. code-block:: python
+
+   result = compiled.export_aot(
+       file_path=output,
+       file_name="vector_add",
+       function_prefix="flydsl_vector_add",
+   )
+
+``export_aot`` writes ``vector_add.o``, ``vector_add.h``, and
+``vector_add.json``. It returns an ``AOTExportResult`` containing the typed
+``AOTManifest``, content hashes, and generated paths. The JSON sidecar is
+written last and is the cross-process contract for build systems. Manifest
+schema changes are additive within one major version; consumers ignore unknown
+fields and honor ``min_consumer_schema``.
+
 The lowered IR is parsed and its export ABI validated on the first
-``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
+export call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
 
 Passing live device arguments to ``flyc.compile`` preserves its normal initial

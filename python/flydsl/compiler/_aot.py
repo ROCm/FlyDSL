@@ -4,8 +4,8 @@
 """Internal implementation of ``CompiledFunction.export_to_c``."""
 
 import ctypes
-import dataclasses
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,7 +14,6 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -26,6 +25,17 @@ from ..expr.struct import _runtime_fields, is_struct_type
 from ..expr.typing import Constexpr, Stream
 from ..runtime._libraries import _find_aot_runtime_archive
 from ..utils._elf import _defined_global_symbols, _global_symbols
+from .aot import (
+    AOT_MANIFEST_SCHEMA,
+    AOTAbiSlot,
+    AOTExportResult,
+    AOTLayoutEntry,
+    AOTLifecycle,
+    AOTLinkContract,
+    AOTManifest,
+    AOTProducer,
+    AOTReturnABI,
+)
 from .backends import _get_backend_class
 from .jit_argument import (
     DLTensorJitArg,
@@ -38,8 +48,6 @@ from .jit_argument import (
 from .jit_function import _create_mlir_context
 from .protocol import c_abi_spec
 
-_SCHEMA_VERSION = 2
-
 _C_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INT_CTYPE = re.compile(r"u?int(8|16|32|64)")
 
@@ -47,69 +55,9 @@ _HOST_OPT_LEVEL = 2
 _AOT_TAKE_ERROR_SYMBOL = "flydslRuntimeTakeError"
 
 
-@dataclass(frozen=True)
-class _AbiSlot:
-    """One host-storage entry in the packed ``void **args`` ABI."""
-
-    arg_index: Optional[int]
-    arg_name: Optional[str]
-    kind: str
-    ctype: str
-    size: int
-    alignment: int
-    shape_dims: Optional[Tuple[int, ...]] = None
-    stride_dims: Optional[Tuple[int, ...]] = None
-    shape_bits: Optional[int] = None
-    stride_bits: Optional[int] = None
-    encoding: Optional[str] = None
-    field: Optional[str] = None
-
-    def _to_dict(self) -> Dict[str, Any]:
-        """JSON-compatible dict; optional fields are omitted when unset."""
-        d = {}
-        for f in dataclasses.fields(self):
-            v = getattr(self, f.name)
-            if v is None and f.default is None:
-                continue
-            d[f.name] = list(v) if isinstance(v, tuple) else v
-        return d
-
-
-@dataclass(frozen=True)
-class _ReturnAbi:
-    """Return value of the exported entry and lifecycle functions."""
-
-    kind: str = "status"
-    ctype: str = "int32"
-    success: int = 0
-
-    def _to_dict(self) -> Dict[str, Any]:
-        return dataclasses.asdict(self)
-
-
-@dataclass(frozen=True)
-class _ExportMetadata:
-    schema_version: int
-    symbol: str
-    module_init_symbol: str
-    module_load_symbol: str
-    module_unload_symbol: str
-    metadata_symbol: str
-    runtime_libraries: Tuple[str, ...]
-    linker_flags: Tuple[str, ...]
-    abi: Tuple[_AbiSlot, ...]
-    return_abi: _ReturnAbi
-    backend: str
-    arch: str
-    host_triple: str
-    flydsl_version: str
-
-    def _to_dict(self) -> Dict[str, Any]:
-        d = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
-        d["runtime_libraries"] = [{"link_name": name} for name in self.runtime_libraries]
-        d["abi"] = [slot._to_dict() for slot in self.abi]
-        d["return_abi"] = self.return_abi._to_dict()
-        return d
+_AbiSlot = AOTAbiSlot
+_ReturnAbi = AOTReturnABI
+_ExportMetadata = AOTManifest
 
 
 _NUMERIC_ENCODINGS = {Float16: "float16_bits", BFloat16: "bfloat16_bits"}
@@ -301,6 +249,28 @@ def _build_abi(pending, entry_arg_types: List[ir.Type]) -> Tuple[_AbiSlot, ...]:
                 raise RuntimeError(f"flyc.compile: tensor {arg_name!r} layout {ty} does not match its dynamic dims")
             extra["shape_bits"] = _group_width(widths[:n_shape], "shape", arg_name)
             extra["stride_bits"] = _group_width(widths[n_shape:], "stride", arg_name)
+            offset = 0
+            layout_entries = []
+            for kind, dims, entry_widths in (
+                ("shape", semantic["shape_dims"], widths[:n_shape]),
+                ("stride", semantic["stride_dims"], widths[n_shape:]),
+            ):
+                for dim, bits in zip(dims, entry_widths):
+                    layout_entries.append(
+                        AOTLayoutEntry(
+                            kind=kind,
+                            dim=dim,
+                            offset=offset,
+                            bits=bits,
+                        )
+                    )
+                    offset += bits // 8
+            if offset != size:
+                raise RuntimeError(
+                    f"flyc.compile: tensor {arg_name!r} layout entries use "
+                    f"{offset} bytes but the lowered type has {size}"
+                )
+            extra["layout_entries"] = tuple(layout_entries)
         slots.append(_AbiSlot(arg_index, arg_name, size=size, alignment=alignment, **semantic, **extra))
     return tuple(slots)
 
@@ -573,11 +543,17 @@ def _path_identity(path: Path) -> str:
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
-def _check_output_path_collisions(object_path: Path, header_path: Optional[Path]) -> None:
+def _check_output_path_collisions(
+    object_path: Path,
+    header_path: Optional[Path],
+    manifest_path: Optional[Path] = None,
+) -> None:
     """Reject output aliases that could overwrite another artifact."""
     outputs = {"object": object_path}
     if header_path is not None:
         outputs["header"] = header_path
+    if manifest_path is not None:
+        outputs["manifest"] = manifest_path
     identities = {}
     for kind, path in outputs.items():
         identity = _path_identity(path)
@@ -668,7 +644,8 @@ def _render_header(metadata: _ExportMetadata) -> str:
             "#define FLYDSL_AOT_ERR_NOT_LOADED (-2)",
             "#endif",
             "",
-            f"#define {macro}_SCHEMA_VERSION {metadata.schema_version}",
+            f"#define {macro}_SCHEMA_VERSION_MAJOR {metadata.schema_version.major}",
+            f"#define {macro}_SCHEMA_VERSION_MINOR {metadata.schema_version.minor}",
             f"#define {macro}_NUM_ARGS {len(metadata.abi)}",
             "",
             *types,
@@ -723,11 +700,54 @@ class _AOTCompiledFunction:
         file_path: Union[str, "os.PathLike[str]"],
         file_name: str,
         function_prefix: str = "",
-    ) -> None:
+        *,
+        return_metadata: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Write ``<file_name>.o`` and ``<file_name>.h`` into ``file_path``."""
+        result = self._export(file_path, file_name, function_prefix, write_manifest=False)
+        if not return_metadata:
+            return None
+        manifest = result.manifest
+        return {
+            "schema_version": 2,
+            "symbol": manifest.symbol,
+            "module_init_symbol": manifest.module_init_symbol,
+            "module_load_symbol": manifest.module_load_symbol,
+            "module_unload_symbol": manifest.module_unload_symbol,
+            "metadata_symbol": manifest.metadata_symbol,
+            "runtime_libraries": [{"link_name": name} for name in manifest.runtime_libraries],
+            "linker_flags": manifest.linker_flags,
+            "abi": [slot.to_dict() for slot in manifest.abi],
+            "return_abi": manifest.return_abi.to_dict(),
+            "backend": manifest.backend,
+            "arch": manifest.arch,
+            "host_triple": manifest.host_triple,
+            "flydsl_version": manifest.flydsl_version,
+            "object_file_path": str(result.object_path),
+            "header_file_path": str(result.header_path),
+        }
+
+    def _export_aot(
+        self,
+        file_path: Union[str, "os.PathLike[str]"],
+        file_name: str,
+        function_prefix: str = "",
+    ) -> AOTExportResult:
+        """Write a relocatable object, C header, and versioned JSON manifest."""
+        return self._export(file_path, file_name, function_prefix, write_manifest=True)
+
+    def _export(
+        self,
+        file_path: Union[str, "os.PathLike[str]"],
+        file_name: str,
+        function_prefix: str,
+        *,
+        write_manifest: bool,
+    ) -> AOTExportResult:
         import flydsl
 
         object_path, function_name, header_path = _resolve_export_paths(file_path, file_name, function_prefix)
+        manifest_path = object_path.with_suffix(".json")
         if self._host_triple != _host_target_triple():
             raise NotImplementedError(
                 f"export_to_c: artifact targets host {self._host_triple}; cross-compiling from "
@@ -744,30 +764,64 @@ class _AOTCompiledFunction:
         }
         metadata_symbol = f"{function_name}__metadata"
         exported_symbols = {function_name, metadata_symbol, *lifecycle.values()}
-        _check_output_path_collisions(object_path, header_path)
+        _check_output_path_collisions(
+            object_path,
+            header_path,
+            manifest_path if write_manifest else None,
+        )
         runtime_archive = _find_aot_runtime_archive(self._backend)
         runtime_object, runtime_symbols = _materialize_aot_runtime(runtime_archive)
         clashes = sorted(exported_symbols & runtime_symbols)
         if clashes:
             raise ValueError(f"export_to_c: exported symbols collide with the backend AOT runtime: {clashes}")
 
+        fingerprint_payload = {
+            "entry": self._entry,
+            "ir": self._ir_text,
+            "abi": [slot.to_dict() for slot in self._abi],
+            "backend": self._backend,
+            "arch": self._arch,
+            "host_triple": self._host_triple,
+            "flydsl_version": flydsl.__version__,
+        }
+        specialization_fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         export_metadata = _ExportMetadata(
-            schema_version=_SCHEMA_VERSION,
+            schema_version=AOT_MANIFEST_SCHEMA,
+            min_consumer_schema=AOT_MANIFEST_SCHEMA,
+            producer=AOTProducer(
+                flydsl_version=flydsl.__version__,
+                backend=self._backend,
+                arch=self._arch,
+                host_triple=self._host_triple,
+            ),
             symbol=function_name,
-            module_init_symbol=lifecycle["init"],
-            module_load_symbol=lifecycle["load"],
-            module_unload_symbol=lifecycle["unload"],
             metadata_symbol=metadata_symbol,
-            runtime_libraries=runtime.runtime_libraries,
-            linker_flags=runtime.linker_flags,
+            lifecycle=AOTLifecycle(
+                init_symbol=lifecycle["init"],
+                load_symbol=lifecycle["load"],
+                unload_symbol=lifecycle["unload"],
+            ),
             abi=self._abi,
             return_abi=_ReturnAbi(),
-            backend=self._backend,
-            arch=self._arch,
-            host_triple=self._host_triple,
-            flydsl_version=flydsl.__version__,
+            link=AOTLinkContract(
+                libraries=runtime.runtime_libraries,
+                options=runtime.linker_flags,
+            ),
+            specialization_fingerprint=specialization_fingerprint,
+            capabilities=(
+                "async_launch",
+                "multi_device",
+                "self_contained_runtime",
+                "thread_safe_lifecycle",
+            ),
         )
-        embedded = export_metadata._to_dict()
+        embedded = export_metadata.to_dict()
         metadata = json.dumps(embedded, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
         data = _emit_export_object(
@@ -787,7 +841,27 @@ class _AOTCompiledFunction:
                 f"export_to_c: object exports {sorted(exported)}, expected exactly {sorted(exported_symbols)}"
             )
         header = _render_header(export_metadata).encode("utf-8")
+        result = AOTExportResult(
+            object_path=object_path,
+            header_path=header_path,
+            manifest_path=manifest_path,
+            object_sha256=hashlib.sha256(data).hexdigest(),
+            header_sha256=hashlib.sha256(header).hexdigest(),
+            manifest=export_metadata,
+        )
 
         with _output_directory_lock(object_path.parent):
+            # Sidecar presence marks a complete generation. Remove an older
+            # generation before replacing either payload, then publish the new
+            # sidecar last.
+            manifest_path.unlink(missing_ok=True)
             _write_atomically(object_path, data)
             _write_atomically(header_path, header)
+            if write_manifest:
+                sidecar = json.dumps(
+                    result.to_sidecar_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                _write_atomically(manifest_path, sidecar)
+        return result

@@ -461,6 +461,11 @@ class TestExportCompile:
         assert layout.shape_dims == (0, 1) and layout.stride_dims == (0,)
         assert (layout.shape_bits, layout.stride_bits) == (32, 64)
         assert (layout.size, layout.alignment) == (2 * 4 + 8, 1)
+        assert [(entry.kind, entry.dim, entry.offset, entry.bits) for entry in layout.layout_entries] == [
+            ("shape", 0, 0, 32),
+            ("shape", 1, 4, 32),
+            ("stride", 0, 8, 64),
+        ]
 
     def test_32bit_stride_layout(self):
         t = torch.empty(4, 8, device="meta")
@@ -505,7 +510,7 @@ class TestExportCompile:
             (2, "p", "alpha", "float"),
             (None, None, None, "pointer"),
         ]
-        assert "field" not in compiled._abi[0]._to_dict() and compiled._abi[2]._to_dict()["field"] == "n"
+        assert "field" not in compiled._abi[0].to_dict() and compiled._abi[2].to_dict()["field"] == "n"
 
     def test_does_not_dispatch_or_create_engine(self, monkeypatch):
         from flydsl.compiler import jit_executor, jit_function
@@ -951,9 +956,10 @@ class TestExport:
         assert (out / "axpy_file.h").is_file()
         assert sorted(path.name for path in out.iterdir()) == ["axpy_file.h", "axpy_file.o"]
         assert "aoti_axpy" in _defined_global_symbols(out / "axpy_file.o")
-        assert b'"schema_version":2' in (out / "axpy_file.o").read_bytes()
-        assert b'"runtime_libraries":[{"link_name":"libamdhip64.so"}]' in (out / "axpy_file.o").read_bytes()
-        assert b'"linker_flags":["-lamdhip64","-pthread","-ldl"]' in (out / "axpy_file.o").read_bytes()
+        object_bytes = (out / "axpy_file.o").read_bytes()
+        assert b'"schema_version":{"major":3,"minor":0}' in object_bytes
+        assert b'"libraries":[{"link_name":"libamdhip64.so"}]' in object_bytes
+        assert b'"options":["-lamdhip64","-pthread","-ldl"]' in object_bytes
 
         assert compiled._export_to_c(out, "default_name") is None
         assert "default_name" in _defined_global_symbols(out / "default_name.o")
@@ -961,6 +967,59 @@ class TestExport:
         assert "empty_prefix" in _defined_global_symbols(out / "empty_prefix.o")
         assert compiled._export_to_c(out, "keyword_prefix", function_prefix="keyword_symbol") is None
         assert "keyword_symbol" in _defined_global_symbols(out / "keyword_prefix.o")
+
+    def test_public_export_returns_typed_manifest(self, tmp_path):
+        compiled = flyc.compile(axpy, _ptr(), _ptr(), 8, 1.0)
+        result = compiled.export_aot(
+            tmp_path,
+            "public_metadata",
+            "aoti_public_metadata",
+        )
+
+        manifest = result.manifest
+        assert manifest.schema_version == flyc.AOTSchemaVersion(3, 0)
+        assert manifest.min_consumer_schema == flyc.AOTSchemaVersion(3, 0)
+        assert manifest.symbol == "aoti_public_metadata"
+        assert manifest.module_init_symbol == "aoti_public_metadata__module_init"
+        assert manifest.module_load_symbol == "aoti_public_metadata__module_load"
+        assert manifest.module_unload_symbol == "aoti_public_metadata__module_unload"
+        assert manifest.metadata_symbol == "aoti_public_metadata__metadata"
+        assert result.object_path == tmp_path / "public_metadata.o"
+        assert result.header_path == tmp_path / "public_metadata.h"
+        assert result.manifest_path == tmp_path / "public_metadata.json"
+        assert result.manifest_path.is_file()
+        assert manifest.runtime_libraries == ("libamdhip64.so",)
+        assert manifest.linker_flags == ("-lamdhip64", "-pthread", "-ldl")
+        assert manifest.return_abi == flyc.AOTReturnABI()
+        assert [(slot.arg_name, slot.kind) for slot in manifest.abi] == [
+            ("X", "pointer"),
+            ("Y", "pointer"),
+            ("n", "scalar"),
+            ("alpha", "scalar"),
+            ("stream", "stream"),
+        ]
+        sidecar = json.loads(result.manifest_path.read_text())
+        assert sidecar["manifest"] == manifest.to_dict()
+        assert sidecar["files"]["object"]["sha256"] == result.object_sha256
+        assert sidecar["files"]["header"]["sha256"] == result.header_sha256
+        assert flyc.AOTManifest.from_dict(sidecar["manifest"]).to_dict() == manifest.to_dict()
+        manifest.require_compatible_consumer(flyc.AOTSchemaVersion(3, 0))
+        with pytest.raises(ValueError, match="major version"):
+            manifest.require_compatible_consumer(flyc.AOTSchemaVersion(4, 0))
+        compiled.export_to_c(
+            tmp_path,
+            "public_metadata",
+            "aoti_public_metadata",
+        )
+        assert not result.manifest_path.exists()
+        legacy = compiled.export_to_c(
+            tmp_path,
+            "public_metadata",
+            "aoti_public_metadata",
+            return_metadata=True,
+        )
+        assert legacy["schema_version"] == 2
+        assert legacy["symbol"] == "aoti_public_metadata"
 
     def test_metadata_and_symbols(self, compiled, tmp_path):
         out = tmp_path / "with space"
@@ -1042,20 +1101,26 @@ class TestExport:
             shape_bits=32,
         )
         metadata = aot._ExportMetadata(
-            schema_version=1,
+            schema_version=flyc.AOTSchemaVersion(3, 0),
+            min_consumer_schema=flyc.AOTSchemaVersion(3, 0),
+            producer=flyc.AOTProducer(
+                flydsl_version="test",
+                backend="rocm",
+                arch="gfx950",
+                host_triple="x86_64-unknown-linux-gnu",
+            ),
             symbol="k",
-            module_init_symbol="k__module_init",
-            module_load_symbol="k__module_load",
-            module_unload_symbol="k__module_unload",
             metadata_symbol="k__metadata",
-            runtime_libraries=(),
-            linker_flags=(),
+            lifecycle=flyc.AOTLifecycle(
+                init_symbol="k__module_init",
+                load_symbol="k__module_load",
+                unload_symbol="k__module_unload",
+            ),
             abi=(aot._AbiSlot(field="a.b", **slot), aot._AbiSlot(field="a_b", **slot)),
             return_abi=aot._ReturnAbi(),
-            backend="rocm",
-            arch="gfx950",
-            host_triple="x86_64-unknown-linux-gnu",
-            flydsl_version="test",
+            link=flyc.AOTLinkContract(libraries=(), options=()),
+            specialization_fingerprint="test",
+            capabilities=(),
         )
         header = aot._render_header(metadata)
         assert "k_p_a_b_layout_t;" in header
