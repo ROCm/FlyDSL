@@ -664,7 +664,7 @@ def _run_mxfp_moe_e2e(
     # --- quantize activations / weights (per-1x32 e8m0) ------------------------
     # A: MX-FP8 (e4m3, 1 B/elem) for a8w4; MX-FP4 (0.5 B/elem) for a4w4. W is MX-FP4.
     if a_dtype == "fp8":
-        x_q, x_scale = _per_1x32_mxfp8_quant(x_fp32)  # [T, K] fp8, [T, K/32] u8
+        x_q, x_scale = gcu.per_1x32_f8_quant(x_fp32)  # [T, K] fp8, [T, K/32] u8
     else:
         x_q, x_scale = _per_1x32_fp4_quant(x_fp32)  # [T, K/2] u8, [T, K/32] u8
     w1_q, w1_scale = _per_1x32_fp4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
@@ -1487,28 +1487,6 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     y_fp4 = y_fp4.view(*shape_orig[:-1], -1)  # K dim halved
     scale = scale_e8m0.view(m, -1).view(torch.uint8)
     return y_fp4, scale
-
-
-def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a tensor to MX-FP8 (e4m3fn) with per-1x32 E8M0 block scaling.
-
-    Mirrors `_per_1x32_fp4_quant` for the A8W4 path: the activation is kept at
-    1 byte/element (no packing), and each 32-element K block gets its own
-    E8M0 scale stored as uint8.  Returns
-        (x_q [..., K] fp8_e4m3fn, scale_e8m0 [..., K//32] uint8).
-    """
-    from tests.kernels.utils import gemm_common_utils
-
-    fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
-    shape_orig = x.shape
-    x_flat = x.contiguous().view(-1, 32).float()
-    amax = torch.amax(torch.abs(x_flat), dim=-1).clamp_min(1e-30)
-    scale_e8m0 = gemm_common_utils.f32_to_e8m0(amax / fp8_max)
-    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
-    x_q = (x_flat / scale_f32.view(-1, 1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
-    x_q = x_q.view(shape_orig).contiguous()
-    scale_bytes = scale_e8m0.view(*shape_orig[:-1], shape_orig[-1] // 32).view(torch.uint8).contiguous()
-    return x_q, scale_bytes
 
 
 if __name__ == "__main__":
