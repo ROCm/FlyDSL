@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 
 __all__ = [
@@ -110,6 +111,79 @@ def load_i64_global(addr_i64):
     Returns a DSL scalar, so callers need no re-wrapping.
     """
     return fx.generic_load(_to_ptr_global(addr_i64))
+
+
+def load_i32_acquire(addr_i64):
+    """Volatile monotonic i32 load suitable for a spin-wait."""
+    return fx.generic_load(
+        _to_ptr_global(addr_i64, fx.Int32, 4),
+        volatile=True,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope="one-as",
+    )
+
+
+def load_i64_acquire(addr_i64):
+    """Volatile monotonic i64 load suitable for a spin-wait."""
+    return fx.generic_load(
+        _to_ptr_global(addr_i64, fx.Int64, 8),
+        volatile=True,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope="one-as",
+    )
+
+
+@flyc.jit
+def spin_until_eq_i32(addr_i64, val):
+    """Spin until an i32 flag equals ``val``."""
+    cur = fx.Int32(load_i32_acquire(addr_i64))
+    while cur != fx.Int32(val):
+        cur = fx.Int32(load_i32_acquire(addr_i64))
+    return cur
+
+
+@flyc.jit
+def spin_until_gt_i32(addr_i64, val):
+    """Spin until an i32 flag exceeds ``val`` and return the observed value."""
+    cur = fx.Int32(load_i32_acquire(addr_i64))
+    while cur <= fx.Int32(val):
+        cur = fx.Int32(load_i32_acquire(addr_i64))
+    return cur
+
+
+def wait_i32_until_equals(addr_i64, expected):
+    """Compatibility wrapper for the historical MegaMoE wait helper."""
+    spin_until_eq_i32(addr_i64, expected)
+
+
+def wait_i32_until_greater_than(addr_i64, expected):
+    """Compatibility wrapper returning the first i32 value above ``expected``."""
+    return spin_until_gt_i32(addr_i64, expected)
+
+
+@flyc.jit
+def wait_i64_until_equals(addr_i64, expected):
+    """Spin until a system-visible i64 flag equals ``expected``."""
+    cur = fx.Int64(load_i64_acquire(addr_i64))
+    while cur != fx.Int64(expected):
+        cur = fx.Int64(load_i64_acquire(addr_i64))
+
+
+def _to_ptr_shared(v):
+    """Cast an integer address to an aligned shared i32 pointer."""
+    ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 4)
+    return fx.inttoptr(ptr_type, fx.Int64(v))
+
+
+def load_i32_system(addr_i64, index):
+    """Compatibility system-scope i32 load at ``addr_i64 + index * 4``."""
+    item_addr = fx.Int64(addr_i64) + fx.Int64(index) * fx.Int64(4)
+    return fx.Int32(load_i32_acquire(item_addr))
+
+
+def atomic_add_workgroup(addr_i64, val):
+    """Workgroup-scope monotonic shared-memory fetch-and-add."""
+    return fx.atomic_add(_to_ptr_shared(addr_i64), fx.Int32(val), syncscope="workgroup")
 
 
 def atomic_add_global_at(addr_i64, val, syncscope="one-as"):

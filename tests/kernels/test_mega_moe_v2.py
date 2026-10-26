@@ -47,6 +47,8 @@ NETWORKS = {
     "r1_v3": dict(model_dim=7168, inter_dim=2048, experts=256, topk=8),
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
     "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6, swiglu_limit=10.0),
+    # Kimi-K3: SiTUv2 activation (topk16, 896 experts); situ_beta/linear_beta are K3 checkpoint constants.
+    "kimi_k3_route": dict(model_dim=3584, inter_dim=3072, experts=896, topk=16, swiglu_limit=0.0, act="situv2", situ_beta=4.0, situ_linear_beta=25.0),
 }
 
 # batch-size sweeps for --matrix / --full-bs.
@@ -279,6 +281,15 @@ def _swiglu(gate, up, limit):
         gate = gate.clamp(max=limit)
         up = up.clamp(-limit, limit)
     return torch.nn.functional.silu(gate) * up
+
+
+def _act_hidden(gate, up, *, act="silu", swiglu_limit=0.0, situ_beta=1.0, situ_linear_beta=1.0):
+    """Oracle activation: swiglu (silu(gate)*up) or SiTUv2 (Kimi-K3), matching the kernel epilogue."""
+    if act == "situv2":
+        gate = situ_beta * torch.tanh(gate / situ_beta) * torch.sigmoid(gate)
+        up = situ_linear_beta * torch.tanh(up / situ_linear_beta)
+        return gate * up
+    return _swiglu(gate, up, swiglu_limit)
 
 
 def _calc_diff(x, y):
@@ -977,6 +988,9 @@ def _run_mega_only(
     check_acc=True,
     measure_perf=False,
     stage1_only=False,
+    act="silu",
+    situ_beta=1.0,
+    situ_linear_beta=1.0,
 ):
     """Run the aiter-free MegaMoEV2 accuracy and performance CI path."""
 
@@ -1032,6 +1046,9 @@ def _run_mega_only(
         max_tok_per_rank=mtpr,
         stage2_p2p_quant=args.stage2_p2p_quant,
         swiglu_limit=swiglu_limit,
+        act=act,
+        situ_beta=situ_beta,
+        situ_linear_beta=situ_linear_beta,
     )
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
@@ -1110,7 +1127,7 @@ def _run_mega_only(
             xr = inp_s1[rows]
             gate = xr @ w1e[:inter_dim].t()
             up = xr @ w1e[inter_dim:].t()
-            ref_s1[rows] = _swiglu(gate, up, swiglu_limit)
+            ref_s1[rows] = _act_hidden(gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta)
         if not torch.isfinite(got_s1).all() or not torch.isfinite(ref_s1).all():
             got_bad = int((~torch.isfinite(got_s1)).sum().item())
             ref_bad = int((~torch.isfinite(ref_s1)).sum().item())
@@ -1204,7 +1221,7 @@ def _run_mega_only(
                 xr = x32[rows]
                 gate = xr @ w1e[:inter_dim].t()
                 up = xr @ w1e[inter_dim : 2 * inter_dim].t()
-                _a1 = _swiglu(gate, up, swiglu_limit)
+                _a1 = _act_hidden(gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta)
                 oracle[rows] += w_e[:, None] * (_a1 @ w2e.t())
                 del w1e, w2e
             if local_experts_only:
@@ -1349,6 +1366,9 @@ def run_one(args, rank, world, dev):
     if int(args.experts_per_rank) > 0:
         experts = int(args.experts_per_rank) * world
     swiglu_limit = float(net.get("swiglu_limit", 0.0))
+    act = str(net.get("act", "silu"))
+    situ_beta = float(net.get("situ_beta", 1.0))
+    situ_linear_beta = float(net.get("situ_linear_beta", 1.0))
     # topk: --topk>0 overrides; else use the network's native topk (r1_v3=8, v4_*=6).
     topk = int(args.topk) if int(args.topk) > 0 else int(net["topk"])
     run_tokens = max(int(args.tokens), 1)  # allow bs=1 (1 token/rank); routing still reaches all ranks
@@ -1392,6 +1412,9 @@ def run_one(args, rank, world, dev):
             epr=epr,
             topk=topk,
             swiglu_limit=swiglu_limit,
+            act=act,
+            situ_beta=situ_beta,
+            situ_linear_beta=situ_linear_beta,
             run_tokens=run_tokens,
             mtpr=mtpr,
             quant=args.quant,

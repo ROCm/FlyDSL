@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
+import threading
 from abc import ABC, abstractmethod
 from itertools import product
 
@@ -75,6 +77,32 @@ def _run_compiled(exe, *args):
         except Exception:
             pass
         raise
+
+
+_PRELOAD_COMPILE_LOCK = threading.RLock()
+
+
+def _preload_compiled(exe, *args):
+    """Materialize a JIT artifact without dispatching its GPU kernels.
+
+    Uses ``JitFunction.preload()`` when available; otherwise falls back to the
+    public ``COMPILE_ONLY`` mode so placeholder-pointer preload callers never
+    execute the launcher.
+    """
+    preload = getattr(exe, "preload", None)
+    if callable(preload):
+        return preload(*args)
+
+    with _PRELOAD_COMPILE_LOCK:
+        old_compile_only = os.environ.get("COMPILE_ONLY")
+        os.environ["COMPILE_ONLY"] = "1"
+        try:
+            return flyc.compile(exe, *args)
+        finally:
+            if old_compile_only is None:
+                os.environ.pop("COMPILE_ONLY", None)
+            else:
+                os.environ["COMPILE_ONLY"] = old_compile_only
 
 
 def _to_raw(v):
