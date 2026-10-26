@@ -9,8 +9,8 @@
 
 // CHECK-LABEL: @tdm_wholetile
 // CHECK: fly.copy_atom_call
-// CHECK-SAME: !fly.memref<f16, global, (128,64):(64,1)>
-// CHECK-SAME: !fly.memref<f16, shared, (128,64):(64,1)
+// CHECK-SAME: !fly.memref<f16, <global>, (128,64):(64,1)>
+// CHECK-SAME: !fly.memref<f16, <shared>, (128,64):(64,1)
 // CHECK-NOT: fly.copy_atom_call
 func.func @tdm_wholetile(
     %g: !fly.memref<f16, global, (128,64):(64,1)>,

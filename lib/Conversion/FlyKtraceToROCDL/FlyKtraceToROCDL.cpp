@@ -188,10 +188,10 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPe
     // Stop claiming once the cursor is past the buffer so the 32-bit cursor cannot wrap back
     // into range on long captures. A claim at exactly capacity still goes through, so the host
     // sees the cursor exceed capacity and reports the overflow.
-    Value cursor = b.create<LLVM::LoadOp>(loc, i32Ty, st.bufPtr, /*alignment=*/4,
-                                          /*isVolatile=*/false, /*isNonTemporal=*/false,
-                                          /*isInvariant=*/false, /*isInvariantGroup=*/false,
-                                          LLVM::AtomicOrdering::monotonic);
+    auto cursorLoad = b.create<LLVM::LoadOp>(loc, i32Ty, st.bufPtr);
+    cursorLoad.setAlignment(4);
+    cursorLoad.setOrdering(LLVM::AtomicOrdering::monotonic);
+    Value cursor = cursorLoad;
     Value hasRoom = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, cursor,
                                             i32Const(b, loc, capacitySlots));
     auto roomIf = b.create<scf::IfOp>(loc, TypeRange{i32Ty}, hasRoom, true);

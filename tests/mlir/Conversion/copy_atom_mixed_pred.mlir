@@ -32,8 +32,8 @@ func.func @buffer_store(%atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 
 // CHECK: scf.if %[[PRED]] {
 // CHECK: llvm.atomicrmw fadd
 // CHECK-NEXT: }
-func.func @universal_atomic(%atom: !fly.copy_atom<!fly.universal_atomic<#fly<atomic_op add>, f32>, 32>, %dst: !fly.memref<f32, global, 1:1>, %pred: !fly.memref<i1, register, 1:1>, %src: f32) {
-  fly.copy_atom_call_ssa(%atom, %src, %dst, %pred) {operandSegmentSizes = array<i32: 1, 1, 1, 1>} : (!fly.copy_atom<!fly.universal_atomic<#fly<atomic_op add>, f32>, 32>, f32, !fly.memref<f32, global, 1:1>, !fly.memref<i1, register, 1:1>) -> ()
+func.func @universal_atomic(%atom: !fly.copy_atom<!fly.universal_atomic<#fly.atomic_op<add>, f32>, 32>, %dst: !fly.memref<f32, global, 1:1>, %pred: !fly.memref<i1, register, 1:1>, %src: f32) {
+  fly.copy_atom_call_ssa(%atom, %src, %dst, %pred) {operandSegmentSizes = array<i32: 1, 1, 1, 1>} : (!fly.copy_atom<!fly.universal_atomic<#fly.atomic_op<add>, f32>, 32>, f32, !fly.memref<f32, global, 1:1>, !fly.memref<i1, register, 1:1>) -> ()
   return
 }
 
@@ -42,8 +42,8 @@ func.func @universal_atomic(%atom: !fly.copy_atom<!fly.universal_atomic<#fly<ato
 // CHECK: scf.if %[[PRED]] {
 // CHECK: rocdl.raw.ptr.buffer.atomic.fadd
 // CHECK-NEXT: }
-func.func @buffer_atomic(%atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, f32>, 32>, %dst: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, %pred: !fly.memref<i1, register, 1:1>, %src: f32) {
-  fly.copy_atom_call_ssa(%atom, %src, %dst, %pred) {operandSegmentSizes = array<i32: 1, 1, 1, 1>} : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, f32>, 32>, f32, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<i1, register, 1:1>) -> ()
+func.func @buffer_atomic(%atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, f32>, 32>, %dst: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, %pred: !fly.memref<i1, register, 1:1>, %src: f32) {
+  fly.copy_atom_call_ssa(%atom, %src, %dst, %pred) {operandSegmentSizes = array<i32: 1, 1, 1, 1>} : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, f32>, 32>, f32, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<i1, register, 1:1>) -> ()
   return
 }
 

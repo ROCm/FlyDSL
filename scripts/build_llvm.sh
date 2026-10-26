@@ -13,14 +13,25 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
+# Read LLVM pin from thirdparty/llvm-build-info.json (upstream entry).
+# Supports either llvm_hash (exact commit) or branch (track a branch tip).
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
+LLVM_PIN=$(python3 -c "
+import json
+pin = json.load(open('${LLVM_BUILD_INFO}'))['upstream']
+print(pin.get('llvm_hash', ''))
+print(pin.get('branch', ''))
+print(pin.get('repository', ''))
+")
+LLVM_COMMIT_DEFAULT=$(echo "$LLVM_PIN" | sed -n '1p')
+LLVM_BRANCH_DEFAULT=$(echo "$LLVM_PIN" | sed -n '2p')
+LLVM_REPO_DEFAULT=$(echo "$LLVM_PIN" | sed -n '3p')
 LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
 
 # FLYDSL_LLVM_REF / FLYDSL_LLVM_REMOTE build any commit, from any remote, without
 # editing the pin. The patches below still apply.
-LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+# When llvm_hash is absent, fall back to the branch name from the JSON.
+LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-${LLVM_COMMIT_DEFAULT:-$LLVM_BRANCH_DEFAULT}}}}"
 
 # FLYDSL_LLVM_NO_EXT=1 drops LLVM_EXTENSIONS and keeps REQUIRED_PATCHES: the
 # control arm for "is this regression ours?". See CONTRIBUTING.md.
@@ -81,7 +92,7 @@ echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 echo "LLVM Patches:   ${LLVM_PATCHES[*]:-(none)}"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}}"
+LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-${LLVM_REPO_DEFAULT:-https://github.com/llvm/llvm-project.git}}}"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
@@ -99,6 +110,11 @@ if [ ! -d "$LLVM_SRC_DIR" ]; then
     git remote add origin "$LLVM_REMOTE"
 else
     pushd "$LLVM_SRC_DIR"
+    CURRENT_REMOTE="$(git remote get-url origin 2>/dev/null || true)"
+    if [ -n "$CURRENT_REMOTE" ] && [ "$CURRENT_REMOTE" != "$LLVM_REMOTE" ]; then
+        echo "Updating origin URL: ${CURRENT_REMOTE} -> ${LLVM_REMOTE}"
+        git remote set-url origin "$LLVM_REMOTE"
+    fi
 fi
 
 # Plain shallow fetch. Do NOT add --filter=blob:none here: a blob-filtered fetch
@@ -136,22 +152,8 @@ fi
 # go in with --index, so the forced checkout above also drops files they created.
 # Never `git clean`: build-flydsl/ and mlir_install/ live in this checkout.
 
-# Every .patch file must be listed, and every listed file must exist.
+# Every listed patch file must exist on disk.
 LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
-for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
-    [ -e "${patch_file}" ] || continue
-    patch_base="$(basename "${patch_file}")"
-    listed=0
-    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
-        [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
-    done
-    if [ "${listed}" -eq 0 ]; then
-        echo "Error: patch file is not listed in thirdparty/llvm-build-info.json: ${patch_base}" >&2
-        echo "       Add it to upstream.extensions (or upstream.required_patches, if" >&2
-        echo "       the build is broken without it), or delete it." >&2
-        exit 1
-    fi
-done
 for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
     if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
         echo "Error: llvm-build-info.json lists a file that does not exist: ${patch_name}" >&2

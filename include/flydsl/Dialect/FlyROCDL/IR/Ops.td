@@ -26,7 +26,7 @@ def FlyROCDL_GetBufferRsrcOp : FlyROCDL_Op<"get_buffer_rsrc",
   }];
   let arguments = (ins AnyType:$ptr);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "`(` $ptr `)` attr-dict `:` functional-type($ptr, $result)";
+  let assemblyFormat = "`(` $ptr `)` prop-dict attr-dict `:` functional-type($ptr, $result)";
 }
 
 class FlyROCDL_MakeTiledTdmAtomOp<string mnemonic>
@@ -44,7 +44,7 @@ class FlyROCDL_MakeTiledTdmAtomOp<string mnemonic>
   let results = (outs AnyType:$atom, AnyType:$coordTensor);
 
   let assemblyFormat = [{
-    $tensor `,` $smemLayout `,` $tiler attr-dict `:` type(operands)
+    $tensor `,` $smemLayout `,` $tiler prop-dict attr-dict `:` type(operands)
   }];
 }
 

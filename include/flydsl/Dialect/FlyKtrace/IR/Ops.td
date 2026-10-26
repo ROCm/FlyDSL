@@ -38,7 +38,7 @@ def FlyKtrace_MarkOp : FlyKtrace_Op<"mark"> {
   let results = (outs);
 
   let assemblyFormat = [{
-    $event_name (`payload` $payload^ `:` type($payload))? attr-dict
+    $event_name (`payload` $payload^ `:` type($payload))? prop-dict attr-dict
   }];
 }
 
@@ -55,7 +55,7 @@ def FlyKtrace_RangePushOp : FlyKtrace_Op<"range_push"> {
   let results = (outs);
 
   let assemblyFormat = [{
-    $event_name (`payload` $payload^ `:` type($payload))? attr-dict
+    $event_name (`payload` $payload^ `:` type($payload))? prop-dict attr-dict
   }];
 }
 
@@ -71,7 +71,7 @@ def FlyKtrace_RangePopOp : FlyKtrace_Op<"range_pop"> {
   let results = (outs);
 
   let assemblyFormat = [{
-    (`payload` $payload^ `:` type($payload))? attr-dict
+    (`payload` $payload^ `:` type($payload))? prop-dict attr-dict
   }];
 }
 
@@ -93,7 +93,7 @@ def FlyKtrace_RangeStartOp : FlyKtrace_Op<"range_start"> {
   let results = (outs AnyType:$token);
 
   let assemblyFormat = [{
-    $event_name (`payload` $payload^ `:` type($payload))? attr-dict `->` type($token)
+    $event_name (`payload` $payload^ `:` type($payload))? prop-dict attr-dict `->` type($token)
   }];
 }
 
@@ -116,7 +116,7 @@ def FlyKtrace_RangeStopOp : FlyKtrace_Op<"range_stop"> {
   let results = (outs);
 
   let assemblyFormat = [{
-    $token `,` $event_name (`payload` $payload^ `:` type($payload))? attr-dict
+    $token `,` $event_name (`payload` $payload^ `:` type($payload))? prop-dict attr-dict
     `:` type($token)
   }];
 }

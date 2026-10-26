@@ -11,7 +11,7 @@
 // CHECK: %[[STATE:.*]] = vector.insert_strided_slice %[[LOAD]], %[[POISON]] offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
 // CHECK: %[[READ:.*]] = vector.extract_strided_slice %[[STATE]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[READ]], %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 1, 0>}
-// CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, global, 4:1>) -> ()
+// CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, <global>, 4:1>) -> ()
 
 gpu.module @promote_rmem_to_vector_ssa_copy {
   gpu.func @promote_copy_atoms_to_ssa(%src: !fly.ptr<f16, global>, %dst: !fly.ptr<f16, global>) kernel {
@@ -103,7 +103,7 @@ gpu.module @promote_rmem_to_vector_ssa_copy {
 // CHECK: %[[UPDATED:.*]] = vector.insert_strided_slice %[[SSA]], %[[DST_POISON]] offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
 // CHECK: %[[OUT_VEC:.*]] = vector.extract_strided_slice %[[UPDATED]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[OUT_VEC]], %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 1, 0>}
-// CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, global, 4:1>) -> ()
+// CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, <global>, 4:1>) -> ()
 gpu.module @promote_rmem_to_vector_ssa_copy_pred {
   gpu.func @promote_pred_copy_to_ssa(%src: !fly.ptr<f16, global>, %dst: !fly.ptr<f16, global>, %pred_val: i1) kernel {
     %c0_i16 = arith.constant 0 : i16
