@@ -6,6 +6,7 @@ import enum
 import fcntl
 import hashlib
 import inspect
+import operator
 import os
 import pickle
 import threading
@@ -18,9 +19,12 @@ from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import torch
+
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr import numeric as _fast_num
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
@@ -38,6 +42,7 @@ from .diagnostics import (
 from .jit_argument import (
     DLTensorJitArg,
     JitArgumentRegistry,
+    MemRefJitArg,
     PointerJitArg,
     TorchTensorJitArg,
     convert_to_jit_arguments,
@@ -1222,6 +1227,426 @@ class _TraceResult:
     has_ktrace_buf: bool
 
 
+# ================================ Cache-hit fast dispatch ================================
+#
+# ``JitFunction.__call__`` on a warm, already-compiled kernel used to redo the
+# full slow-path bookkeeping on *every* launch: globals-drift snapshot
+# (``_snapshot_or_check_globals``), ``sig.bind`` + ``apply_defaults``, full cache-key
+# construction (each argument wrapped into a ``JitArgument`` and probed with the
+# ``typing.Protocol`` ``isinstance`` check, which goes through
+# ``inspect.getattr_static``), compile-hint merging and the compile/runtime
+# pairing check, before finally hitting ``_call_state_cache``. That costs
+# ~50 us per launch in eager serving loops.
+#
+# The fast path below maps a cheap per-call key straight to the ``CallState``
+# the slow path already resolved. The fast key is *at least as fine* as the
+# slow key: for every parameter it records either the exact slow-path key part
+# (Constexpr / Type params, JitArgument instances) or a tuple that determines it
+# uniquely (torch tensors: ``(type, dtype, ndim, first unit-stride dim)`` which
+# fixes ``TorchTensorJitArg``'s cache signature; numerics / streams whose
+# signature is ``(ctor,)``: the Python type). Everything that the slow key
+# depends on but the fast key does not carry is validated as a whole "epoch":
+# the cache-key env vars (plus every env var read on the hit path), the
+# JitArgument registry, compile hints (persistent + thread-local), the device
+# runtime registration, and the captured globals (identity checks, exact
+# snapshot comparison for mutable containers). Captured types: a type read as a
+# module global sits in the memoized ``_globals_`` key segment and is drift
+# checked by identity here (rebinding it falls back to the slow path, which
+# raises); types / values captured in closures only feed ``manager_key`` (the
+# disk-cache directory), which is not part of the in-process key and is not
+# consulted on a hit, so the fast path sees exactly what the slow hit path
+# sees. Any mismatch, unknown argument type, unsupported signature, first call
+# or trace context falls back to the unchanged slow path, which also
+# (re)populates the fast cache. Set ``FLYDSL_JIT_FASTPATH=0`` to disable the
+# fast path entirely.
+
+_FASTPATH_ENABLED = os.environ.get("FLYDSL_JIT_FASTPATH", "1").strip().lower() not in ("0", "false", "no", "off")
+
+_MISSING = object()
+
+# Env vars read by the cache-hit slow path (cache key + hit-path control flow).
+_FAST_ENV_VARS = tuple(
+    dict.fromkeys(
+        _CACHE_INVALIDATING_ENV_VARS
+        + (
+            type(env.compile).options["backend"].env_var,
+            type(env.compile).options["compile_only"].env_var,
+            type(env.runtime).options["kind"].env_var,
+            type(env.runtime).options["enable_cache"].env_var,
+            type(env.runtime).options["run_only"].env_var,
+            type(env.runtime).options["cache_dir"].env_var,
+            type(env.debug).options["dump_ir"].env_var,
+        )
+    )
+)
+_FAST_ENV_VARS_ENCODED = tuple(os.fsencode(n) for n in _FAST_ENV_VARS)
+
+
+def _fast_env_fingerprint() -> tuple:
+    if _ENABLE_ENV_FAST_READ:
+        return tuple(map(os.environ._data.get, _FAST_ENV_VARS_ENCODED))
+    return tuple(map(os.environ.get, _FAST_ENV_VARS))
+
+
+# Per-parameter kinds (fixed by the annotation).
+_PK_CONSTEXPR = 0
+_PK_TYPE = 1
+_PK_VALUE = 2
+
+# Per-(parameter, python type) handlers for _PK_VALUE parameters.
+_H_TENSOR = 1  # raw torch tensor -> TorchTensorJitArg (dynamic layout)
+_H_TYPE_SIG = 2  # converted signature is ``(ctor,)``; raw value accepted by the C-ABI fill
+_H_JITARG = 3  # value already is a JitArgument: exact __cache_signature__()
+_H_POINTER = 4  # PointerJitArg: exact signature fields, minus the str() call
+_H_CONVERT = 5  # anything else convertible: build the JitArgument exactly like the slow path
+
+
+def _fast_param_spec(sig):
+    """Static per-parameter info for the fast path, or ``None`` if unsupported.
+
+    Only plain positional-or-keyword parameters are supported, for which
+    ``sig.bind(*args, **kwargs)`` + ``apply_defaults()`` is reproduced exactly
+    by :meth:`JitFunction._fast_bind`.
+    """
+    names = []
+    defaults = []
+    kinds = []
+    ann_jits = []
+    for p in sig.parameters.values():
+        if p.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            return None
+        ann = p.annotation
+        names.append(p.name)
+        defaults.append(_MISSING if p.default is inspect.Parameter.empty else p.default)
+        ann_jit = None
+        if ann is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(ann):
+            kind = _PK_CONSTEXPR
+        elif ann is not inspect.Parameter.empty and is_type_param_annotation(ann):
+            kind = _PK_TYPE
+        else:
+            kind = _PK_VALUE
+            try:
+                if isinstance(ann, type) and issubclass(ann, JitArgument):
+                    ann_jit = ann
+            except TypeError:
+                return None
+        kinds.append(kind)
+        ann_jits.append(ann_jit)
+    n = len(names)
+    # default tails: tails[k] = defaults for params k..n-1, or None if any is required
+    tails = []
+    for k in range(n + 1):
+        tail = tuple(defaults[k:])
+        tails.append(None if any(d is _MISSING for d in tail) else tail)
+    cidx = tuple(i for i in range(n) if kinds[i] == _PK_CONSTEXPR)
+    tidx = tuple(i for i in range(n) if kinds[i] == _PK_TYPE)
+    vidx = tuple(i for i in range(n) if kinds[i] == _PK_VALUE)
+    return _FastSpec(
+        tuple(names),
+        {name: i for i, name in enumerate(names)},
+        tuple(defaults),
+        tuple(kinds),
+        tuple(ann_jits),
+        tuple(tails),
+        _tuple_getter(cidx),
+        _tuple_getter(tidx),
+        vidx,
+    )
+
+
+_FastSpec = namedtuple("_FastSpec", ["names", "index", "defaults", "kinds", "anns", "tails", "cget", "tget", "vidx"])
+
+
+def _tuple_getter(idx):
+    """``vals -> tuple(vals[i] for i in idx)`` (C-level), or None if ``idx`` is empty."""
+    if not idx:
+        return None
+    if len(idx) == 1:
+        (i,) = idx
+        return lambda v, _i=i: (v[_i],)
+    return operator.itemgetter(*idx)
+
+
+# Constexpr scalar types whose slow-path signature is exactly ``(type(v), v)``.
+_CONSTEXPR_SCALAR_TYPES = frozenset((int, bool, float, str))
+_KEY_CBATCH = object()  # key-layout markers (keep the two constexpr layouts disjoint)
+_KEY_CSLOW = object()
+
+
+def _fast_resolve_handler(ann_jit, value):
+    """Pick the fast handler for a _PK_VALUE parameter given a sample value.
+
+    Mirrors the branch order of ``_resolve_and_make_cache_key``. The decision
+    only depends on ``type(value)`` (and the static annotation), so it is
+    memoized per (parameter, type). Returns ``(handler, ctor)``.
+    """
+    t = type(value)
+    _num = _fast_num
+    if isinstance(value, JitArgument):
+        if t is PointerJitArg and t.__cache_signature__ is _PTR_CACHE_SIGNATURE:
+            return _H_POINTER, None
+        return _H_JITARG, None
+    if ann_jit is not None:
+        ctor = ann_jit
+    else:
+        ctor, _ = JitArgumentRegistry.get(t)
+        if ctor is None:
+            return None, None  # slow path raises TypeError
+    sig_fn = getattr(ctor, "__cache_signature__", None)
+    type_only_sig = sig_fn is _NUMERIC_CACHE_SIGNATURE or sig_fn is _STREAM_CACHE_SIGNATURE
+    if type_only_sig:
+        # ``ctor(value)`` is an instance of ``ctor`` -> signature ``(ctor,)``; the
+        # raw value is packed by the same C-ABI fill (it unwraps ``.value``).
+        if ctor is Stream:
+            return _H_TYPE_SIG, ctor
+        if ctor in _FAST_INT_TYPES and t in (int, bool) and ctor.__init__ is _num.Integer.__init__:
+            return _H_TYPE_SIG, ctor  # _wrap_int == ctypes C-cast truncation
+        if ctor is _num.Boolean and t in (int, bool):
+            return _H_TYPE_SIG, ctor  # bool(value) either way
+        if ctor in (_num.Float32, _num.Float64) and t is float:
+            return _H_TYPE_SIG, ctor
+    if (
+        ann_jit is None
+        and ctor is TorchTensorJitArg
+        and isinstance(value, torch.Tensor)
+        and TorchTensorJitArg.__init__ is _TORCH_JITARG_INIT
+        and TorchTensorJitArg.__cache_signature__ is MemRefJitArg.__cache_signature__
+        and MemRefJitArg.__cache_signature__ is _MEMREF_CACHE_SIGNATURE
+    ):
+        return _H_TENSOR, ctor
+    return _H_CONVERT, ctor
+
+
+def _identity_check_kind(val):
+    """How a captured global can be drift-checked without re-snapshotting.
+
+    Returns ``(kind, token)``; kind ``None`` means "use the exact snapshot".
+    The snapshot (stable=False) of these values is fully determined by the
+    object identity plus the token:
+      0: immutable scalars / tuples+frozensets of them (by value == by identity)
+      1: opaque objects and callables with a default repr -> type(val)
+      2: plain functions -> __qualname__ (repr is "<function qualname at id>")
+      3: classes with the default ``type.__repr__`` -> (__module__, __qualname__)
+      4: modules / builtin functions -> type(val)
+      5: builtin containers (tuple/list/set/frozenset/dict) -> structural
+         identity snapshot (:func:`_freeze_global`), catching in-place mutation
+    """
+    t = type(val)
+    if t in _SNAPSHOT_SCALARS:
+        return 0, None
+    if (t is tuple or t is frozenset) and all(type(v) in _SNAPSHOT_SCALARS for v in val):
+        return 0, None  # immutable all-scalar container: identity is enough
+    if t in _SNAPSHOT_CONTAINERS:
+        fz = _freeze_global(val, 0)
+        return (5, fz) if fz is not None else (None, None)
+    if isinstance(val, _SNAPSHOT_CONTAINERS):
+        # Container *subclass* (OrderedDict, defaultdict, namedtuple, ...): the slow
+        # snapshot walks it by value, so in-place mutation must be seen -> exact.
+        return None, None
+    if t is types.FunctionType:
+        return 2, val.__qualname__
+    if t is types.ModuleType or t is types.BuiltinFunctionType:
+        return 4, t
+    if isinstance(val, type):
+        if t.__repr__ is type.__repr__:
+            return 3, (val.__module__, val.__qualname__)
+        return None, None
+    if callable(val):
+        if t.__repr__ is object.__repr__:
+            return 1, t
+        return None, None
+    return 1, t  # non-callable opaque object: snapshot is ("obj", id, type qualname)
+
+
+def _freeze_global(v, depth):
+    """Identity snapshot of a captured container global, or None if unsupported.
+
+    Node layouts: (0, obj) leaf checked by identity (scalars), (k, obj, tok) leaf
+    checked by identity + kind token k in 1..4 (see _identity_check_kind), and
+    (5, obj, children) for containers (identity, length, then children in
+    iteration order; dict children are (frozen key, frozen value)). Equal
+    identity snapshots imply an equal ``_snapshot_global_value(stable=False)``.
+    """
+    t = type(v)
+    if t in _SNAPSHOT_SCALARS:
+        return (0, v)
+    if t in _SNAPSHOT_CONTAINERS:
+        if depth >= 4 or len(v) > 256:
+            return None
+        children = []
+        if t is dict:
+            for k, x in v.items():
+                fk = _freeze_global(k, depth + 1)
+                fv = _freeze_global(x, depth + 1)
+                if fk is None or fv is None:
+                    return None
+                children.append((fk, fv))
+        else:
+            for x in v:
+                fx_ = _freeze_global(x, depth + 1)
+                if fx_ is None:
+                    return None
+                children.append(fx_)
+        return (5, v, tuple(children))
+    kind, tok = _identity_check_kind(v)
+    if kind is None or kind == 0 or kind == 5:
+        return None
+    return (kind, v, tok)
+
+
+def _check_frozen_global(cur, node) -> bool:
+    if cur is not node[1]:
+        return False
+    k = node[0]
+    if k == 0:
+        return True
+    if k == 5:
+        children = node[2]
+        if len(cur) != len(children):
+            return False
+        if type(cur) is dict:
+            for (fk, fv), (ck, cv) in zip(children, cur.items()):
+                if not _check_frozen_global(ck, fk) or not _check_frozen_global(cv, fv):
+                    return False
+        else:
+            for fx_, cx in zip(children, cur):
+                if not _check_frozen_global(cx, fx_):
+                    return False
+        return True
+    tok = node[2]
+    if k == 1 or k == 4:
+        return type(cur) is tok
+    if k == 2:
+        return cur.__qualname__ == tok
+    if k == 3:
+        return (cur.__module__, cur.__qualname__) == tok
+    return False
+
+
+def _freeze(v, depth=0):
+    """Identity snapshot of a compile-hint value: scalars by identity, builtin
+    dict/list/tuple containers (<= 4 levels) structurally. ``None`` if unsupported.
+
+    The slow path folds ``repr(value)`` of every hint into the cache key, so any
+    in-place mutation of a (nested) hint container must invalidate the fast path;
+    :func:`_same_frozen` detects that (conservatively: identity, not equality)."""
+    t = type(v)
+    if t in _SNAPSHOT_SCALARS:
+        return v
+    if depth >= 4:
+        return None
+    if t is dict:
+        items = []
+        for k, x in v.items():
+            fx_ = _freeze(x, depth + 1)
+            if fx_ is None and x is not None:
+                return None
+            items.append((k, fx_))
+        return (dict, tuple(items))
+    if t is list or t is tuple:
+        elems = []
+        for x in v:
+            fx_ = _freeze(x, depth + 1)
+            if fx_ is None and x is not None:
+                return None
+            elems.append(fx_)
+        return (t, tuple(elems))
+    return None
+
+
+def _same_frozen(v, fz) -> bool:
+    if type(fz) is not tuple:  # frozen scalar (scalars are never tuples)
+        return v is fz
+    ctype, items = fz
+    if type(v) is not ctype or len(v) != len(items):
+        return False
+    if ctype is dict:
+        for (k, f2), (k2, v2) in zip(items, v.items()):
+            if k is not k2 or not _same_frozen(v2, f2):
+                return False
+        return True
+    for f2, v2 in zip(items, v):
+        if not _same_frozen(v2, f2):
+            return False
+    return True
+
+
+class _CallStateCache(dict):
+    """``JitFunction._call_state_cache``: a plain dict that also counts
+    destructive mutations (clear / delete / pop / overwrite / update).
+
+    A ``CallState`` does not own the compiled code object, so a fast-path entry
+    is only valid while the slow path would return the very same ``CallState``
+    from this cache. Any destructive mutation (e.g. a test resetting the JIT
+    caches, which frees the artifact) bumps ``gen`` and invalidates the whole
+    fast cache. Pure insertions (new compilations) do not."""
+
+    __slots__ = ("gen",)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gen = 0
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.gen += 1
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        self.gen += 1
+        super().__delitem__(key)
+
+    def clear(self):
+        self.gen += 1
+        super().clear()
+
+    def pop(self, *args):
+        self.gen += 1
+        return super().pop(*args)
+
+    def popitem(self):
+        self.gen += 1
+        return super().popitem()
+
+    def update(self, *args, **kwargs):
+        self.gen += 1
+        super().update(*args, **kwargs)
+
+    def __ior__(self, other):
+        self.gen += 1
+        return super().__ior__(other)
+
+
+class _FastEpoch:
+    """Everything outside the fast key that the slow cache key / hit path reads."""
+
+    __slots__ = ("env_fp", "reg_len", "hints_obj", "hints_items", "rt_map_obj", "rt_map_snap", "csc", "csc_gen")
+
+    def __init__(self, env_fp, reg_len, hints_obj, hints_items, rt_map_obj, rt_map_snap, csc, csc_gen):
+        self.env_fp = env_fp
+        self.reg_len = reg_len
+        self.hints_obj = hints_obj
+        self.hints_items = hints_items
+        self.rt_map_obj = rt_map_obj
+        self.rt_map_snap = rt_map_snap
+        self.csc = csc
+        self.csc_gen = csc_gen
+
+
+_NUMERIC_CACHE_SIGNATURE = _fast_num.Numeric.__cache_signature__
+_STREAM_CACHE_SIGNATURE = Stream.__cache_signature__
+_PTR_CACHE_SIGNATURE = PointerJitArg.__cache_signature__
+_TORCH_JITARG_INIT = TorchTensorJitArg.__init__
+_MEMREF_CACHE_SIGNATURE = MemRefJitArg.__cache_signature__
+_DEVICE_RUNTIME = None  # flydsl.runtime.device_runtime, bound on the first slow-path call
+_FAST_CACHE_MAX = 4096  # bound on distinct fast keys per JitFunction (cleared when full)
+_FAST_INT_TYPES = tuple(
+    getattr(_fast_num, n)
+    for n in ("Int8", "Int16", "Int32", "Int64", "Uint8", "Uint16", "Uint32", "Uint64")
+    if hasattr(_fast_num, n)
+)
+
+
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
         install_excepthook()
@@ -1248,7 +1673,7 @@ class JitFunction:
         self.manager_key = None
         self._manager_owner_cls = None
         self.cache_manager = None
-        self._call_state_cache = {}  # cache_key -> CallState
+        self._call_state_cache = _CallStateCache()  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
         self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
@@ -1270,6 +1695,13 @@ class JitFunction:
         # raising first, so the segment is built once and reused on every cache
         # hit (matching Triton, which never re-snapshots globals per launch).
         self._globals_prefix_cache: Dict[Any, tuple] = {}
+
+        # Cache-hit fast dispatch state (see the "Cache-hit fast dispatch" notes).
+        self._fast_spec = _MISSING  # lazily: _fast_param_spec(sig) or None (unsupported)
+        self._fast_cache: Dict[tuple, CallState] = {}  # fast key -> CallState
+        self._fast_handlers = None  # per param: {python type: (handler, ctor)}
+        self._fast_drift: Dict[Any, tuple] = {}  # owner_cls -> (identity refs, exact refs)
+        self._fast_epoch: Optional[_FastEpoch] = None
 
     def __get__(self, obj, objtype=None):
         # when used as a method on a class bind the owning instance as the
@@ -1554,16 +1986,321 @@ class JitFunction:
             has_ktrace_buf=has_ktrace_buf,
         )
 
+    # ------------------------------------------------------------------
+    # Cache-hit fast dispatch
+    # ------------------------------------------------------------------
+
+    def _fast_bind(self, spec, args, kwargs):
+        """Exact ``sig.bind(*args, **kwargs)`` + ``apply_defaults()`` for
+        positional-or-keyword-only signatures; ``None`` -> let the slow path
+        bind (and raise its own TypeError if the call is malformed)."""
+        names, index, defaults, tails = spec.names, spec.index, spec.defaults, spec.tails
+        n = len(names)
+        na = len(args)
+        if na > n:
+            return None
+        if not kwargs:
+            if na == n:
+                return list(args)
+            tail = tails[na]
+            if tail is None:
+                return None
+            return list(args) + list(tail)
+        vals = list(args) + [_MISSING] * (n - na)
+        for k, v in kwargs.items():
+            i = index.get(k)
+            if i is None or i < na:
+                return None
+            vals[i] = v
+        for i in range(na, n):
+            if vals[i] is _MISSING:
+                d = defaults[i]
+                if d is _MISSING:
+                    return None
+                vals[i] = d
+        return vals
+
+    def _fast_key(self, owner_cls, vals, *, resolve):
+        """Build the fast key for bound values ``vals`` (mutated in place for
+        _H_CONVERT params, exactly like the slow path's in-place resolution).
+        Returns ``None`` when the fast path cannot represent the call.
+
+        Layout: (owner_cls, <constexpr part>, <type-param values>, <value params...>).
+        Constexpr part: all-scalar -> (marker, values, types), which is equal iff
+        every ``(type(v), v)`` == ``Constexpr.value_signature(v)`` is; otherwise
+        (marker, tuple of exact value signatures). Type params are keyed exactly
+        like the slow key (incl. ``(T, T.__cache_signature__())`` for Structs with
+        member behavior)."""
+        spec = self._fast_spec
+        parts = [owner_cls]
+        append = parts.append
+        cget = spec.cget
+        if cget is not None:
+            cv = cget(vals)
+            ct = tuple(map(type, cv))
+            if _CONSTEXPR_SCALAR_TYPES.issuperset(ct):
+                append((_KEY_CBATCH, cv, ct))
+            else:
+                sigs = []
+                for v in cv:
+                    try:
+                        sigs.append(Constexpr.value_signature(v))
+                    except Exception:
+                        return None
+                append((_KEY_CSLOW, tuple(sigs)))
+        tget = spec.tget
+        if tget is not None:
+            tv = tget(vals)
+            if any(getattr(a, "__dsl_member_behavior__", False) for a in tv):
+                # Same as the slow key: Structs with member behavior add their definition signature.
+                tv = tuple(
+                    (a, a.__cache_signature__()) if getattr(a, "__dsl_member_behavior__", False) else a for a in tv
+                )
+            append(tv)
+        anns = spec.anns
+        handlers = self._fast_handlers
+        for i in spec.vidx:
+            a = vals[i]
+            t = type(a)
+            h = handlers[i].get(t)
+            if h is None:
+                if not resolve:
+                    return None
+                h = _fast_resolve_handler(anns[i], a)
+                handlers[i][t] = h
+            hk = h[0]
+            if hk == _H_TENSOR:
+                st = a.stride()
+                try:
+                    unit = st.index(1)
+                except ValueError:
+                    return None  # slow path raises the no-unit-stride error
+                append((t, a.dtype, len(st), unit))
+            elif hk == _H_TYPE_SIG:
+                append(t)
+            elif hk == _H_POINTER:
+                asp = a.address_space
+                append((t, a.element_type, type(asp), asp, a.alignment))
+            elif hk == _H_JITARG:
+                append((t, a.__cache_signature__()))
+            elif hk == _H_CONVERT:
+                try:
+                    jit_arg = h[1](a)
+                except Exception:
+                    return None
+                vals[i] = jit_arg
+                append((t, cache_signature(jit_arg)))
+            else:
+                return None
+        return tuple(parts)
+
+    def _fast_epoch_ok(self, epoch) -> bool:
+        csc = self._call_state_cache
+        if csc is not epoch.csc or csc.gen != epoch.csc_gen:
+            return False
+        if _fast_env_fingerprint() != epoch.env_fp:
+            return False
+        if len(JitArgumentRegistry.registry) != epoch.reg_len:
+            return False
+        if getattr(CompilationContext._compile_hints, "data", None):
+            return False
+        hints = self.compile_hints
+        if hints is not epoch.hints_obj:
+            return False
+        if not _same_frozen(hints, epoch.hints_items):
+            return False
+        dr = _DEVICE_RUNTIME
+        if dr is None:
+            return False
+        if dr._runtime_cls_override is not None or dr._EXTRA_MAPPINGS:
+            return False
+        m = dr.COMPILE_BACKEND_TO_RUNTIME_KIND
+        if m is not epoch.rt_map_obj or m != epoch.rt_map_snap:
+            return False
+        return True
+
+    @staticmethod
+    def _fast_drift_ok(drift) -> bool:
+        ident, exact, _baseline = drift
+        for d, name, obj, kind, tok in ident:
+            cur = d.get(name, _MISSING)
+            if cur is not obj:
+                return False
+            if kind == 0:
+                continue
+            if kind == 1 or kind == 4:
+                if type(cur) is not tok:
+                    return False
+            elif kind == 2:
+                if cur.__qualname__ != tok:
+                    return False
+            elif kind == 3:
+                if (cur.__module__, cur.__qualname__) != tok:
+                    return False
+            elif kind == 5:
+                if not _check_frozen_global(cur, tok):
+                    return False
+            else:
+                return False
+        for d, name, old in exact:
+            new = _snapshot_global_value(d[name], stable=False) if name in d else None
+            if new != old:
+                return False
+        return True
+
+    def _fast_call(self, args, kwargs):
+        """Return the launch result, or ``_MISSING`` to fall back to the slow path."""
+        epoch = self._fast_epoch
+        if epoch is None or not self._fast_epoch_ok(epoch):
+            return _MISSING
+        if self._has_self_param:
+            if not args:
+                return _MISSING
+            owner_cls = type(args[0])
+            args = args[1:]
+        else:
+            owner_cls = None
+        drift = self._fast_drift.get(owner_cls)
+        if drift is None:
+            return _MISSING
+        try:
+            vals = self._fast_bind(self._fast_spec, args, kwargs)
+            if vals is None:
+                return _MISSING
+            key = self._fast_key(owner_cls, vals, resolve=False)
+            if key is None:
+                return _MISSING
+            call_state = self._fast_cache.get(key)
+            if call_state is None:
+                return _MISSING
+            if not self._fast_drift_ok(drift):
+                return _MISSING  # slow path re-checks exactly and raises on real drift
+        except Exception:
+            # e.g. an unhashable key part or a raising __cache_signature__: the
+            # slow path reproduces (or raises) exactly as before.
+            return _MISSING
+        return call_state(tuple(vals))
+
+    def _fast_build_drift(self, owner_cls):
+        baseline = self._used_global_vals.get(owner_cls)
+        if baseline is None:
+            return None
+        ident = []
+        exact = []
+        for name, mod_name, var_dict in self._get_global_refs(owner_cls):
+            old = baseline.get((name, mod_name), _NOT_IN_BASELINE)
+            if old is _NOT_IN_BASELINE:
+                continue
+            if name not in var_dict:
+                exact.append((var_dict, name, old))
+                continue
+            val = var_dict[name]
+            kind, tok = _identity_check_kind(val)
+            # Only trust the identity shortcut if the value still matches the
+            # first-compile baseline exactly right now.
+            if kind is not None and _snapshot_global_value(val, stable=False) == old:
+                ident.append((var_dict, name, val, kind, tok))
+            else:
+                exact.append((var_dict, name, old))
+        return (tuple(ident), tuple(exact), baseline)
+
+    def _fast_register(self, owner_cls, raw_vals, call_state, env_fp):
+        """Record ``raw_vals -> call_state`` after a successful slow-path dispatch."""
+        try:
+            if not _FASTPATH_ENABLED or call_state is None:
+                return
+            if self._fast_spec is _MISSING:
+                self._fast_spec = _fast_param_spec(self._sig)
+                if self._fast_spec is not None:
+                    self._fast_handlers = tuple({} for _ in self._fast_spec.names)
+            if self._fast_spec is None:
+                return
+            if _fast_env_fingerprint() != env_fp:
+                return  # env changed while the slow path ran: key/env pairing uncertain
+            if getattr(CompilationContext._compile_hints, "data", None):
+                return
+            if env.compile.compile_only:
+                return
+            dr = _DEVICE_RUNTIME
+            if dr is None or dr._runtime_cls_override is not None or dr._EXTRA_MAPPINGS:
+                return
+            hints = self.compile_hints
+            if not isinstance(hints, dict):
+                return
+            hints_items = _freeze(hints)
+            if hints_items is None:
+                return  # hint values we cannot snapshot cheaply: stay on the slow path
+            csc = self._call_state_cache
+            if type(csc) is not _CallStateCache:
+                return  # replaced by a plain dict: cannot track invalidation
+            reg_len = len(JitArgumentRegistry.registry)
+            epoch = self._fast_epoch
+            if (
+                epoch is None
+                or epoch.csc is not csc
+                or epoch.csc_gen != csc.gen
+                or epoch.env_fp != env_fp
+                or epoch.reg_len != reg_len
+                or epoch.hints_obj is not hints
+                or not _same_frozen(hints, epoch.hints_items)
+                or epoch.rt_map_obj is not dr.COMPILE_BACKEND_TO_RUNTIME_KIND
+                or epoch.rt_map_snap != dr.COMPILE_BACKEND_TO_RUNTIME_KIND
+            ):
+                # New epoch: everything cached under the old one is dropped.
+                self._fast_cache.clear()
+                self._fast_drift.clear()
+                if epoch is None or epoch.reg_len != reg_len:
+                    self._fast_handlers = tuple({} for _ in self._fast_spec.names)
+                self._fast_epoch = _FastEpoch(
+                    env_fp,
+                    reg_len,
+                    hints,
+                    hints_items,
+                    dr.COMPILE_BACKEND_TO_RUNTIME_KIND,
+                    dict(dr.COMPILE_BACKEND_TO_RUNTIME_KIND),
+                    csc,
+                    csc.gen,
+                )
+            drift = self._fast_drift.get(owner_cls)
+            if drift is None or drift[2] is not self._used_global_vals.get(owner_cls) or not self._fast_drift_ok(drift):
+                # (Re)build: first call for this owner, reset baseline, or a global
+                # that was rebound to a snapshot-equal value since the last build.
+                drift = self._fast_build_drift(owner_cls)
+                if drift is None:
+                    self._fast_drift.pop(owner_cls, None)
+                    return
+                self._fast_drift[owner_cls] = drift
+            vals = list(raw_vals)
+            key = self._fast_key(owner_cls, vals, resolve=True)
+            if key is None:
+                return
+            if len(self._fast_cache) >= _FAST_CACHE_MAX:
+                self._fast_cache.clear()
+            self._fast_cache[key] = call_state
+        except Exception:
+            # The fast path is purely an accelerator: never let its bookkeeping
+            # break a launch that the slow path already handled.
+            return
+
     def __call__(self, *args, **kwargs):
-        return self._compile_or_execute(args, kwargs, execute=True)
+        if _FASTPATH_ENABLED and self._fast_epoch is not None and ir.Context.current is None:
+            res = self._fast_call(args, kwargs)
+            if res is not _MISSING:
+                return res
+        return self._compile_or_execute(args, kwargs, execute=True, fast_register=_FASTPATH_ENABLED)
 
     def _compile_only(self, *args, **kwargs):
         """Compile one specialization without creating an engine or running it."""
         return self._compile_or_execute(args, kwargs, execute=False)
 
-    def _compile_or_execute(self, args, kwargs, *, execute: bool, return_compiled: bool = False):
+    def _compile_or_execute(
+        self, args, kwargs, *, execute: bool, return_compiled: bool = False, fast_register: bool = False
+    ):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
+
+        # Only plain ``__call__`` launches feed the fast-dispatch cache.
+        _fast_env_fp = _fast_env_fingerprint() if fast_register else None
 
         bound_self, args = self._split_self(args)
         owner_cls = type(bound_self) if bound_self is not None else None
@@ -1574,6 +2311,9 @@ class JitFunction:
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
+        # Raw (pre-resolution) values for the fast-dispatch key; captured before
+        # _build_full_cache_key replaces them with JitArgument instances.
+        _fast_raw_vals = tuple(bound.arguments.values()) if _fast_env_fp is not None else None
 
         # Resolve once so cache identity and compilation use the same options.
         effective_hints = self._effective_compile_hints()
@@ -1600,11 +2340,19 @@ class JitFunction:
 
             ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
+        global _DEVICE_RUNTIME
+        if _DEVICE_RUNTIME is None:
+            from ..runtime import device_runtime as _dr_mod
+
+            _DEVICE_RUNTIME = _dr_mod
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
             if env.compile.compile_only:
                 return None
+            if _fast_raw_vals is not None:
+                self._fast_register(owner_cls, _fast_raw_vals, call_state, _fast_env_fp)
             result = call_state(args_tuple) if execute else None
             if return_compiled:
                 return self._make_compiled_function(cache_key, bound, call_state)
@@ -1651,6 +2399,8 @@ class JitFunction:
                 return self._make_compiled_function(cache_key, bound, None) if return_compiled else None
             state = _build_call_state(sig, args_tuple, cached_func)
             self._call_state_cache[cache_key] = state
+            if _fast_raw_vals is not None:
+                self._fast_register(owner_cls, _fast_raw_vals, state, _fast_env_fp)
             result = state(args_tuple)
             return self._make_compiled_function(cache_key, bound, state) if return_compiled else result
 
@@ -1737,6 +2487,8 @@ class JitFunction:
         # cache is off.
         state = _build_call_state(sig, args_tuple, compiled_func)
         self._call_state_cache[cache_key] = state
+        if _fast_raw_vals is not None:
+            self._fast_register(owner_cls, _fast_raw_vals, state, _fast_env_fp)
         result = state(args_tuple)
         return self._make_compiled_function(cache_key, bound, state) if return_compiled else result
 
