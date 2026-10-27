@@ -77,9 +77,7 @@ def _compile_degenerate_mode():
 
     @flyc.kernel(name="tdm_contiguous_filler_degenerate", known_block_size=[32, 1, 1])
     def load_scales(arg: fx.Pointer):
-        g = fx.Tensor(
-            fx.make_view(arg, fx.make_layout((N_BLOCKS, 1, KT_ALL), (KT_ALL, 1, 1)))
-        )
+        g = fx.Tensor(fx.make_view(arg, fx.make_layout((N_BLOCKS, 1, KT_ALL), (KT_ALL, 1, 1))))
         return fx.rocdl.cdna5.make_tiled_tdm_atom(
             fx.rocdl.TensorLoad(),
             g,
