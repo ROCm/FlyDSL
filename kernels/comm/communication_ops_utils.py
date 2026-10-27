@@ -94,6 +94,16 @@ def fence_agent_release():
     fence_release(fx.rocdl.SyncScope.AgentOneAs)
 
 
+def load_i32_global_agent(addr_i64):
+    """Volatile monotonic i32 load with agent-one-as visibility."""
+    return fx.generic_load(
+        _to_ptr_global(addr_i64, fx.Int32, 4),
+        volatile=True,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=fx.rocdl.SyncScope.AgentOneAs,
+    )
+
+
 def load_i64_global(addr_i64):
     """Relaxed global i64 load from ``addr_i64``.
 
