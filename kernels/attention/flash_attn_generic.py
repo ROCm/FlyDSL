@@ -308,7 +308,7 @@ def build_flash_attn_func_module_primary(
         if const_expr(_use_dma_dbuf):
             init_args.append(fx.Index(0))
             kv_gmem_to_lds.coop_dma_k(fx.Index(0), buf_id=0)
-            rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         if const_expr(_pipe_k):
             _k0_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(0))
             for _kb in range_constexpr(traits.NUM_BATCHES_KV):
@@ -336,7 +336,7 @@ def build_flash_attn_func_module_primary(
                     else:
                         kv_gmem_to_lds.coop_load_k(pre_k_start, pre_k_slot)
                 if const_expr(traits.ENABLE_DMA):
-                    rocdl.s_waitcnt(0)
+                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                 else:
                     rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
                 gpu.barrier()
@@ -351,7 +351,7 @@ def build_flash_attn_func_module_primary(
                         _k_buf_id = _cur_buf_id
                     else:
                         _k_buf_id = fx.Index(1) - _cur_buf_id
-                    rocdl.s_waitcnt(0)
+                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                     gpu.barrier()
                     _next_k_buf_id = fx.Index(1) - _k_buf_id
                     if const_expr(kv_sub + 1 < traits.N_SUBTILES):
@@ -381,7 +381,7 @@ def build_flash_attn_func_module_primary(
                         rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
                     elif const_expr(traits.ENABLE_GFX942_DMA):
                         kv_gmem_to_lds.coop_dma_k(kv_start, k_slot)
-                        rocdl.s_waitcnt(0)
+                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                     else:
                         kv_gmem_to_lds.coop_load_k(kv_start, k_slot)
                     gpu.barrier()
@@ -450,12 +450,12 @@ def build_flash_attn_func_module_primary(
                     gpu.barrier()
                 elif const_expr(traits.ENABLE_DMA):
                     v_base = kv_gmem_to_lds.v_buf_base(0)
-                    rocdl.s_waitcnt(0)
+                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                     gpu.barrier()
                 elif const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
                     v_slot = 0
                     v_base = kv_gmem_to_lds.v_buf_base(v_slot)
-                    rocdl.s_waitcnt(0)
+                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                     gpu.barrier()
                 else:
                     v_slot = 0

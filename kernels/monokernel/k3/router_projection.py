@@ -10,7 +10,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
-from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.layout import CM_DEV, LAYER_SLOTS
@@ -190,7 +189,7 @@ def build_router_projection(
                 gpu.barrier()
                 local_sample = fx.min(lane % 16, sample_group - 1)
                 sample = sample_base + local_sample
-                accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+                accumulator = fx.full(4, 0.0, fx.Float32)
 
                 for chunk_index in range_constexpr(router_chunks_per_wave):
                     chunk = wave * router_chunks_per_wave + chunk_index
@@ -272,7 +271,7 @@ def build_router_projection(
 
                 def dense_accumulate(weight_rsrc, scale_rsrc, row_tile):
                     accumulator = fx.make_rmem_tensor(4, fx.Float32)
-                    accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
+                    accumulator.store(fx.full(4, 0.0, fx.Float32))
                     valid_sample = lane_mod16 < samples
                     sample = fx.min(lane_mod16, samples - 1)
                     scale_lane = lane_div16 * 16 + lane_mod16
@@ -302,18 +301,11 @@ def build_router_projection(
                             k_base = k128 * 128 + lane_div16 * 16
                             activation_halves = []
                             for k64_half in range_constexpr(2):
-                                loaded = fx.Vector(
-                                    fx.ptr_load(
-                                        x + (sample * hidden + k_base + k64_half * 64) // 4,
-                                        result_type=fx.Vector.make_type(4, fx.Float32),
-                                    )
+                                loaded = fx.ptr_load(
+                                    x + (sample * hidden + k_base + k64_half * 64) // 4,
+                                    result_type=fx.Vector.make_type(4, fx.Float32),
                                 ).bitcast(fx.Int32)
-                                activation_halves.append(
-                                    fx.Vector.from_elements(
-                                        [valid_sample.select(loaded[index], fx.Int32(0)) for index in range(4)],
-                                        fx.Int32,
-                                    )
-                                )
+                                activation_halves.append(valid_sample.select(loaded, 0))
                             activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
                             activation_fragment.store(
                                 activation_halves[0].shuffle(activation_halves[1], list(range(8)))
@@ -405,7 +397,7 @@ def build_router_projection(
                                     )
 
         if include_router and bid == fx.Int32(selector_bid):
-            zero4 = fx.Vector.filled(4, 0, fx.Int32)
+            zero4 = fx.full(4, 0, fx.Int32)
             moe_vectors = moe_elements // 8
             for zero_index in range_constexpr((moe_vectors + threads - 1) // threads):
                 vector_index = tid + zero_index * threads
@@ -445,7 +437,7 @@ def build_router_projection(
                         candidate_score = corrected_scores[value_index]
                         candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
                         take = (candidate_score > best_score) | (
-                            (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
+                            (candidate_score == best_score) & (candidate_id < best_id)
                         )
                         best_score = take.select(candidate_score, best_score)
                         best_id = take.select(candidate_id, best_id)
@@ -453,9 +445,7 @@ def build_router_projection(
                     for shuffle_offset in (32, 16, 8, 4, 2, 1):
                         peer_score = xshfl(best_score, shuffle_offset)
                         peer_id = xshfl(best_id, shuffle_offset)
-                        take = (peer_score > best_score) | (
-                            (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
-                        )
+                        take = (peer_score > best_score) | ((peer_score == best_score) & (peer_id < best_id))
                         best_score = take.select(peer_score, best_score)
                         best_id = take.select(peer_id, best_id)
 

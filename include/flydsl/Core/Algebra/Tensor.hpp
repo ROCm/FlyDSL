@@ -101,10 +101,10 @@ template <class Cat> using MemRef = Tensor<Cat, Pointer<Cat>>;
 template <class Cat> using CoordTensor = Tensor<Cat, IntTuple<Cat>>;
 
 template <class Cat, class Shape, class Stride,
-          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int>>
+          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int> = 0>
 auto make_tensor(Pointer<Cat> pointer, const Shape &shape, const Stride &stride);
 
-template <class LayoutT, class Cat> auto make_coord_tensor(LayoutT layout);
+template <class LayoutT, class Cat = category_of<LayoutT>> auto make_coord_tensor(LayoutT layout);
 
 template <class Cat, class Engine>
 auto layout(const Tensor<Cat, Engine> &tensor, llvm::ArrayRef<int32_t> path = {});
@@ -144,7 +144,7 @@ template <class Cat, class Engine, class Tiler, class Coord>
 auto outer_partition(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, const Coord &coord);
 
 template <class Cat, class Engine, class TileLayout, class Index,
-          std::enable_if_t<is_int_tuple_v<Index>, int>>
+          std::enable_if_t<is_int_tuple_v<Index>, int> = 0>
 auto local_partition(const Tensor<Cat, Engine> &tensor, const TileLayout &tile, const Index &index);
 
 template <class Cat> auto max_common_layout(const MemRef<Cat> &src, const MemRef<Cat> &dst);
@@ -260,14 +260,14 @@ auto make_tensor(Pointer<Cat> pointer, const Shape &shape) {
 }
 
 template <class Cat, class Shape, class Stride,
-          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int> = 0>
+          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int>>
 auto make_tensor(Pointer<Cat> pointer, const Shape &shape, const Stride &stride) {
   static_assert(std::is_same_v<Cat, category_of<Shape>>);
   static_assert(std::is_same_v<Cat, category_of<Stride>>);
   return make_tensor(std::move(pointer), make_layout(shape, stride));
 }
 
-template <class LayoutT, class Cat = category_of<LayoutT>> auto make_coord_tensor(LayoutT layout) {
+template <class LayoutT, class Cat> auto make_coord_tensor(LayoutT layout) {
   auto coord = coprofile(layout);
   return CoordTensor<Cat>(std::move(coord), std::move(layout));
 }
@@ -517,7 +517,8 @@ auto inner_partition(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, cons
   if (tiled.isError())
     return detail::tagError(tiled, AlgebraOp::InnerPartition);
   FLYDSL_CORE_ASSERT(tiled.shape().rank() == 2);
-  auto tileCoord = repeat(IntTuple<Cat>::getNone(), tiled.shape().at(0).rank());
+  // a rank-1 tile group is unpacked too, where CuTe C++ keeps it whole.
+  auto tileCoord = detail::unpackGroup(tiled.shape().at(0));
   auto restCoord = [&]() -> IntTuple<Cat> {
     auto value = coord.asRef();
     if (value.isLeaf())
@@ -539,7 +540,8 @@ auto outer_partition(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, cons
       return value;
     return append(value, IntTuple<Cat>::getNone(), tiled.shape().at(0).rank());
   }();
-  auto restCoord = repeat(IntTuple<Cat>::getNone(), tiled.shape().at(1).rank());
+  // a rank-1 rest group is unpacked too, where CuTe C++ keeps it whole.
+  auto restCoord = detail::unpackGroup(tiled.shape().at(1));
   return slice(make_tuple(tileCoord, restCoord), tiled);
 }
 
@@ -555,7 +557,7 @@ auto local_tile(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, const Coo
 }
 
 template <class Cat, class Engine, class TileLayout, class Index,
-          std::enable_if_t<is_int_tuple_v<Index>, int> = 0>
+          std::enable_if_t<is_int_tuple_v<Index>, int>>
 auto local_partition(const Tensor<Cat, Engine> &tensor, const TileLayout &tile,
                      const Index &index) {
   return outer_partition(tensor, product_each(tile.shape()), tile.get_flat_coord(index));

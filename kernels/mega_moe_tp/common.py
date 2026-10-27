@@ -9,6 +9,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import rocdl as _rocdl
 from flydsl.compiler.ast_rewriter import ASTRewriter
+from flydsl.expr import Int32 as i32
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common.act import sigmoid_batch, sigmoid_f32, silu_mul_batch, tanh_f32
@@ -42,13 +43,6 @@ def ceildiv(numer, denom):
     return (numer + denom - 1) // denom
 
 
-def i32(v):
-    raw = v if isinstance(v, ir.Value) else getattr(v, "ir_value", lambda: None)()
-    if raw is not None and isinstance(raw.type, ir.IndexType):
-        return fx.Int32(fx.index_cast(T.i32, raw))
-    return fx.Int32(v)
-
-
 class _LazyTy:
     def __init__(self, fn):
         self.fn = fn
@@ -78,7 +72,7 @@ def lds_ld(base, off, ty=None, align=4):
 
 
 def lds_ld_i32(base, off):
-    return i32(lds_ld(base, off))
+    return lds_ld(base, off)
 
 
 def lds_st(base, off, val, align=4):
@@ -98,22 +92,20 @@ def gptr(addr):
 
 
 def lds_atomic_add(base, off, v, ordering=MONO):
-    return i32(fx.atomic_add(lds_p(base, off), i32(v), syncscope="workgroup", ordering=ordering))
+    return fx.atomic_add(lds_p(base, off), i32(v), syncscope="workgroup", ordering=ordering)
 
 
 def lds_atomic_or(base, off, v):
-    return i32(fx.atomic_or(lds_p(base, off), i32(v), syncscope="workgroup"))
+    return fx.atomic_or(lds_p(base, off), i32(v), syncscope="workgroup")
 
 
 def lds_ld_acq(base, off):
-    return i32(
-        fx.generic_load(
-            lds_p(base, off),
-            dtype=fx.Int32,
-            memory_order=MONO,
-            syncscope="workgroup",
-            volatile=True,
-        )
+    return fx.generic_load(
+        lds_p(base, off),
+        dtype=fx.Int32,
+        memory_order=MONO,
+        syncscope="workgroup",
+        volatile=True,
     )
 
 
@@ -122,22 +114,20 @@ def lds_st_rel(base, off, v):
 
 
 def lds_cas(base, off, cmp, new):
-    return i32(fx.atomic_cas(lds_p(base, off), i32(cmp), i32(new), syncscope="workgroup")[0])
+    return fx.atomic_cas(lds_p(base, off), i32(cmp), i32(new), syncscope="workgroup")[0]
 
 
 def _ctpop(v):
-    return i32(fx.ctpop(i32(v)))
+    return fx.ctpop(i32(v))
 
 
 def g_ld_rel(addr, scope):
-    return i32(
-        fx.generic_load(
-            gptr(addr),
-            dtype=fx.Int32,
-            memory_order=MONO,
-            syncscope=scope,
-            volatile=True,
-        )
+    return fx.generic_load(
+        gptr(addr),
+        dtype=fx.Int32,
+        memory_order=MONO,
+        syncscope=scope,
+        volatile=True,
     )
 
 
@@ -150,7 +140,7 @@ def g_st_sys(addr, v):
 
 
 def g_add_agent(addr, v):
-    return i32(fx.atomic_add(gptr(addr), i32(v), syncscope="agent"))
+    return fx.atomic_add(gptr(addr), i32(v), syncscope="agent")
 
 
 def g_or_agent(addr, v):
@@ -158,7 +148,7 @@ def g_or_agent(addr, v):
 
 
 def g_ld_i32(addr):
-    return i32(fx.generic_load(gptr(addr), dtype=fx.Int32))
+    return fx.generic_load(gptr(addr), dtype=fx.Int32)
 
 
 def uni(v):
@@ -168,26 +158,15 @@ def uni(v):
 def uni64(v):
     v = fx.Int64(v)
     lo = uni(fx.Int32(v & fx.Int64(0xFFFFFFFF)))
-    hi = uni(fx.Int32(v >> fx.Int64(32)))
-    return (fx.Int64(hi) << fx.Int64(32)) | (fx.Int64(lo) & fx.Int64(0xFFFFFFFF))
+    hi = uni(fx.Int32(v >> 32))
+    return (fx.Int64(hi) << 32) | (fx.Int64(lo) & fx.Int64(0xFFFFFFFF))
 
 
 # Buffer resources from raw (peer / arena) addresses plus per-lane byte offsets
 # and explicit cache-policy bits (sc0 / sc1 / nt): no layout-tensor form.
-# CDNA V# flags word: DATA_FORMAT 7 (float), NUM_FORMAT 4 (32-bit), no bounds-check select
-_RSRC_FLAGS = (7 << 12) | (4 << 15)
-
-
 def rsrc(addr, nbytes=None):
-    base = _llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr"), _u(uni64(addr))).result
-    n = fx.Int64(0xFFFFFFFF) if nbytes is None else fx.Int64(uni(nbytes))
-    return _rocdl.MakeBufferRsrcOp(
-        ir.Type.parse("!llvm.ptr<8>"),
-        base,
-        _u(fx.Int16(0)),
-        _u(n),
-        _u(fx.Int32(_RSRC_FLAGS)),
-    ).result
+    size = None if nbytes is None else fx.Int64(uni(nbytes))
+    return rocdl.get_buffer_rsrc(rocdl.make_buffer_ptr(gptr(uni64(addr)), num_records_bytes=size))
 
 
 def bld(rs, voff, soff, ty, aux=0):
@@ -203,7 +182,7 @@ def bst(val, rs, voff, soff, aux=0):
 def _dma(lds_addr, rs, voff, soff, nbytes, aux):
     _rocdl.raw_ptr_buffer_load_async_lds(
         rs,
-        _llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<3>"), _u(uni(lds_addr))).result,
+        lds_ptr(uni(lds_addr), 0, T.i8).llvm_ptr,
         _u(i32(nbytes)),
         _u(i32(voff)),
         _u(uni(soff)),
@@ -243,10 +222,10 @@ def fp4_pack(vals, qs):
 
 
 def fp8x4_pack(f, qs):
-    zero = fx.Vector.filled(2, 0, fx.Int16)
+    zero = fx.full(2, 0, fx.Int16)
     w = rocdl.cvt_scalef32_pk_fp8_f32(T.vec(2, T.i16), _u(zero), _u(f[0]), _u(f[1]), _u(qs), False)
     w = rocdl.cvt_scalef32_pk_fp8_f32(T.vec(2, T.i16), w, _u(f[2]), _u(f[3]), _u(qs), True)
-    return fx.Int32(fx.Vector(w).bitcast(fx.Int32)[0])
+    return fx.Vector(w).bitcast(fx.Int32)[0]
 
 
 def fp8x4_unpack(d, sc):
@@ -258,7 +237,7 @@ def fp8x4_unpack(d, sc):
 
 
 def e8_scale(e8):
-    return ((fx.Int32(e8) & i32(0xFF)) << i32(23)).bitcast(fx.Float32)
+    return ((fx.Int32(e8) & 0xFF) << 23).bitcast(fx.Float32)
 
 
 def fp8x8_decode(ld):
@@ -268,11 +247,9 @@ def fp8x8_decode(ld):
 
 
 def mxfp8x8(acc):
-    am = amax(acc)
-    am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
-    am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
+    am = fx.coop.warp_reduce(amax(acc), fx.ReductionOp.MAX, width=4)
     e8, qs = _e8m0_from_amax(am, max_norm=448.0)
-    return fp8x4_pack(acc[0:4], qs), fp8x4_pack(acc[4:8], qs), fx.Int32(e8) & i32(0xFF)
+    return fp8x4_pack(acc[0:4], qs), fp8x4_pack(acc[4:8], qs), fx.Int32(e8) & 0xFF
 
 
 def scales4(e8i):
@@ -284,9 +261,9 @@ def scales4(e8i):
 
 
 def bf16_bits(f):
-    return fx.Int32(fx.Vector.from_elements([fx.Float32(f).to(fx.BFloat16)], fx.BFloat16).bitcast(fx.Int16)[0]) & i32(
-        0xFFFF
-    )
+    # The scalar bitcast changes register allocation in the fused kernel.
+    bits = fx.Vector.from_elements([fx.Float32(f).to(fx.BFloat16)], fx.BFloat16).bitcast(fx.Int16)[0]
+    return fx.Int32(bits) & 0xFFFF
 
 
 def pack_bf16x2(a, b):
@@ -298,7 +275,7 @@ def bf16x8_to_f32(d):
     out = []
     for q in range_constexpr(4):
         w = fx.Int32(dv[q])
-        out.append((w << i32(16)).bitcast(fx.Float32))
+        out.append((w << 16).bitcast(fx.Float32))
         out.append((w & i32(-65536)).bitcast(fx.Float32))
     return out
 
@@ -320,7 +297,7 @@ def wave_red(v, lane, op):
 def wave_rank(hit):
     b = fx.Int64(rocdl.ballot(T.i64, hit))
     lo = i32(b & fx.Int64(0xFFFFFFFF))
-    hi = i32(b >> fx.Int64(32))
+    hi = i32(b >> 32)
     below = rocdl.mbcnt_lo(T.i32, _u(lo), _u(i32(0)))
     below = i32(rocdl.mbcnt_hi(T.i32, _u(hi), below))
     return below, _ctpop(lo) + _ctpop(hi)
@@ -344,7 +321,7 @@ def swap32(x, y):
 
 
 def widen(v4):
-    z = fx.Vector.filled(4, 0, fx.Int32)
+    z = fx.full(4, 0, fx.Int32)
     return fx.Vector(v4).shuffle(z, list(range(8)))
 
 
@@ -407,7 +384,7 @@ def poll_sys_ge(addr, target, nap=2):
 def _e8m0_from_amax(amax_f32, max_norm=6.0):
     wi = (amax_f32 * fx.Float32(1.0 / float(max_norm))).bitcast(fx.Int32)
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    e8m0 = (fx.Uint32(bexp) < fx.Uint32(254)).select(bexp, fx.Int32(254))
+    e8m0 = (fx.Uint32(bexp) < 254).select(bexp, fx.Int32(254))
     return e8m0, (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
 
 

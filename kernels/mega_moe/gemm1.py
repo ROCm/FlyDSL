@@ -83,9 +83,9 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
             b_prev = [
                 [Vec(state[N_ACC + ni * _PACK + ks]) for ks in range(_PACK)] for ni in range(NUM_ACC_N)
             ]
-            cur_off = (sp & fx.Int32(1)) * fx.Int32(a_lds_i32)
-            nxt_off = ((sp + fx.Int32(1)) & fx.Int32(1)) * fx.Int32(a_lds_i32)
-            spn = sp + fx.Int32(1)
+            cur_off = (sp & 1) * fx.Int32(a_lds_i32)
+            nxt_off = ((sp + 1) & 1) * fx.Int32(a_lds_i32)
+            spn = sp + 1
             if const_expr(async_a_copy):
                 sb = [
                     fx.Int32(
@@ -168,7 +168,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
             [Vec(state[N_ACC + ni * _PACK + ks]) for ks in range(_PACK)]
             for ni in range(NUM_ACC_N)
         ]
-        final_off = (last & fx.Int32(1)) * fx.Int32(a_lds_i32)
+        final_off = (last & 1) * fx.Int32(a_lds_i32)
 
         def final_a_load(mi, ks, _base=final_off):
             return a_s2r.load_operand(a_buf, mi, ks, _base)
@@ -222,10 +222,10 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
         for sp_i, state in range(0, K_ITERS, 1, init=init):
             sp = fx.Int32(sp_i)
             acc = [Vec(a) for a in state]
-            cur_off = (sp & fx.Int32(1)) * fx.Int32(a_lds_i32)
-            nxt_off = ((sp + fx.Int32(1)) & fx.Int32(1)) * fx.Int32(a_lds_i32)
-            spn = (sp + fx.Int32(1) < last).select(
-                sp + fx.Int32(1),
+            cur_off = (sp & 1) * fx.Int32(a_lds_i32)
+            nxt_off = ((sp + 1) & 1) * fx.Int32(a_lds_i32)
+            spn = (sp + 1 < last).select(
+                sp + 1,
                 last,
             )
 
@@ -406,7 +406,7 @@ def compile_gemm1(
             out_scale,
             fx.Int8,
             max_size=False,
-            num_records_bytes=num_valid * fx.Int32(scale_cols) + fx.Int32(8192),
+            num_records_bytes=num_valid * fx.Int32(scale_cols) + 8192,
         )
         wave_id = fx.thread_idx.x // 64
 

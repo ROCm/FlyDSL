@@ -378,7 +378,8 @@ IntTuple<Cat> swizzle_apply(Swizzle<Cat> swizzle, const T &value) {
     return tuple;
   auto amount = IntTuple<Cat>::getSInt(swizzle.shift() < 0 ? -swizzle.shift() : swizzle.shift());
   auto masked = leaf_bit_and(tuple, IntTuple<Cat>::getSInt(swizzle.y_mask()));
-  auto shifted = swizzle.shift() < 0 ? leaf_shl(masked, amount) : leaf_shr(masked, amount);
+  // The mask leaves `masked` non-negative, so it shifts right logically.
+  auto shifted = swizzle.shift() < 0 ? leaf_shl(masked, amount) : leaf_lshr(masked, amount);
   return leaf_bit_xor(tuple, shifted);
 }
 

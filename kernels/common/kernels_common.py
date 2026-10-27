@@ -19,6 +19,18 @@ from kernels.common.mem_ops import _create_llvm_ptr
 from kernels.common.mem_ops import atomic_add as atomic_add
 from kernels.common.mem_ops import get_llvm_ptr as get_llvm_ptr
 
+
+def format_kernel_name(name: str) -> str:
+    """Sanitize a kernel symbol name for the amdhsa assembler.
+
+    Config values interpolated into a kernel name may be negative (e.g. the
+    grouped-contiguous sentinel ``topk=-1`` renders as ``tk-1``). A hyphen is
+    not a legal symbol character, so the assembler misparses the
+    ``.amdhsa_kernel`` directive and the whole module fails to link.
+    """
+    return name.replace("-", "_")
+
+
 LOG2E = 1.4426950408889634
 
 _VALID_A_DTYPES = frozenset(("fp8", "fp16", "int8", "fp4"))
@@ -54,8 +66,8 @@ def cvt_sr_f32_to_bf16(x, rand):
 
     The add-then-truncate conversion matches AMD's non-saturating behavior.
     """
-    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & fx.Uint32(0xFFFF))
-    return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
+    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & 0xFFFF)
+    return fx.Uint16(bits >> 16).bitcast(fx.BFloat16)
 
 
 def default_f8_type() -> ir.Type:

@@ -1471,8 +1471,5 @@ def make_tile(*args):
         raise ValueError(f"make_tile: expected int, None, tuple, or Layout, got {type(m)}")
 
     resolved = [_resolve(m) for m in args]
-    if len(resolved) == 1:
-        tile_type = TileType.get(resolved[0])
-    else:
-        tile_type = TileType.get(resolved)
+    tile_type = TileType.get(resolved)
     return static(tile_type)

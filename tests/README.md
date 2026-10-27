@@ -103,6 +103,8 @@ axis value is covered without compiling its full Cartesian product. Set
 also when the shared default-device fixture covers both CPU and CUDA defaults.
 This switch is independent of `RUN_TESTS_FULL`, which continues to control
 `large_shape`.
+See [coop test coverage](extension/coop/README.md) for the matrix selection,
+cross-target compilation and stress-input policies.
 
 ## MLIR FileCheck tests
 

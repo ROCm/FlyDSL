@@ -4,19 +4,22 @@
 """Shape and strict-order helpers shared by cooperative sorting algorithms."""
 
 from ...compiler import jit
-from ...expr.numeric import Int32
+from ...expr.numeric import Int32, Integer
+from ...expr.typing import Vector
 from ._values import _as_items, _from_items, _is_items, _item_dtype, _items_dtype, _record_default, _record_select
 
 
-def _unpack(keys, values=None, value_dtype=None):
-    vector = _is_items(keys)
-    items = list(_as_items(keys))
-    payload = list(_as_items(values)) if values is not None else None
+def _unpack(keys, values=None, value_dtype=None, key_dtype=None):
+    vector = _is_items(keys, key_dtype)
+    items = list(_as_items(keys, key_dtype))
+    payload = list(_as_items(values, value_dtype)) if values is not None else None
     if payload is not None:
-        if len(payload) != len(items) or _is_items(values) != vector:
+        if len(payload) != len(items) or _is_items(values, value_dtype) != vector:
             raise ValueError("values must have the same shape as keys")
-        if value_dtype is not None and _items_dtype(values) is not value_dtype:
-            raise TypeError(f"expected value dtype {value_dtype.__name__}, got {_items_dtype(values).__name__}")
+        if value_dtype is not None and _items_dtype(values, value_dtype) is not value_dtype:
+            raise TypeError(
+                f"expected value dtype {value_dtype.__name__}, got {_items_dtype(values, value_dtype).__name__}"
+            )
     return items, payload, vector
 
 
@@ -29,8 +32,17 @@ def _pack(items, payload, vector, keys=None, values=None):
 
 def _before(a, b, descending=False, compare_op=None):
     if compare_op is None:
-        return a > b if descending else a < b
-    return compare_op(b, a) if descending else compare_op(a, b)
+        if isinstance(a, Vector):
+            raise TypeError("Vector keys require a comparator returning one scalar predicate")
+        result = a > b if descending else a < b
+    else:
+        result = compare_op(b, a) if descending else compare_op(a, b)
+    from ._values import _normalize_value
+
+    result = _normalize_value(result)
+    if not isinstance(result, (bool, int, Integer)):
+        raise TypeError("a comparator must return one scalar predicate per complete key")
+    return Int32(result) != 0
 
 
 @jit

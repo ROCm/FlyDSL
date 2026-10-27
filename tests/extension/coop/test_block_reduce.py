@@ -11,18 +11,20 @@ Scalar and Vector inputs retain their block-wide semantics.
 
 from __future__ import annotations
 
+import coop_block_utils as checks
 import pytest
 from coop_common import (
     BLOCK_THREADS,
     DTYPES,
     SUB_WARP_BLOCK_THREADS,
-    dtype_id,
     is_float,
     linear_tid,
     sample,
     torch_dtype,
     wrap,
 )
+from coop_test_utils import ARCHES, matrix_cases
+from coop_test_utils import coop_default_device as coop_default_device
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -103,9 +105,7 @@ def check_sum(values, out, name):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("items_per_thread", (1, 4))
-@pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
+@pytest.mark.parametrize("entry,items_per_thread,algorithm", matrix_cases(DTYPES, (1, 4), ALGORITHMS))
 def test_sum_over_a_full_tile(entry, items_per_thread, algorithm):
     """A full tile sums to the same value every thread can read."""
     dtype, name = entry
@@ -121,8 +121,7 @@ def test_sum_over_a_full_tile(entry, items_per_thread, algorithm):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("block_size", BLOCK_SHAPES, ids=lambda b: "x".join(map(str, b)))
-@pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
+@pytest.mark.parametrize("block_size,algorithm", matrix_cases(BLOCK_SHAPES, ALGORITHMS))
 def test_sum_across_block_shapes(block_size, algorithm):
     """The block shape axis: the same sum, however the block is shaped."""
     dtype, name = fx.Int32, "torch.int32"
@@ -139,15 +138,19 @@ def test_sum_across_block_shapes(block_size, algorithm):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
 @pytest.mark.parametrize(
-    "op,reference",
-    (
-        (fx.ReductionOp.ADD, torch.sum if torch else None),
-        (fx.ReductionOp.MAX, torch.max if torch else None),
-        (fx.ReductionOp.MIN, torch.min if torch else None),
-    ),
-    ids=lambda v: getattr(v, "name", ""),
+    "algorithm,op,reference",
+    [
+        (algorithm, op, reference)
+        for algorithm, (op, reference) in matrix_cases(
+            ALGORITHMS,
+            (
+                (fx.ReductionOp.ADD, torch.sum if torch else None),
+                (fx.ReductionOp.MAX, torch.max if torch else None),
+                (fx.ReductionOp.MIN, torch.min if torch else None),
+            ),
+        )
+    ],
 )
 def test_block_reduce_matches_torch(algorithm, op, reference):
     """Every thread of the block sees the exact whole-block reduction."""
@@ -257,6 +260,7 @@ def test_universal_agrees_with_the_dispatched_reduction(algorithm):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.usefixtures("coop_default_device")
 def test_single_warp_block_skips_shared_memory():
     """A one-warp block reduces entirely in registers."""
     warp_threads = fx.num_warp_threads()
@@ -267,16 +271,15 @@ def test_single_warp_block_skips_shared_memory():
         block_size=(warp_threads, 1, 1),
         algorithm=fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS,
     )
-    assert torch.equal(out, torch.full((warp_threads,), float(warp_threads)))
+    assert torch.equal(out, torch.full((warp_threads,), float(warp_threads), device="cpu"))
 
 
 # ── sub-wave blocks ───────────────────────────────────────────────────────
 
 
 @pytest.mark.l1a_compile_no_target_dialect
-@pytest.mark.parametrize("block_threads", SUB_WARP_BLOCK_THREADS, ids=lambda n: f"t{n}")
-@pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
-def test_sub_wave_blocks_narrow_the_logical_warp(block_threads, algorithm):
+@pytest.mark.parametrize("block_threads,algorithm", matrix_cases(SUB_WARP_BLOCK_THREADS, ALGORITHMS))
+def test_sub_wave_blocks_use_logical_width(block_threads, algorithm):
     primitive = fx.coop.BlockReduce[fx.Int32, block_threads, algorithm]
     assert primitive.warp_threads == block_threads
     assert primitive.num_warps == 1
@@ -285,6 +288,7 @@ def test_sub_wave_blocks_narrow_the_logical_warp(block_threads, algorithm):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.usefixtures("coop_default_device")
 def test_multi_dimensional_block():
     """A 2-D block linearizes its thread id the way gpu.thread_id orders it."""
     DIM_X, DIM_Y = 64, 2
@@ -297,12 +301,13 @@ def test_multi_dimensional_block():
         block_size=(DIM_X, DIM_Y, 1),
         algorithm=fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS,
     )
-    assert torch.equal(out, torch.full((BLOCK,), float(BLOCK)))
+    assert torch.equal(out, torch.full((BLOCK,), float(BLOCK), device="cpu"))
 
 
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.usefixtures("coop_default_device")
 def test_block_size_can_come_from_the_traced_launch():
     """``known_block_size`` feeds the specialization, so the two cannot drift apart."""
     BLOCK = 128
@@ -323,7 +328,7 @@ def test_block_size_can_come_from_the_traced_launch():
     out = torch.zeros(BLOCK, dtype=torch.float32, device="cuda")
     launch(values, out, stream=torch.cuda.Stream())
     torch.cuda.synchronize()
-    assert torch.equal(out.cpu(), torch.full((BLOCK,), float(BLOCK)))
+    assert torch.equal(out.cpu(), torch.full((BLOCK,), float(BLOCK), device="cpu"))
 
 
 @pytest.mark.l2_device
@@ -347,3 +352,142 @@ def test_dynamic_block_size_has_nothing_to_read():
     out = torch.zeros(128, dtype=torch.float32, device="cuda")
     with pytest.raises(RuntimeError, match="no compile-time block size"):
         launch(values, out, 128)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize(
+    "block,algorithm,universal",
+    matrix_cases(
+        [64, 128, 192],
+        [fx.coop.BlockReduceAlgorithm.RAKING, fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS],
+        [True, False],
+    ),
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_ordered_reduce_partial_blocks(block, algorithm, universal):
+    checks.check_ordered_reduce_partial_blocks(block, algorithm, universal)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("algorithm,valid", matrix_cases(list(fx.coop.BlockReduceAlgorithm), [None, 0, 71, 128]))
+@pytest.mark.usefixtures("coop_default_device")
+def test_reduce_policies_scalar_or_array(algorithm, valid):
+    checks.check_reduce_policies_scalar_or_array(algorithm, valid)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        fx.coop.BlockReduceAlgorithm.RAKING_COMMUTATIVE_ONLY,
+        fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS_NONDETERMINISTIC,
+    ],
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_commutative_policies_reject_undeclared_callable(algorithm):
+    checks.check_commutative_policies_reject_undeclared_callable(algorithm)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("algorithm,valid", matrix_cases(list(fx.coop.BlockReduceAlgorithm), [None, 1, 4, 67, 128]))
+@pytest.mark.usefixtures("coop_default_device")
+def test_reduce_semigroup_scalar_or_array(algorithm, valid):
+    checks.check_reduce_semigroup_scalar_or_array(algorithm, valid)
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, tuple(fx.coop.BlockReduceAlgorithm)))
+def test_policies_compile(monkeypatch, arch, case):
+    checks.check_reduce_scan_policies_compile(monkeypatch, arch, case)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize(
+    "policy,op,valid",
+    matrix_cases(tuple(fx.coop.BlockReduceAlgorithm), [fx.ReductionOp.MIN, fx.ReductionOp.MAX], [0, 5]),
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_boolean_partial_identities(policy, op, valid):
+    checks.check_boolean_partial_identities(policy, op, valid)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize(
+    "policy,dtype,torch_dtype,op",
+    [
+        (policy, dtype, torch_dtype, op)
+        for policy, (dtype, torch_dtype), op in matrix_cases(
+            tuple(fx.coop.BlockReduceAlgorithm), checks.POLICY_DTYPES, checks.POLICY_OPS
+        )
+    ],
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_policy_dtype_operation_matrix(policy, dtype, torch_dtype, op):
+    checks.check_policy_dtype_operation_matrix(policy, dtype, torch_dtype, op)
+
+
+@pytest.mark.rocm_lower
+@pytest.mark.l2_device
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("policy,valid", matrix_cases(tuple(fx.coop.BlockReduceAlgorithm), [None, 0, 127]))
+@pytest.mark.usefixtures("coop_default_device")
+def test_nested_record_reduce_policies(policy, valid):
+    checks.check_nested_record_reduce_policies(policy, valid)
+
+
+@pytest.mark.rocm_lower
+@pytest.mark.l2_device
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize(
+    "policy,valid",
+    matrix_cases([fx.coop.BlockReduceAlgorithm.RAKING, fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS], [None, 0, 127]),
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_record_reduce_semigroup_without_identity(policy, valid):
+    checks.check_record_reduce_semigroup_without_identity(policy, valid)
+
+
+@pytest.mark.rocm_lower
+@pytest.mark.l1b_target_dialect
+@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, tuple(fx.coop.BlockReduceAlgorithm)))
+def test_record_policies_compile(monkeypatch, arch, case):
+    checks.check_record_collectives_compile(monkeypatch, arch, case)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize(
+    "block,algorithm,universal,custom",
+    matrix_cases(
+        [1, fx.num_warp_threads() // 2, 3 * fx.num_warp_threads()],
+        list(fx.coop.BlockReduceAlgorithm),
+        [False, True],
+        [False, True],
+    ),
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_vector_element_collective(block, algorithm, universal, custom):
+    checks.check_vector_element_collective(block, algorithm, universal, custom, scan=False)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize(
+    "algorithm,op", matrix_cases(list(fx.coop.BlockReduceAlgorithm), [fx.ReductionOp.MIN, fx.ReductionOp.MAX])
+)
+@pytest.mark.usefixtures("coop_default_device")
+def test_vector_element_extrema(algorithm, op):
+    checks.check_vector_element_collective(3 * fx.num_warp_threads(), algorithm, False, False, False, op)

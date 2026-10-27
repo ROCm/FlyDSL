@@ -103,7 +103,7 @@ public:
       : TiledMMA<Cat>(std::move(tiledMMA)), thr_vmnk_(std::move(thr_vmnk)) {}
 
   const TiledMMA<Cat> &tiledMMA() const { return *this; }
-  const IntTuple<Cat> &threadCoord() const { return thr_vmnk_; }
+  const IntTuple<Cat> &thr_vmnk() const { return thr_vmnk_; }
 
   template <class Engine> auto partition_C(const Tensor<Cat, Engine> &ctensor) const;
 
@@ -503,7 +503,7 @@ template <class Cat> void print(const ThrMMA<Cat> &mma, llvm::raw_ostream &os) {
   os << "thr_mma<";
   print(mma.tiledMMA(), os);
   os << ",thr_vmnk=";
-  print(mma.threadCoord(), os);
+  print(mma.thr_vmnk(), os);
   os << '>';
 }
 

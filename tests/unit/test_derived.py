@@ -91,10 +91,10 @@ def test_tile_unpack_int_modes():
         assert tiled_copy.tile_mn.unpack() == (8, 64)
 
 
-def test_tile_unpack_single_mode_is_leaf():
-    # A single (non-list) mode builds a leaf tile.
+def test_tile_unpack_single_mode():
+    # Every mode list builds a tuple tile, including a one-mode one.
     with _trace_context():
-        assert fx.make_tile(256).unpack() == 256
+        assert fx.make_tile(256).unpack() == (256,)
 
 
 def test_tile_unpack_nested_modes():

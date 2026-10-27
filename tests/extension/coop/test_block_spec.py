@@ -239,3 +239,23 @@ def test_subwarp_support_is_explicit(monkeypatch, target):
                     primitive[fx.Int32, threads]
             with pytest.raises(ValueError, match="multiple of the target warp size"):
                 primitive[fx.Int32, target.warp_size + 1]
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+@pytest.mark.parametrize("warp", [32, 64])
+def test_block_size_rule(monkeypatch, warp):
+    from flydsl.extension.coop.block import _spec
+
+    monkeypatch.setattr(_spec, "num_warp_threads", lambda: warp)
+    monkeypatch.setattr(Pinned, "_supports_subwarp", True)
+    for threads in (1, 2, 16, warp // 2, warp, 3 * warp):
+        primitive = Pinned[fx.Int32, threads]
+        assert primitive.block_threads == threads
+        assert primitive.warp_threads == min(threads, warp)
+        assert primitive.num_warps == max(1, threads // warp)
+    for threads in (3, warp - 1, warp + 1, 3 * warp // 2):
+        with pytest.raises(ValueError, match="power of two|multiple of the target warp size"):
+            Pinned[fx.Int32, threads]
+    for threads in (True, False, 0, -1):
+        with pytest.raises(TypeError, match="positive Python int"):
+            Pinned[fx.Int32, threads]

@@ -48,7 +48,7 @@ def _load_bf16x4(resource, offset):
 
 
 def _zeros4():
-    return fx.Vector.filled(_VALUES_PER_THREAD, fx.Float32(0.0), fx.Float32)
+    return fx.full(_VALUES_PER_THREAD, 0.0, fx.Float32)
 
 
 def _subgroup_sum(value):
@@ -190,10 +190,10 @@ def build_kimi_k3_kda_recurrence(
                     ).to(fx.Float32)
                     inputs = fx.Vector.from_elements(
                         [
-                            fx.Float32(state0),
-                            fx.Float32(state1),
-                            fx.Float32(state2),
-                            fx.Float32(current),
+                            state0,
+                            state1,
+                            state2,
+                            current,
                         ],
                         fx.Float32,
                     )
@@ -264,27 +264,21 @@ def build_kimi_k3_kda_recurrence(
             for k_iter in range_constexpr(_K_ITERS):
                 k_base = k_lane * _VALUES_PER_THREAD + k_iter * _K_TILE
                 if const_expr(fuse_conv):
-                    q_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_query + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    q_vec = fx.ptr_load(
+                        shared_query + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
-                    k_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_key + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    k_vec = fx.ptr_load(
+                        shared_key + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                 else:
                     q_vec = _load_bf16x4(query_rsrc, vector_base + k_base)
                     k_vec = _load_bf16x4(key_rsrc, vector_base + k_base)
                 if const_expr(fuse_gate_projection):
-                    gate_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_gate + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    gate_vec = fx.ptr_load(
+                        shared_gate + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                 else:
                     gate_vec = _load_bf16x4(gate_rsrc, vector_base + k_base)
@@ -311,12 +305,12 @@ def build_kimi_k3_kda_recurrence(
 
             q_inverse_norm = rsq(_subgroup_sum(q_square) + fx.Float32(1.0e-6))
             k_inverse_norm = rsq(_subgroup_sum(k_square) + fx.Float32(1.0e-6))
-            q_scale = fx.Vector.filled(
+            q_scale = fx.full(
                 _VALUES_PER_THREAD,
                 q_inverse_norm * fx.Float32(_Q_SCALE),
                 fx.Float32,
             )
-            k_scale = fx.Vector.filled(_VALUES_PER_THREAD, k_inverse_norm, fx.Float32)
+            k_scale = fx.full(_VALUES_PER_THREAD, k_inverse_norm, fx.Float32)
             for k_iter in range_constexpr(_K_ITERS):
                 q_vecs[k_iter] = q_vecs[k_iter] * q_scale
                 k_vecs[k_iter] = k_vecs[k_iter] * k_scale
@@ -369,7 +363,7 @@ def build_kimi_k3_kda_recurrence(
                         )
                     )
                 v_new = (v_input - state_k) * beta_value
-                v_new_vec = fx.Vector.filled(_VALUES_PER_THREAD, v_new, fx.Float32)
+                v_new_vec = fx.full(_VALUES_PER_THREAD, v_new, fx.Float32)
 
                 for k_iter in range_constexpr(_K_ITERS):
                     index = v_iter * _K_ITERS + k_iter
@@ -393,8 +387,7 @@ def build_kimi_k3_kda_recurrence(
                 if k_lane == 0:
                     for v_iter in range_constexpr(_V_ITERS):
                         square_sum = square_sum + results[v_iter] * results[v_iter]
-                for offset in (32, 16, 8, 4, 2, 1):
-                    square_sum = square_sum + xshfl(square_sum, offset)
+                square_sum = fx.coop.warp_reduce(square_sum, fx.ReductionOp.ADD, width=64)
                 if lane == 0:
                     fx.ptr_store(square_sum, norm_sums + wave)
                 gpu.barrier()

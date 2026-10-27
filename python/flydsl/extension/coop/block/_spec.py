@@ -12,10 +12,6 @@ from ....compiler.backends import current_target
 from ....expr.gpu import num_warp_threads
 from .._common import _require_power_of_two
 
-# Specializations are cached across algorithms, keyed by the root class as well
-# as the parameters, so two algorithms cannot collide on an identical key.
-_CACHE = {}
-
 
 def _block_shape(block_size):
     """Normalize a block size to ``(x, y, z)``; a bare int means ``(x, 1, 1)``."""
@@ -23,7 +19,7 @@ def _block_shape(block_size):
     if len(dims) != 3:
         raise TypeError(f"block_size must be an int or a 3-tuple, got {block_size!r}")
     for name, dim in zip(("block_dim_x", "block_dim_y", "block_dim_z"), dims):
-        if not isinstance(dim, int) or dim < 1:
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 1:
             raise TypeError(f"{name} must be a positive Python int, got {dim!r}")
     return dims
 
@@ -43,6 +39,10 @@ class BlockAlgorithmMeta(type):
     A concrete metaclass sets ``_algorithms`` and ``_shared_storage``, and
     implements :meth:`_default_algorithm_for`.
     """
+
+    # Shared across algorithms; the root class and specialization parameters
+    # in each key keep their entries distinct.
+    _cache = {}
 
     _algorithms = None
     _shared_storage = None
@@ -81,6 +81,7 @@ class BlockAlgorithmMeta(type):
                 f"{cls.__name__} block_size must contain a multiple of the target warp size "
                 f"({warp_threads}) threads, got {block_threads}"
             )
+        warp_threads = min(block_threads, warp_threads)
         key_dtype, value_dtype = dtype, None
         if isinstance(dtype, tuple):
             if not cls._supports_pairs or len(dtype) != 2:
@@ -88,7 +89,7 @@ class BlockAlgorithmMeta(type):
             key_dtype, value_dtype = dtype
 
         key = (cls, dtype, block_size, algorithm, warp_threads, items_per_thread, current_target())
-        cached = _CACHE.get(key)
+        cached = BlockAlgorithmMeta._cache.get(key)
         if cached is not None:
             return cached
 
@@ -118,7 +119,7 @@ class BlockAlgorithmMeta(type):
         )
         if items_per_thread is not None:
             setattr(specialized, cls._parameter_name, items_per_thread)
-        _CACHE[key] = specialized
+        BlockAlgorithmMeta._cache[key] = specialized
         return specialized
 
 
@@ -152,6 +153,10 @@ class BlockPrimitive:
     view to collective calls. All participating threads must finish reading
     that storage before it is reused.
 
+    A value matching dtype is one complete element, including Vector or Struct.
+    Outer lists/tuples supply multiple elements; a Vector supplies a scalar item
+    sequence only when dtype is Numeric. Item counts exclude fields/components.
+
     Attributes:
         dtype: Input element type, or key type for a key/value specialization.
         key_dtype: Key type; identical to ``dtype``.
@@ -167,6 +172,7 @@ class BlockPrimitive:
         SharedStorage: DSL type describing the caller-allocated shared memory.
     """
 
+    _supports_subwarp = True
     dtype = None
     key_dtype = None
     value_dtype = None
@@ -185,9 +191,9 @@ class BlockPrimitive:
         if cls.block_threads is None:
             raise TypeError(f"specialize {cls.__name__} first")
         if value is not None:
-            dtype = _items_dtype(value)
+            dtype = _items_dtype(value, cls.dtype)
             if dtype is not cls.dtype:
                 raise TypeError(f"expected {cls.dtype.__name__}, got {dtype.__name__}")
-            count = len(_as_items(value))
+            count = len(_as_items(value, cls.dtype))
             if cls.items_per_thread is not None and count != cls.items_per_thread:
                 raise ValueError(f"expected {cls.items_per_thread} items per thread, got {count}")

@@ -101,6 +101,9 @@ template <int N, class X, class Cat = category_of<X>> IntTuple<Cat> repeat(const
 
 template <class X, class Cat = category_of<X>> IntTuple<Cat> repeat(const X &value, int N);
 
+// a tuple of N values, also for N == 1 where repeat returns the value itself.
+template <class X, class Cat = category_of<X>> IntTuple<Cat> tuple_repeat(const X &value, int N);
+
 template <class T, class Cat = category_of<T>> IntTuple<Cat> sum(const T &t);
 
 template <class T, class Cat = category_of<T>> IntTuple<Cat> gcd(const T &t);
@@ -699,6 +702,11 @@ template <class X, class Cat> IntTuple<Cat> repeat(const X &value, int N) {
     auto parts = llvm::SmallVector<IntTupleRef<Cat>, 8>(N, value.asRef());
     return make_tuple(parts);
   }
+}
+
+template <class X, class Cat> IntTuple<Cat> tuple_repeat(const X &value, int N) {
+  auto parts = llvm::SmallVector<IntTupleRef<Cat>, 8>(N, value.asRef());
+  return make_tuple(parts);
 }
 
 template <class T, class Cat> IntTuple<Cat> zip(const T &tuple) {
