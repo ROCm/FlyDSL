@@ -32,7 +32,7 @@ def scale_view(arg_scale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_b
     base_dw = rocdl.readfirstlane(T.i32, base_dw)
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
-    base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_scale) + off_i64 * fx.Int64(4))
+    base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_scale) + off_i64 * 4)
     shape = (4, 16, K_TILES_TOTAL, 1)
     stride = (16, 1, k0_stride_dw, 1)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, stride)))
@@ -191,15 +191,15 @@ def gemm2_compute(
     # Contraction K = inter_dim runtime (i32_inter); INTER_MAX caps compile-time view/fragment bounds.
     K_rt = fx.Int32(i32_inter)
     K_BYTES = K_rt // fx.Int32(a_pack)  # A row stride bytes (runtime)
-    kc_rt = K_rt // fx.Int32(256)  # (K//32)//4//2
+    kc_rt = K_rt // 256  # (K//32)//4//2
     K_TILES_RT = K_rt // fx.Int32(BK)  # runtime K-tile trip count
-    kAS_per_chunk_dw = kc_rt * fx.Int32(64)
-    kBS_stride_n0_dw = kc_rt * fx.Int32(64)
+    kAS_per_chunk_dw = kc_rt * 64
+    kBS_stride_n0_dw = kc_rt * 64
     # N_OUT = model_dim/hidden is the gemm2 output N dim; runtime via i32_hidden (no K-loop dependency).
     N_OUT_rt = fx.Int32(i32_hidden)
-    kbs_per_expert_dw = (N_OUT_rt // fx.Int32(32)) * kBS_stride_n0_dw  # (N_OUT//16//2)*stride
+    kbs_per_expert_dw = (N_OUT_rt // 32) * kBS_stride_n0_dw  # (N_OUT//16//2)*stride
     num_n_blocks = N_OUT_rt // fx.Int32(BN)
-    KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
+    KH4 = K_rt // 8  # i32 col stride (= K_HALF//4)
     K_SCALE_CHUNKS_MAX = INTER_MAX // 256
     # Four A slots make read/write reuse distance two K tiles; one WG barrier
     # can safely retire both slots instead of fencing every iteration.
@@ -210,7 +210,7 @@ def gemm2_compute(
     N_real = None
     if const_expr(has_pad):
         K_real = K_rt - fx.Int32(i32_kpad)
-        halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
+        halves_real = (K_real + 127) // 128
         N_real = N_OUT_rt - fx.Int32(i32_npad)
 
     # Map each compute block to its SBM-padded expert metadata row.
@@ -298,13 +298,13 @@ def gemm2_compute(
     # The shared e8m0 scale layout bounds each A-scale view to its remaining bytes.
     sc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
-    asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
+    asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * 4
     asc_num = fx.Int64(i32_max_m_blocks) * fx.Int64(asc_per_mb)
     scale_chunk0 = m_block_idx if const_expr(is_bm16) else m_row // 32
 
     def make_ascale_view(sub):
         base_dw = (scale_chunk0 + fx.Int32(sub)) * kAS_per_chunk_dw
-        nrec = asc_num - fx.Int64(base_dw) * fx.Int64(4)
+        nrec = asc_num - fx.Int64(base_dw) * 4
         return scale_view(
             arg_ascale,
             base_dw,
@@ -440,7 +440,7 @@ def gemm2_compute(
 
     # C remains in register fragments; these helpers only serialize it into
     # loop-carried state for the runtime K loop.
-    zero4 = Vec.filled(4, 0.0, Float32)
+    zero4 = fx.full(4, 0.0, Float32)
     c_frags = [[fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(numAccN)] for _ in range_constexpr(kMChunks)]
     for i in range_constexpr(kMChunks):
         for J in range_constexpr(numAccN):
@@ -538,7 +538,7 @@ def gemm2_compute(
             # A-scale vmem load(s) for K-tile kt_rt into the given (per-stage) fragment(s).
             sa = load_a_scale_tile(kt_rt)
             for sub in range_constexpr(kScaleSubBlocks):
-                saf[sub].store(Vec.filled(1, sa[sub], Int32))
+                saf[sub].store(fx.full(1, sa[sub], Int32))
 
         def load_carry():
             return load_c_carry() + load_b_carry()
@@ -584,7 +584,7 @@ def gemm2_compute(
             if const_expr(g2_bhoist):
                 prefetch_next_b(kt_rt)
             if const_expr(g2_deep_a_pipeline):
-                if (kt_rt % fx.Int32(kFenceEvery)) == fx.Int32(0):
+                if (kt_rt % fx.Int32(kFenceEvery)) == 0:
                     gpu.barrier()
             else:
                 gpu.barrier()

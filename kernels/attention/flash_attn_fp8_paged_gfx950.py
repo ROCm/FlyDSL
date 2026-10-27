@@ -253,7 +253,7 @@ def build_flash_attn_paged_fp8_module(
         if const_expr(BOUNDED_MAX):
             # E4M3FN finite keys satisfy |K_i| <= 448. Bound every score by
             # 2 * 448 * sum(abs(Q_i)); factor two dominates FP32 summation error.
-            max_key = fx.Vector.filled(8, 0x7E7E7E7E, fx.Int32)
+            max_key = fx.full(8, 0x7E7E7E7E, fx.Int32)
             bound_tile = ctx.c_zero_v16f32
             for ws in range_constexpr(2):
                 absolute_query = fx.Vector(q_wide[ws]) & fx.Int32(0x7F7F7F7F)

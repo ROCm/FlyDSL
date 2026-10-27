@@ -52,7 +52,7 @@ def _global_i32_buffer_view(addr_i64, num_bytes):
     # make_layout's dynamic-shape leaf must be i32/i64, not fx.Index.
     num_bytes_i64 = fx.Int64(num_bytes)
     ptr = global_typed_ptr(addr_i64, T.i32)
-    view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
+    view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // 4, 1)))
     return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
 
 
@@ -96,7 +96,7 @@ def _global_scalar_tiles(addr_i64, numeric_cls, num_elems):
 def _scalar_store(tiles, idx, value, numeric_cls):
     atom = fx.make_copy_atom(fx.UniversalCopy(numeric_cls.width), numeric_cls)
     r = fx.make_rmem_tensor(fx.make_layout(1, 1), numeric_cls)
-    r.store(fx.Vector.from_elements([numeric_cls(value)], numeric_cls))
+    r.store(fx.Vector.from_elements([value], numeric_cls))
     fx.copy(atom, r, fx.slice(tiles, (None, idx)))
 
 
@@ -220,7 +220,7 @@ def _e8m0_from_amax_fp8(amax_f32):
 
 
 def _inline_e8m0(amax_u16_i32):
-    f32 = ((fx.Int32(amax_u16_i32) & fx.Int32(0xFFFF)) << fx.Int32(16)).bitcast(fx.Float32)
+    f32 = ((fx.Int32(amax_u16_i32) & 0xFFFF) << 16).bitcast(fx.Float32)
     return _e8m0_roundup(f32, _FMT_MAX_FP4)
 
 

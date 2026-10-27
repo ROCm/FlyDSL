@@ -58,11 +58,12 @@ def _warp_gather(
     width: int | None = None,
     algorithm: WarpExchangeAlgorithm = WarpExchangeAlgorithm.SHUFFLE,
     storage=None,
+    _dtype=None,
 ):
     """Internal gather from a blocked warp tile; indices are group-relative."""
     width = _resolve_warp_width(width, "_warp_gather width")
     _check_algorithm(algorithm, storage)
-    items = _as_items(value)
+    items = _as_items(value, _dtype)
     requested = list(indices) if isinstance(indices, Vector) else [indices]
     out = []
     if algorithm is WarpExchangeAlgorithm.Shared:
@@ -87,14 +88,33 @@ def _warp_gather(
 class WarpExchange(WarpPrimitive):
     """Exchange blocked, striped and ranked logical-warp ownership.
 
-    Specialize with ``[dtype, width, items_per_thread, algorithm]``. The final
-    policy is optional and defaults to ``WarpExchangeAlgorithm.Shared``.
-    ``None`` selects the target's physical warp width. All participating lanes
+    Specialize with ``WarpExchange[dtype, width, items_per_thread, algorithm]``. The
+    parameters below are compile-time positional arguments to ``WarpExchange[...]``, in
+    bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required positive Python int giving the number of complete items
+            owned by each lane; the logical-warp tile has width * items_per_thread items.
+            Element components/fields do not increase this count. SHUFFLE requires
+            items_per_thread == width.
+        algorithm: Optional member of WarpExchangeAlgorithm selecting the implementation
+            policy. Defaults to ``WarpExchangeAlgorithm.SHARED`` when omitted; member calls
+            use this fixed policy.
+
+    All participating lanes
     use the same specialization and per-call options. Algorithm selection is
     part of the operator type; member functions do not accept an algorithm.
-    Shared requires one SharedStorage instance per logical warp. SHUFFLE needs
+    SHARED requires one SharedStorage instance per logical warp. SHUFFLE needs
     an empty SharedStorage and requires items_per_thread == width. Synchronize each group
-    before reusing its scratch; scatter is supported only by Shared.
+    before reusing its scratch; scatter is supported only by SHARED.
 
     Examples:
         P = fx.coop.WarpExchange[fx.Int32, 8, 2]
@@ -165,11 +185,11 @@ class WarpExchange(WarpPrimitive):
         width = cls.warp_threads
         _check_algorithm(algorithm, storage)
         value = cls._prepare(value)
-        if not _is_items(value):
+        if not _is_items(value, cls.dtype):
             return value
         lane = lane_id() % width
-        indices = Vector.from_elements([lane + i * width for i in range(len(_as_items(value)))])
-        return _warp_gather(value, indices, width=width, algorithm=algorithm, storage=storage)
+        indices = Vector.from_elements([lane + i * width for i in range(len(_as_items(value, cls.dtype)))])
+        return _warp_gather(value, indices, width=width, algorithm=algorithm, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def striped_to_blocked(
@@ -215,13 +235,13 @@ class WarpExchange(WarpPrimitive):
         width = cls.warp_threads
         _check_algorithm(algorithm, storage)
         value = cls._prepare(value)
-        if not _is_items(value):
+        if not _is_items(value, cls.dtype):
             return value
         lane = lane_id() % width
-        count = len(_as_items(value))
+        count = len(_as_items(value, cls.dtype))
         indices = [lane * count + i for i in range(count)]
         sources = Vector.from_elements([(i % width) * count + i // width for i in indices])
-        return _warp_gather(value, sources, width=width, algorithm=algorithm, storage=storage)
+        return _warp_gather(value, sources, width=width, algorithm=algorithm, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def scatter_to_striped(
@@ -274,7 +294,8 @@ class WarpExchange(WarpPrimitive):
         if algorithm is WarpExchangeAlgorithm.SHUFFLE:
             raise ValueError("Scatter to striped supports only Shared")
         value = cls._prepare(value)
-        items = _as_items(value)
+        items = _as_items(value, cls.dtype)
+        ranks = _from_items(_as_items(ranks))
         if not isinstance(ranks, Vector) or ranks.numel != len(items) or ranks.dtype.is_float:
             raise TypeError("ranks must be an integer Vector with one rank per input item")
         lane = lane_id() % width

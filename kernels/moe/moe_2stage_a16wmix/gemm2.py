@@ -5,13 +5,10 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.moe.mxfp_moe.mxfp4_gemm_common import (
-    _gep1,
-    _global_base_ptr1,
     global_typed_ptr,
     lds_typed_ptr,
     lds_vec_load,
@@ -63,9 +60,9 @@ def _atomic_bf16_epilog(
     lds_base_fptr = lds_typed_ptr(lds_acc_base_i32, T.f32)
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(32)
-    n_lane = tx_i32 % fx.Int32(32)
-    col_start = n_lane * fx.Int32(2)
+    m_lane = tx_i32 // 32
+    n_lane = tx_i32 % 32
+    col_start = n_lane * 2
 
     def _flat_buffer(arg, elem_ty, align):
         ptr = global_typed_ptr(arg, elem_ty, align=align)
@@ -83,13 +80,11 @@ def _atomic_bf16_epilog(
     # v2bf16" (same fork as moe_gemm_2stage / mxfp4_gemm2).
     if const_expr(not is_gfx942):
         atomic_bf16x2 = fx.make_copy_atom(fx.rocdl.BufferAtomicPkAdd(fx.BFloat16), fx.BFloat16)
-    else:
-        out_base = _global_base_ptr1(arg_out)
 
     def load_scalar(atom, src, index, elem_ty):
         frag = fx.make_rmem_tensor(1, elem_ty)
         fx.copy(atom, src[None, index], frag)
-        return Vec(frag.load())[0]
+        return frag.load()[0]
 
     packed = []
     weight = []
@@ -116,27 +111,18 @@ def _atomic_bf16_epilog(
             row_base_addr = token_id * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + col_start
             for s in range_constexpr(_s_count):
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                v2 = Vec(
-                    lds_vec_load(
-                        lds_acc_base_i32,
-                        idx0 * fx.Int32(4),
-                        Vec.make_type(2, fx.Float32),
-                        fx.Float32,
-                        align=8,
-                    )
+                v2 = lds_vec_load(
+                    lds_acc_base_i32,
+                    idx0 * 4,
+                    Vec.make_type(2, fx.Float32),
+                    fx.Float32,
+                    align=8,
                 )
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 out_off = row_base_addr + fx.Int32(s * 64)
                 if const_expr(is_gfx942):
-                    out_ptr = _gep1(out_base, out_off * fx.Int32(2))
-                    llvm.AtomicRMWOp(
-                        llvm.AtomicBinOp.fadd,
-                        out_ptr,
-                        _raw(pk),
-                        llvm.AtomicOrdering.monotonic,
-                        syncscope="agent",
-                        alignment=4,
-                    )
+                    out_ptr = global_typed_ptr(arg_out, T.bf16, align=4, byte_offset=out_off * 2)
+                    fx.atomic_add(out_ptr, pk, syncscope="agent")
                 else:
                     out_frag = fx.make_rmem_tensor(2, fx.BFloat16)
                     out_frag.store(pk)
@@ -178,9 +164,9 @@ def _reduce_bf16_epilog(
     lds_bf16 = lds_typed_ptr(lds_acc_base_i32, T.bf16)
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(32)
-    n_lane = tx_i32 % fx.Int32(32)
-    col_start = n_lane * fx.Int32(2)
+    m_lane = tx_i32 // 32
+    n_lane = tx_i32 % 32
+    col_start = n_lane * 2
 
     def _flat_buffer(arg, elem_ty, align):
         ptr = global_typed_ptr(arg, elem_ty, align=align)
@@ -198,7 +184,7 @@ def _reduce_bf16_epilog(
     def load_scalar(atom, src, index, elem_ty):
         frag = fx.make_rmem_tensor(1, elem_ty)
         fx.copy(atom, src[None, index], frag)
-        return Vec(frag.load())[0]
+        return frag.load()[0]
 
     packed = []
     for mr in range_constexpr(M_REPS):
@@ -234,14 +220,12 @@ def _reduce_bf16_epilog(
             )
             for s in range_constexpr(_s_count):
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                pk = Vec(
-                    lds_vec_load(
-                        lds_acc_base_i32,
-                        idx0 * fx.Int32(2),
-                        Vec.make_type(2, fx.BFloat16),
-                        fx.BFloat16,
-                        align=4,
-                    )
+                pk = lds_vec_load(
+                    lds_acc_base_i32,
+                    idx0 * 2,
+                    Vec.make_type(2, fx.BFloat16),
+                    fx.BFloat16,
+                    align=4,
                 )
                 out_frag = fx.make_rmem_tensor(2, fx.BFloat16)
                 out_frag.store(pk)
@@ -351,7 +335,7 @@ def _gemm2_body_a16w4(
     # ---- accumulators: accm[mi][ni] f32[4] (layout the atomic epilog expects) --
     acc_layout = fx.make_layout(4, 1)
     accm = [[fx.make_rmem_tensor(acc_layout, fx.Float32) for _ in range(num_acc_n)] for _ in range(m_repeat)]
-    zero4 = Vec.filled(4, 0.0, fx.Float32)
+    zero4 = fx.full(4, 0.0, fx.Float32)
     for mi in range_constexpr(m_repeat):
         for ni in range_constexpr(num_acc_n):
             accm[mi][ni].store(zero4)
@@ -524,8 +508,8 @@ def compile_gemm2_a16w4_port(
         lds_raw_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx_i32 = fx.Int32(gpu.thread_id("x"))
         bx_i32 = fx.Int32(gpu.block_id("x"))
-        lane = tx_i32 % fx.Int32(64)
-        wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
+        lane = tx_i32 % 64
+        wave = rocdl.readfirstlane(T.i32, tx_i32 // 64)
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_num_n_blocks)

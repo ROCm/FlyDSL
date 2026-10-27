@@ -163,11 +163,11 @@ def build_mxfp4_moe_scale_sort_module(cols: int):
         row_base = block << fx.Int32(5)
         tile_base = block * fx.Int32(n32)
         num_valid_ids = fx.Int32(buffer_ops.buffer_load(nv_rsrc, fx.Int32(0), vec_width=1, dtype=T.i32))
-        token_max = token_num - fx.Int32(1)
+        token_max = token_num - 1
 
         def token_scale_base(row):
             fused = fx.Int32(buffer_ops.buffer_load(sid_rsrc, row, vec_width=1, dtype=T.i32))
-            token = fused & fx.Int32(0xFFFFFF)
+            token = fused & 0xFFFFFF
             return (token < token_max).select(token, token_max) * fx.Int32(scale_cols)
 
         def load_byte(offset):

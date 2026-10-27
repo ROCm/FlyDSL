@@ -1,7 +1,7 @@
 {
   "upstream": {
     "repository": "https://github.com/llvm/llvm-project.git",
-    "llvm_hash": "1df311a6f7d8af05d068ce835b60dfa5b199d2f8",
+    "llvm_hash": "941a04e69ee8fe4c7a162b2f1e215aa8df867534",
     "required_patches": [
       {
         "file": "rocdl-lld-argv0.patch",
@@ -12,6 +12,21 @@
         "file": "rocdl-waves-per-eu-range.patch",
         "description": "Support waves_per_eu min,max range attribute for full VGPR utilization.",
         "upstream_status": "merged into upstream: 4d5db577f969519703c348b8c7b02ee22987bd94"
+      },
+      {
+        "file": "xnack-any-codegen-override.patch",
+        "description": "Allow overriding xnack=any codegen to xnack- or xnack+ on gfx1250 via LLVM_GFX1250_ANY_XNACK_CODEGEN env var.",
+        "upstream_status": "experimental"
+      },
+      {
+        "file": "amdgpu-initial-unclaused-vmem-sequence.patch",
+        "description": "Use another sequence for initial unclaused vmem on AMDGPU.",
+        "upstream_status": "merged into upstream: 1109d68feb1b746c675d8f88fb89085334f8f514"
+      },
+      {
+        "file": "amdgpu-improve-unclaused-vmem-sequence.patch",
+        "description": "Improve the sequence for initial unclaused VMEM on AMDGPU.",
+        "upstream_status": "merged into upstream: 739eaa08d45e5f6e5d13b1dd82daf0e5dc27e344"
       }
     ],
     "extensions": []

@@ -430,6 +430,7 @@ private:
     bool withElse = hasElse || !touchedRoots.empty();
     auto newIf = scf::IfOp::create(builder, oldIf.getLoc(), TypeRange(newResultTypes),
                                    mapping.lookupOrDefault(oldIf.getCondition()), withElse);
+    newIf->setDiscardableAttrs(oldIf->getDiscardableAttrDictionary());
 
     {
       // process then block
@@ -503,6 +504,7 @@ private:
         builder, oldFor.getLoc(), mapping.lookupOrDefault(oldFor.getLowerBound()),
         mapping.lookupOrDefault(oldFor.getUpperBound()), mapping.lookupOrDefault(oldFor.getStep()),
         newInitArgs, [](OpBuilder &, Location, Value, ValueRange) {}, oldFor.getUnsignedCmp());
+    newFor->setDiscardableAttrs(oldFor->getDiscardableAttrDictionary());
 
     IRMapping bodyMapping = mapping;
     Block *oldBody = oldFor.getBody();
@@ -557,6 +559,7 @@ private:
 
     auto newWhile =
         scf::WhileOp::create(builder, oldWhile.getLoc(), TypeRange(newResultTypes), newInitArgs);
+    newWhile->setDiscardableAttrs(oldWhile->getDiscardableAttrDictionary());
 
     SmallVector<Type> beforeArgTypes;
     beforeArgTypes.reserve(newInitArgs.size());

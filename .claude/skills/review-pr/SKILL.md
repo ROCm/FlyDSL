@@ -13,7 +13,8 @@ allowed-tools: Read Write Bash Grep Glob Agent
 
 This skill gives a human reviewer hints. Its judgement is stochastic and never blocks a merge,
 and it never posts to GitHub: the output is a card in `$WORK/card.md`, and publishing it is a
-human decision.
+human decision. The `review-pr` workflow posts a card only after a maintainer adds the `ai-review`
+label to the PR.
 
 **What makes FlyDSL different from a kernel library.** It is a compiler *and* a kernel
 collection, so a defect can live at four depths: the Python DSL front end, the JIT cache, the
@@ -343,6 +344,12 @@ then the gates. With `FLYDSL_REVIEW_SANDBOX_IMAGE` set, both agents run in a Doc
 mounts the checkout read-only and `$WORK` read-write and holds no GitHub credentials, so a review of
 untrusted PR text cannot write to GitHub or read the host's tokens. The card, the gate report and
 `usage.txt` (each agent's wall time and token use) are left in `$WORK`; nothing is posted.
+
+`.github/workflows/review-pr.yml` runs this on the self-hosted `flydsl-review` runner when a PR
+gets the `ai-review` label. Its review job alone uses the `flydsl-review` environment, which holds
+the API key and serves `main` only. `gateway.sh start` hands the key to a gateway container and
+puts the sandbox on a network whose only reachable peer is that gateway, so the agents never see
+the key and reach neither the host nor the internet. A separate job posts the card.
 
 ---
 

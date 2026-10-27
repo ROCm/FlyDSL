@@ -193,8 +193,8 @@ def build_schedule(kc: KernelCtx) -> dict:
             idx = i32(idx_)
             e = fx.Int32(bld(rid, idx * i32(16 if MLL else 4), 0, T.i32, 0))
             if masked(e) == fx.Boolean(False):
-                lds_atomic_or(L, L_DYN + (e >> i32(5)) * i32(4), i32(1) << (e & i32(31)))
-                lds_atomic_add(L, L_DCNT + e * i32(4), 1)
+                lds_atomic_or(L, L_DYN + (e >> 5) * 4, 1 << (e & 31))
+                lds_atomic_add(L, L_DCNT + e * 4, 1)
         cbar(L, tid)
         _dyn_prefix(L, tid)
         cbar(L, tid)
@@ -277,7 +277,7 @@ def build_schedule(kc: KernelCtx) -> dict:
 
     @traced
     def lb_none(L, tid, a, nun):
-        if (nun == i32(0)) & (tid == i32(0)) & (i32(gpu.block_id("x")) == i32(0)):
+        if (nun == i32(0)) & (tid == i32(0)) & (i32(gpu.block_id("x")) == 0):
             lb_lists_wait(a, lb_bank(L))
             for c in range_constexpr(NCK):
                 g_st_sys(lrdy_at(a, i32(c)), a["epoch"])
@@ -331,17 +331,17 @@ def build_schedule(kc: KernelCtx) -> dict:
                     e = fx.Int32(vs[it][j])
                     live, ahead = q < n4, q * i32(4) + i32(j) < lo
                     if live & (masked(e) == fx.Boolean(False)):
-                        lds_atomic_add(L, L_DCNT + e * i32(4), 1)
+                        lds_atomic_add(L, L_DCNT + e * 4, 1)
                         if ahead:
-                            lds_atomic_add(L, L_DPRE + e * i32(4), 1)
+                            lds_atomic_add(L, L_DPRE + e * 4, 1)
         for idx_ in range(n4 * i32(4) + tid, n, i32(NT)):
             idx = i32(idx_)
-            e = fx.Int32(bld(rid, idx * i32(4), 0, T.i32, 0))
+            e = fx.Int32(bld(rid, idx * 4, 0, T.i32, 0))
             ahead = idx < lo
             if masked(e) == fx.Boolean(False):
-                lds_atomic_add(L, L_DCNT + e * i32(4), 1)
+                lds_atomic_add(L, L_DCNT + e * 4, 1)
                 if ahead:
-                    lds_atomic_add(L, L_DPRE + e * i32(4), 1)
+                    lds_atomic_add(L, L_DPRE + e * 4, 1)
         cbar(L, tid)
         _lb_bitmap(L, tid)
         cbar(L, tid)
@@ -378,21 +378,19 @@ def build_schedule(kc: KernelCtx) -> dict:
         bid = i32(gpu.block_id("x"))
         nblk = i32(gpu.grid_dim.x)
         if tid < i32(64):
-            for j_ in range(bid + tid * nblk, i32(NCHLB_MAX), nblk * i32(64)):
+            for j_ in range(bid + tid * nblk, i32(NCHLB_MAX), nblk * 64):
                 g_st_sys(lb_g1c(a, i32(j_), nb), i32(0))
-            if bid == i32(0):
+            if bid == 0:
                 if tid < i32(NCK):
                     g_st_sys(lb_colc(a, tid, nb), i32(0))
                 if (tid >= i32(NCK)) & (tid < i32(NCK + N_XCD)):
                     g_st_sys(lb_lbr(a, nb, tid - i32(NCK)), i32(0))
 
     def _wave_prefix(v, bits):
-        pre, tot = i32(0), i32(0)
-        for b in range_constexpr(bits):
-            below, cnt = wave_rank(((v >> i32(b)) & i32(1)) == i32(1))
-            pre = pre + (below << i32(b))
-            tot = tot + (cnt << i32(b))
-        return pre, tot
+        if bits == 1:
+            return wave_rank((v & 1) == 1)
+        _, prefix, total = fx.coop.warp_scan_with_aggregate(v & ((1 << bits) - 1), fx.ReductionOp.ADD, width=64)
+        return prefix, total
 
     @traced
     def _chunk_table(L, tid, offs=False):
@@ -433,7 +431,7 @@ def build_schedule(kc: KernelCtx) -> dict:
                 lds_st(
                     L,
                     L_DCH + (off[0] + c) * i32(4),
-                    e | (ce << i32(16)) | (c << i32(24)),
+                    e | (ce << i32(16)) | (c << 24),
                 )
             cbar(L, tid)
         if tid == i32(0):
@@ -449,11 +447,11 @@ def build_schedule(kc: KernelCtx) -> dict:
         rl, rw = lb_lists(a)
         for idx_ in range(lo + tid, hi, i32(NT)):
             idx = i32(idx_)
-            e = fx.Int32(bld(rid, idx * i32(4), 0, T.i32, 0))
+            e = fx.Int32(bld(rid, idx * 4, 0, T.i32, 0))
             if masked(e) == fx.Boolean(False):
-                pos = lds_atomic_add(L, L_DPRE + e * i32(4), 1)
-                slot = lds_ld_i32(L, L_EOFF + e * i32(4)) + pos
-                wv = fx.Int32(bld(rtw, idx * i32(4), 0, T.i32, 0))
+                pos = lds_atomic_add(L, L_DPRE + e * 4, 1)
+                slot = lds_ld_i32(L, L_EOFF + e * 4) + pos
+                wv = fx.Int32(bld(rtw, idx * 4, 0, T.i32, 0))
                 bst(idx, rl, slot * i32(4), 0, AUX_SYS)
                 bst(wv, rw, slot * i32(4), 0, AUX_SYS)
         wait_vm(0)
@@ -834,7 +832,7 @@ def build_schedule(kc: KernelCtx) -> dict:
     @traced
     def lb_finish(tid, a, L):
         lb_zero_next(tid, a, lb_bank(L))
-        if (tid == i32(0)) & (i32(gpu.block_id("x")) == i32(0)):
+        if (tid == i32(0)) & (i32(gpu.block_id("x")) == 0):
             lb_lists_wait(a, lb_bank(L))
             g_add_agent(ctrl_at(a, i32(CTRL_LBSEQ)), 1)
 

@@ -69,8 +69,9 @@ def test_specialization_metadata_and_target_cache(monkeypatch, name, tile, api):
     assert root[params] is operator
 
 
-@pytest.mark.parametrize("name,tile", OPERATORS)
-@pytest.mark.parametrize("width", [0, 3, -1, 128, True])
+@pytest.mark.parametrize(
+    "name,tile,width", [(name, tile, width) for (name, tile), width in matrix_cases(OPERATORS, [0, 3, -1, 128, True])]
+)
 def test_invalid_logical_widths(name, tile, width):
     params = (fx.Int32, width, 3) if tile else (fx.Int32, width)
     with pytest.raises((TypeError, ValueError), match="width"):

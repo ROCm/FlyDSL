@@ -43,7 +43,6 @@ the 8 partials in rank order, so all ranks produce bit-identical hidden states
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
@@ -83,6 +82,7 @@ from kernels.monokernel.layout import (
     layout,
     stage_tasks,
 )
+from kernels.monokernel.ops import bpermute_i32, mem_realtime, write_lane_i32
 from kernels.monokernel.ops import (
     exp as _exp,
 )
@@ -115,9 +115,6 @@ from kernels.monokernel.ops import (
 )
 from kernels.monokernel.ops import (
     wave_umax as _wave_umax,
-)
-from kernels.monokernel.ops import (
-    xred as _xred,
 )
 from kernels.monokernel.ops import (
     xshfl as _xshfl,
@@ -350,7 +347,7 @@ def build_kimi_k3_mla_attention(
             return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
 
         def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+            return fx.Float32(a.to(fx.BFloat16))
 
         # ---- tagged-pair mailboxes
         def mb(name):
@@ -470,19 +467,13 @@ def build_kimi_k3_mla_attention(
 
         # ---- wave reductions
         def wave_sum(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, lambda a, b: a + b)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.ADD, width=64)
 
         def wave_max(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, fx.max)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.MAX, width=64)
 
         def subgroup16_max(v):
-            for off in (8, 4, 2, 1):
-                v = _xred(v, off, fx.max)
-            return v
+            return fx.coop.warp_reduce(v, fx.ReductionOp.MAX, width=16)
 
         def block_sums(vs):
             """Block-wide sums of several per-thread values with one LDS exchange."""
@@ -560,8 +551,7 @@ def build_kimi_k3_mla_attention(
             row = rg * 16 + ln % 16
             packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
             scales = [
-                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4)
+                ((packed_scale.shrui(fx.Int32(sp * 8)) & 0xFF) << 23).bitcast(fx.Float32) for sp in range_constexpr(4)
             ]
             return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
 
@@ -599,7 +589,7 @@ def build_kimi_k3_mla_attention(
                     for sp in range_constexpr(4):
                         a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
                         b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                        c = fx.Vector.filled(4, 0.0, fx.Float32)
+                        c = fx.full(4, 0.0, fx.Float32)
                         c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
                         part_coef = coef[sp] if const_expr(isinstance(coef, list)) else coef
                         if const_expr(callable(part_coef)):
@@ -609,12 +599,10 @@ def build_kimi_k3_mla_attention(
                         else:
                             acc = [acc[e] + c[e] * part_coef for e in range(4)]
                     continue
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
+                c = fx.full(4, 0.0, fx.Float32)
                 if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                     a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    bv = [
-                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
-                    ]
+                    bv = [fx.ptr_load(xs + (bw + h * 16), result_type=v4f).bitcast(fx.Int32) for h in range(2)]
                     b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                     one = fx.Int32(127)
                     c = fx.Vector(
@@ -901,25 +889,15 @@ def build_kimi_k3_mla_attention(
                 m = _wave_umax(ks[0])
                 hit = ks[0] == m
                 ks = [hit.select(ks[i + 1], ks[i]) for i in range(4)] + [ks[4]]
-                mv = fx.Int32(
-                    llvm.call_intrinsic(
-                        T.i32,
-                        "llvm.amdgcn.writelane.i32",
-                        [m.ir_value(), fx.Int32(k).ir_value(), mv.ir_value()],
-                        [],
-                        [],
-                    )
-                )
+                mv = write_lane_i32(m, k, mv)
             e = 255 - (mv & 255)
             src = (e % 64) * 4
-            got = [fx.Int32(rocdl.ds_bpermute(T.i32, src.ir_value(), r.bitcast(fx.Int32).ir_value())) for r in raws]
+            got = [bpermute_i32(src, r.bitcast(fx.Int32)) for r in raws]
             raw = got[0]
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
             raw = (lane < TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
-            tot = raw
-            for off in (1, 2, 4):
-                tot = _xred(tot, off, lambda a, b: a + b)
+            tot = fx.coop.warp_reduce(raw, fx.ReductionOp.ADD, width=8)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
@@ -1054,7 +1032,7 @@ def build_kimi_k3_mla_attention(
         def stamp(name, t, which, lead=0):
             if const_expr(timeline):
                 if tid == lead:
-                    now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
+                    now = mem_realtime()
                     fx.generic_store(
                         fx.inttoptr(
                             fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
@@ -1433,7 +1411,7 @@ def build_kimi_k3_mla_attention(
             score_head_base = task_head_group * WAVES
             hn = fx.min(score_head_base + lane % 16, H - 1)
             rgk = wave % 4
-            c = fx.Vector.filled(4, 0.0, fx.Float32)
+            c = fx.full(4, 0.0, fx.Float32)
             for st in range_constexpr(QK_DIM // 32 // 2):
                 kst = (wave // 4) * (QK_DIM // 32 // 2) + st
                 key = rgk * 16 + lane % 16
@@ -1477,8 +1455,8 @@ def build_kimi_k3_mla_attention(
                 hn = fx.min(head_base + lane % 16, H - 1)
                 for g in range_constexpr(KV_LORA // 32 // WAVES):
                     dw = (wave * (KV_LORA // 32 // WAVES) + g) * 16 + lane % 16  # dim pair word
-                    c0 = fx.Vector.filled(4, 0.0, fx.Float32)
-                    c1 = fx.Vector.filled(4, 0.0, fx.Float32)
+                    c0 = fx.full(4, 0.0, fx.Float32)
+                    c1 = fx.full(4, 0.0, fx.Float32)
                     for js in range_constexpr(SPLIT_KEYS // 32):
                         a = fx.ptr_load(
                             pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4), result_type=v4f
@@ -1621,7 +1599,7 @@ def build_kimi_k3_mla_attention(
                 if const_expr(not attention_residual):
                     return fx.Float32(0.0), fx.Float32(0.0)
                 w = fx.Vector.from_elements(
-                    [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32))], fx.Int32
+                    [bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32)], fx.Int32
                 )
                 v = w.bitcast(fx.BFloat16).to(fx.Float32)
                 return v[0], v[1]
@@ -1790,12 +1768,8 @@ def build_kimi_k3_mla_attention(
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                     nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                    r_wug = bo.create_buffer_resource_from_addr(
-                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                    )
-                    r_sug = bo.create_buffer_resource_from_addr(
-                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                    )
+                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                     unit = wave * UG8_UNITS + cc
                     if const_expr(use_mxfp4_weight):
                         coefficients = None
@@ -1918,12 +1892,8 @@ def build_kimi_k3_mla_attention(
             def ug8_units(e, sample, live=None):
                 nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                rw = bo.create_buffer_resource_from_addr(
-                    w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                )
-                rs = bo.create_buffer_resource_from_addr(
-                    s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                )
+                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
                 for cc in range_constexpr(UG8_UNITS):
@@ -2045,13 +2015,13 @@ def build_kimi_k3_mla_attention(
                 slot_q = (q // DN_UNITS_PER_SLOT) % MOE_SLOTS
                 kc = q % DN_UNITS_PER_SLOT
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
-                wb = bo.create_buffer_resource_from_addr(
+                wb = _rsrc(
                     w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
-                sb = bo.create_buffer_resource_from_addr(
+                sb = _rsrc(
                     s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
                 )
 
                 if const_expr(use_mxfp4_weight):

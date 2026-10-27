@@ -66,8 +66,8 @@ def cvt_sr_f32_to_bf16(x, rand):
 
     The add-then-truncate conversion matches AMD's non-saturating behavior.
     """
-    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & fx.Uint32(0xFFFF))
-    return fx.Uint16(bits >> fx.Uint32(16)).bitcast(fx.BFloat16)
+    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & 0xFFFF)
+    return fx.Uint16(bits >> 16).bitcast(fx.BFloat16)
 
 
 def default_f8_type() -> ir.Type:

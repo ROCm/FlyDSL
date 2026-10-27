@@ -45,7 +45,7 @@ def buf_copy_load(buffer, index, elem, unit_elems, *, cache_modifier=0):
     """Load one 8- or 16-byte unit from a bounded buffer tensor."""
     fragment = fx.make_rmem_tensor(unit_elems, elem)
     fx.copy(_buf_copy_atom(elem, unit_elems, cache_modifier), fx.slice(buffer, (index, None)), fragment)
-    return Vec(fragment.load())
+    return fragment.load()
 
 
 def buf_copy_store(buffer, index, value, elem, unit_elems, *, cache_modifier=0):

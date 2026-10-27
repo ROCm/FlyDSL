@@ -11,13 +11,15 @@
 #   FLYDSL_REVIEW_AGENT           agent CLI, default `claude` (run as `<agent> -p --dangerously-skip-permissions`)
 #   FLYDSL_REVIEW_REFUTER_AGENT   a different CLI or model for Step 8.7, default the same agent
 #   FLYDSL_REVIEW_SANDBOX_IMAGE   run both agents in this Docker image instead of on the host
+#   FLYDSL_REVIEW_SANDBOX_NETWORK Docker network for that container, default host
 #   FLYDSL_AGENT_TIMEOUT          seconds per agent, default 2400
 #
 # The agents read untrusted PR text with permissions skipped. In the sandbox they see the checkout
 # read-only and $WORK read-write, run as the calling user, and get no GitHub credentials and no
 # home directory, so they cannot post to GitHub or read the host's tokens. Model access comes from
 # ANTHROPIC_BASE_URL, which must be a gateway that holds the credential and ignores the client's
-# x-api-key: no real token is passed in.
+# x-api-key: no real token is passed in. `gateway.sh start` runs one on a network whose only
+# reachable peer is the gateway, and prints the two variables that point the sandbox at it.
 set -euo pipefail
 
 SKILL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,11 +59,14 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
     bin="$(readlink -f "$(command -v "$cli")")"
     mkdir -p "$W/.home"
     for v in ANTHROPIC_BASE_URL ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
-             ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
+             ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_EFFORT_LEVEL \
+             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; do
       [ -n "${!v:-}" ] && env_args+=(-e "$v")
     done
     # The placeholder key only satisfies the CLI's start-up check; the gateway supplies the real one.
-    timeout "$TIMEOUT" docker run --rm --network host --user "$(id -u):$(id -g)" \
+    # The caps bound a runaway agent: a full review measured 0.01 cores on average, 1 core at peak, 160 MiB.
+    timeout "$TIMEOUT" docker run --rm --network "${FLYDSL_REVIEW_SANDBOX_NETWORK:-host}" --user "$(id -u):$(id -g)" \
+      --cpus 2 --memory 2g --pids-limit 256 \
       -e HOME="$W/.home" -e ANTHROPIC_API_KEY=sandbox-has-no-credential "${env_args[@]}" \
       -v "$PROJ:$PROJ:ro" -v "$W:$W" -v "$bin:/usr/local/bin/review-agent:ro" -w "$PROJ" \
       --entrypoint /usr/local/bin/review-agent "$FLYDSL_REVIEW_SANDBOX_IMAGE" \
@@ -73,7 +78,11 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
   fi
   usage "$label" "$((SECONDS - started))" >> "$W/usage.txt"
   [ "$rc" -eq 124 ] && say "$label hit the ${TIMEOUT}s timeout"
-  [ -s "$out" ] || { say "$label wrote no $(basename "$out") (exit $rc); see $W/$label.log"; return 1; }
+  if [ ! -s "$out" ]; then
+    say "$label wrote no $(basename "$out") (exit $rc); see $W/$label.log"
+    say "$label's last message: $(result "$label")"
+    return 1
+  fi
   say "$label done (exit $rc): $(tail -1 "$W/usage.txt")"
 }
 
@@ -96,6 +105,20 @@ print(", ".join([
     f"{inp} input + {int(u.get('output_tokens') or 0)} output tokens" if u else "no usage record",
     f"${cost:.2f} as priced by the CLI" if isinstance(cost, (int, float)) else "cost not reported",
 ]))
+PY
+}
+
+result() {  # <label> -> the CLI's final message; for a failed agent it names the error
+  python3 - "$W/$1.json" <<'PY'
+import json, sys
+try:
+    data = json.loads(open(sys.argv[1]).read() or "null")
+except (OSError, ValueError):
+    data = None
+if isinstance(data, list):
+    data = next((x for x in reversed(data) if isinstance(x, dict) and x.get("type") == "result"), None)
+text = data.get("result") if isinstance(data, dict) else None
+print(" ".join(str(text or "none recorded").split())[:300])
 PY
 }
 

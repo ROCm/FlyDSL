@@ -3,8 +3,6 @@
 
 """RMSNorm backward kernel builders for plain and fused-add variants."""
 
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
@@ -14,7 +12,6 @@ from kernels.common.kernels_common import atomic_add, dtype_to_elem_type
 from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
     VEC_WIDTH,
-    WARP_SIZE,
     load_vec,
     load_weight_vec,
     make_single_reduction_storage,
@@ -48,8 +45,8 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
     eps is baked into Rstd by the forward, so it is not needed here.
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    SharedStorage = make_single_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def rmsnorm_bwd_kernel(
@@ -69,35 +66,10 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
         c_zero_f = fx.Float32(0.0)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w = wave_reduce_add(val)
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
+            with fx.fastmath(fm_fast):
+                return BlockReduce(val, fx.ReductionOp.ADD, storage=lds)
 
         Input_buf = fx.rocdl.make_buffer_tensor(Input)
         Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -187,8 +159,8 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
     This keeps the kernel branch-free wrt None.
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    SharedStorage = make_single_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def fused_add_rmsnorm_bwd_kernel(
@@ -209,35 +181,10 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
         c_zero_f = fx.Float32(0.0)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w = wave_reduce_add(val)
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
+            with fx.fastmath(fm_fast):
+                return BlockReduce(val, fx.ReductionOp.ADD, storage=lds)
 
         Added_buf = fx.rocdl.make_buffer_tensor(Added)
         Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -341,7 +288,6 @@ def _build_rmsnorm_bwd_two_stage_module(
         raise ValueError(f"num_programs must be positive, got {num_programs}")
 
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
-    RED_SLOTS = max(1, (TWO_STAGE_PARTIAL_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
     USE_VEC = is_rmsnorm_bwd_two_stage_vec_config(N, dtype_str)
@@ -352,7 +298,8 @@ def _build_rmsnorm_bwd_two_stage_module(
     PARTIAL_ACC_SIZE = NUM_IO_ITERS * IO_WIDTH
     arch = get_rocm_arch() if USE_VEC else ""
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
-    SharedStorage = make_single_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, TWO_STAGE_PARTIAL_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
     DWeightReduceStorage = make_single_reduction_storage(DWEIGHT_REDUCE_THREADS)
 
     @flyc.kernel(known_block_size=[TWO_STAGE_PARTIAL_THREADS, 1, 1])
@@ -376,35 +323,10 @@ def _build_rmsnorm_bwd_two_stage_module(
         c_zero_f = fx.Float32(0.0)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w = wave_reduce_add(val)
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
+            with fx.fastmath(fm_fast):
+                return BlockReduce(val, fx.ReductionOp.ADD, storage=lds)
 
         Source_buf = fx.rocdl.make_buffer_tensor(Source)
         Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -448,7 +370,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                     )
                 )
 
-        dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
+        dweight_partial = fx.full(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
         for row in range(bid, MIn, num_programs):
             row_source = fx.slice(Source_buf, (row, None))
             row_dy = fx.slice(DY_buf, (row, None))

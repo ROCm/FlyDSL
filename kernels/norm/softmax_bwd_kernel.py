@@ -19,11 +19,9 @@ Two paths:
   - Generic path (arbitrary N): scalar access with masking.
 """
 
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, const_expr, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr.typing import ReductionOp, full
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
@@ -82,11 +80,9 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
     # vector width must satisfy vec_width * elem_bits == 128 (8 for 16-bit, 4 for f32).
     vec_width = 128 // elem_bits
     tile_cols = BLOCK_THREADS * vec_width
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
 
-    @fx.struct
-    class SharedStorage:
-        s_red: fx.Array[fx.Float32, RED_SLOTS, 16]
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def softmax_bwd_kernel(
@@ -101,45 +97,14 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
         fm_fast = arith.FastMathFlags.fast
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
 
         c_zero_f = fx.Float32(0.0)
 
         # ── wave / block reduction (sum only) ─────────────────────────────
-        def wave_reduce_add(x):
-            w = x
-            with fx.fastmath(fm_fast):
-                for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                    off = WARP_SIZE // (2 << _sh_exp)
-                    peer = gpu.shuffle_xor(w, off, WARP_SIZE)
-                    w = w + peer
-            return w
 
         def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-
-            w = wave_reduce_add(val)
-
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_red, 0)
+            with fx.fastmath(fm_fast):
+                return BlockReduce(val, fx.ReductionOp.ADD, storage=lds)
 
         DY_buf = fx.rocdl.make_buffer_tensor(DY)
         Y_buf = fx.rocdl.make_buffer_tensor(Y)

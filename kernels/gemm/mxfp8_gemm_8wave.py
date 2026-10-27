@@ -134,7 +134,7 @@ class MxMfma:
             fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
             fx.make_layout((1, 1, 1), (1, 1, 1)),
         )
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
+        self.zero_value = fx.full(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
 
@@ -150,7 +150,7 @@ class MxMfma:
     def _scales(self, values):
         frag = fx.make_rmem_tensor(fx.make_layout((1, len(values)), (0, 1)), fx.Int32)
         for i in range_constexpr(len(values)):
-            fx.slice(frag, (None, i)).store(Vec.filled(1, values[i], fx.Int32))
+            fx.slice(frag, (None, i)).store(fx.full(1, values[i], fx.Int32))
         return frag
 
     def call(self, a, b, c, sa, sb, *, k_pack, set_prio=True):
@@ -397,6 +397,8 @@ def compile_mxfp8_gemm_8w(
             b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
+            # The other wave group refills B0 right after this barrier: finish this wave's LDS reads first.
+            rocdl.s_waitcnt(lgkmcnt=0)
             rocdl.s_barrier()
             scale_chunk_dma(k)
 
@@ -433,7 +435,8 @@ def compile_mxfp8_gemm_8w(
         sb0 = scale_read(sc_pf, k, "b0")
         b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
         a0_frag = a_s2r.load(a_cur0)
-        rocdl.s_barrier()
+        # Drain the last tile's loads: its B0/A0 are read before the final wait.
+        wait_barrier(0)
 
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
@@ -485,7 +488,9 @@ def compile_mxfp8_gemm_8w(
         c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2, set_prio=False)
         c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2, set_prio=False)
         rocdl.s_setprio(0)
-        rocdl.s_barrier()
+        # Balance the prologue's extra wave_m == 1 barrier so both groups' epilogues overlap (helps small shapes).
+        if wave_m == 0:
+            rocdl.s_barrier()
 
         # Accumulators are already scaled by the MFMA: convert and store.
         wave_n_offset = wave_n * (N_TILES_B * 16)

@@ -179,7 +179,7 @@ def compile_mega_moe_tp(
         f, ss = [], fx.Float32(0.0)
         for k in range_constexpr(TN_IT):
             q = tid + i32(k * NTT)
-            qc = fx.min(q, H8 - i32(1))
+            qc = fx.min(q, H8 - 1)
             off = (r * i32(H) + qc * i32(8)) * i32(2)
             yv = bf16x8_to_f32(bld(ry, off, 0, V4I, AUX_SYS if sysy else 0))
             rv = bf16x8_to_f32(bld(rres, off, 0, V4I, 0))
@@ -201,12 +201,10 @@ def compile_mega_moe_tp(
         rcp = fx.Float32(fmath.rsqrt(tot.bitcast(fx.Float32) / fx.Float32(float(H)) + fx.Float32(float(tn_eps))))
         xs, am = [], fx.Float32(0.0)
         for k in range_constexpr(TN_IT):
-            q = fx.min(tid + i32(k * NTT), H8 - i32(1))
+            q = fx.min(tid + i32(k * NTT), H8 - 1)
             wv = bf16x8_to_f32(bld(rw, q * i32(16), 0, V4I, 0))
             xk = [
-                fx.Float32(
-                    fx.Float32(x * rcp * ((w + fx.Float32(1.0)) if tn_gemma else w)).to(fx.BFloat16).to(fx.Float32)
-                )
+                fx.Float32(x * rcp * ((w + fx.Float32(1.0)) if tn_gemma else w)).to(fx.BFloat16).to(fx.Float32)
                 for x, w in zip(f[k], wv)
             ]
             am = fx.max(am, amax(xk))
@@ -370,22 +368,22 @@ def compile_mega_moe_tp(
         epoch = lds_ld_i32(L, L_CTL + C_EPOCH * 4)
         a["epoch"] = epoch
         _drop_stale(tid, a)
-        if (tid == i32(0)) & (i32(gpu.block_id("x")) == i32(0)):
+        if (tid == 0) & (i32(gpu.block_id("x")) == 0):
             g_st_sys(claim_addr(a, 1), i32(0))
         if const_expr(ar):
             a["ids"] = fx.Int64(ids_in)
             a["tw"] = fx.Int64(tw_in)
         else:
             par = fx.Int64(epoch & i32(1)) * fx.Int64(a["tp"] * a["mmax"] * i32(TOPK))
-            a["off_ids"] = off_ids + par * fx.Int64(16)
-            a["off_w"] = off_w + par * fx.Int64(4)
+            a["off_ids"] = off_ids + par * 16
+            a["off_w"] = off_w + par * 4
             a["ids"] = fx.Int64(mine) + a["off_ids"]
             a["tw"] = fx.Int64(mine) + a["off_w"]
             if (tid >= i32(NT)) & (tid < i32(NT + 64)):
                 if const_expr(MLL):
-                    _ag_send_meta_ll(tid % i32(64), a)
+                    _ag_send_meta_ll(tid % 64, a)
                 else:
-                    _ag_send_meta(tid % i32(64), a)
+                    _ag_send_meta(tid % 64, a)
         quant_chunks(L, tid, NTT, a, i32(0), i32(NCHA))
         gpu.barrier()
         a["ax"] = fx.Int64(mine) + off_x

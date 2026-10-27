@@ -8,7 +8,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
@@ -109,7 +109,7 @@ def build_gqa_attn(
             return fx.maxnumf(a, b, fastmath=current_fastmath())
 
         def bcast16(scalar):
-            return Vec.from_elements([f32(scalar)], f32).broadcast_to(16)
+            return fx.full(16, f32(scalar), f32)
 
         def hw_exp2_scalar(x):
             return f32(rocdl.exp2(f32.ir_type, _raw(x)))
@@ -183,7 +183,7 @@ def build_gqa_attn(
             offs = []
             for i in range_constexpr(2):
                 lane_byte_off = lid * BYTES_PER_THREAD + wid * BYTES_PER_WARP + i * NUM_WARPS * BYTES_PER_WARP
-                lane_elem_off = i32(lane_byte_off) // i32(2)
+                lane_elem_off = i32(lane_byte_off) // 2
                 offs.append(i32(fx.get_scalar(fx.crd2idx(fx.make_int_tuple(lane_elem_off), layout))))
             return offs
 
@@ -225,7 +225,7 @@ def build_gqa_attn(
                     off_imm = (ii * 4 + jj) * ST_ELEMS
                     for j in range_constexpr(2):
                         col = j * 16 + col_offset
-                        crd = fx.make_int_tuple((i32(row_offset), i32(col)))
+                        crd = fx.make_int_tuple((row_offset, i32(col)))
                         elem_off = i32(fx.get_scalar(fx.crd2idx(crd, _k_smem_layout))) + i32(off_imm)
                         kreg[ii][jj * 2 + j] = _read_v8bf16(smem_ptr, elem_off)
             return kreg  # [n=2][k=8] v8bf16
@@ -244,7 +244,7 @@ def build_gqa_attn(
             col_in_sub = col_offset % 32
             ST_ELEMS = 8 * 32
             ST_PER_ROW = 4
-            crd = fx.make_int_tuple((i32(row_offset), i32(col_in_sub)))
+            crd = fx.make_int_tuple((row_offset, col_in_sub))
             lane_elems = i32(fx.get_scalar(fx.crd2idx(crd, _v_smem_layout)))
             base_ptr = fx.add_offset(smem_ptr, fx.make_int_tuple(lane_elems))
             vreg = [[None] * 4 for _ in range_constexpr(4)]
@@ -266,7 +266,7 @@ def build_gqa_attn(
         # ---------------- O store ----------------
         def _store_o_base():
             return (
-                batch_idx * (i32(seq_len_q) * (ATTN_H * ATTN_D))
+                batch_idx * (seq_len_q * (ATTN_H * ATTN_D))
                 + tile_idx * (Q_BLOCK_SIZE * ATTN_H * ATTN_D)
                 + head_idx * ATTN_D
             )
@@ -357,7 +357,7 @@ def build_gqa_attn(
         # block instead of drifting up into the previous compute block (which
         # forced the compiler to insert conservative vmcnt(3/5/6) drains).
         def nop_anchor():
-            _llvm.inline_asm(ir.Type.parse("!llvm.void"), [], "s_nop 7", "", has_side_effects=True)
+            rocdl.s_nop(7)
 
         def _anchor_vals(vals):
             n = len(vals)
@@ -445,7 +445,7 @@ def build_gqa_attn(
             left_edge = qs - i32(swa_left)
             left_edge = (left_edge > i32(0)).select(left_edge, i32(0))
             right_edge = qs + i32((Q_BLOCK_SIZE * NUM_WARPS - 1) + swa_right)
-            seq_m1 = i32(seq_len_kv) - i32(1)
+            seq_m1 = seq_len_kv - 1
             right_edge = (right_edge < seq_m1).select(right_edge, seq_m1)
             # First in-band tile, 64-aligned (>= 0 since qs >= 0).
             base0 = (left_edge // i32(KV_BLOCK_SIZE)) * i32(KV_BLOCK_SIZE)
@@ -457,24 +457,24 @@ def build_gqa_attn(
             nt_ct = sgpr(nt_ct)
             nt_rt = nt_ct
 
-            max_base = i32(seq_len_kv) - nt_ct * i32(KV_BLOCK_SIZE)
+            max_base = seq_len_kv - nt_ct * i32(KV_BLOCK_SIZE)
             base_unclamped = (base0 < max_base).select(base0, max_base)
             base_unclamped = (base_unclamped > i32(0)).select(base_unclamped, i32(0))
             base_kv_row = sgpr(base_unclamped)
             swa_row_off = base_kv_row * i32(ATTN_H_KV * ATTN_D)
         else:
-            nt_rt = i32(seq_len_kv) // i32(KV_BLOCK_SIZE)
+            nt_rt = seq_len_kv // i32(KV_BLOCK_SIZE)
             base_kv_row = i32(0)
             swa_row_off = i32(0)
 
-        k_base_elems = batch_idx * (i32(seq_len_kv) * (ATTN_H_KV * ATTN_D)) + head_idx_kv * ATTN_D + swa_row_off
-        v_base_elems = batch_idx * (i32(seq_len_kv) * (ATTN_H_KV * ATTN_D)) + head_idx_kv * ATTN_D + swa_row_off
+        k_base_elems = batch_idx * (seq_len_kv * (ATTN_H_KV * ATTN_D)) + head_idx_kv * ATTN_D + swa_row_off
+        v_base_elems = batch_idx * (seq_len_kv * (ATTN_H_KV * ATTN_D)) + head_idx_kv * ATTN_D + swa_row_off
 
         # ---------------- per-query band mask (aiter window_size) ----------------
         def _mask_band_half(att_h, band_tile, h):
-            q_row = i32(tile_idx * i32(Q_BLOCK_SIZE)) + i32(lid % 32)
+            q_row = i32(tile_idx * i32(Q_BLOCK_SIZE)) + (lid % 32)
 
-            kcol_base = base_kv_row + i32(band_tile) * i32(KV_BLOCK_SIZE) + i32((lid // 32) * 4)
+            kcol_base = base_kv_row + i32(band_tile) * i32(KV_BLOCK_SIZE) + ((lid // 32) * 4)
 
             width = fx.Uint32(swa_left + swa_right)
             src = Vec(att_h)
@@ -528,7 +528,7 @@ def build_gqa_attn(
         o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O), fx.make_layout(1, 1))
         _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), bf16)
 
-        ZERO16 = Vec.filled(16, 0.0, f32)
+        ZERO16 = fx.full(16, 0.0, f32)
 
         q_reg = [[None] * 8 for _ in range_constexpr(1)]
         q_reg_t = [[None] * 1 for _ in range_constexpr(8)]
@@ -560,7 +560,7 @@ def build_gqa_attn(
         q_row_offset = lid % 32
         q_col_offset = 8 * (lid // 32)
         q_base = (
-            batch_idx * (i32(seq_len_q) * (ATTN_H * ATTN_D))
+            batch_idx * (seq_len_q * (ATTN_H * ATTN_D))
             + tile_idx * (Q_BLOCK_SIZE * ATTN_H * ATTN_D)
             + head_idx * ATTN_D
         )
@@ -585,9 +585,9 @@ def build_gqa_attn(
         q16 = [_concat(q_raw[2 * p], q_raw[2 * p + 1]) for p in range_constexpr(4)]
         q32 = [_concat(q16[2 * p], q16[2 * p + 1]) for p in range_constexpr(2)]
         q_all = _concat(q32[0], q32[1])
-        q_sc64 = Vec.from_elements([TEMPERATURE_SCALE], f32).broadcast_to(64)
+        q_sc64 = fx.full(64, f32(TEMPERATURE_SCALE), f32)
         q_all_scaled = Vec(q_all.to(f32)) * q_sc64
-        q_all_bf = Vec(Vec(q_all_scaled).to(bf16))
+        q_all_bf = Vec(q_all_scaled).to(bf16)
         for j in range_constexpr(8):
             qbf = q_all_bf.shuffle(q_all_bf, [j * 8 + e for e in range(8)])
             q_reg[0][j] = qbf
@@ -644,10 +644,10 @@ def build_gqa_attn(
 
         # Scale the 4 bf16 P packs (att_block_bf16) by a scalar corr
         def scale_packs(packs, corr_scalar):
-            corr8 = Vec.from_elements([f32(corr_scalar)], f32).broadcast_to(8)
+            corr8 = fx.full(8, f32(corr_scalar), f32)
             out = []
             for p in range_constexpr(4):
-                ps = Vec(Vec(packs[p]).to(f32)) * corr8
+                ps = Vec(packs[p]).to(f32) * corr8
                 out.append(Vec(ps).to(bf16))
             return out
 
@@ -1039,7 +1039,7 @@ def build_gqa_attn(
         inv = rocdl.rcp(T.f32, norm_vec)
         # Guard against a fully-masked row (norm == 0 -> rcp == inf).
         if const_expr(NT_BAND is not None):
-            inv = arith.select(f32(norm_vec) > 0.0, inv, 0.0)
+            inv = (f32(norm_vec) > 0.0).select(inv, 0.0)
         inv_b = bcast16(f32(inv))
 
         o_base = _store_o_base()
@@ -1073,7 +1073,7 @@ def build_gqa_attn(
         stream: fx.Stream = fx.Stream(None),
     ):
         grid_x = ATTN_H
-        grid_y = (fx.Int32(seq_len_q) // fx.Int32(Q_BLOCK_SIZE) + fx.Int32(NUM_WARPS - 1)) // fx.Int32(NUM_WARPS)
+        grid_y = (seq_len_q // fx.Int32(Q_BLOCK_SIZE) + fx.Int32(NUM_WARPS - 1)) // fx.Int32(NUM_WARPS)
         grid_z = ATTN_B
         attend_ker(
             Q,
