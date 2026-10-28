@@ -196,11 +196,14 @@ to the same kernel. Run the example with `--layers 3 --graph` to try this.
 | `FLYDSL_KTRACE_DUMP_DIR` | current directory | Trace output directory |
 
 An explicit `ktrace` compile hint overrides the environment. To set a persistent
-default for a launcher:
+default for a launcher, set it on the launcher:
 
 ```python
-flyc.compile[{"ktrace": True}](launch, *args)
+launch.compile_hints["ktrace"] = True
 ```
+
+`flyc.compile[{"ktrace": True}](launch, *args)` applies the hint to that compile
+only and leaves `launch` unchanged.
 
 Use `ktrace.capture(...)` for a temporary setting. The buffer is allocated once
 per process. Keep its size consistent across compilation and execution; cached

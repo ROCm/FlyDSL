@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import copy
 import ctypes
 import enum
 import fcntl
@@ -2003,9 +2004,18 @@ class CompileCallable:
         return CompileCallable(compile_hints=hints)
 
     def __call__(self, func, *args, **kwargs):
-        jit_func, _bound_self = _unwrap_jit_function(func)
+        jit_func, bound_self = _unwrap_jit_function(func)
         if self._compile_hints and jit_func is not None:
+            if args or kwargs:
+                # Set these up on ``jit_func`` itself, so that repeated hinted
+                # compiles share them instead of each copy rebuilding them.
+                jit_func._ensure_sig()
+                jit_func._ensure_cache_manager(type(bound_self) if bound_self is not None else None)
+            # A copy, so the hints do not stick to ``jit_func`` for its later
+            # compiles. The caches it shares are keyed on the hints.
+            jit_func = copy.copy(jit_func)
             jit_func.compile_hints = {**jit_func.compile_hints, **self._compile_hints}
+            func = jit_func if bound_self is None else jit_func.__get__(bound_self)
         if not args and not kwargs:
             # No args → just return the (hinted) function for deferred compilation
             return func
