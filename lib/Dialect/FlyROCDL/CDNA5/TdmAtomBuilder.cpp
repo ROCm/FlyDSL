@@ -341,6 +341,27 @@ FailureOr<TdmGbasis> construct_tdm_gbasis(const Layout &gtensor, const Layout &s
                           "tile do not share a contiguous innermost run. Does the tiler select "
                           "out the major global mode?";
 
+  // TDM only: descriptor axis 0 has an implicit stride of 1, so only the contiguous global
+  // mode can lead the box. A size-1 leaf is not an axis, so its stride does not count. When
+  // the run reaches that mode later, the box stops before it, exactly as when a non-unit
+  // step keeps the run from reaching it: the mode then leads with extent 1 (below) and its
+  // traversal stays in ITER, which is how TDM transposes.
+  int32_t contiguousMode = -1, found = 0;
+  for (auto [i, extent, stride] :
+       llvm::enumerate(gtensor.shape().leaves(), gtensor.stride().leaves()))
+    if (!extent.isOne() && stride.isOne()) {
+      contiguousMode = i;
+      ++found;
+    }
+  if (found != 1)
+    contiguousMode = -1;
+  if (contiguousMode >= 0) {
+    auto run = sidx2gmodeFull.stride().leaves().take_front(smemRank);
+    auto it = llvm::find(run, globalBases[contiguousMode]);
+    if (it != run.begin() && it != run.end())
+      smemRank = std::distance(run.begin(), it);
+  }
+
   // Keep only the static-1 basis modes into gmem
   auto sidx2gmode = core::take(sidx2gmodeFull, 0, smemRank);
 
@@ -371,6 +392,19 @@ FailureOr<TdmGbasis> construct_tdm_gbasis(const Layout &gtensor, const Layout &s
   if (tdmGbasisTile.isError())
     return emitError() << "cannot express the coalesced TDM box in global modes";
 
+  // TDM only: a box the contiguous mode does not lead takes it as an extent-1 axis 0. Done
+  // before the missing modes are appended, so they never take axis 0.
+  auto firstBasis = tdmGbasisTile.stride().leaves();
+  if (firstBasis.empty() ||
+      !core::basis_get(Tuple::fromLeaf(firstBasis.front()), gtensor.stride()).isOne()) {
+    if (contiguousMode < 0)
+      return emitError() << "TDM descriptor axis 0 has an implicit stride of 1, but the global "
+                            "tensor has no unique static stride-1 mode to put there";
+    tdmGbasisTile = core::prepend(
+        tdmGbasisTile,
+        core::make_layout(Tuple::getOne(), Tuple::fromLeaf(globalBases[contiguousMode])));
+  }
+
   // Find missing bases that don't appear in tile_gbasis
   auto tileGbasisFlatStride = core::flatten(tdmGbasisTile.stride());
   auto tileGbasisRemainingStride = core::filter_tuple(
@@ -393,38 +427,6 @@ FailureOr<TdmGbasis> construct_tdm_gbasis(const Layout &gtensor, const Layout &s
   auto tdmGbasis = core::make_layout(
       core::concat(core::wrap(tdmGbasisTile.shape()), core::wrap(tileGbasisRemainingShape)),
       core::concat(core::wrap(tdmGbasisTile.stride()), core::wrap(tileGbasisRemainingStride)));
-
-  // TDM only: descriptor axis 0 has an implicit stride of 1. A dropped size-1 contiguous
-  // mode can still be needed there; require a unique contiguous global mode and an
-  // extent-1 selection of that mode.
-  auto firstBasis = tdmGbasis.stride().leaves();
-  if (firstBasis.empty() ||
-      !core::basis_get(Tuple::fromLeaf(firstBasis.front()), gtensor.stride()).isOne()) {
-    int32_t contiguousMode = -1, found = 0;
-    for (auto [i, stride] : llvm::enumerate(gtensor.stride().leaves()))
-      if (stride.isOne()) {
-        contiguousMode = i;
-        ++found;
-      }
-    int64_t tileExtent = 1;
-    if (found == 1)
-      for (auto [extent, stride] : llvm::zip(ctaVMap.shape().leaves(), ctaVMap.stride().leaves()))
-        if (stride.isBasis() && stride.modes() == globalBases[contiguousMode].modes())
-          tileExtent *= extent.staticValue();
-    if (found == 1 && tileExtent == 1 &&
-        !llvm::is_contained(tdmGbasis.stride().leaves(), globalBases[contiguousMode]))
-      tdmGbasis =
-          core::prepend(tdmGbasis, core::make_layout(Tuple::getOne(),
-                                                     Tuple::fromLeaf(globalBases[contiguousMode])));
-    else
-      return emitError() << "the innermost descriptor dim must be contiguous in global memory "
-                            "(stride 1), got global mode "
-                         << (firstBasis.empty()
-                                 ? -1
-                                 : std::distance(globalBases.begin(),
-                                                 llvm::find(globalBases, firstBasis.front())))
-                         << " — the LDS tile's majorness does not match the global tensor's";
-  }
 
   // Group the trailing modes to make this max rank-5 -- TDM rank limitation.
   // tdm_box_shape:gmem_mode
