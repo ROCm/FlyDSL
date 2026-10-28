@@ -512,6 +512,20 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
     return failure();
   SmallVector<VectorEntry> vector = *vectorOr;
 
+  // `coalesce` compares basis strides by coefficient alone, so it can join two different
+  // global modes: `(2,2,2):(1E0,2E1,1E1)` comes back as `(4,2):(1E0,1E1)`, four elements of
+  // a two-element mode. A box built from that run spans the wrong modes and nothing below
+  // notices, but the run can never take more of a mode than the tile does.
+  {
+    SmallVector<int64_t> taken(numModes, 1);
+    for (const VectorEntry &e : vector)
+      if ((taken[e.mode] *= e.extent) > tileExtent[e.mode])
+        return emitError() << "internal: the LDS run takes " << taken[e.mode]
+                           << " elements of global mode " << e.mode << " but the tile takes only "
+                           << tileExtent[e.mode]
+                           << "; coalescing this LDS layout joined two global modes";
+  }
+
   // Residual traversal stays in ITER instead of changing the logical atom's
   // size through hardware descriptor iteration.
   llvm::DenseSet<int32_t> coveredModes;
