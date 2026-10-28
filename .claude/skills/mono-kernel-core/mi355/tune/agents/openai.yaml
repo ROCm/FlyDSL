@@ -1,0 +1,4 @@
+interface:
+  display_name: "MI355X Mono-Kernel Optimization"
+  short_description: "Tune MI355X kernels with benchmarks, PMC, and ATT"
+  default_prompt: "Use $mi355-mono-kernel-tune to select and validate one optimization from the current performance evidence."
