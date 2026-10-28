@@ -73,11 +73,27 @@ INDEX_CP_TILE = 4096
 INDEX_RADIX_DIGITS = 4
 INDEX_RADIX_BINS = 256
 INDEX_LOCAL_LDS_CAPACITY = 16384
+ONE_WORKGROUP_MAX_WIDTH = 20000
+SHORT_LDS_CAPACITY = (ONE_WORKGROUP_MAX_WIDTH + 511) // 512 * 512
 
 
-def indexer_uses_tiles(index_max_seq: int) -> bool:
+def index_local_capacity(index_max_seq: int, indexer_quant: bool = False) -> int:
+    # The allocated-width branch never uses short-score storage in the long path.
+    # Keep the validated v102 long-path LDS and symmetric layout unchanged.
+    limit = (
+        SHORT_LDS_CAPACITY if indexer_quant and index_max_seq <= ONE_WORKGROUP_MAX_WIDTH else INDEX_LOCAL_LDS_CAPACITY
+    )
+    return min(index_max_seq, limit)
+
+
+def index_radix_geometry(indexer_quant: bool) -> tuple[int, int]:
+    """Retain BF16 geometry; FP4 uses three wider radix digits."""
+    return (3, 2048) if indexer_quant else (INDEX_RADIX_DIGITS, INDEX_RADIX_BINS)
+
+
+def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool = False, indexer_quant: bool = False) -> bool:
     """Keep the existing short selector; use bounded tiles for larger contexts."""
-    return index_max_seq > INDEX_LOCAL_LDS_CAPACITY
+    return index_max_seq > (ONE_WORKGROUP_MAX_WIDTH if indexer_quant else INDEX_LOCAL_LDS_CAPACITY)
 
 
 def index_cp_world(npes: int, samples: int, index_max_seq: int) -> int:
@@ -93,8 +109,14 @@ def index_cp_capacity(index_max_seq: int, npes: int) -> int:
     return (index_max_seq + unit - 1) // unit * INDEX_KEYS_PER_TASK
 
 
-def index_cp_partitions(index_max_seq: int, npes: int) -> int:
-    return (index_cp_capacity(index_max_seq, npes) + INDEX_CP_TILE - 1) // INDEX_CP_TILE
+def index_cp_tile(indexer_quant: bool) -> int:
+    """Use eighteen keys per lane for FP4; retain BF16's eight-key geometry."""
+    return 9216 if indexer_quant else INDEX_CP_TILE
+
+
+def index_cp_partitions(index_max_seq: int, npes: int, indexer_quant: bool = False) -> int:
+    tile = index_cp_tile(indexer_quant)
+    return (index_cp_capacity(index_max_seq, npes) + tile - 1) // tile
 
 
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
@@ -232,9 +254,11 @@ def layout(
     output_heads: int | None = None,
     dcp_size: int = 1,
     native_fp4_mfma: bool = False,
+    indexer_quant: bool = False,
 ):
     """Return byte offsets for per-rank scratch and symmetric peer buffers."""
 
+    radix_digits, radix_bins = index_radix_geometry(indexer_quant)
     tile = row_tile_size(samples, native_fp4_mfma)
     if tile != samples:
         scratch, symmetric = layout(
@@ -249,6 +273,7 @@ def layout(
             output_heads=output_heads,
             dcp_size=dcp_size,
             native_fp4_mfma=native_fp4_mfma,
+            indexer_quant=indexer_quant,
         )
         count = samples // tile
         scratch = dict(scratch, _tile_rows=tile, _tile_count=count, _tile_stride=scratch["_bytes"])
@@ -262,7 +287,7 @@ def layout(
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples, heads)
     output_heads = heads if output_heads is None else output_heads
-    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq)
+    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq, indexer_cp, indexer_quant)
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
     pair_bytes = 8
     items = [
@@ -295,6 +320,8 @@ def layout(
             ("index_ready", samples * pair_bytes),
             ("index_w", samples * INDEX_HEADS * pair_bytes),
             ("index_q", samples * INDEX_Q_ROWS // 2 * pair_bytes),
+            ("index_q_quant", samples * INDEX_HEADS * 20 * pair_bytes if indexer_quant else 0),
+            ("index_k_quant", samples * 20 * pair_bytes if indexer_quant else 0),
             (
                 "index_scores",
                 samples * (index_cp_capacity(index_max_seq, index_ranks) if indexer_cp else index_max_seq) * pair_bytes,
@@ -303,9 +330,9 @@ def layout(
             ("indices_ready", samples * pair_bytes),
         ]
         if tiled_indexer:
-            parts = index_cp_partitions(index_max_seq, index_ranks)
+            parts = index_cp_partitions(index_max_seq, index_ranks, indexer_quant)
             items += [
-                ("index_cp_hist", INDEX_RADIX_DIGITS * samples * parts * INDEX_RADIX_BINS * pair_bytes),
+                ("index_cp_hist", radix_digits * samples * parts * radix_bins * pair_bytes),
                 ("index_cp_counts", samples * parts * 2 * pair_bytes),
                 ("index_cp_offsets", samples * parts * 2 * pair_bytes),
             ]
@@ -333,8 +360,8 @@ def layout(
         offset = symmetric["_bytes"]
         cp_items = (
             [
-                ("index_cp_hist", index_ranks * INDEX_RADIX_DIGITS * samples * INDEX_RADIX_BINS * pair_bytes),
-                ("index_cp_threshold", INDEX_RADIX_DIGITS * samples * 2 * pair_bytes),
+                ("index_cp_hist", index_ranks * radix_digits * samples * radix_bins * pair_bytes),
+                ("index_cp_threshold", radix_digits * samples * 2 * pair_bytes),
                 ("index_cp_counts", index_ranks * samples * 2 * pair_bytes),
                 ("index_cp_offsets", samples * 2 * pair_bytes),
                 ("index_cp_indices", samples * sparse_attention_topk * pair_bytes),
@@ -343,7 +370,7 @@ def layout(
             else []
         )
         if indexer_cp:
-            cp_items += [("index_cp_scores", samples * min(index_max_seq, INDEX_LOCAL_LDS_CAPACITY) * pair_bytes)]
+            cp_items += [("index_cp_scores", samples * index_local_capacity(index_max_seq, indexer_quant) * pair_bytes)]
         if indexer_cp and not tiled_indexer and npes > 1:
             cp_items += [("index_cp_q", samples * INDEX_Q_ROWS // 2 * pair_bytes)]
         for name, size in cp_items:
@@ -375,6 +402,7 @@ def stage_tasks(
     uv_reuse: bool = False,
     split_task_pair: int = 1,
     cohort_samples: int | None = None,
+    indexer_quant: bool = False,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
@@ -395,6 +423,7 @@ def stage_tasks(
             uv_reuse,
             split_task_pair,
             samples if cohort_samples is None else cohort_samples,
+            indexer_quant,
         )
         return [(f"tile{part}/{name}", count) for part in range(samples // tile) for name, count in stages]
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
@@ -405,15 +434,15 @@ def stage_tasks(
         ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
     ]
     if with_indexer:
-        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq)
+        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq, indexer_cp, indexer_quant)
         tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE // (index_ranks if shard_q else 1))]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
         capacity = index_cp_capacity(index_max_seq, index_ranks) if indexer_cp else index_max_seq
         tasks += [("index_score", samples * ((capacity + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK))]
-        if indexer_uses_tiles(index_max_seq):
-            parts = index_cp_partitions(index_max_seq, index_ranks)
-            for digit in range(INDEX_RADIX_DIGITS):
+        if indexer_uses_tiles(index_max_seq, indexer_cp, indexer_quant):
+            parts = index_cp_partitions(index_max_seq, index_ranks, indexer_quant)
+            for digit in range(index_radix_geometry(indexer_quant)[0]):
                 tasks += [(f"index_hist_{digit}", samples * parts), (f"index_prefix_{digit}", samples)]
             tasks += [("index_count", samples * parts), ("index_offsets", samples), ("index_emit", samples * parts)]
         tasks += [("index_select", samples)]

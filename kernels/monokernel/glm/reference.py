@@ -105,8 +105,14 @@ def make_weights(
     return LayerWeights(heads, t, config)
 
 
-def indexer_golden(W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin, topk: int = 2048):
-    """Reference for the fused BF16 indexer path; mutates ``index_cache``."""
+def indexer_golden(
+    W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin, topk: int = 2048, *, indexer_quant: bool = False
+):
+    """Independent score reference on a logical BF16 cache; mutates current rows.
+
+    ``indexer_quant`` models FP4 Q/K rounding while retaining dequantized
+    logical keys for reference math. Historical rows must already be decoded.
+    """
     t = W.t
     S = h.shape[0]
     x = bf(rmsnorm(h, t["g_in"]))
@@ -128,6 +134,12 @@ def indexer_golden(W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin,
         index_q[s, :, :PE_DIM] = rope(index_q[s, :, :PE_DIM], cos[positions[s]], sin[positions[s]])
         index_cache[positions[s]] = index_k[s].to(torch.bfloat16)
     index_q = index_q.to(torch.bfloat16).float()
+    if indexer_quant:
+        from kernels.monokernel.glm.index_quant import pack_index_fp4, unpack_index_fp4
+
+        index_q = unpack_index_fp4(pack_index_fp4(index_q.bfloat16())).float()
+        current = index_cache[cur_pos : cur_pos + h.shape[0]]
+        current.copy_(unpack_index_fp4(pack_index_fp4(current)))
     indices = []
     logits = []
     for s in range(S):

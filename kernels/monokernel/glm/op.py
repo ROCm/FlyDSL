@@ -125,6 +125,11 @@ class Glm5MonoKernel:
     ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
     in-kernel peer mailboxes for exact global selection. Index caches remain
     replicated; each rank must receive identical indexer weights and inputs.
+    ``indexer_quant=True`` stores index K as MXFP4: each uint8 cache row has
+    64 packed E2M1 bytes followed by four E8M0 scales (one per 32 values).
+    Q is quantized once per head and scored with native scaled FP4 MFMA and
+    FP32 accumulation. Pack existing logical BF16 rows with ``pack_index_fp4``
+    before capture; query quantization and cache writes are fused.
     The public API accepts at most sixteen total query tokens across requests,
     including chunked calls. Native ATOM MXFP4 weights support every row count
     through sixteen; the legacy path retains its existing buckets. Above twelve
@@ -150,6 +155,7 @@ class Glm5MonoKernel:
         timeline=False,
         indexer_cp: bool = False,
         *,
+        indexer_quant: bool = False,
         index_request_width: int | None = None,
         index_page_size: int = 16,
         index_block_table_stride: int | None = None,
@@ -165,6 +171,11 @@ class Glm5MonoKernel:
     ):
         if not 1 <= samples <= MAX_TOTAL_TOKENS:
             raise ValueError(f"total query tokens must be in [1, {MAX_TOTAL_TOKENS}], got {samples}")
+        if not isinstance(indexer_quant, bool):
+            raise ValueError("indexer_quant must be a bool")
+        if indexer_quant and not with_indexer:
+            raise ValueError("indexer_quant requires with_indexer=True")
+        self.indexer_quant = indexer_quant
         if W.config not in (GLM5_CONFIG, glm5_tp_config(4)):
             raise ValueError(f"unsupported GLM-5 shard configuration: {W.config}")
         if W.config == glm5_tp_config(4) and npes != 4:
@@ -257,6 +268,7 @@ class Glm5MonoKernel:
             output_heads=output_heads,
             dcp_size=dcp_size,
             native_fp4_mfma=native_fp4_mfma,
+            indexer_quant=indexer_quant,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         if samples > 12 and torch.cuda.get_device_properties(dev).multi_processor_count != 256:
@@ -288,6 +300,7 @@ class Glm5MonoKernel:
             npes=npes,
             inter=W.config.inter,
             native_fp4_mfma=native_fp4_mfma,
+            indexer_quant=indexer_quant,
             cohort_rows=self.cohort_rows,
             uv_reuse=self.cohort_rows,
         )
@@ -349,6 +362,7 @@ class Glm5MonoKernel:
             dcp_size=dcp_size,
             native_fp4_mfma=native_fp4_mfma,
             moe_activation_dtype=moe_activation_dtype,
+            indexer_quant=indexer_quant,
             rope_dtype=rope_dtype,
             uv_scale_rows=(
                 128
@@ -451,16 +465,18 @@ class Glm5MonoKernel:
                 if index_cache.ndim == 3
                 else index_cache.shape[0] if index_cache.ndim == 2 else 0
             )
+            index_width = INDEX_DIM // 2 + INDEX_DIM // 32 if self.indexer_quant else INDEX_DIM
+            index_dtype = torch.uint8 if self.indexer_quant else torch.bfloat16
             if (
                 index_cache.ndim not in (2, 3)
                 or cache_rows < self.index_max_seq
-                or index_cache.shape[-1] != INDEX_DIM
+                or index_cache.shape[-1] != index_width
                 or (index_cache.ndim == 3 and index_cache.shape[1] != self.index_page_size)
-                or index_cache.dtype is not torch.bfloat16
+                or index_cache.dtype is not index_dtype
                 or not index_cache.is_contiguous()
             ):
                 raise ValueError(
-                    f"index_cache must be contiguous bf16 [physical rows >= {self.index_max_seq}, {INDEX_DIM}], got "
+                    f"index_cache must be contiguous {index_dtype} [physical rows >= {self.index_max_seq}, {index_width}], got "
                     f"{tuple(index_cache.shape)} {index_cache.dtype}"
                 )
             if self.kv_cache_layout is KvCacheLayout.ATOM:

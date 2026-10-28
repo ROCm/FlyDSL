@@ -27,8 +27,11 @@ MXFP4 expert storage. `moe_activation_dtype="fp4"` enables A4W4 on that path;
 the default activation format is FP8.
 
 The fused indexer accepts either flat BF16 KV/PE and index caches for one
-consecutive request, or ATOM attention KV with a physically paged BF16 index
-cache. It does not implement ATOM's FP8 index-cache format. For paged calls:
+consecutive request, or ATOM attention KV with a physically paged index
+cache. The index cache defaults to BF16; `indexer_quant=True` selects the
+mono-kernel's logical MXFP4 format and quantizes both index queries and keys.
+ATOM's shuffled FP4 and FP8 index-cache formats require conversion before use.
+For paged calls:
 
 - `index_request_width` consecutive query rows belong to one request; set it
   to five for MTP4 C1/S5 or C2/S10. Different requests may start at different
@@ -37,7 +40,9 @@ cache. It does not implement ATOM's FP8 index-cache format. For paged calls:
   index caches share its physical page IDs. The kernel converts selected
   logical positions to physical attention slots.
 - Supply `positions`, `slot_mapping`, and `sparse_kv_indptr` for the ATOM cache
-  layout. Each physical index-cache row contains 128 BF16 values.
+  layout. Each physical index-cache row contains 128 BF16 values by default,
+  or 68 bytes with `indexer_quant=True`: 64 bytes of low-nibble-first E2M1
+  values and four E8M0 scales, one scale per 32 values.
 - `index_max_seq` must be positive, divisible by 64 and `index_page_size`, and
   large enough for every query. The block-table stride must cover that window.
 
@@ -49,6 +54,40 @@ Graph buckets can reuse a layer's packed weights, and layers may share runtime
 buffers. Assign each layer a distinct ordinal below `launches_per_step`;
 after a graph's layer launches, call `advance_step()` once. Mailbox epochs
 and the step update are device operations compatible with HIP graph capture.
+
+## Optional FP4 indexer
+
+Enable `with_indexer=True, indexer_quant=True` and supply a contiguous uint8
+index cache with shape `[rows,68]` or `[pages,page_size,68]`. The helper
+`pack_index_fp4` in `index_quant.py` converts BF16 keys to this format;
+`unpack_index_fp4` decodes them for inspection and independent references.
+Both helpers run outside HIP graph capture. The kernel quantizes new keys,
+updates their physical cache rows, and scores against quantized queries.
+
+FP4 changes the numerical contract relative to BF16 indexing. Its reference
+must include query and key quantization; agreement with that reference does
+not establish full-model quality. The TP4 C2/S8 real-checkpoint layer fixture
+has been validated with CP off at 128K and 256K. It passes independent
+quantization-aware goldens, exact v163 equivalence, cache/state checks and
+HIP graph replay at both contexts. Paired measurements reproduce v163
+latency; 128K has an independent timing confirmation, while additional 256K
+timing runs were excluded by the shared-node contention guard. These checks
+do not establish full-model quality or serving performance. The CP-on
+implementation is retained but has not been GPU-tested in this port. The
+commands below exercise the existing BF16 path unless extended with a
+quantization-aware fixture.
+
+### Indexer launch organization
+
+The kernel shares three local IR emission routines: front projections and cache
+updates, index scoring and selection, and attention/MoE. Compile-time partition
+selection controls which routines contribute to each kernel; calling a routine
+does not add a device launch.
+
+CP-off uses one fused kernel per TP rank. BF16 indexing also retains one fused
+kernel with CP enabled. Enabling both `indexer_quant=True` and `indexer_cp=True`
+builds separate front, index, and back kernels and launches them in order on the
+same stream. The index partition uses its own grid and LDS layout.
 
 ## Indexer context parallelism
 
