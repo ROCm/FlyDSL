@@ -4,6 +4,7 @@
 import contextlib
 import inspect
 import os
+import sysconfig
 import threading
 from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, overload
@@ -30,15 +31,80 @@ __all__ = [
 # and skipped when locating the user's source position.
 _FLYDSL_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The Python standard library is skipped too: ``ArithValue``'s operators are
+# ``functools.partialmethod``s, whose wrapper frame would otherwise be the
+# innermost "user" frame of every arithmetic op.
+_STDLIB_ROOTS = tuple(
+    os.path.abspath(p) + os.sep
+    for p in {sysconfig.get_paths().get("stdlib"), sysconfig.get_paths().get("platstdlib")}
+    if p
+)
+
 
 @lru_cache(maxsize=1024)
 def _is_framework_file(filename: str) -> bool:
-    """True if *filename* belongs to DSL library code (or is not locatable)."""
+    """True if *filename* belongs to DSL library code or the Python standard
+    library (or is not locatable)."""
     if not filename or filename[0] == "<":
         # ``<string>``, ``<frozen ...>`` and similar synthetic names are not
         # user source we can point at.
         return True
-    return os.path.abspath(filename).startswith(_FLYDSL_PKG_ROOT)
+    path = os.path.abspath(filename)
+    if path.startswith(_FLYDSL_PKG_ROOT):
+        return True
+    return path.startswith(_STDLIB_ROOTS) and f"{os.sep}site-packages{os.sep}" not in path
+
+
+def _escape_attr_string(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# Scopes built for the current context, so a function has one subprogram per
+# compilation; only the last context is held.
+_scope_cache = [None, {}]
+
+
+def _frame_scope(code, context) -> ir.Attribute:
+    """A debug scope for the Python function of *code*: a ``DILexicalBlockFile``
+    in a ``DISubprogram`` named after it.
+
+    MLIR's debug translation gives a call-site frame a scope only if its
+    location carries one, and drops the frames that have none, so without it
+    every frame between the innermost and the kernel's collapses into the
+    kernel's call line. A ``DILexicalBlockFile`` rather than the subprogram
+    itself: ``ensure-debug-info-scope-on-llvm-func`` takes any
+    ``FusedLoc<DISubprogramAttr>`` inside a function op's location as that
+    function's subprogram, which breaks a function declaration created under a
+    call chain. Each subprogram carries its own compile unit, as a distinct id
+    in parsed attribute text is local to that parse.
+    """
+    if _scope_cache[0] is not context:
+        _scope_cache[:] = [context, {}]
+    key = (code.co_filename, code.co_firstlineno, code.co_name)
+    if key not in _scope_cache[1]:
+        _scope_cache[1][key] = _parse_scope(
+            code.co_filename, getattr(code, "co_qualname", code.co_name), code.co_firstlineno, context
+        )
+    return _scope_cache[1][key]
+
+
+def _parse_scope(filename: str, name: str, line: int, context) -> ir.Attribute:
+    path = os.path.abspath(filename)
+    f = (
+        f'#llvm.di_file<"{_escape_attr_string(os.path.basename(path))}" in '
+        f'"{_escape_attr_string(os.path.dirname(path))}">'
+    )
+    cu = (
+        f"#llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, file = {f}, "
+        f'producer = "FlyDSL", isOptimized = true, emissionKind = LineTablesOnly>'
+    )
+    return ir.Attribute.parse(
+        f"#llvm.di_lexical_block_file<scope = #llvm.di_subprogram<id = distinct[1]<>, compileUnit = {cu}, "
+        f'scope = {f}, name = "{_escape_attr_string(name)}", file = {f}, line = {line}, scopeLine = {line}, '
+        f'subprogramFlags = "Definition|Optimized", type = #llvm.di_subroutine_type<callingConvention = '
+        f"DW_CC_normal>>, file = {f}, discriminator = 0>",
+        context=context,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -106,7 +172,10 @@ def capture_user_location() -> ir.Location:
     max_depth = env.debug.max_loc_depth
     ctx = ir.Context.current
     locs = []
+    codes = []  # the code object of each entry of ``locs``
     boundary_loc = None
+    boundary_code = None
+    reached_boundary = False
     dropped = 0
 
     frame = inspect.currentframe().f_back
@@ -126,12 +195,15 @@ def capture_user_location() -> ir.Location:
                     floc = file_location(info.filename, line, col, context=ctx)
                     if keep:
                         locs.append(floc)
+                        codes.append(code)
                     else:
                         # Always keep the kernel frame: it is the top of the stack.
                         boundary_loc = floc
+                        boundary_code = code
                 else:
                     dropped += 1
             if is_boundary:
+                reached_boundary = True
                 break
             frame = frame.f_back
     finally:
@@ -140,6 +212,17 @@ def capture_user_location() -> ir.Location:
     # The kernel boundary frame is always kept as the outermost call-site
     if boundary_loc is not None:
         locs.append(boundary_loc)
+        codes.append(boundary_code)
+
+    # With debug info, every frame but the kernel's (the last) carries the scope
+    # of its own function, so each becomes one inlined level in the DWARF. Only
+    # when the chain reaches the kernel frame: an outermost frame with a foreign
+    # subprogram would not belong to the kernel function.
+    if env.debug.enable_debug_info and reached_boundary and len(locs) > 1:
+        locs = [
+            ir.Location.fused([loc], metadata=_frame_scope(c, ctx), context=ctx)
+            for loc, c in zip(locs[:-1], codes[:-1])
+        ] + [locs[-1]]
 
     if not locs:
         return ir.Location.unknown()
