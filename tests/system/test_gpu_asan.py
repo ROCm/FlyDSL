@@ -31,6 +31,8 @@ def _asan_env():
     e = dict(os.environ)
     e["HSA_XNACK"] = "1"
     e["HSA_DISABLE_FRAGMENT_ALLOCATOR"] = "1"
+    e["AMD_PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+    e["PYTORCH_NO_HIP_MEMORY_CACHING"] = "1"
     e["FLYDSL_COMPILE_ENABLE_ASAN"] = "1"
     e["FLYDSL_RUNTIME_ENABLE_CACHE"] = "0"
     # Ensure the subprocess can find flydsl with the same PYTHONPATH
@@ -112,6 +114,7 @@ class TestGpuAsan:
             "heap-buffer-overflow" in combined
             or "__asan_report" in combined
             or "AddressSanitizer" in combined
+            or "Memory access fault" in combined
             or result.returncode != 0
         )
         if not detected:
