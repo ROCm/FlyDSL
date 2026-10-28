@@ -195,7 +195,12 @@ build_one() {
   echo "[build] ${py_tag} using ${pybin}"
   create_venv_and_deps "${pybin}" "${venv}"
 
+  # Pin the interpreter explicitly: build.sh sources python_interpreter.sh, which
+  # otherwise falls back to the first python3 on PATH. The venv prefix already
+  # makes the right interpreter win, but passing it keeps the wheel build
+  # independent of PATH ordering and skips the helper's own discovery.
   PATH="${venv}/bin:${PATH}" \
+  PYTHON_EXECUTABLE="${venv}/bin/python" \
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
