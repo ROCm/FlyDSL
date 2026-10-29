@@ -795,9 +795,18 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
+    _run_pass_manager(pm, module)
+
+
+def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
+    """Run *pm* on *module*, raising a failure as a DSLCompileError that points at the user's source."""
     with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
+        except ir.MLIRError as exc:
+            # PassManager.run captures the errors into the MLIRError before any other handler sees them.
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError(str(exc), diagnostics=records) from exc
         except Exception as exc:
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
@@ -810,12 +819,15 @@ class MlirCompiler:
         try:
             module.operation.verify()
         except ir.MLIRError as exc:
-            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError("MLIR verification failed", diagnostics=records) from exc
 
         backend = get_backend(arch=arch)
 
         compile_hints = CompilationContext.get_compile_hints()
-        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
+        # Keep source locations so pass diagnostics point at user code. They only become DWARF when
+        # the debug-info pass runs.
+        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=True))
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
@@ -843,8 +855,17 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        dump_enabled = env.debug.dump_ir
+        # FLYDSL_DEBUG_DUMP_ASM takes the FLYDSL_DUMP_IR path but writes only the final ISA.
+        dump_ir = env.debug.dump_ir
+        dump_enabled = dump_ir or env.debug.dump_asm
         dump_dir = Path(env.debug.dump_dir).resolve()
+
+        if dump_enabled and not dump_ir and external_binary:
+            raise RuntimeError(
+                "FLYDSL_DEBUG_DUMP_ASM is not supported with "
+                "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
+                "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
+            )
 
         with _llvm_ctx:
             if dump_enabled:
@@ -852,10 +873,11 @@ class MlirCompiler:
                 kernel_names = _infer_kernel_names_from_asm(asm)
                 subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
                 dump_dir = dump_dir / _sanitize_path_component(subdir)
-                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+                if dump_ir:
+                    print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-                print(f"[flydsl.compile] dump 00_origin -> {out}")
+                    out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                    print(f"[flydsl.compile] dump 00_origin -> {out}")
 
                 asm_for_isa = None
                 llir = None
@@ -869,15 +891,12 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with dsl_ir_diagnostics(module.context) as diags:
-                        try:
-                            pm.run(module.operation)
-                        except Exception as exc:
-                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
+                    _run_pass_manager(pm, module)
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
-                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+                    if dump_ir:
+                        out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                        print(f"[flydsl.compile] dump {stage_name} -> {out}")
 
                     if frag.strip() == "reconcile-unrealized-casts":
                         asm_for_isa = stage_asm
@@ -906,8 +925,9 @@ class MlirCompiler:
 
                 if llir is not None:
                     ll_name = f"{next_stage:02d}_llvm_ir"
-                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    if dump_ir:
+                        (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                        print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
                     next_stage += 1
 
                 if asm_for_isa is not None:
@@ -934,13 +954,6 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
-
-                    if env.debug.dump_asm:
-                        raise RuntimeError(
-                            "FLYDSL_DEBUG_DUMP_ASM is not supported with "
-                            "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
-                            "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
-                        )
 
                     run_external_binary_codegen(
                         module,
@@ -1359,9 +1372,9 @@ class JitFunction:
         self._manager_owner_cls = owner_cls
         self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
 
-        if run_only and env.debug.dump_ir:
+        if run_only and (env.debug.dump_ir or env.debug.dump_asm):
             raise ValueError(
-                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1 or FLYDSL_DEBUG_DUMP_ASM=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
             )
 
@@ -1634,8 +1647,9 @@ class JitFunction:
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         _rejected_link_libs = False
+        dumping = env.debug.dump_ir or env.debug.dump_asm
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not dumping:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
@@ -1677,7 +1691,7 @@ class JitFunction:
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
-        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        _use_compile_lock = use_disk_cache and self.cache_manager and not dumping
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(

@@ -32,6 +32,15 @@ string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
 
+# MLIR detects Python twice (Python3_ for the project, Python_ for nanobind).
+# Both passes must agree, or the extensions are built for one ABI and installed
+# under another. Included by path like the other project modules, since
+# CMAKE_MODULE_PATH only carries MLIR/LLVM's directories here.
+option(FLY_ALLOW_PYTHON_MISMATCH
+  "Warn instead of failing when MLIR's two Python detections disagree" OFF)
+include(cmake/FlyDSLPythonCheck.cmake)
+fly_check_python_consistency()
+
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include)

@@ -16,26 +16,18 @@ import torch
 
 from kernels.monokernel.config import (
     FP8_MAX,
+    GLM5_CONFIG,
     HIDDEN,
-    INTER,
     KV_LORA,
     N_EXPERTS,
     PE_DIM,
     Q_LORA,
     SHARED_EXPERT,
     ExpertWeight,
+    LayerConfig,
 )
 from kernels.monokernel.glm.layout import INDEX_DIM, INDEX_HEADS, INDEX_Q_ROWS
-from kernels.monokernel.reference import (
-    bf,
-    dequant,
-    fp8_mats,
-    quant_dequant,
-    rmsnorm,
-    rope,
-    route,
-    scale_shape,
-)
+from kernels.monokernel.reference import bf, dequant, fp8_mats, quant_dequant, rmsnorm, rope, route, scale_shape
 from kernels.monokernel.reference import dequant_expert as _dequant_expert
 from kernels.monokernel.reference import golden_layer as _golden_attention
 from kernels.monokernel.weights import LayerWeights
@@ -56,8 +48,11 @@ def make_weights(
     seed: int = 1234,
     with_indexer: bool = False,
     expert_mxfp4: bool = False,
+    config: LayerConfig = GLM5_CONFIG,
+    vary_expert_scales: bool = False,
 ) -> LayerWeights:
     """Replicated tensors share ``seed``; TP shards add ``rank`` to it."""
+    inter = config.inter
     rep = torch.Generator(device=device).manual_seed(seed)
     shd = torch.Generator(device=device).manual_seed(seed + 1 + rank)
     t = {}
@@ -82,47 +77,42 @@ def make_weights(
         # byte per 32 values.  Fixed representative scales keep test-weight
         # construction cheap while exercising the production storage contract.
         ug_q = torch.randint(
-            0,
-            256,
-            (N_EXPERTS + 1, 2 * INTER, HIDDEN // 2),
-            generator=shd,
-            dtype=torch.uint8,
-            device=device,
+            0, 256, (N_EXPERTS + 1, 2 * inter, HIDDEN // 2), generator=shd, dtype=torch.uint8, device=device
         )
-        ug_s = torch.full(
-            (N_EXPERTS + 1, 2 * INTER, HIDDEN // 32),
-            118,
-            dtype=torch.uint8,
-            device=device,
-        )
+        ug_s = torch.full((N_EXPERTS + 1, 2 * inter, HIDDEN // 32), 118, dtype=torch.uint8, device=device)
         dn_q = torch.randint(
-            0,
-            256,
-            (N_EXPERTS + 1, HIDDEN, INTER // 2),
-            generator=shd,
-            dtype=torch.uint8,
-            device=device,
+            0, 256, (N_EXPERTS + 1, HIDDEN, inter // 2), generator=shd, dtype=torch.uint8, device=device
         )
-        dn_s = torch.full(
-            (N_EXPERTS + 1, HIDDEN, INTER // 32),
-            121,
-            dtype=torch.uint8,
-            device=device,
-        )
+        dn_s = torch.full((N_EXPERTS + 1, HIDDEN, inter // 32), 121, dtype=torch.uint8, device=device)
     else:
-        ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
-        ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * INTER, HIDDEN, 128), device=device)
-        dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER, dtype=torch.float8_e4m3fn, device=device)
-        dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, INTER, 128), device=device)
+        ug_q = torch.empty(N_EXPERTS + 1, 2 * inter, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
+        ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * inter, HIDDEN, 128), device=device)
+        dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, inter, dtype=torch.float8_e4m3fn, device=device)
+        dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, inter, 128), device=device)
         for e in range(N_EXPERTS + 1):
-            ug_q[e], ug_s[e] = _rand_fp8(2 * INTER, HIDDEN, 128, shd, device)
-            dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, INTER, 128, shd, device)
+            ug_q[e], ug_s[e] = _rand_fp8(2 * inter, HIDDEN, 128, shd, device)
+            dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, inter, 128, shd, device)
     t["w_ug"], t["s_ug"], t["w_dn"], t["s_dn"] = ug_q, ug_s, dn_q, dn_s
-    return LayerWeights(heads, t)
+    if vary_expert_scales:
+        if not expert_mxfp4:
+            raise ValueError("vary_expert_scales requires MXFP4 weights")
+        for name, exponent in (("s_ug", 118), ("s_dn", 121)):
+            # Vary rows and scale groups so an incorrect row/tile permutation
+            # cannot pass merely because every scale has the same exponent.
+            value = t[name]
+            pattern = torch.arange(value.numel(), device=device) % 7 < 3
+            value.copy_((exponent - pattern.to(torch.int32)).reshape_as(value))
+    return LayerWeights(heads, t, config)
 
 
-def indexer_golden(W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin, topk: int = 2048):
-    """Reference for the fused BF16 indexer path; mutates ``index_cache``."""
+def indexer_golden(
+    W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin, topk: int = 2048, *, indexer_quant: bool = False
+):
+    """Independent score reference on a logical BF16 cache; mutates current rows.
+
+    ``indexer_quant`` models FP4 Q/K rounding while retaining dequantized
+    logical keys for reference math. Historical rows must already be decoded.
+    """
     t = W.t
     S = h.shape[0]
     x = bf(rmsnorm(h, t["g_in"]))
@@ -144,6 +134,12 @@ def indexer_golden(W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin,
         index_q[s, :, :PE_DIM] = rope(index_q[s, :, :PE_DIM], cos[positions[s]], sin[positions[s]])
         index_cache[positions[s]] = index_k[s].to(torch.bfloat16)
     index_q = index_q.to(torch.bfloat16).float()
+    if indexer_quant:
+        from kernels.monokernel.glm.index_quant import pack_index_fp4, unpack_index_fp4
+
+        index_q = unpack_index_fp4(pack_index_fp4(index_q.bfloat16())).float()
+        current = index_cache[cur_pos : cur_pos + h.shape[0]]
+        current.copy_(unpack_index_fp4(pack_index_fp4(current)))
     indices = []
     logits = []
     for s in range(S):
@@ -164,17 +160,7 @@ def golden_layer(W: LayerWeights, h, cur_pos: int, kv_cache, pe_cache, indices, 
     """Combine the shared GLM attention golden with the MonoKernel MoE format."""
 
     result = _golden_attention(
-        W,
-        h,
-        cur_pos,
-        kv_cache,
-        pe_cache,
-        indices,
-        cos,
-        sin,
-        allreduce,
-        topk=topk,
-        attention_only=True,
+        W, h, cur_pos, kv_cache, pe_cache, indices, cos, sin, allreduce, topk=topk, attention_only=True
     )
     result.pop("gate", None)
     result.update(golden_moe(W, result["a"], allreduce))
@@ -189,6 +175,7 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
     inputs, so each stage can be checked from the kernel's own inputs.
     """
     t = W.t
+    inter = W.config.inter
     S = a.shape[0]
     expert_weight = ExpertWeight.MXFP4_BLOCK32 if t["w_ug"].dtype is torch.uint8 else ExpertWeight.FP8_BLOCK128
     out = {k: [] for k in ("sel", "prob", "mid")}
@@ -204,7 +191,7 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
         mids = []
         for e in experts:
             ug = _dequant_expert(t["w_ug"][e], t["s_ug"][e], expert_weight) @ xq[s]
-            mids.append(torch.nn.functional.silu(ug[:INTER]) * ug[INTER:])
+            mids.append(torch.nn.functional.silu(ug[:inter]) * ug[inter:])
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
         out["prob"].append(torch.tensor(weights, device=a.device, dtype=torch.float32))
         out["mid"].append(torch.stack(mids))
