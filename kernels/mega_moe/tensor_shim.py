@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-import os
-import threading
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -12,9 +9,7 @@ from flydsl.compiler.protocol import extract_to_ir_values
 from flydsl.expr import ptrtoint
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-
-_PRELOAD_COMPILE_LOCK = threading.RLock()
-
+from kernels.common.tensor_shim import _preload_compiled  # noqa: F401  # re-exported to the stage modules
 
 _BUF_COPY_ATOM = {
     16: fx.rocdl.BufferCopy128b,
@@ -166,28 +161,3 @@ def _run_compiled(exe, *args, specialization_key=None):
         if not hasattr(exe, "_cf_by_specialization"):
             exe._cf_by_specialization = {}
         exe._cf_by_specialization[specialization_key] = cf
-
-
-def _preload_compiled(exe, *args):
-    """Materialize a JIT artifact without dispatching its GPU kernels.
-
-    Newer FlyDSL versions expose ``JitFunction.preload()`` for this operation.
-    Older supported versions provide the same no-dispatch behavior through the
-    public ``COMPILE_ONLY`` mode.  Calling ``flyc.compile()`` without either
-    guard executes the launcher and is unsafe for preload callers that pass
-    placeholder pointers.
-    """
-    preload = getattr(exe, "preload", None)
-    if callable(preload):
-        return preload(*args)
-
-    with _PRELOAD_COMPILE_LOCK:
-        old_compile_only = os.environ.get("COMPILE_ONLY")
-        os.environ["COMPILE_ONLY"] = "1"
-        try:
-            return flyc.compile(exe, *args)
-        finally:
-            if old_compile_only is None:
-                os.environ.pop("COMPILE_ONLY", None)
-            else:
-                os.environ["COMPILE_ONLY"] = old_compile_only

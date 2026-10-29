@@ -7,14 +7,12 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
-import threading
 from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 
-from flydsl.compiler import compile as _compile
-from kernels.common.tensor_shim import _run_compiled
+from kernels.common.tensor_shim import _preload_compiled, _run_compiled
 from kernels.monokernel import ipc as _ipc
 
 from .common import ceildiv, device_key, nearest, tuned_rows
@@ -85,21 +83,6 @@ class LaunchCfg:
 # --- intra-node symmetric memory (hipIpc, via kernels.monokernel.ipc) -----------------
 
 _ALIGN = 256
-_PRELOAD_LOCK = threading.Lock()
-
-
-def _preload_compiled(exe, *args):
-    """Compile (and cache) a launcher without dispatching its kernel."""
-    with _PRELOAD_LOCK:
-        old = os.environ.get("COMPILE_ONLY")
-        os.environ["COMPILE_ONLY"] = "1"
-        try:
-            return _compile(exe, *args)
-        finally:
-            if old is None:
-                os.environ.pop("COMPILE_ONLY", None)
-            else:
-                os.environ["COMPILE_ONLY"] = old
 
 
 # a peer allocation maps once per process (arenas can share one): handle -> [ptr, refs]

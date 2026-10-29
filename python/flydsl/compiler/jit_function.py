@@ -1574,7 +1574,17 @@ class JitFunction:
         """Compile one specialization without creating an engine or running it."""
         return self._compile_or_execute(args, kwargs, execute=False)
 
-    def _compile_or_execute(self, args, kwargs, *, execute: bool, return_compiled: bool = False):
+    def preload(self, *args, **kwargs):
+        """Compile one specialization and return it as a ``CompiledFunction`` without launching.
+
+        Arguments only specialize the compilation, so placeholder pointers are
+        safe. Runtime state is created on the first call of the result. No
+        process-wide state such as ``COMPILE_ONLY`` is touched, so this is safe
+        while other threads launch kernels.
+        """
+        return self._compile_or_execute(args, kwargs, execute=False, return_compiled=True, launch=False)
+
+    def _compile_or_execute(self, args, kwargs, *, execute: bool, return_compiled: bool = False, launch: bool = True):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
@@ -1604,7 +1614,7 @@ class JitFunction:
             # must not suppress live launches; CPU/placeholder-only inputs
             # still compile without creating a runtime.
             has_device_args = any(_has_live_device_argument(value) for value in args_tuple)
-            execute = not any(
+            execute = launch and not any(
                 _is_compile_placeholder(value, allow_null_pointers=has_device_args) for value in args_tuple
             )
 
