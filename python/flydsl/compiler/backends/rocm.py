@@ -92,8 +92,15 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "true" if get_warp_size(chip) == 64 else "false",
+            # rocdl-attach-target takes the wavefront size as `wavesize` (32 or 64).
+            "wavesize": get_warp_size(chip),
         }
+        if asan_enabled:
+            # LLVM 24 rejects `+xnack` as a subtarget feature. The attach-target
+            # `arch` target-ID modifier becomes `rocdl.xnack`, which lowers to
+            # the `amdgpu.xnack` module flag. Without it the code object is not
+            # loadable when the process is in xnack+ mode (HSA_XNACK=1).
+            rocdl_opts["arch"] = f"{chip}:xnack+"
 
         ktrace_fragments = []
         if _ktrace_tracing_enabled(compile_hints):
@@ -180,7 +187,7 @@ class RocmBackend(BaseBackend):
         # Intentionally empty: the ROCm pipeline attaches the authoritative
         # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
         # which carries the compile options (O, abi, fast/unsafe-math,
-        # wave64, link_libs). Attaching a bare target here as well made
+        # wavesize, link_libs). Attaching a bare target here as well made
         # gpu-module-to-binary serialize one object per target and select the
         # *bare* one (first object, no offloading handler) — doubling backend
         # work and silently discarding compile options and link_libs
@@ -286,27 +293,6 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
     existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
     kept = [entry for entry in existing if _entry_key(entry) != key] if existing is not None else []
     func_op.attributes["passthrough"] = ir.ArrayAttr.get([*kept, new_entry])
-
-
-def _set_xnack_module_flag(module) -> None:
-    """Insert ``llvm.module_flags`` with ``amdgpu.xnack = 1`` into each gpu.module.
-
-    LLVM 24+ requires xnack to be specified via LLVM module flags instead of
-    subtarget features. This adds the flag so the AMDGPU backend enables xnack+
-    mode, which is required for GPU Address Sanitizer.
-    """
-    from ..._mlir import ir
-    from ..._mlir.dialects import llvm as llvm_dialect
-
-    for top in module.body.operations:
-        if top.operation.name != "gpu.module":
-            continue
-        block = top.regions[0].blocks[0]
-        ip = ir.InsertionPoint.at_block_begin(block)
-        flag_attr = ir.Attribute.parse('#llvm.mlir.module_flag<error, "amdgpu.xnack", 1 : i32>')
-        flags_attr = ir.ArrayAttr.get([flag_attr])
-        loc = ir.Location.unknown()
-        llvm_dialect.ModuleFlagsOp(flags=flags_attr, ip=ip, loc=loc)
 
 
 def _add_passthrough_flag(func_op, name: str) -> None:
