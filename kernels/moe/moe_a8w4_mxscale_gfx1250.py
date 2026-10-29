@@ -200,11 +200,14 @@ def launch_moe_gemm_a8w4(
             return base_ptr + s * PITCH
 
         gA_base = fx.recast_iter(fx.Int8, arg_a)
-        gB_base = fx.recast_iter(fx.Int8, arg_b)
         gSA_base = fx.recast_iter(fx.Int32, fx.get_iter(arg_scale_a))
-        gSB_base = fx.recast_iter(fx.Int32, fx.get_iter(arg_scale_b))
-        b_outer_row = eb64 * B_BATCH_ROWS + blk_n64 // 16
-        sb_outer_super = eb64 * N_SUPERS + blk_n64 // 32
+        # B / B-scale: the per-expert stride (B_BATCH_ROWS = N//16, N_SUPERS = ceil(N/32)) is a whole
+        # number of N-tiles only when N % tile_n == 0, so carrying it in the tile index floors it onto
+        # another expert's rows. Keep it exact in the base pointer, as the pre-tiled-atom code did, and
+        # let the tile index carry the N-tile alone (blk_n is tile_n-aligned, so n_blk is exact).
+        gB_base = fx.recast_iter(fx.Int8, arg_b) + eb64 * B_BATCH_ROWS * Kp16
+        gSB_base = fx.recast_iter(fx.Int32, fx.get_iter(arg_scale_b)) + eb64 * N_SUPERS * K4
+        n_blk = blk_n64 // tile_n
         m_blk = blk_m // tile_m
         a_m_ext = blk_m + mn_oob  # per-expert valid M rows (A / C boundary_check clamp)
         WS8 = num_waves >= 8
@@ -238,7 +241,16 @@ def launch_moe_gemm_a8w4(
                     fx.make_layout((tile, num_buffers), (box_stride, pipe)),
                 )
             )
-            wcrd = wave if wv is None else (wave - wv[0])
+            # Every wave builds the partition, but only this load's pair issues the copy
+            # (see `issue`). Waves outside the pair would otherwise hand tdm_partition a
+            # coord outside [0, nw) -- often negative -- and it validates only that the warp
+            # LAYOUT is bijective, never the coord. Clamp so the contract holds for all waves.
+            if const_expr(wv is None):
+                wcrd = wave
+            else:
+                rel = wave - wv[0]
+                rel = (rel > 0).select(rel, fx.Int32(0))
+                wcrd = (rel < nw).select(rel, fx.Int32(nw - 1))
             tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, wcrd, fx.make_layout(nw, 1), lds, blk)
             return (atom, tAs, tAg, None if wv is None else wv[0] // 2)
 
@@ -259,10 +271,10 @@ def launch_moe_gemm_a8w4(
             ),
             _tiled_load(
                 gB_base,
-                (n_experts * B_BATCH_ROWS, Kp16),
+                (B_BATCH_ROWS, Kp16),
                 (Kp16, 1),
                 (tile_n // 16, PACK_TK * 16),
-                b_outer_row // (tile_n // 16),
+                n_blk,
                 fx.Int8,
                 STAGE_A,
                 (B_LDS_ROW, 1),
@@ -283,14 +295,18 @@ def launch_moe_gemm_a8w4(
                 PITCH // 4,
                 waves[2],
                 a_mask,
-                False,
+                # clamp on: this extent is the real super-row count, and the last M-tile of an
+                # expert reaches past it, which clamp=False would turn into a read off the end
+                # of the scale tensor (CopyAtom.cpp:670 reads clamp=False as the caller
+                # asserting coord + tile <= extent).
+                True,
             ),
             _tiled_load(
                 gSB_base,
-                (n_experts * N_SUPERS, K4),
+                (N_SUPERS, K4),
                 (K4, 1),
                 (SB_SUPERS, SC_INNER),
-                sb_outer_super // SB_SUPERS,
+                n_blk,
                 fx.Int32,
                 SB_OFF,
                 (SC_INNER, 1),

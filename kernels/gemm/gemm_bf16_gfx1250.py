@@ -146,8 +146,21 @@ def launch_gemm_bf16(
 
         # The view spans the whole K row, so the K tail needs no per-iteration extent
         # write: zipped_divide yields the tail tile and boundary_check clamps it.
+        # The M extent is now a layout shape (zipped_divide, boundary_check), not just a
+        # clamp register, so floor it at 0: with tdm_balance=1 the p=1 job's
+        # `mn_oob - A_ROWS` goes negative on an M tail shorter than half a tile.
+        def _rows_left(oob, taken):
+            left = oob - taken
+            return (left > 0).select(left, fx.Int32(0))
+
         a_jobs = [
-            (2 * p, p, _gv(gA_base, fx.Int64(blk_m + p * A_ROWS) * lda_b, (mn_oob - p * A_ROWS, k_bytes), (lda_b, 1)))
+            (
+                2 * p,
+                p,
+                _gv(
+                    gA_base, fx.Int64(blk_m + p * A_ROWS) * lda_b, (_rows_left(mn_oob, p * A_ROWS), k_bytes), (lda_b, 1)
+                ),
+            )
             for p in range_constexpr(tdm_parts)
         ]
         b_jobs = [

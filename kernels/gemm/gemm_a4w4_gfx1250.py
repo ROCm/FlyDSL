@@ -376,8 +376,12 @@ def launch_gemm_a4w4(
                                 if col + j < n:
                                     fx.ptr_store(values[j], out + fx.Int64(row) * fx.Int64(ld_c) + fx.Int64(col + j))
 
-            # Whole tiles go out through TDM with bounds equal to the tile, so no
-            # out-of-range clamp is relied on; edge tiles keep the guarded stores.
+            # Whole tiles go out through TDM; edge tiles keep the guarded stores. The tile
+            # is the PADDED width (c_lds_row) against a real-width view, so the default
+            # init_boundary_check is load-bearing here -- it is what drops the pad columns.
+            # Turning it off would write each row's 8 pad columns into the next C row.
+            # num_warps splits tile_m, and physicalTileShape rejects an uneven cut, so a
+            # tile_m that waves does not divide falls back to the guarded path.
             if const_expr(tile_m % waves == 0):
                 if (bm + tile_m <= m) & (bn + tile_n <= n) & (ld_c % 8 == 0):
                     # Padded tile, real-width view: boundary_check drops the pad columns.

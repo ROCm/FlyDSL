@@ -163,7 +163,10 @@ def launch_gemm_a8w8(
         if const_expr(mx32):
             sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M super-rows (scale-A)
         elif const_expr(mx128):
-            nb_oob = (i32_n // 128 - blk_n // 128) if not ALIGNED_N else None
+            # Ceil, like sa_oob above: nb_oob is now the scale view's extent, so a floor
+            # drops the trailing partial 128-block. N=200/tile_n=192/blk_n=192 floors to a
+            # zero-row view and the last N tile's B scales come back zero-filled.
+            nb_oob = ((i32_n + 127) // 128 - blk_n // 128) if not ALIGNED_N else None
             stride_ask64 = fx.Int64(i32_stride_ascale_k)
 
         arena = fx.SharedAllocator(static=False)

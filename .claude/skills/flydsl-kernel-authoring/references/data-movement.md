@@ -147,8 +147,9 @@ The older `fx.rocdl.make_tdm_atom` (explicit `tensor_extents` / `strides` /
 `pad_*` plus an `imm_offset` tile bump) still works, and is still required where
 the tiled atom cannot express the copy: an innermost dim that is not contiguous
 in global memory, and gather/scatter (`make_tensor_gather_descriptor`,
-`tensor_load_gather`). Mixing both in one kernel is fine and is what the in-tree
-kernels do.
+`tensor_load_gather`). Mixing both in one kernel is fine, but no in-tree kernel
+does: `make_tdm_atom` and `tensor_load_gather` now have zero callers under
+`kernels/`. Prefer the tiled atom for new code.
 
 ## 5. Shared Memory (LDS)
 
