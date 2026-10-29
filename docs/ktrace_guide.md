@@ -227,11 +227,12 @@ mode disabled.
   do not increase this limit. Overflow raises during collection because dropped
   range endpoints would make the timeline incomplete.
 - **Finite collection window.** Waves reserve 256 slots each, including a header
-  slot. A wave takes its slots from one of up to 256 partitions, picked by hashing
-  its workgroup, its hardware slot and the dispatch, so waves that start together
-  do not contend for one counter. The default 64 MiB buffer has 64 partitions of
-  about 128 waves, 8190 waves in all, and a trace overflows when its busiest partition
-  fills: one large launch fits reliably up to about 6000 waves. Use block filters
+  slot. A wave takes its slots from one of up to 256 partitions. Consecutive waves
+  of a row of workgroups take consecutive partitions, so waves that start together
+  do not contend for one counter and a launch fills the partitions evenly; successive
+  launches start at different partitions. The default 64 MiB buffer has 64 partitions
+  of about 128 waves, 8190 waves in all, and a trace overflows when its busiest
+  partition fills: one launch fits up to about 8100 waves. Use block filters
   and periodic reads for large grids or repeated launches. The overflow error names
   a buffer size that holds the recorded launches.
 - **One device per process.** Access from another device raises. Trace multiple

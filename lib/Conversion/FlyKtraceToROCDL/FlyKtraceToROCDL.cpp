@@ -200,34 +200,39 @@ FailureOr<Value> blockFilter(OpBuilder &b, Location loc, StringRef spec, Value x
   return cond;
 }
 
-// Hashes the wave's block, its slot on the CU and the dispatch, so the waves that claim at the
-// same time spread over the partitions, and so do repeated launches of a small grid.
-Value partitionOf(OpBuilder &b, Location loc, Value hwId, Value xccId, Value dispatchId,
+// Consecutive waves of a row of workgroups take consecutive partitions, so a launch fills them
+// evenly; odd multipliers scatter the rows, and the dispatch id rotates successive launches.
+Value partitionOf(OpBuilder &b, Location loc, gpu::GPUFuncOp kernel, Value dispatchId,
                   int64_t partitions) {
   if (partitions == 1)
     return i32Const(b, loc, 0);
   Type i32 = b.getI32Type();
-  auto mul = [&](Value v, uint32_t factor) -> Value {
-    return arith::MulIOp::create(b, loc, v, i32Const(b, loc, static_cast<int32_t>(factor)));
-  };
-  auto xorShift = [&](Value v, int64_t shift) -> Value {
-    return arith::XOrIOp::create(b, loc, v,
-                                 arith::ShRUIOp::create(b, loc, v, i32Const(b, loc, shift)));
-  };
-  Value key = arith::TruncIOp::create(b, loc, i32, dispatchId);
-  static constexpr std::pair<gpu::Dimension, uint32_t> kBlockFactors[] = {
-      {gpu::Dimension::x, 0x9E3779B1u},
-      {gpu::Dimension::y, 0x85EBCA77u},
-      {gpu::Dimension::z, 0xC2B2AE3Du}};
-  for (auto [dim, factor] : kBlockFactors) {
-    Value block = arith::IndexCastOp::create(b, loc, i32, gpu::BlockIdOp::create(b, loc, dim));
-    key = arith::AddIOp::create(b, loc, key, mul(block, factor));
+  auto toI32 = [&](Value index) -> Value { return arith::IndexCastOp::create(b, loc, i32, index); };
+  Value wavesPerBlock;
+  if (std::optional<ArrayRef<int32_t>> known = kernel.getKnownBlockSize()) {
+    wavesPerBlock = i32Const(b, loc, llvm::divideCeil((*known)[0] * (*known)[1] * (*known)[2], 64));
+  } else {
+    Value threads = toI32(gpu::BlockDimOp::create(b, loc, gpu::Dimension::x));
+    for (gpu::Dimension dim : {gpu::Dimension::y, gpu::Dimension::z})
+      threads = arith::MulIOp::create(b, loc, threads, toI32(gpu::BlockDimOp::create(b, loc, dim)));
+    wavesPerBlock = arith::ShRUIOp::create(
+        b, loc, arith::AddIOp::create(b, loc, threads, i32Const(b, loc, 63)), i32Const(b, loc, 6));
   }
-  Value slot = arith::XOrIOp::create(b, loc, hwId,
-                                     arith::ShLIOp::create(b, loc, xccId, i32Const(b, loc, 20)));
-  key = arith::AddIOp::create(b, loc, key, mul(slot, 0x27D4EB2Fu));
-  Value h = xorShift(mul(xorShift(mul(xorShift(key, 16), 0x85EBCA6Bu), 13), 0xC2B2AE35u), 16);
-  return arith::ShRUIOp::create(b, loc, h, i32Const(b, loc, 32 - llvm::Log2_64(partitions)));
+  auto blockId = [&](gpu::Dimension dim) -> Value {
+    return toI32(gpu::BlockIdOp::create(b, loc, dim));
+  };
+  Value key = arith::MulIOp::create(b, loc, blockId(gpu::Dimension::z), i32Const(b, loc, 0x85EB));
+  key = arith::AddIOp::create(b, loc, key, blockId(gpu::Dimension::y));
+  key = arith::MulIOp::create(b, loc, key, i32Const(b, loc, 0x9E37));
+  key = arith::AddIOp::create(
+      b, loc, key, arith::MulIOp::create(b, loc, blockId(gpu::Dimension::x), wavesPerBlock));
+  key = arith::AddIOp::create(b, loc, key, toI32(gpu::SubgroupIdOp::create(b, loc, nullptr)));
+  Value dispatchLow = arith::TruncIOp::create(b, loc, i32, dispatchId);
+  key = arith::AddIOp::create(
+      b, loc, key,
+      arith::MulIOp::create(b, loc, dispatchLow,
+                            i32Const(b, loc, static_cast<int32_t>(0x9E3779B1u))));
+  return arith::AndIOp::create(b, loc, key, i32Const(b, loc, partitions - 1));
 }
 
 FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, const BufferLayout &layout,
@@ -288,7 +293,7 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, const BufferLayo
   if (failed(recording))
     return failure();
 
-  Value partition = partitionOf(b, loc, st.hwId, st.xccId, dispatchId, layout.partitions);
+  Value partition = partitionOf(b, loc, kernel, dispatchId, layout.partitions);
 
   // One returning atomic per wave, on its partition's counter, numbers the wave within that
   // partition. The counter keeps counting past the partition's capacity, so the host sees the

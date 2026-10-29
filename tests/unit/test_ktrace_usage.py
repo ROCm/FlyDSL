@@ -144,6 +144,11 @@ def _grid(blocks: fx.Constexpr[int]):
     _grid_kernel().launch(grid=(blocks, 1, 1), block=(256, 1, 1))
 
 
+@flyc.jit
+def _grid_rows(cols: fx.Constexpr[int], rows: fx.Constexpr[int]):
+    _grid_kernel().launch(grid=(cols, rows, 1), block=(256, 1, 1))
+
+
 @flyc.kernel
 def _loop_kernel():
     for i in fx.range(0, 8, 1):
@@ -542,6 +547,23 @@ def test_every_wave_of_a_grid_is_recorded():
     assert len(records) == 3 * 4096
     assert len({r["slot"] for r in records}) == len(records), "two records share a slot"
     assert trace.summary()["phases"]["body"]["count"] == 4096
+
+
+@pytest.mark.parametrize("two_d", [False, True], ids=["1-D", "2-D"])
+def test_one_launch_fills_every_partition(two_d):
+    from flydsl.expr.rocdl import ktrace_emit
+
+    with ktrace.capture("warmup"):
+        _grid(1)
+    layout = ktrace_emit.current_buffer().layout
+    per_partition = min(layout.capacity(p) for p in range(layout.partitions))
+    blocks = per_partition * layout.partitions // 4
+    # A row of partitions // 4 four-wave blocks gives every partition one wave.
+    cols, rows = (layout.partitions // 4, per_partition) if two_d else (blocks, 1)
+    with ktrace.capture("full") as trace:
+        _grid_rows(cols, rows)
+    waves = {(r["block"], r["wave_id"]) for r in trace._snapshot()}
+    assert len(waves) == 4 * cols * rows, f"{4 * cols * rows - len(waves)} waves left no records"
 
 
 def test_loop_iterations_take_distinct_slots():
