@@ -332,18 +332,36 @@ def _find_rocm_bitcode_dir() -> Path:
 
 
 def _get_asan_bitcode_paths(chip: str = "gfx942") -> List[str]:
-    """Return device bitcode paths needed for GPU ASAN."""
+    """Return device bitcode paths needed for GPU ASAN.
+
+    Links asanrtl (ASAN runtime), ocml/ockl (math/runtime helpers), and the
+    OCLC control-variable bitcode that asanrtl references (__oclc_ISA_version,
+    __oclc_wavefrontsize64, __oclc_ABI_version).  The OCLC files are
+    arch-specific; when the exact file is missing we fall back to the
+    generic variant (e.g. ``oclc_isa_version_9-4-generic.bc``).
+    """
     bc_dir = _find_rocm_bitcode_dir()
     isa_ver = chip.replace("gfx", "")
     wave64 = get_warp_size(chip) == 64
-    libs = [
-        "asanrtl.bc",
-        "ocml.bc",
-        "ockl.bc",
-        f"oclc_isa_version_{isa_ver}.bc",
-        "oclc_wavefrontsize64_on.bc" if wave64 else "oclc_wavefrontsize64_off.bc",
-        "oclc_abi_version_600.bc",
-    ]
+
+    def _pick(candidates: List[str]) -> str:
+        for name in candidates:
+            if name and (bc_dir / name).is_file():
+                return name
+        raise FileNotFoundError(
+            f"GPU ASAN: none of {[c for c in candidates if c]} found in {bc_dir}. "
+            f"Check that ROCm device-libs are installed for {chip}."
+        )
+
+    isa_candidates = [f"oclc_isa_version_{isa_ver}.bc"]
+    if len(isa_ver) >= 3:
+        isa_candidates.append(f"oclc_isa_version_{isa_ver[0]}-{isa_ver[1]}-generic.bc")
+    if len(isa_ver) >= 1:
+        isa_candidates.append(f"oclc_isa_version_{isa_ver[0]}-generic.bc")
+    isa_lib = _pick(isa_candidates)
+    wave_lib = "oclc_wavefrontsize64_on.bc" if wave64 else "oclc_wavefrontsize64_off.bc"
+
+    libs = ["asanrtl.bc", "ocml.bc", "ockl.bc", isa_lib, wave_lib, "oclc_abi_version_600.bc"]
     paths = []
     for lib in libs:
         p = bc_dir / lib
