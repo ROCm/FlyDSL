@@ -3,7 +3,8 @@
 
 For each recent run of the benchmark workflow (``flydsl.yaml`` / "Fly DSL test") this:
 
-1. finds the three single-GPU benchmark jobs (``test (linux-flydsl-<box>)``),
+1. finds the single-GPU ``benchmark (linux-flydsl-<box>)`` jobs (or the combined
+   ``test`` jobs in older runs),
 2. downloads each job's log and parses it with :mod:`parse_bench`,
 3. merges the resulting records into ``history.json`` (idempotent per run+runner),
 4. snapshots recent runs + per-job status into ``runs.json`` for the live CI board.
@@ -182,11 +183,19 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
     commit = run.get("head_sha")
     pr = resolve_pr(repo, run)
     jobs = run_jobs(repo, run_id)
+    # New runs split correctness from performance. Prefer the benchmark job
+    # even while it is queued/failed, so a passing correctness job cannot hide
+    # the benchmark's status. Older runs still store benchmarks in test jobs.
+    benchmark_runners = {
+        runner_of(job.get("name", "")) for job in jobs if job.get("name", "").startswith("benchmark (")
+    }
     records: list[dict] = []
     job_status: list[dict] = []
     for job in jobs:
         runner = runner_of(job.get("name", ""))
         if not runner:
+            continue
+        if runner in benchmark_runners and not job.get("name", "").startswith("benchmark ("):
             continue
         js = {
             "runner": runner,
