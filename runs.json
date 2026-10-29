@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-29T18:11:37Z",
+ "updated": "2026-10-29T18:28:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -766,13 +766,41 @@
    "branch": "fix/debug-call-chain-scopes",
    "event": "pull_request",
    "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608",
    "created_at": "2026-10-28T21:00:24Z",
-   "updated_at": "2026-10-29T18:02:59Z",
+   "updated_at": "2026-10-29T18:22:19Z",
    "actor": "hanli0612",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-29T18:22:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608/job/123646155769"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-29T18:22:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608/job/123646155809"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-29T18:22:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608/job/123646155817"
+    }
+   ]
   },
   {
    "run_id": 40705569863,
@@ -1699,7 +1727,9 @@
      "started_at": "2026-10-27T15:52:48Z",
      "completed_at": "2026-10-27T16:51:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272/job/122298619965",
-     "log_fetch_failed": true
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
