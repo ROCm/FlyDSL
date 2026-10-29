@@ -164,7 +164,7 @@ def test_scatter_mfma_layout(width, dtype):
 
 
 @pytest.mark.l0_backend_agnostic
-def test_scatter_layout_specialization():
+def test_scatter_layout_specialization(insert_point):
     src = fx.make_layout((8, 4), (4, 1))
     dst = fx.make_layout((8, 4), (1, 8))
     P = fx.coop.WarpExchange[fx.Int32, src, dst]
@@ -201,7 +201,7 @@ def test_scatter_layout_specialization():
 @pytest.mark.l0_backend_agnostic
 @pytest.mark.parametrize("side", [0, 1])
 @pytest.mark.parametrize("case", ["rank", "shape", "dynamic", "overlap", "holes", "type"])
-def test_scatter_layout_specialization_diagnostics(side, case):
+def test_scatter_layout_specialization_diagnostics(insert_point, side, case):
     valid = fx.make_layout((8, 4), (4, 1))
     invalid = {
         "rank": lambda: fx.make_layout(32, 1),
