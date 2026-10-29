@@ -92,15 +92,8 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            # rocdl-attach-target takes the wavefront size as `wavesize` (32 or 64).
-            "wavesize": get_warp_size(chip),
+            "wave64": "true" if get_warp_size(chip) == 64 else "false",
         }
-        if asan_enabled:
-            # LLVM 24 rejects `+xnack` as a subtarget feature. The attach-target
-            # `arch` target-ID modifier becomes `rocdl.xnack`, which lowers to
-            # the `amdgpu.xnack` module flag. Without it the code object is not
-            # loadable when the process is in xnack+ mode (HSA_XNACK=1).
-            rocdl_opts["arch"] = f"{chip}:xnack+"
 
         ktrace_fragments = []
         if _ktrace_tracing_enabled(compile_hints):
