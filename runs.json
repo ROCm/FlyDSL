@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T09:48:53Z",
+ "updated": "2026-10-29T10:19:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40854060000,
+   "pr": 1347,
+   "commit": "c548e2f29ec119ac9cdcf6887bc2bdb33cf57565",
+   "branch": "pr/feat-storage-dsltype",
+   "event": "pull_request",
+   "title": "[Feat] Support DslType protocol for Storage[T]",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000",
+   "created_at": "2026-10-29T10:00:21Z",
+   "updated_at": "2026-10-29T10:01:49Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 40847642200,
    "pr": null,
@@ -25,11 +40,11 @@
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
    "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886",
    "created_at": "2026-10-29T08:30:52Z",
-   "updated_at": "2026-10-29T09:46:58Z",
+   "updated_at": "2026-10-29T10:17:01Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -65,11 +80,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-29T08:59:44Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904/job/123353490389"
+     "completed_at": "2026-10-29T10:02:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904/job/123353490389",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1780,52 +1798,6 @@
    "updated_at": "2026-10-27T07:26:15Z",
    "actor": "xudoyuan",
    "jobs": []
-  },
-  {
-   "run_id": 40462231178,
-   "pr": null,
-   "commit": "d4ff12d072cc54ee87d49f9c4aba819175ed142d",
-   "branch": "main",
-   "event": "push",
-   "title": "Keep region op attributes in fly-promote-regmem-to-vectorssa (#1333)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40462231178",
-   "created_at": "2026-10-27T06:37:42Z",
-   "updated_at": "2026-10-27T09:18:19Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T07:02:26Z",
-     "completed_at": "2026-10-27T07:35:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40462231178/job/122055049326"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T06:56:44Z",
-     "completed_at": "2026-10-27T07:53:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40462231178/job/122055049393",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T06:55:53Z",
-     "completed_at": "2026-10-27T09:18:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40462231178/job/122055049418"
-    }
-   ]
   }
  ]
 }
