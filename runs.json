@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-29T13:18:18Z",
+ "updated": "2026-10-29T13:51:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,20 +29,23 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-29T12:58:30Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-29T13:23:30Z",
+     "completed_at": "2026-10-29T13:43:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863085"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-29T13:00:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863105"
+     "completed_at": "2026-10-29T13:36:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863105",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -87,18 +90,21 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-29T12:58:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965178"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-29T13:19:28Z",
+     "completed_at": "2026-10-29T13:49:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965178",
+     "machine": "smci350-odcdh2-a08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-29T12:58:43Z",
+     "started_at": "2026-10-29T13:48:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965311"
     }
@@ -126,21 +132,24 @@
    "branch": "pr/feat-storage-dsltype",
    "event": "pull_request",
    "title": "[Feat] Support DslType protocol for Storage[T]",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000",
    "created_at": "2026-10-29T10:00:21Z",
-   "updated_at": "2026-10-29T13:14:10Z",
+   "updated_at": "2026-10-29T13:48:06Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-29T12:48:14Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455083957"
+     "completed_at": "2026-10-29T13:19:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455083957",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -154,10 +163,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-29T13:03:44Z",
-     "completed_at": null,
+     "completed_at": "2026-10-29T13:23:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455084071"
     }
    ]
