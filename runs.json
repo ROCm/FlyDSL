@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T06:36:41Z",
+ "updated": "2026-10-29T07:16:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40833810850,
+   "pr": 1238,
+   "commit": "7f439907d9891c3b4a91e03d8dbab1821c3c63ba",
+   "branch": "migrate-kernels-tiled-tdm",
+   "event": "pull_request",
+   "title": "Migrate kernels tiled tdm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850",
+   "created_at": "2026-10-29T07:11:13Z",
+   "updated_at": "2026-10-29T07:12:55Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 40821294719,
    "pr": 1288,
@@ -55,11 +70,11 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010",
    "created_at": "2026-10-29T04:38:38Z",
-   "updated_at": "2026-10-29T06:02:33Z",
+   "updated_at": "2026-10-29T07:14:49Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -86,10 +101,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-29T06:02:32Z",
-     "completed_at": null,
+     "completed_at": "2026-10-29T07:14:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010/job/123271908619"
     }
    ]
@@ -1943,49 +1958,6 @@
      "started_at": "2026-10-26T17:12:00Z",
      "completed_at": "2026-10-26T17:40:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40362651138/job/121724838707"
-    }
-   ]
-  },
-  {
-   "run_id": 40351239986,
-   "pr": 1329,
-   "commit": "df4c5236fad2f91b1caa61f303e45f23f1c43f1e",
-   "branch": "xiaobingsuper/aot-export-metadata",
-   "event": "pull_request",
-   "title": "[AOT] Add a versioned export manifest",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40351239986",
-   "created_at": "2026-10-26T15:38:04Z",
-   "updated_at": "2026-10-26T19:54:38Z",
-   "actor": "XiaobingSuper",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-26T19:16:33Z",
-     "completed_at": "2026-10-26T19:54:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40351239986/job/121680703151"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-26T15:54:38Z",
-     "completed_at": "2026-10-26T16:37:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40351239986/job/121680703308"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-26T15:54:01Z",
-     "completed_at": "2026-10-26T16:18:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40351239986/job/121680703407"
     }
    ]
   }
