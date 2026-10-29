@@ -38,9 +38,7 @@ def _fp8_scale_for_leader(is_leader, local_max):
     e8m0 = fx.Int32(0)
     if is_leader:
         max_bits = local_max.bitcast(fx.Int32)
-        working_bits = (local_max * fx.Int32(0x3B124925).bitcast(fx.Float32)).bitcast(
-            fx.Int32
-        )
+        working_bits = (local_max * fx.Int32(0x3B124925).bitcast(fx.Float32)).bitcast(fx.Int32)
         mantissa = working_bits & fx.Int32(0x7FFFFF)
         biased_exp = (working_bits >> fx.Int32(23)) & fx.Int32(0xFF)
         e8m0 = (mantissa != fx.Int32(0)).select(biased_exp + fx.Int32(1), biased_exp)

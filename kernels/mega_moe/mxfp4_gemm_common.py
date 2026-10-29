@@ -2,15 +2,8 @@
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 
 import flydsl.expr as fx
-from flydsl._mlir import ir
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
-
-from kernels.common import buffer_ops
-from kernels.common import dpp_utils
-from kernels.common.act import sigmoid_batch, sigmoid_f32, tanh_f32
-from kernels.common.act import silu_mul_batch as _silu_mul_batch
-from kernels.common.layout_utils import crd2idx
 
 kStages = 2
 kBS_stride_k0_dw = 64
@@ -71,9 +64,7 @@ def lds_dma_atom_128():
     return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
 
-def flat_buffer_view(
-    arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None
-):
+def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
     """Flat buffer-tensor view over a RAW i64 addr; fold=True folds wave-uniform base to a VGPR voffset, fold=False keeps per-lane offset + num_records_bytes for OOB-zero."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
     if fold:
@@ -93,8 +84,3 @@ def flat_buffer_view(
 
 def _fabs_f32(x):
     return fmath.absf(x)
-
-
-FP8OUT_SCALE_BLK = 32
-FP8OUT_SCALE_BLK_MIN = 8
-FP8OUT_PITCH_ALIGN = 64

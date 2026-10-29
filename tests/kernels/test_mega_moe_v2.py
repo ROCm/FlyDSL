@@ -48,7 +48,16 @@ NETWORKS = {
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
     "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6, swiglu_limit=10.0),
     # Kimi-K3: SiTUv2 activation (topk16, 896 experts); situ_beta/linear_beta are K3 checkpoint constants.
-    "kimi_k3_route": dict(model_dim=3584, inter_dim=3072, experts=896, topk=16, swiglu_limit=0.0, act="situv2", situ_beta=4.0, situ_linear_beta=25.0),
+    "kimi_k3_route": dict(
+        model_dim=3584,
+        inter_dim=3072,
+        experts=896,
+        topk=16,
+        swiglu_limit=0.0,
+        act="situv2",
+        situ_beta=4.0,
+        situ_linear_beta=25.0,
+    ),
 }
 
 # batch-size sweeps for --matrix / --full-bs.
@@ -1127,7 +1136,9 @@ def _run_mega_only(
             xr = inp_s1[rows]
             gate = xr @ w1e[:inter_dim].t()
             up = xr @ w1e[inter_dim:].t()
-            ref_s1[rows] = _act_hidden(gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta)
+            ref_s1[rows] = _act_hidden(
+                gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta
+            )
         if not torch.isfinite(got_s1).all() or not torch.isfinite(ref_s1).all():
             got_bad = int((~torch.isfinite(got_s1)).sum().item())
             ref_bad = int((~torch.isfinite(ref_s1)).sum().item())
@@ -1221,7 +1232,9 @@ def _run_mega_only(
                 xr = x32[rows]
                 gate = xr @ w1e[:inter_dim].t()
                 up = xr @ w1e[inter_dim : 2 * inter_dim].t()
-                _a1 = _act_hidden(gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta)
+                _a1 = _act_hidden(
+                    gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta
+                )
                 oracle[rows] += w_e[:, None] * (_a1 @ w2e.t())
                 del w1e, w2e
             if local_experts_only:

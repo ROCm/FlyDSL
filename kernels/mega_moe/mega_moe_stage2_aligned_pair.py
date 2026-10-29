@@ -16,14 +16,6 @@ from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 from flydsl.runtime.device import get_rocm_arch
 
-from .mxfp4_gemm_common import _fabs_f32 as fabs_f32
-from .mxfp4_gemm_common import lds_typed_ptr, lds_vec_load
-from .tensor_shim import (
-    _preload_compiled,
-    _run_compiled,
-    buf_copy_store,
-    ptr_buf_tensor,
-)
 from .gemm2 import (
     _resolve_g2_knobs,
     gemm2_compute_v2,
@@ -33,6 +25,14 @@ from .gemm2 import (
 from .mega_moe_stage2 import (
     _fp8_scale_for_leader,
     _stage2_lds_bytes,
+)
+from .mxfp4_gemm_common import _fabs_f32 as fabs_f32
+from .mxfp4_gemm_common import lds_typed_ptr, lds_vec_load
+from .tensor_shim import (
+    _preload_compiled,
+    _run_compiled,
+    buf_copy_store,
+    ptr_buf_tensor,
 )
 
 _BUFFER_OFFSET_ABI_BYTES = 1 << 31

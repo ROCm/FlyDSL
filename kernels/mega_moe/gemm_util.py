@@ -7,8 +7,8 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-
 from kernels.common.act import situ_mul, tanh_via_sigmoid_f32
+
 from .tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
 
 _PACK = 2  # fp4 micro-scale pack (per-32 E8M0): pack_M = pack_N = pack_K = 2
@@ -111,18 +111,14 @@ class ATileLoader:
         if const_expr(self._indexed_input):
             input_iter = fx.get_iter(self._x_tensor)
             input_bytes = self._source_rows * self._row_bytes
-            input_view = fx.Tensor(
-                fx.make_view(input_iter, fx.make_layout(input_bytes, 1))
-            )
+            input_view = fx.Tensor(fx.make_view(input_iter, fx.make_layout(input_bytes, 1)))
         else:
             tile_iter = fx.add_offset(
                 fx.get_iter(self._x_tensor),
                 fx.Int64(tile_row_base_i32) * fx.Int64(self._row_bytes),
             )
             input_bytes = self._sort_block_m * self._row_bytes
-            input_view = fx.Tensor(
-                fx.make_view(tile_iter, fx.make_layout(input_bytes, 1))
-            )
+            input_view = fx.Tensor(fx.make_view(tile_iter, fx.make_layout(input_bytes, 1)))
         self._tile_rsrc = ptr_buf_tensor(
             fx.get_iter(input_view),
             fx.Int32,
@@ -245,18 +241,12 @@ class ATileLoader:
                         source_index = round_base // self._total_threads  # noqa: B023
                         source_byte = self._chunks[source_index][1]
                         source_row = source_byte // fx.Int32(self._row_bytes)
-                    src_byte = (
-                        source_row * fx.Int32(self._row_bytes)
-                        + koff
-                        + logical_chunk * fx.Int32(16)
-                    )
+                    src_byte = source_row * fx.Int32(self._row_bytes) + koff + logical_chunk * fx.Int32(16)
                     src = fx.slice(
                         self._tile_dma,
                         (None, src_byte),
                     )
-                    wave_base = base_bytes + fx.Int32(
-                        (round_base + self._wave * 64) * 16  # noqa: B023
-                    )
+                    wave_base = base_bytes + fx.Int32((round_base + self._wave * 64) * 16)  # noqa: B023
                     dst = fx.make_view(
                         fx.add_offset(lds_elem, wave_base),
                         fx.make_layout(1, 1),
@@ -304,12 +294,8 @@ class AS2RLoader:
         lo = self._load_16b(lds_src, row_i32 + _c(col_lo)).bitcast(fx.Int64)
         if const_expr(self._is_fp4):
             return Vec(lo).bitcast(fx.Int32)
-        hi = self._load_16b(lds_src, row_i32 + _c(col_lo + fx.Int32(16))).bitcast(
-            fx.Int64
-        )
-        return Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64).bitcast(
-            fx.Int32
-        )
+        hi = self._load_16b(lds_src, row_i32 + _c(col_lo + fx.Int32(16))).bitcast(fx.Int64)
+        return Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64).bitcast(fx.Int32)
 
 
 class BWeightLoader:
@@ -346,17 +332,11 @@ class BWeightLoader:
 
     def load_step(self, row_base_i32, kstep_i32):
         """list[num_acc_n] of [ksub0_i32x4, ksub1_i32x4] for this K-step."""
-        return [
-            self.load_ni(row_base_i32, ni, kstep_i32)
-            for ni in range_constexpr(self._num_acc_n)
-        ]
+        return [self.load_ni(row_base_i32, ni, kstep_i32) for ni in range_constexpr(self._num_acc_n)]
 
     def load_ni(self, row_base_i32, ni, kstep_i32):
         """One N-group's [ksub0, ksub1] fp4 packs (per-ni so the pipe can interleave one next-tile B load)."""
-        return [
-            self._load_pack(row_base_i32, ni, kstep_i32, ks)
-            for ks in range_constexpr(_PACK)
-        ]
+        return [self._load_pack(row_base_i32, ni, kstep_i32, ks) for ks in range_constexpr(_PACK)]
 
 
 class BScaleLoader:
@@ -423,9 +403,7 @@ class AScaleLoader:
                 unit_elems=4,
             )
             dst = fx.make_view(
-                fx.add_offset(
-                    fx.recast_iter(fx.Int32, lds_ascale.ptr), lin * fx.Int32(4)
-                ),
+                fx.add_offset(fx.recast_iter(fx.Int32, lds_ascale.ptr), lin * fx.Int32(4)),
                 fx.make_layout(4, 1),
             )
             fragment = fx.make_rmem_tensor(4, fx.Int32)
@@ -489,20 +467,13 @@ class AScaleLoader:
             for ksub in range_constexpr(_PACK):
                 for rr in (r0, r1):
                     b.append(self._read_scale_lds(lds_ascale, rr, col0 + ksub * 4))
-            packed = (
-                b[0]
-                | (b[1] << fx.Int32(8))
-                | (b[2] << fx.Int32(16))
-                | (b[3] << fx.Int32(24))
-            )
+            packed = b[0] | (b[1] << fx.Int32(8)) | (b[2] << fx.Int32(16)) | (b[3] << fx.Int32(24))
             out.append(packed)
         return out
 
     def _read_scale_lds(self, lds_ascale, row_i32, col_i32):
         off = row_i32 * fx.Int32(self._n_scale) + col_i32
-        ptr = fx.recast_iter(
-            fx.Uint8, fx.add_offset(lds_ascale.ptr, fx.make_int_tuple(off))
-        )
+        ptr = fx.recast_iter(fx.Uint8, fx.add_offset(lds_ascale.ptr, fx.make_int_tuple(off)))
         v = fx.make_view(ptr, fx.make_layout(1, 1)).load()
         return Vec(v, dtype=fx.Uint8)[0].to(fx.Int32)
 
@@ -518,9 +489,7 @@ class MfmaScaleGU:
         elem_a = fx.Float4E2M1FN if self._is_fp4 else fx.Float8E4M3FN
         self._atoms = {
             (osa, osb): fx.make_mma_atom(
-                fx.rocdl.cdna4.MFMA_Scale(
-                    16, 16, 128, elem_a, fx.Float4E2M1FN, opsel_a=osa, opsel_b=osb
-                )
+                fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, fx.Float4E2M1FN, opsel_a=osa, opsel_b=osb)
             )
             for osa in range(4)
             for osb in range(4)

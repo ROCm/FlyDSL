@@ -11,15 +11,9 @@ from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-
 from kernels.comm import communication_ops_utils as comm_ops
 from kernels.gemm.fp8_gemm_utils import ceildiv
-from .tensor_shim import (
-    _preload_compiled,
-    _run_compiled,
-    buf_copy_load,
-    ptr_buf_tensor,
-)
+
 from . import envs
 from .dispatch import (
     DispatchSlot,
@@ -33,6 +27,12 @@ from .mega_moe_config import (
     INDEXED_PAYLOAD_MIN_MTPR,
     Stage1Config,
     fixed_stage1_epoch_slot,
+)
+from .tensor_shim import (
+    _preload_compiled,
+    _run_compiled,
+    buf_copy_load,
+    ptr_buf_tensor,
 )
 
 _SC0_CACHE = 1
@@ -49,9 +49,7 @@ class _Stage1KernelSpec:
         self.waves_per_eu_hint = int(waves_per_eu_hint)
 
 
-def _validate_fixed_slot_geometry(
-    npes, experts_per_rank, max_tokens_per_rank, cap, tile_m
-):
+def _validate_fixed_slot_geometry(npes, experts_per_rank, max_tokens_per_rank, cap, tile_m):
     if tile_m <= 0 or max_tokens_per_rank <= 0:
         raise ValueError("fixed-slot requires positive tile and token capacities")
     required_cap = ((npes * max_tokens_per_rank + tile_m - 1) // tile_m) * tile_m
@@ -71,16 +69,9 @@ def _validate_dispatch_capacity(
 ):
     max_rows = npes * batch_size * topk + experts_per_rank * tile_m
     if not use_tile_resource and max_rows * row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
-        raise ValueError(
-            "MegaMoE v2 stage1 payload exceeds the 32-bit buffer-resource ABI"
-        )
-    if (
-        not use_tile_resource
-        and max_rows * output_row_bytes >= _BUFFER_OFFSET_ABI_BYTES
-    ):
-        raise ValueError(
-            "MegaMoE v2 stage1 output exceeds the 32-bit buffer-resource ABI"
-        )
+        raise ValueError("MegaMoE v2 stage1 payload exceeds the 32-bit buffer-resource ABI")
+    if not use_tile_resource and max_rows * output_row_bytes >= _BUFFER_OFFSET_ABI_BYTES:
+        raise ValueError("MegaMoE v2 stage1 output exceeds the 32-bit buffer-resource ABI")
 
 
 # fmt: off

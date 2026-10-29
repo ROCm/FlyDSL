@@ -9,8 +9,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
-
 from kernels.comm import communication_ops_utils as comm_ops
+
 from .tensor_shim import buf_copy_load, buf_copy_store, ptr_buf_tensor
 
 
@@ -125,11 +125,7 @@ def _wave_inclusive_scan_i32(value, lane):
 @flyc.jit
 def _wave_reduce_max_i32(value, lane):
     for distance in (1, 2, 4, 8, 16, 32):
-        peer = fx.Int32(
-            fx.rocdl.ds_bpermute(
-                T.i32, (lane ^ fx.Int32(distance)) * fx.Int32(4), value
-            )
-        )
+        peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, (lane ^ fx.Int32(distance)) * fx.Int32(4), value))
         value = (peer > value).select(peer, value)
     return value
 
@@ -177,26 +173,16 @@ def _classify_fanout_wave_route(
         token_mask = fx.Int64(0)
         for slot in range_constexpr(fz_k):
             source_lane = group_lane + fx.Int32(slot)
-            peer_expert = fx.Int32(
-                fx.rocdl.ds_bpermute(T.i32, source_lane * fx.Int32(4), route_expert)
-            )
-            valid = (peer_expert >= fx.Int32(0)) & (
-                peer_expert < fx.Int32(fz_total_experts)
-            )
+            peer_expert = fx.Int32(fx.rocdl.ds_bpermute(T.i32, source_lane * fx.Int32(4), route_expert))
+            valid = (peer_expert >= fx.Int32(0)) & (peer_expert < fx.Int32(fz_total_experts))
             same_destination = peer_expert // fx.Int32(fz_epr) == destination
             peer_local = peer_expert - destination * fx.Int32(fz_epr)
             safe_local = (valid & same_destination).select(peer_local, fx.Int32(0))
             peer_bit = fx.Int64(1) << fx.Int64(safe_local)
-            token_mask = (valid & same_destination).select(
-                token_mask | peer_bit, token_mask
-            )
+            token_mask = (valid & same_destination).select(token_mask | peer_bit, token_mask)
             selected_member = valid & same_destination
-            selected_member = selected_member & (
-                ((selected_mask >> fx.Int64(safe_local)) & fx.Int64(1)) != fx.Int64(0)
-            )
-            member_slots = selected_member.select(
-                member_slots | fx.Int32(1 << slot), member_slots
-            )
+            selected_member = selected_member & (((selected_mask >> fx.Int64(safe_local)) & fx.Int64(1)) != fx.Int64(0))
+            member_slots = selected_member.select(member_slots | fx.Int32(1 << slot), member_slots)
         selected = selected_mask != fx.Int64(0)
         matched = selected & ((token_mask & selected_mask) == selected_mask)
         member_bit = (selected_mask >> fx.Int64(local_expert)) & fx.Int64(1)
@@ -210,12 +196,8 @@ def _classify_fanout_wave_route(
         has_b = fx.Int32(0) != fx.Int32(0)
         for slot in range_constexpr(fz_k):
             source_lane = group_lane + fx.Int32(slot)
-            peer_expert = fx.Int32(
-                fx.rocdl.ds_bpermute(T.i32, source_lane * fx.Int32(4), route_expert)
-            )
-            valid = (peer_expert >= fx.Int32(0)) & (
-                peer_expert < fx.Int32(fz_total_experts)
-            )
+            peer_expert = fx.Int32(fx.rocdl.ds_bpermute(T.i32, source_lane * fx.Int32(4), route_expert))
+            valid = (peer_expert >= fx.Int32(0)) & (peer_expert < fx.Int32(fz_total_experts))
             same_destination = peer_expert // fx.Int32(fz_epr) == destination
             peer_local = peer_expert - destination * fx.Int32(fz_epr)
             safe_local = (valid & same_destination).select(peer_local, fx.Int32(0))
@@ -225,9 +207,7 @@ def _classify_fanout_wave_route(
             has_b = has_b | member_b
             if const_expr(fz_k <= 8):
                 selected_member = member_a | member_b
-                member_slots = selected_member.select(
-                    member_slots | fx.Int32(1 << slot), member_slots
-                )
+                member_slots = selected_member.select(member_slots | fx.Int32(1 << slot), member_slots)
             slot_a = member_a.select(fx.Int32(slot), slot_a)
             slot_b = member_b.select(fx.Int32(slot), slot_b)
         matched = pair_enabled & has_a & has_b
@@ -263,21 +243,15 @@ def _configure_payload_geometry(
         for local_expert in range(lane, fz_epr, 64):
             ge = fx.Int32(destination * fz_epr) + local_expert
             source_count = local_hist[ge]
-            max_source_count = (source_count > max_source_count).select(
-                source_count, max_source_count
-            )
+            max_source_count = (source_count > max_source_count).select(source_count, max_source_count)
         max_source_count = _wave_reduce_max_i32(max_source_count, lane)
         group_count = fx.Int32(0)
         if lane == fx.Int32(0):
             group_count = local_hist[fx.Int32(fz_total_experts + destination)]
         group_count = fx.Int32(fx.rocdl.readfirstlane(T.i32, group_count))
-        max_source_count = (group_count > max_source_count).select(
-            group_count, max_source_count
-        )
+        max_source_count = (group_count > max_source_count).select(group_count, max_source_count)
         if lane == fx.Int32(0):
-            chunks = (max_source_count + fx.Int32(payload_chunk_rows - 1)) // fx.Int32(
-                payload_chunk_rows
-            )
+            chunks = (max_source_count + fx.Int32(payload_chunk_rows - 1)) // fx.Int32(payload_chunk_rows)
             chunks = (chunks > fx.Int32(0)).select(chunks, fx.Int32(1))
             chunk_counts[fx.Int32(destination)] = chunks
             # Tasks are flattened as chunk x expert. Even one chunk contains
@@ -351,15 +325,11 @@ def _initialize_section_ready(
         )
         source_active = source_count > fx.Int32(0)
         source_boundary = source_active & (sender_prefix > fx.Int32(0))
-        source_boundary = source_boundary & (
-            sender_prefix % fx.Int32(fz_tile_m) != fx.Int32(0)
-        )
+        source_boundary = source_boundary & (sender_prefix % fx.Int32(fz_tile_m) != fx.Int32(0))
         if source_boundary:
             tile_index = base_tile + sender_prefix // fx.Int32(fz_tile_m)
             _increment_i32(tile_expected, tile_index)
-        for chunk_offset in range(
-            fx.Int32(payload_chunk_rows), source_count, payload_chunk_rows
-        ):
+        for chunk_offset in range(fx.Int32(payload_chunk_rows), source_count, payload_chunk_rows):
             boundary = sender_prefix + chunk_offset
             if boundary % fx.Int32(fz_tile_m) != fx.Int32(0):
                 tile_index = base_tile + boundary // fx.Int32(fz_tile_m)
@@ -368,17 +338,13 @@ def _initialize_section_ready(
 
 
 @flyc.jit
-def _copy_token_row(
-    source_buffer, destination_buffer, lane, *, fz_safe_end_i32, fz_n_i32
-):
+def _copy_token_row(source_buffer, destination_buffer, lane, *, fz_safe_end_i32, fz_n_i32):
     safe_end_vec = fz_safe_end_i32 // 4
     n_vec = fz_n_i32 // 4
     if const_expr(fz_safe_end_i32 > 0):
         for unit in range(lane, safe_end_vec, 128):
             value0 = buf_copy_load(source_buffer, unit, fx.Int32, unit_elems=4)
-            value1 = buf_copy_load(
-                source_buffer, unit + fx.Int32(64), fx.Int32, unit_elems=4
-            )
+            value1 = buf_copy_load(source_buffer, unit + fx.Int32(64), fx.Int32, unit_elems=4)
             buf_copy_store(destination_buffer, unit, value0, fx.Int32, unit_elems=4)
             buf_copy_store(
                 destination_buffer,
@@ -427,18 +393,14 @@ def _publish_tile_range(
         last_tile = (destination_base + row_end - fx.Int32(1)) // rows_per_tile
         for tile in range(first_tile, last_tile + fx.Int32(1), 1):
             previous = fx.Int32(
-                comm_ops.atomic_add_system(
-                    remote_tile_ready + fx.Int64(tile) * fx.Int64(4), fx.Int32(1)
-                )
+                comm_ops.atomic_add_system(remote_tile_ready + fx.Int64(tile) * fx.Int64(4), fx.Int32(1))
             )
             expected = ptr_buf_tensor(remote_tile_expected, fx.Int32)[tile]
             if previous + fx.Int32(1) == expected:
                 # The final RMW observes the release sequence from all payload
                 # publishers before publishing the completion-order entry.
                 comm_ops.fence_system_acquire()
-                ready_slot = fx.Int32(
-                    comm_ops.atomic_add_system(remote_queue_tail, fx.Int32(1))
-                )
+                ready_slot = fx.Int32(comm_ops.atomic_add_system(remote_queue_tail, fx.Int32(1)))
                 ptr_buf_tensor(remote_queue, fx.Int32)[ready_slot] = tile
                 fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                 comm_ops.fence_system_release()

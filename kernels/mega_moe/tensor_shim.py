@@ -3,40 +3,15 @@
 
 import os
 import threading
-from abc import ABC, abstractmethod
-from functools import lru_cache
-from itertools import product
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import numpy as np
-import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
-from flydsl.expr import ptrtoint, range_constexpr
+from flydsl.expr import ptrtoint
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-
-from kernels.common.kernels_common import get_warp_size
-
-# Global toggle for the amdgpu-kernarg-preload compile hint used by the flydsl
-# kernels. Enabled by default; set AITER_FLYDSL_KERNARG_PRELOAD=0 to disable it
-# globally for all kernels. AITER_FLYDSL_KERNARG_PRELOAD_COUNT overrides the
-# number of kernel arguments to preload.
-AITER_FLYDSL_KERNARG_PRELOAD = bool(
-    int(os.environ.get("AITER_FLYDSL_KERNARG_PRELOAD", "1"))
-)
-AITER_FLYDSL_KERNARG_PRELOAD_COUNT = int(
-    os.environ.get("AITER_FLYDSL_KERNARG_PRELOAD_COUNT", "32")
-)
-
-# Toggle for the amdgpu-expert-scheduling-mode compile hint on the MoE GEMM
-# kernels. Disabled by default; set AITER_FLYDSL_MOE_EXPERT_SCHEDULING_MODE=1
-# to enable it.
-AITER_FLYDSL_MOE_EXPERT_SCHEDULING_MODE = bool(
-    int(os.environ.get("AITER_FLYDSL_MOE_EXPERT_SCHEDULING_MODE", "0"))
-)
 
 _PRELOAD_COMPILE_LOCK = threading.RLock()
 
@@ -109,11 +84,7 @@ def ptr_buf_tensor(
     zero-fills rather than reading stale bytes.
     """
     unit_stride = unit_elems if unit_stride is None else unit_stride
-    layout = (
-        fx.make_layout((n,), (1,))
-        if unit_elems == 1
-        else fx.make_layout((n, unit_elems), (unit_stride, 1))
-    )
+    layout = fx.make_layout((n,), (1,)) if unit_elems == 1 else fx.make_layout((n, unit_elems), (unit_stride, 1))
     pt = fx.PointerType.get(
         elem.ir_type,
         address_space=fx.AddressSpace.Global,
@@ -128,18 +99,6 @@ def buf_copy_atom(unit_bytes, elem=fx.Int32, cache_modifier=0):
     return fx.make_copy_atom(_BUF_COPY_ATOM[unit_bytes](cache_modifier), elem)
 
 
-# GTensor takes MLIR scalar types (``T.f32``); the buffer views take fx classes.
-_FX_ELEM = {
-    "i8": fx.Int8,
-    "i16": fx.Int16,
-    "i32": fx.Int32,
-    "i64": fx.Int64,
-    "f16": fx.Float16,
-    "bf16": fx.BFloat16,
-    "f32": fx.Float32,
-}
-
-
 def _buf_copy_slice(buffer, index, unit_elems):
     if unit_elems == 1:
         grouped = fx.logical_divide(buffer, fx.make_layout(1, 1))
@@ -151,9 +110,7 @@ def buf_copy_load(buffer, index, elem=fx.Int32, unit_elems=1, cache_modifier=0):
     """Load one vector unit, preserving an explicit buffer cache policy."""
     fragment = fx.make_rmem_tensor(unit_elems, elem)
     fx.copy(
-        buf_copy_atom(
-            unit_elems * (elem.width // 8), elem, cache_modifier=cache_modifier
-        ),
+        buf_copy_atom(unit_elems * (elem.width // 8), elem, cache_modifier=cache_modifier),
         _buf_copy_slice(buffer, index, unit_elems),
         fragment,
     )
@@ -166,9 +123,7 @@ def buf_copy_store(buffer, index, value, elem=fx.Int32, unit_elems=1, cache_modi
     fragment = fx.make_rmem_tensor(unit_elems, elem)
     fragment.store(Vec.from_elements([value], elem) if unit_elems == 1 else Vec(value))
     fx.copy(
-        buf_copy_atom(
-            unit_elems * (elem.width // 8), elem, cache_modifier=cache_modifier
-        ),
+        buf_copy_atom(unit_elems * (elem.width // 8), elem, cache_modifier=cache_modifier),
         fragment,
         _buf_copy_slice(buffer, index, unit_elems),
     )

@@ -4,13 +4,13 @@
 
 import functools
 
+import torch
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-import torch
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 
-from .tensor_shim import _run_compiled, ptr_buf_tensor
 from .gemm_util import (
     _PACK,
     AS2RLoader,
@@ -23,6 +23,7 @@ from .gemm_util import (
     TileScheduler,
     wait_lds_barrier,
 )
+from .tensor_shim import _run_compiled, ptr_buf_tensor
 
 
 class _LdsF32View:

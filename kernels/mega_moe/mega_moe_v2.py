@@ -5,14 +5,15 @@
 import os
 from dataclasses import replace
 
-import flydsl.expr as fx
 import mori.shmem as ms
 import torch
 
+import flydsl.expr as fx
 from kernels.comm.flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
+
 from . import envs
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from .mega_moe_config import (

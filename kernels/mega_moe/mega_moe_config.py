@@ -139,9 +139,7 @@ class MegaMoEConfig:
         sbm = self.stage1.sort_block_m
         bm = self.stage2.block_m
         if bm > sbm or sbm % bm:
-            raise ValueError(
-                f"Stage2 block_m={bm} must divide Stage1 sort_block_m={sbm}"
-            )
+            raise ValueError(f"Stage2 block_m={bm} must divide Stage1 sort_block_m={sbm}")
         if self.p2p_quant not in ("none", "fp8_blockwise_1x32"):
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
         if self.p2p_quant != "none" and self.stage2.bf16_lds:
@@ -160,9 +158,7 @@ class Stage2BundleKey:
 
     def __post_init__(self):
         if self.config.block_m > self.sbm or self.sbm % self.config.block_m:
-            raise ValueError(
-                f"Stage2 block_m={self.config.block_m} must divide bundle SBM={self.sbm}"
-            )
+            raise ValueError(f"Stage2 block_m={self.config.block_m} must divide bundle SBM={self.sbm}")
         if self.p2p_quant not in ("none", "fp8_blockwise_1x32"):
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
 
@@ -193,9 +189,7 @@ class MegaMoEBundlePlan:
         for entry in self.entries:
             if entry.token_bucket == bucket:
                 return entry
-        raise ValueError(
-            f"token bucket {bucket} is not present in the mtpr={self.mtpr} bundle"
-        )
+        raise ValueError(f"token bucket {bucket} is not present in the mtpr={self.mtpr} bundle")
 
 
 def nearest_token_bucket(tokens: int) -> int:
@@ -328,9 +322,7 @@ def _select_large_stage1(bucket: int, inter_dim: int) -> Stage1Config:
     )
 
 
-def _select_bounded_stage2(
-    bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int, model_dim: int
-) -> Stage2Config:
+def _select_bounded_stage2(bucket: int, fixed_slot: bool, mtpr: int, sort_block_m: int, model_dim: int) -> Stage2Config:
     if not fixed_slot and mtpr > bucket:
         return Stage2Config(
             block_m=64 if sort_block_m == 128 else 32,
@@ -340,11 +332,7 @@ def _select_bounded_stage2(
             use_nt=bucket <= 128,
             persist_strided=512 <= bucket <= 2048,
         )
-    block_n = (
-        256
-        if bucket in (1, 4, 64) or bucket >= 1024 or not fixed_slot and bucket < 128
-        else 128
-    )
+    block_n = 256 if bucket in (1, 4, 64) or bucket >= 1024 or not fixed_slot and bucket < 128 else 128
     if model_dim < 4096:
         block_n = 128
     # Fixed-slot buckets below 128 also run persistent: the non-persistent grid
@@ -369,9 +357,7 @@ def _select_bounded_stage2(
     )
 
 
-def _select_large_stage2(
-    bucket: int, sort_block_m: int, model_dim: int
-) -> Stage2Config:
+def _select_large_stage2(bucket: int, sort_block_m: int, model_dim: int) -> Stage2Config:
     if bucket in (1024, 2048):
         persist_cu = 256
     elif bucket == 16384:
@@ -404,17 +390,13 @@ def _select_bucket_config(
     if mtpr_class == MAX_MTPR_CLASS:
         stage1 = _select_large_stage1(bucket, inter_dim)
         stage2 = _select_large_stage2(bucket, stage1.sort_block_m, model_dim)
-        return MegaMoEConfig(
-            stage1=stage1, stage2=stage2, p2p_quant="fp8_blockwise_1x32"
-        )
+        return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant="fp8_blockwise_1x32")
 
     if fixed_slot_dispatch:
         stage1 = _select_fixed_stage1(bucket)
     else:
         stage1 = _select_bounded_stage1(bucket, inter_dim)
-    stage2 = _select_bounded_stage2(
-        bucket, fixed_slot_dispatch, mtpr_class, stage1.sort_block_m, model_dim
-    )
+    stage2 = _select_bounded_stage2(bucket, fixed_slot_dispatch, mtpr_class, stage1.sort_block_m, model_dim)
     return MegaMoEConfig(stage1=stage1, stage2=stage2, p2p_quant="none")
 
 
@@ -718,11 +700,7 @@ def _tune_v4_pro(config: MegaMoEConfig, ctx: _TuningContext) -> MegaMoEConfig:
 
     # The deep Stage2 path is enabled only for A4 and only where the base
     # geometry uses BN256, so A8 remains byte-for-byte mainline.
-    if (
-        bucket >= 1024
-        and config.stage2.block_n == 256
-        and not config.stage2.aligned_pair
-    ):
+    if bucket >= 1024 and config.stage2.block_n == 256 and not config.stage2.aligned_pair:
         config = _replace_config(
             config,
             stage2={"b2stage": True, "deep_a_pipeline": True},
@@ -801,15 +779,11 @@ _NETWORKS = (
         _tune_v4_pro,
         V4_EPLB_EXPERTS_PER_RANKS,
     ),
-    NetworkProfile(
-        "kimi_k3", KIMI_K3_EXPERTS_PER_RANK, K3_MODEL_DIM, K3_INTER_DIM, _tune_kimi_k3
-    ),
+    NetworkProfile("kimi_k3", KIMI_K3_EXPERTS_PER_RANK, K3_MODEL_DIM, K3_INTER_DIM, _tune_kimi_k3),
 )
 
 
-def _match_network(
-    experts_per_rank: int, model_dim: int, inter_dim: int
-) -> NetworkProfile | None:
+def _match_network(experts_per_rank: int, model_dim: int, inter_dim: int) -> NetworkProfile | None:
     """Return the registered network matching the full (epr, shape) identity.
 
     A profile matches when the shape is exact and the experts-per-rank is either
@@ -820,10 +794,7 @@ def _match_network(
     for profile in _NETWORKS:
         if profile.model_dim != model_dim or profile.inter_dim != inter_dim:
             continue
-        if (
-            experts_per_rank == profile.experts_per_rank
-            or experts_per_rank in profile.family_experts_per_rank
-        ):
+        if experts_per_rank == profile.experts_per_rank or experts_per_rank in profile.family_experts_per_rank:
             return profile
     return None
 
@@ -855,15 +826,12 @@ def select_mega_moe_config(
         raise ValueError(f"invalid model shape {model_dim}x{inter_dim}")
     if experts_per_rank > MAX_FANOUT_EXPERTS_PER_RANK:
         raise ValueError(
-            "MegaMoE v2 fanout pair ids support at most "
-            f"{MAX_FANOUT_EXPERTS_PER_RANK} experts per rank"
+            "MegaMoE v2 fanout pair ids support at most " f"{MAX_FANOUT_EXPERTS_PER_RANK} experts per rank"
         )
     bucket = nearest_token_bucket(tokens)
     mtpr_class = mtpr_config_class(mtpr)
     fixed_slot_dispatch = (
-        mtpr_class <= FIXED_SLOT_MAX_MTPR
-        and world_size == 8
-        and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
+        mtpr_class <= FIXED_SLOT_MAX_MTPR and world_size == 8 and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
     )
     if fixed_slot_dispatch and bucket > FIXED_SLOT_MAX_MTPR:
         raise ValueError(f"fixed-slot does not support token bucket {bucket}")
@@ -899,12 +867,7 @@ def select_mega_moe_config(
             config,
             stage2={"aligned_pair": False, "pair_cu": 0},
         )
-    if (
-        a_dtype == ACTIVATION_FP4
-        and bucket <= 128
-        and config.stage1.async_a_copy
-        and not fixed_slot_dispatch
-    ):
+    if a_dtype == ACTIVATION_FP4 and bucket <= 128 and config.stage1.async_a_copy and not fixed_slot_dispatch:
         # FP4 halves each A K-step. SBM64 keeps at least one 16-byte async
         # copy per thread in the eight-wave Stage1 configuration.
         # Excluded for fixed-slot: its EP8 receive capacity is
@@ -917,9 +880,7 @@ def select_mega_moe_config(
             stage1=replace(config.stage1, sort_block_m=64),
         )
     if p2p_quant == P2P_QUANT_AUTO:
-        desired_p2p = (
-            P2P_QUANT_FP8_BLOCKWISE if mtpr >= P2P_FP8_MIN_MTPR else config.p2p_quant
-        )
+        desired_p2p = P2P_QUANT_FP8_BLOCKWISE if mtpr >= P2P_FP8_MIN_MTPR else config.p2p_quant
     else:
         desired_p2p = p2p_quant
     if desired_p2p != config.p2p_quant:
@@ -948,11 +909,7 @@ def select_mega_moe_config(
         config = _fp4_common_prelude(config, ctx)
     if profile is not None and experts_per_rank == profile.experts_per_rank:
         config = profile.tuner(config, ctx)
-    if (
-        a_dtype == ACTIVATION_FP4
-        and not fixed_slot_dispatch
-        and mtpr >= INDEXED_PAYLOAD_MIN_MTPR
-    ):
+    if a_dtype == ACTIVATION_FP4 and not fixed_slot_dispatch and mtpr >= INDEXED_PAYLOAD_MIN_MTPR:
         # Every rank here uses the source-indexed payload. The async A-copy
         # (ATileLoader.prefetch_to_lds) resolves each row's source key per thread,
         # so it serves indexed FP4 too -- the old "indexed FP4 must be sync" rule
@@ -963,9 +920,7 @@ def select_mega_moe_config(
     if config.stage2.aligned_pair and config.p2p_quant != P2P_QUANT_FP8_BLOCKWISE:
         # The aligned-pair Stage2 kernel only emits the FP8 P2P row layout, so
         # reject the combination here instead of at launch.
-        raise ValueError(
-            f"p2p_quant={config.p2p_quant!r} conflicts with aligned-pair Stage2"
-        )
+        raise ValueError(f"p2p_quant={config.p2p_quant!r} conflicts with aligned-pair Stage2")
     return config
 
 
@@ -988,9 +943,7 @@ def build_mega_moe_bundle_plan(
         raise ValueError(f"mtpr={mtpr} has no exact token bucket")
 
     fixed_slot_dispatch = (
-        mtpr <= FIXED_SLOT_MAX_MTPR
-        and world_size == 8
-        and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
+        mtpr <= FIXED_SLOT_MAX_MTPR and world_size == 8 and experts_per_rank == REFERENCE_EXPERTS_PER_RANK
     )
     stage1_variants: list[Stage1Config] = []
     stage2_variants: list[Stage2BundleKey] = []

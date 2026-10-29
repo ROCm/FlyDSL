@@ -10,11 +10,11 @@ from flydsl.expr import const_expr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-
 from kernels.comm import communication_ops_utils as comm_ops
-from .tensor_shim import _preload_compiled, _run_compiled, ptr_buf_tensor
+
 from .dispatch import DispatchSlot, emit_dispatch_group, emit_dispatch_plan
 from .quant import emit_per_1x32_mx_fp4_group, emit_per_1x32_mx_fp8_group
+from .tensor_shim import _preload_compiled, _run_compiled, ptr_buf_tensor
 
 
 @functools.cache
@@ -38,9 +38,7 @@ def compile_mega_moe_prepare(
     """Compile compact count/group/plan without the GEMM1 shared footprint."""
     arch = str(get_rocm_arch() or "")
     if not arch.startswith("gfx95"):
-        raise RuntimeError(
-            f"MegaMoE prepare requires CDNA4 (gfx95x), got {arch or 'unknown'}"
-        )
+        raise RuntimeError(f"MegaMoE prepare requires CDNA4 (gfx95x), got {arch or 'unknown'}")
     npes = int(fuse_npes)
     epr = int(experts_per_rank)
     topk = int(fuse_topk)
@@ -136,13 +134,9 @@ def compile_mega_moe_prepare(
                 group0 = quant_slot * fx.Int32(block_threads) + tid
                 for group_id in range(group0, total_groups, group_stride):
                     if const_expr(quant_mode == "fp4"):
-                        emit_per_1x32_mx_fp4_group(
-                            quant_in, quant_out, quant_scale, group_id
-                        )
+                        emit_per_1x32_mx_fp4_group(quant_in, quant_out, quant_scale, group_id)
                     else:
-                        emit_per_1x32_mx_fp8_group(
-                            quant_in, quant_out, quant_scale, group_id
-                        )
+                        emit_per_1x32_mx_fp8_group(quant_in, quant_out, quant_scale, group_id)
 
         # Quant CTAs are independent specialists.  They must retire as soon as
         # their quant groups drain instead of entering prepare's epoch/barrier
@@ -166,9 +160,7 @@ def compile_mega_moe_prepare(
                     )
                 next_parity = fx.Int32(fx.rocdl.readfirstlane(T.i32, next_parity_lane))
                 if tid == fx.Int32(0):
-                    comm_ops.store_i32_system(
-                        payload_ready_rows, fx.Int32(0), fx.Int32(tile_m)
-                    )
+                    comm_ops.store_i32_system(payload_ready_rows, fx.Int32(0), fx.Int32(tile_m))
                     comm_ops.fence_system_release()
                 fx.barrier()
                 if tid == fx.Int32(0):
