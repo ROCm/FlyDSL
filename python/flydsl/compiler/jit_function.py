@@ -1546,8 +1546,12 @@ class JitFunction:
             )
         if extern_linked:
             gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-            if "targets" in gpu_module.operation.attributes:
-                del gpu_module.operation.attributes["targets"]
+            # rocdl-attach-target, which carries link_libs and the compile options,
+            # must be the only source of targets: any other target becomes another
+            # object, and object 0, the one loaded, would lack the extern libs.
+            assert (
+                "targets" not in gpu_module.operation.attributes
+            ), "gpu.module was built with targets; rocdl-attach-target must be the only source"
 
         compiled_module = MlirCompiler.compile(
             module,
