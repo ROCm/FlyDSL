@@ -161,6 +161,20 @@ def _loop():
 
 
 @flyc.kernel
+def _divergent_loop_kernel(out: fx.Tensor):
+    i = fx.thread_idx.x
+    for _ in fx.range(0, i % 4 + 1, 1):
+        with ktrace.range("lap"):
+            out[i] = out[i] + fx.Float32(1)
+    ktrace.mark("after")
+
+
+@flyc.jit
+def _divergent_loop(out: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+    _divergent_loop_kernel(out).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+
+
+@flyc.kernel
 def _divergent_kernel():
     lane = fx.thread_idx.x % fx.Int32(64)
     if lane >= fx.Int32(32):
@@ -572,6 +586,16 @@ def test_loop_iterations_take_distinct_slots():
     records = sorted(trace._snapshot(), key=lambda r: r["slot"])
     assert [r["payload"] for r in records] == list(range(8))
     assert len({r["slot"] for r in records}) == 8
+
+
+def test_divergent_loop_records_every_iteration():
+    out = torch.zeros(64, device="cuda")
+    with ktrace.capture("divergent_loop") as trace:
+        _divergent_loop(out)
+    phases = trace.summary()["phases"]
+    assert phases["lap"]["count"] == 4, "the wave runs the loop as often as its longest lane"
+    assert phases["after"]["count"] == 1, "the event after the loop must not reuse a loop slot"
+    torch.testing.assert_close(out, (torch.arange(64, device="cuda") % 4 + 1).float())
 
 
 def test_a_lane_divergent_mark_keeps_its_slot():
