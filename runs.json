@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-29T02:09:01Z",
+ "updated": "2026-10-29T02:33:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40806778348,
+   "pr": 1340,
+   "commit": "de5e52a03c1782c58a313b9b5fc97e0002bc12f4",
+   "branch": "jli/gpu-asan",
+   "event": "pull_request",
+   "title": "[WIP][feat] support gpu asan feature ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348",
+   "created_at": "2026-10-29T02:30:40Z",
+   "updated_at": "2026-10-29T02:31:51Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 40805519058,
+   "pr": 1340,
+   "commit": "85069c5b5be216e254392212f41930aae5b538b5",
+   "branch": "jli/gpu-asan",
+   "event": "pull_request",
+   "title": "[WIP][feat] support gpu asan feature ",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40805519058",
+   "created_at": "2026-10-29T02:17:59Z",
+   "updated_at": "2026-10-29T02:31:28Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40770827893,
    "pr": 1343,
@@ -1951,64 +1981,6 @@
      "started_at": "2026-10-26T14:48:33Z",
      "completed_at": "2026-10-26T15:00:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40338125910/job/121633186632"
-    }
-   ]
-  },
-  {
-   "run_id": 40336486481,
-   "pr": null,
-   "commit": "8096c614659adbe96f17485736d7649cc5b113e2",
-   "branch": "binding_mega_moe_tp_opt1",
-   "event": "pull_request",
-   "title": "[Kernel]mega_moe_tp: unified path and big-M optimizations",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40336486481",
-   "created_at": "2026-10-26T14:06:06Z",
-   "updated_at": "2026-10-26T14:07:28Z",
-   "actor": "binding7012",
-   "jobs": []
-  },
-  {
-   "run_id": 40331097337,
-   "pr": null,
-   "commit": "af15cf0e163b55c33c4f53a8599f541f35ff9522",
-   "branch": "xiaobingsuper/aot-export-metadata",
-   "event": "pull_request",
-   "title": "[AOT] Add a versioned export manifest",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40331097337",
-   "created_at": "2026-10-26T13:30:02Z",
-   "updated_at": "2026-10-26T14:24:05Z",
-   "actor": "XiaobingSuper",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-26T13:44:31Z",
-     "completed_at": "2026-10-26T14:24:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40331097337/job/121607658866"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-26T13:44:05Z",
-     "completed_at": "2026-10-26T14:23:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40331097337/job/121607658932"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-26T13:44:19Z",
-     "completed_at": "2026-10-26T14:09:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40331097337/job/121607658976"
     }
    ]
   }
