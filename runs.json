@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T10:29:44Z",
+ "updated": "2026-10-29T10:56:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40861222658,
+   "pr": 1238,
+   "commit": "d3c3398f93d1232b30dd0f5e8264cbc74f5ef7e5",
+   "branch": "migrate-kernels-tiled-tdm",
+   "event": "pull_request",
+   "title": "Migrate kernels tiled tdm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861222658",
+   "created_at": "2026-10-29T10:54:25Z",
+   "updated_at": "2026-10-29T10:54:27Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 40857792686,
    "pr": 1348,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686",
    "created_at": "2026-10-29T10:28:06Z",
-   "updated_at": "2026-10-29T10:28:07Z",
+   "updated_at": "2026-10-29T10:29:34Z",
    "actor": "james-huang09",
    "jobs": []
   },
@@ -100,11 +115,11 @@
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
    "title": "Migrate kernels tiled tdm",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904",
    "created_at": "2026-10-29T08:01:22Z",
-   "updated_at": "2026-10-29T08:58:15Z",
+   "updated_at": "2026-10-29T10:54:27Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -131,10 +146,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-29T08:58:15Z",
-     "completed_at": null,
+     "completed_at": "2026-10-29T10:54:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904/job/123353490408"
     }
    ]
@@ -1721,52 +1736,6 @@
    "updated_at": "2026-10-27T09:13:45Z",
    "actor": "big-yellow-duck",
    "jobs": []
-  },
-  {
-   "run_id": 40467764858,
-   "pr": 1269,
-   "commit": "e2f856f9b1b455b8b0d7ca79fc6e15685c93db71",
-   "branch": "fix/gemm-a16w16-hti-wave-sync",
-   "event": "pull_request",
-   "title": "[Bugfix] Sync both wave groups before the gfx950 A16W16 HTI GEMM reads its first and last stages",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467764858",
-   "created_at": "2026-10-27T07:32:47Z",
-   "updated_at": "2026-10-27T14:24:35Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T13:41:00Z",
-     "completed_at": "2026-10-27T14:24:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467764858/job/122079553040"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T08:13:09Z",
-     "completed_at": "2026-10-27T08:36:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467764858/job/122079553096"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T08:10:01Z",
-     "completed_at": "2026-10-27T09:08:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467764858/job/122079553381",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
