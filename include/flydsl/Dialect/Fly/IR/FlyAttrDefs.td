@@ -63,102 +63,124 @@ def Fly_GemmTraversalOrder : Fly_I32EnumAttr<"GemmTraversalOrder", "", [
 ]>;
 def Fly_GemmTraversalOrderAttr : Fly_EnumAttr<Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
 
+// Owning values in storage; callers receive an immutable borrowing reference.
+class Fly_CoreParameter<string type> : AttrParameter<type, "Core algebra value"> {
+  let cppAccessorType = "const " # type # " &";
+}
+
 //===----------------------------------------------------------------------===//
 // Type attributes
 //===----------------------------------------------------------------------===//
 
 def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
   let parameters = (ins "int32_t":$alignment);
-  let assemblyFormat = "`align` `<` `` $alignment `` `>`";
-
+  let hasCustomAssemblyFormat = 1;
+  let skipDefaultBuilders = 1;
   let builders = [
+    AttrBuilder<(ins "int32_t":$alignment), [{
+      if (alignment <= 0)
+        return {};
+      return $_get($_ctxt, alignment);
+    }]>,
     AttrBuilderWithInferredContext<(ins "Type":$elemTy, "int32_t":$divisibility), [{
-      int32_t bitWidth = elemTy.getIntOrFloatBitWidth();
-      divisibility = divisibility > 0 ? divisibility : 1;
-      int32_t alignment = (bitWidth * divisibility + 7) / 8;
-      return $_get(elemTy.getContext(), alignment);
+      auto bits = int64_t{elemTy.getIntOrFloatBitWidth()} * std::max(divisibility, 1);
+      return getFromBitAlignment(elemTy.getContext(), bits);
     }]>
   ];
-
   let extraClassDeclaration = [{
+    int64_t getBitAlignment() const { return int64_t{getAlignment()} * 8; }
+    /// Returns null for non-positive, non-byte-aligned, or overflowing values.
+    static AlignAttr getFromBitAlignment(MLIRContext *ctx, int64_t bits);
     static AlignAttr getTrivialAlignment(Type elemTy);
   }];
 }
 
-/// Unified integer attribute that represents both static and dynamic integers.
-/// - None : value == 0 and width == 0. it could be used as a Static 0 in the arithmetic operations.
-/// - Static integer: staticFlag == true, value is the actual integer value
-/// - Dynamic integer: staticFlag == false, width and divisibility describe the dynamic value
-def Fly_IntAttr : Fly_Attr<"Int", "int", [
+/// A Core scalar or basis, with static, dynamic, ratio, or None payload.
+def Fly_LeafAttr : Fly_Attr<"Leaf", "leaf", [
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
-  let parameters = (ins 
-    "int32_t":$value, // may need update to int64_t in the future
-    "int32_t":$width, 
-    "int32_t":$divisibility,
-    "bool":$staticFlag);
+  let parameters = (ins Fly_CoreParameter<"core::Leaf<core::Trait>">:$ref);
+  let skipDefaultBuilders = 1;
   let hasCustomAssemblyFormat = 1;
-
-  let extraClassDeclaration = [{
-    bool isNone() const;
-    bool isStaticValue(int32_t value) const;
-    static IntAttr getNone(MLIRContext *ctx);
-    static IntAttr getStatic(MLIRContext *ctx, int32_t value);
-    static IntAttr getDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
-  }];
-}
-
-
-def Fly_BasisAttr : Fly_Attr<"Basis", "basis", [
-    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
-]> {
-  let parameters = (ins
-    Fly_IntAttr:$value,
-    ArrayRefParameter<"int32_t">:$modes
-  );
-  let hasCustomAssemblyFormat = 1;
-
   let builders = [
-    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "int32_t":$mode), [{
-      ::llvm::SmallVector<int32_t, 1> modes;
-      modes.push_back(mode);
-      return $_get(value.getContext(), value, modes);
+    AttrBuilder<(ins "core::Leaf<core::Trait>":$ref), [{
+      if (ref.isError())
+        return {};
+      return $_get($_ctxt, std::move(ref));
     }]>,
-    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
-      return $_get(value.getContext(), value, modes);
+    AttrBuilder<(ins "LeafAttr":$scale, "ArrayRef<int32_t>":$modes), [{
+      if (!scale || scale.isBasis() || scale.isNone() || modes.empty())
+        return {};
+      // Preserve Fly's explicit 0E... syntax while Core algebra may fold zero.
+      auto value = scale.getRef();
+      auto leaf = core::Leaf<core::Trait>::getBasis(
+          value.isZero() ? core::Leaf<core::Trait>::getOne() : value, modes);
+      if (value.isZero() && leaf.isBasis())
+        leaf.payload64_ = 0;
+      return get($_ctxt, leaf);
+    }]>,
+    AttrBuilderWithInferredContext<(ins "LeafAttr":$scale, "ArrayRef<int32_t>":$modes), [{
+      return get(scale.getContext(), scale, modes);
     }]>
   ];
-  
+
   let extraClassDeclaration = [{
-    int32_t depth();
-    static BasisAttr getStatic(MLIRContext *ctx, int32_t value, ArrayRef<int32_t> modes);
+    bool isBasis() const { return getRef().isBasis(); }
+    bool isRatio() const;
+    bool isNone() const;
+    bool isStaticValue(int64_t value) const;
+
+    int64_t getValue() const;
+    int32_t getWidth() const;
+    int64_t getDivisibility() const;
+    int32_t getNumerator() const;
+    int32_t getDenominator() const;
+    LeafAttr getScale() const { return get(getContext(), getRef().scale()); }
+    ArrayRef<uint8_t> getModes() const { return getRef().modes(); }
+
+    static LeafAttr getRatio(MLIRContext *ctx, int32_t numerator, int32_t denominator);
+    static LeafAttr getNone(MLIRContext *ctx);
+    static LeafAttr getStatic(MLIRContext *ctx, int64_t value);
+    static LeafAttr getDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
   }];
 }
 
 def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
-  let parameters = (ins "int32_t":$mask, "int32_t":$base, "int32_t":$shift);
-  let assemblyFormat = "`` `S` `` `<` $mask `` `,` `` $base `` `,` `` $shift `` `>`";
+  let parameters = (ins Fly_CoreParameter<"core::Swizzle<core::Trait>">:$ref);
+  let hasCustomAssemblyFormat = 1;
+  let builders = [
+    AttrBuilder<(ins "int32_t":$mask, "int32_t":$base, "int32_t":$shift), [{
+      if (!core::Swizzle<core::Trait>::isValid(mask, base, shift))
+        return {};
+      return $_get($_ctxt, core::Swizzle<core::Trait>(mask, base, shift));
+    }]>
+  ];
 
   let extraClassDeclaration = [{
+    int32_t getMask() const { return getRef().mask(); }
+    int32_t getBase() const { return getRef().base(); }
+    int32_t getShift() const { return getRef().shift(); }
+    
     bool isTrivialSwizzle() const;
     static SwizzleAttr getTrivialSwizzle(MLIRContext *context);
-
-    int32_t period() const { return 1 << (getMask() + getBase() + getShift()); }
   }];
 }
 
 def Fly_CoordSwizzleAttr : Fly_Attr<"CoordSwizzle", "coord_swizzle", []> {
-  let parameters = (ins
-    "int32_t":$mask,
-    "int32_t":$baseRow,
-    ArrayRefParameter<"int32_t">:$modeRow,
-    "int32_t":$baseCol,
-    ArrayRefParameter<"int32_t">:$modeCol
-  );
+  let parameters = (ins Fly_CoreParameter<"core::CoordSwizzle<core::Trait>">:$ref);
+  let builders = [
+    AttrBuilder<(ins "int32_t":$mask, "int32_t":$baseRow,
+                    "ArrayRef<int32_t>":$modeRow, "int32_t":$baseCol,
+                    "ArrayRef<int32_t>":$modeCol)>
+  ];
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
-    bool isTrivialCoordSwizzle() const;
+    int32_t getMask() const { return getRef().mask(); }
+    int32_t getBaseRow() const { return getRef().rowBase(); }
+    int32_t getBaseCol() const { return getRef().colBase(); }
+    ArrayRef<uint8_t> getModeRow() const { return getRef().rowModes(); }
+    ArrayRef<uint8_t> getModeCol() const { return getRef().colModes(); }
   }];
 }
 
@@ -166,37 +188,45 @@ def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
     DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
-  let parameters = (ins
-    "Attribute":$value
-  );
+  let parameters = (ins Fly_CoreParameter<"core::IntTuple<core::Trait>">:$ref);
+  let skipDefaultBuilders = 1;
   let hasCustomAssemblyFormat = 1;
 
   let builders = [
-    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
-      return $_get(value.getContext(), BasisAttr::get(value, modes));
+    AttrBuilder<(ins "core::IntTuple<core::Trait>":$ref), [{
+      if (ref.isError())
+        return {};
+      return $_get($_ctxt, std::move(ref));
     }]>,
+    AttrBuilderWithInferredContext<(ins "LeafAttr":$leaf), [{
+      if (!leaf)
+        return {};
+      return get(leaf.getContext(), core::IntTuple<core::Trait>::fromLeaf(leaf.getRef()));
+    }]>,
+    AttrBuilderWithInferredContext<(ins "LeafAttr":$value, "ArrayRef<int32_t>":$modes), [{
+      return get(LeafAttr::get(value, modes));
+    }]>,
+    // Compatibility with attribute-tree construction: a LeafAttr, or an ArrayAttr
+    // of int tuples and leaves. Null for anything else. New code builds the Core
+    // value instead.
+    AttrBuilder<(ins "Attribute":$value)>,
     AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
-      return $_get(value.getContext(), value);
+      return value ? get(value.getContext(), value) : IntTupleAttr();
     }]>
   ];
 
   let extraClassDeclaration = [{
     static IntTupleAttr getLeafNone(MLIRContext *ctx);
-    static IntTupleAttr getLeafStatic(MLIRContext *ctx, int32_t value);
+    static IntTupleAttr getLeafStatic(MLIRContext *ctx, int64_t value);
     static IntTupleAttr getLeafDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
 
-    bool isLeafNone() const;
     bool isLeafInt() const;
     bool isLeafBasis() const;
-    bool isLeafStaticValue(int32_t value) const;
-    IntAttr getLeafAsInt() const;
-    IntAttr extractIntFromLeaf() const;
-    BasisAttr getLeafAsBasis() const;
+    bool isLeafStaticValue(int64_t value) const;
+    LeafAttr getLeaf() const;
 
     IntTupleAttr at(int32_t idx) const;
     IntTupleAttr at(const ArrayRef<int32_t> idxs) const;
-
-    int32_t dyncLeafCount() const;
   }];
 }
 
@@ -204,19 +234,29 @@ def Fly_LayoutAttr : Fly_Attr<"Layout", "layout", [
     DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
-  let parameters = (ins
-    Fly_IntTupleAttr:$shape,
-    Fly_IntTupleAttr:$stride
-  );
-  let assemblyFormat = "`` $shape `` `:` `` $stride";
-  
+  let parameters = (ins Fly_CoreParameter<"core::Layout<core::Trait>">:$ref);
+  let hasCustomAssemblyFormat = 1;
+  let skipDefaultBuilders = 1;
+
   let builders = [
+    AttrBuilder<(ins "core::Layout<core::Trait>":$ref), [{
+      if (ref.isError())
+        return {};
+      return $_get($_ctxt, std::move(ref));
+    }]>,
+    AttrBuilder<(ins "IntTupleAttr":$shape, "IntTupleAttr":$stride), [{
+      if (!shape || !stride)
+        return {};
+      return get($_ctxt, core::Layout<core::Trait>(shape.getRef(), stride.getRef()));
+    }]>,
     AttrBuilderWithInferredContext<(ins "IntTupleAttr":$shape, "IntTupleAttr":$stride), [{
-      return $_get(shape.getContext(), shape, stride);
+      return get(shape.getContext(), shape, stride);
     }]>
   ];
 
   let extraClassDeclaration = [{
+    IntTupleAttr getShape() const;
+    IntTupleAttr getStride() const;
     bool isStaticShape() const;
     bool isStaticStride() const;
 
@@ -229,51 +269,61 @@ def Fly_ComposedLayoutAttr : Fly_Attr<"ComposedLayout", "composed_layout", [
     DeclareAttrInterfaceMethods<Fly_NestedAttrInterface>,
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
-  let parameters = (ins
-    "Attribute":$inner,
-    Fly_IntTupleAttr:$offset,
-    "Attribute":$outer
-  );
+  let parameters = (ins Fly_CoreParameter<"core::ComposedLayout<core::Trait>">:$ref);
+  let skipDefaultBuilders = 1;
   let hasCustomAssemblyFormat = 1;
     
   let builders = [
+    AttrBuilder<(ins "core::ComposedLayout<core::Trait>":$ref), [{
+      if (ref.isError())
+        return {};
+      return $_get($_ctxt, std::move(ref));
+    }]>,
+    AttrBuilder<(ins "Attribute":$inner, "IntTupleAttr":$offset, "Attribute":$outer)>,
     AttrBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "Attribute":$outer), [{
-      return $_get(inner.getContext(), inner, offset, outer);
+      return get(inner.getContext(), inner, offset, outer);
     }]>
   ];
 
   let extraClassDeclaration = [{
+    Attribute getInner() const;
+    IntTupleAttr getOffset() const;
+    Attribute getOuter() const;
     bool isStaticOuter() const;
     bool isStaticInner() const;
     bool isStaticOffset() const;
 
     ComposedLayoutAttr at(int32_t idx) const;
     ComposedLayoutAttr at(const ArrayRef<int32_t> idxs) const;
+
   }];
 }
 
 def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
-  let parameters = (ins
-    "Attribute":$value
-  );
+  let parameters = (ins Fly_CoreParameter<"core::Tile<core::Trait>">:$ref);
+  let skipDefaultBuilders = 1;
   let hasCustomAssemblyFormat = 1;
   
   let builders = [
+    AttrBuilder<(ins "core::Tile<core::Trait>":$ref), [{
+      if (ref.isError())
+        return {};
+      return $_get($_ctxt, std::move(ref));
+    }]>,
+    // Compatibility with attribute-tree construction: a tile, a layout, a leaf
+    // that is neither a basis nor a ratio, or an ArrayAttr of modes. Null for
+    // anything else. New code builds the Core value instead.
+    AttrBuilder<(ins "Attribute":$value)>,
     AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
-      if (auto nested = ::mlir::dyn_cast<TileAttr>(value))
-        return nested;
-      return $_get(value.getContext(), value);
+      return value ? get(value.getContext(), value) : TileAttr();
     }]>
   ];
 
   let extraClassDeclaration = [{
-    int32_t rank() const;
-
-    bool isLeaf() const;
-    bool isNoneMode() const;
-    bool isNoneMode(int32_t idx) const;
-
-    Attribute at(int32_t idx) const;
+    int32_t rank() const { return getRef().rank(); }
+    bool isLeaf() const { return getRef().isLeaf(); }
+    /// Mode `idx` of a tuple tile.
+    TileAttr at(int32_t idx) const { return get(getContext(), getRef().at(idx)); }
   }];
 }
 

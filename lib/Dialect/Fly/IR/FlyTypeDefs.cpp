@@ -2,13 +2,17 @@
 // Copyright (c) 2025 FlyDSL Project Contributors
 
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
-#include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
 namespace mlir::fly {
+
+LogicalResult BasisType::verify(function_ref<InFlightDiagnostic()> emitError, LeafAttr attr) {
+  if (!attr || !attr.isBasis())
+    return emitError() << "expected a basis leaf";
+  return success();
+}
 
 bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
@@ -16,7 +20,7 @@ bool SwizzleType::isStatic() const { return true; }
 bool CoordSwizzleType::isStatic() const { return true; }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
-bool TileType::isStatic() const { return true; }
+bool TileType::isStatic() const { return getRef().isStatic(); }
 bool CoordTensorType::isStatic() const {
   return getBase().isStatic() && cast<MayStaticAttrInterface>(getLayout()).isStatic();
 }
@@ -27,122 +31,6 @@ bool TiledCopyType::isStatic() const {
 bool TiledMmaType::isStatic() const {
   return cast<MayStaticTypeInterface>(getMmaAtom()).isStatic();
 }
-
-Value BasisType::rebuildStaticValue(OpBuilder &, Location, Value) const { return nullptr; }
-
-Value IntTupleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue && isNormalForm(cast<TypedValue<IntTupleType>>(currentValue)))
-    return nullptr;
-  return MakeIntTupleOp::create(builder, loc, *this, ValueRange{});
-}
-
-Value LayoutType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue && isNormalForm(cast<TypedValue<LayoutType>>(currentValue)))
-    return nullptr;
-  Value shape = IntTupleType::get(getAttr().getShape()).rebuildStaticValue(builder, loc, nullptr);
-  Value stride = IntTupleType::get(getAttr().getStride()).rebuildStaticValue(builder, loc, nullptr);
-  return MakeLayoutOp::create(builder, loc, *this, shape, stride);
-}
-
-Value SwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue)
-    return nullptr;
-  return StaticOp::create(builder, loc, *this);
-}
-
-Value CoordSwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                           Value currentValue) const {
-  if (currentValue)
-    return nullptr;
-  return StaticOp::create(builder, loc, *this);
-}
-
-Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                             Value currentValue) const {
-  if (currentValue && isNormalForm(cast<TypedValue<ComposedLayoutType>>(currentValue)))
-    return nullptr;
-  ComposedLayoutAttr attr = getAttr();
-  Attribute innerAttr = attr.getInner();
-  Value inner;
-  if (auto layoutAttr = dyn_cast<LayoutAttr>(innerAttr))
-    inner = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
-  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(innerAttr))
-    inner = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
-  else if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr))
-    inner = SwizzleType::get(swizzleAttr).rebuildStaticValue(builder, loc, nullptr);
-  else if (auto coordSwizzleAttr = dyn_cast<CoordSwizzleAttr>(innerAttr))
-    inner = CoordSwizzleType::get(coordSwizzleAttr).rebuildStaticValue(builder, loc, nullptr);
-  if (!inner)
-    return nullptr;
-  Value offset = IntTupleType::get(attr.getOffset()).rebuildStaticValue(builder, loc, nullptr);
-  if (!offset)
-    return nullptr;
-  Value outer;
-  if (auto layoutAttr = dyn_cast<LayoutAttr>(attr.getOuter()))
-    outer = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
-  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(attr.getOuter()))
-    outer = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
-  if (!outer)
-    return nullptr;
-  return MakeComposedLayoutOp::create(builder, loc, *this, inner, offset, outer);
-}
-
-Value TileType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue)
-    return nullptr;
-  return StaticOp::create(builder, loc, *this);
-}
-
-Value CoordTensorType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                          Value currentValue) const {
-  if (currentValue && isWeaklyNormalForm(cast<TypedValue<CoordTensorType>>(currentValue)))
-    return nullptr;
-  Value base =
-      IntTupleType::get(cast<IntTupleAttr>(getBase())).rebuildStaticValue(builder, loc, nullptr);
-  Value layout;
-  if (auto layoutAttr = dyn_cast<LayoutAttr>(getLayout()))
-    layout = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
-  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(getLayout()))
-    layout = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
-  else
-    return nullptr;
-  return MakeViewOp::create(builder, loc, base, layout);
-}
-
-Value TiledCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                        Value currentValue) const {
-  if (currentValue && isa<MakeTiledCopyOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  Value copyAtom =
-      cast<MayStaticTypeInterface>(getCopyAtom()).rebuildStaticValue(builder, loc, nullptr);
-  if (!copyAtom)
-    return nullptr;
-  Value layoutThrVal = getLayoutThrVal().rebuildStaticValue(builder, loc, nullptr);
-  Value tileMN = TileType::get(getTileMN().getAttr()).rebuildStaticValue(builder, loc, nullptr);
-  if (!tileMN)
-    return nullptr;
-  return MakeTiledCopyOp::create(builder, loc, *this, copyAtom, layoutThrVal, tileMN);
-}
-
-Value TiledMmaType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue && isa<MakeTiledMmaOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  Value mmaAtom =
-      cast<MayStaticTypeInterface>(getMmaAtom()).rebuildStaticValue(builder, loc, nullptr);
-  if (!mmaAtom)
-    return nullptr;
-  Value atomLayout = getAtomLayout().rebuildStaticValue(builder, loc, nullptr);
-  Value permutation = getPermutation().rebuildStaticValue(builder, loc, nullptr);
-  return MakeTiledMmaOp::create(builder, loc, *this, mmaAtom, atomLayout, permutation);
-}
-
-Value CopyAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, *this, getValBits());
-}
-
-int32_t BasisType::depth() { return getAttr().depth(); }
 
 bool IntTupleType::isLeaf() const { return getAttr().isLeaf(); }
 int32_t IntTupleType::rank() const { return getAttr().rank(); }
@@ -208,20 +96,6 @@ ComposedLayoutType ComposedLayoutType::at(int32_t idx) const {
 }
 ComposedLayoutType ComposedLayoutType::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutType::get(getContext(), getAttr().at(idxs));
-}
-
-int32_t PointerType::getValueDivisibility() const {
-  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
-  int32_t alignmentBytes = getAlignment().getAlignment();
-  assert(alignmentBytes * 8 % bitWidth == 0);
-  return alignmentBytes * 8 / bitWidth;
-}
-
-int32_t MemRefType::getValueDivisibility() const {
-  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
-  int32_t alignmentBytes = getAlignment().getAlignment();
-  assert(alignmentBytes * 8 % bitWidth == 0);
-  return alignmentBytes * 8 / bitWidth;
 }
 
 MemRefType MemRefType::at(int32_t idx) const {
@@ -416,9 +290,8 @@ void MemRefType::print(AsmPrinter &printer) const {
 }
 
 TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
-  Attribute noneVal = IntAttr::getNone(ctx);
-  SmallVector<Attribute> elems(3, noneVal);
-  return TileType::get(ctx, TileAttr::get(ArrayAttr::get(ctx, elems)));
+  auto none = core::Tile<core::Trait>::getNone();
+  return TileType::get(ctx, core::Tile<core::Trait>::getTuple({none, none, none}));
 }
 
 bool CopyAtomType::isStatic() const {
@@ -435,18 +308,24 @@ Attribute CopyAtomType::getThrLayout() {
 
 Attribute CopyAtomType::getThrValLayoutSrc() {
   auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
-  LayoutBuilder<LayoutAttr> builder(getContext());
-  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutSrc()), 1, getValBits());
+  auto layout = cast<LayoutAttr>(copyOp.getThrBitLayoutSrc());
+  return getValBits() <= 0
+             ? layout
+             : LayoutAttr::get(getContext(), core::recast_layout(getValBits(), 1, layout.getRef()));
 }
 Attribute CopyAtomType::getThrValLayoutDst() {
   auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
-  LayoutBuilder<LayoutAttr> builder(getContext());
-  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutDst()), 1, getValBits());
+  auto layout = cast<LayoutAttr>(copyOp.getThrBitLayoutDst());
+  return getValBits() <= 0
+             ? layout
+             : LayoutAttr::get(getContext(), core::recast_layout(getValBits(), 1, layout.getRef()));
 }
 Attribute CopyAtomType::getThrValLayoutRef() {
   auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
-  LayoutBuilder<LayoutAttr> builder(getContext());
-  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
+  auto layout = cast<LayoutAttr>(copyOp.getThrBitLayoutRef());
+  return getValBits() <= 0
+             ? layout
+             : LayoutAttr::get(getContext(), core::recast_layout(getValBits(), 1, layout.getRef()));
 }
 
 LogicalResult CopyAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type copyAtomTy,
@@ -502,12 +381,6 @@ bool MmaAtomType::isStatic() const {
   return mayStatic.isStatic();
 }
 
-Value MmaAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
-  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, Type(*this));
-}
-
 Attribute MmaAtomType::getThrLayout() const {
   return cast<MmaOpTypeInterface>(getMmaOp()).getThrLayout();
 }
@@ -556,6 +429,178 @@ Value MmaAtomType::setAtomState(OpBuilder &builder, Location loc, Value atomStru
   assert(this->isStateful() && "MmaAtom is not stateful");
   return cast<StatefulOpTypeInterface>(getMmaOp())
       .setAtomState(builder, loc, atomStruct, fieldAttr, fieldValue);
+}
+
+//===----------------------------------------------------------------------===//
+// Core descriptions
+//===----------------------------------------------------------------------===//
+
+static FailureOr<core::AnyLayout<core::Trait>> getLayoutRef(Type type) {
+  Attribute attr = llvm::TypeSwitch<Type, Attribute>(type)
+                       .Case<LayoutType, ComposedLayoutType>([](auto t) { return t.getAttr(); })
+                       .Case<MemRefType, CoordTensorType>([](auto t) { return t.getLayout(); })
+                       .Default([](Type) { return Attribute(); });
+  if (auto layout = dyn_cast_or_null<LayoutAttr>(attr))
+    return core::AnyLayout<core::Trait>(layout.getRef());
+  if (auto layout = dyn_cast_or_null<ComposedLayoutAttr>(attr))
+    return core::AnyLayout<core::Trait>(layout.getRef());
+  return failure();
+}
+
+/// i1 is stored in a whole byte; every other element is stored at its width.
+static int32_t storageBitWidth(Type elem) {
+  return elem.isInteger(1) ? 8 : elem.getIntOrFloatBitWidth();
+}
+
+static LogicalResult verifyElement(function_ref<InFlightDiagnostic()> emitError, Type elemTy,
+                                   Attribute addressSpace, AlignAttr alignment) {
+  if (!isa<IntegerType, FloatType>(elemTy))
+    return emitError() << "expected an integer or float element, got " << elemTy;
+  if (!addressSpace)
+    return emitError() << "expected an address space";
+  if (!alignment || alignment.getAlignment() <= 0 || alignment.getBitAlignment() <= 0)
+    return emitError() << "expected a positive alignment";
+  return success();
+}
+
+static LogicalResult verifyLayout(function_ref<InFlightDiagnostic()> emitError, Attribute layout) {
+  if (!isa<LayoutAttr, ComposedLayoutAttr>(layout))
+    return emitError() << "expected a layout or composed layout, got " << layout;
+  return success();
+}
+
+LogicalResult PointerType::verify(function_ref<InFlightDiagnostic()> emitError, Type elemTy,
+                                  Attribute addressSpace, AlignAttr alignment, SwizzleAttr) {
+  return verifyElement(emitError, elemTy, addressSpace, alignment);
+}
+
+LogicalResult MemRefType::verify(function_ref<InFlightDiagnostic()> emitError, Type elemTy,
+                                 Attribute addressSpace, Attribute layout, AlignAttr alignment,
+                                 SwizzleAttr) {
+  if (failed(verifyElement(emitError, elemTy, addressSpace, alignment)))
+    return failure();
+  return verifyLayout(emitError, layout);
+}
+
+LogicalResult CoordTensorType::verify(function_ref<InFlightDiagnostic()> emitError, IntTupleAttr,
+                                      Attribute layout) {
+  return verifyLayout(emitError, layout);
+}
+
+LogicalResult FastDivModType::verify(function_ref<InFlightDiagnostic()> emitError,
+                                     IntegerType divisorType) {
+  if (!divisorType.isSignless() || (divisorType.getWidth() != 32 && divisorType.getWidth() != 64))
+    return emitError() << "expected an i32 or i64 divisor, got " << divisorType;
+  return success();
+}
+
+core::Pointer<core::Trait> PointerType::getRef() const {
+  Type elem = getElemTy();
+  AlignAttr alignment = getAlignment();
+  return core::Pointer<core::Trait>(
+      core::OpaqueValue::get(elem), elem.getIntOrFloatBitWidth(), alignment.getAlignment(),
+      alignment.getBitAlignment(), getSwizzle().getRef(), core::OpaqueValue::get(getAddressSpace()),
+      storageBitWidth(elem));
+}
+
+namespace {
+
+/// Fly wraps MLIR handles as their base class: OpaqueValue keeps the exact C++
+/// type, so an element type is recovered from a Type, or from a TypeAttr held
+/// as an Attribute.
+Type getOpaqueElementType(const core::OpaqueValue &value) {
+  if (value.is<Type>())
+    return value.get<Type>();
+  if (value.is<Attribute>())
+    if (auto attr = dyn_cast_or_null<TypeAttr>(value.get<Attribute>()))
+      return attr.getValue();
+  return {};
+}
+
+/// An address space is a Fly AddressSpace or an attribute handle, which keeps
+/// target-specific spaces opaque to Fly.
+Attribute getOpaqueAddressSpace(MLIRContext *ctx, const core::OpaqueValue &value) {
+  if (value.is<AddressSpace>()) {
+    auto space = value.get<AddressSpace>();
+    if (!symbolizeAddressSpace(static_cast<uint32_t>(space)))
+      return {};
+    return AddressSpaceAttr::get(ctx, space);
+  }
+  return value.is<Attribute>() ? value.get<Attribute>() : Attribute();
+}
+
+} // namespace
+
+std::optional<PointerType::CoreParameters>
+PointerType::getCoreParameters(MLIRContext *ctx, const core::Pointer<core::Trait> &value) {
+  Type elem = getOpaqueElementType(value.elementType());
+  if (!elem || !isa<IntegerType, FloatType>(elem) ||
+      static_cast<int32_t>(elem.getIntOrFloatBitWidth()) != value.elementBitWidth() ||
+      value.storageElementBitWidth() != storageBitWidth(elem))
+    return std::nullopt;
+  ctx = elem.getContext();
+  Attribute addressSpace = getOpaqueAddressSpace(ctx, value.addressSpace());
+  if (!addressSpace || addressSpace.getContext() != ctx)
+    return std::nullopt;
+  auto alignment = AlignAttr::get(ctx, value.byteAlignment());
+  if (!alignment)
+    return std::nullopt;
+  return CoreParameters{elem, addressSpace, alignment, SwizzleAttr::get(ctx, value.swizzle())};
+}
+
+core::MemRef<core::Trait> MemRefType::getRef() const {
+  return core::MemRef<core::Trait>(getPointerType().getRef(), *getLayoutRef(*this));
+}
+
+core::CoordTensor<core::Trait> CoordTensorType::getRef() const {
+  return core::CoordTensor<core::Trait>(getBase().getRef(), *getLayoutRef(*this));
+}
+
+core::CopyAtom<core::Trait> CopyAtomType::getRef() const {
+  auto operation = cast<CopyOpTypeInterface>(getCopyOp());
+  return core::CopyAtom<core::Trait>(core::OpaqueValue::get(getCopyOp()),
+                                     core::OpaqueValue::get(Type(*this)), getValBits(),
+                                     cast<LayoutAttr>(operation.getThrLayout()).getRef(),
+                                     cast<LayoutAttr>(operation.getThrBitLayoutSrc()).getRef(),
+                                     cast<LayoutAttr>(operation.getThrBitLayoutDst()).getRef(),
+                                     cast<LayoutAttr>(operation.getThrBitLayoutRef()).getRef());
+}
+
+core::MMAAtom<core::Trait> MmaAtomType::getRef() const {
+  return core::MMAAtom<core::Trait>(
+      core::OpaqueValue::get(getMmaOp()), cast<LayoutAttr>(getThrLayout()).getRef(),
+      cast<IntTupleAttr>(getShapeMNK()).getRef(),
+      core::MMAValueTypeIdentities{
+          core::OpaqueValue::get(getValTypeA()), core::OpaqueValue::get(getValTypeB()),
+          core::OpaqueValue::get(getValTypeC()), core::OpaqueValue::get(getValTypeD())},
+      cast<LayoutAttr>(getThrValLayoutA()).getRef(), cast<LayoutAttr>(getThrValLayoutB()).getRef(),
+      cast<LayoutAttr>(getThrValLayoutC()).getRef());
+}
+
+bool TiledCopyType::isValidRef() const {
+  auto atomTy = dyn_cast<CopyAtomType>(getCopyAtom());
+  auto operation = atomTy ? dyn_cast<CopyOpTypeInterface>(atomTy.getCopyOp()) : nullptr;
+  if (!operation)
+    return false;
+  auto thr = dyn_cast_or_null<LayoutAttr>(operation.getThrLayout());
+  auto src = dyn_cast_or_null<LayoutAttr>(operation.getThrBitLayoutSrc());
+  auto dst = dyn_cast_or_null<LayoutAttr>(operation.getThrBitLayoutDst());
+  auto ref = dyn_cast_or_null<LayoutAttr>(operation.getThrBitLayoutRef());
+  if (!thr || !src || !dst || !ref ||
+      !core::CopyAtom<core::Trait>::isValid(atomTy.getValBits(), thr.getRef(), src.getRef(),
+                                            dst.getRef(), ref.getRef()))
+    return false;
+  return core::TiledCopy<core::Trait>::isValid(atomTy.getRef(), getLayoutThrVal().getRef());
+}
+
+core::TiledCopy<core::Trait> TiledCopyType::getRef() const {
+  return core::TiledCopy<core::Trait>(cast<CopyAtomType>(getCopyAtom()).getRef(),
+                                      getLayoutThrVal().getRef(), getTileMN().getRef());
+}
+
+core::TiledMMA<core::Trait> TiledMmaType::getRef() const {
+  return core::TiledMMA<core::Trait>(cast<MmaAtomType>(getMmaAtom()).getRef(),
+                                     getAtomLayout().getRef(), getPermutation().getRef());
 }
 
 } // namespace mlir::fly

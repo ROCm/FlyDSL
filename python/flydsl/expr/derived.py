@@ -145,8 +145,8 @@ def make_tiled_copy_A(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_A_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [0]), 1),
-        make_layout(select(tile_size, [2]), 1),
+        make_layout(tile_size[0], 1),
+        make_layout(tile_size[2], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -157,8 +157,8 @@ def make_tiled_copy_B(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_B_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [1]), 1),
-        make_layout(select(tile_size, [2]), 1),
+        make_layout(tile_size[1], 1),
+        make_layout(tile_size[2], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -169,8 +169,8 @@ def make_tiled_copy_C(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_C_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [0]), 1),
-        make_layout(select(tile_size, [1]), 1),
+        make_layout(tile_size[0], 1),
+        make_layout(tile_size[1], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 

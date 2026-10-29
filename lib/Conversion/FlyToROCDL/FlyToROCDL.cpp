@@ -24,8 +24,7 @@
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
-#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/CoreBridge.h"
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
@@ -59,7 +58,7 @@ unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
   if (auto e = dyn_cast<AddressSpaceAttr>(attr))
     return mapToLLVMAddressSpace(e.getValue());
   if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
-    return 8;
+    return BufferFatPtr::getRsrcPtrType(attr.getContext()).getAddressSpace();
   return 0; // default to generic address space
 }
 
@@ -79,6 +78,272 @@ static unsigned getLLVMAlignment(fly::PointerType ptrTy) {
     align = std::gcd(align, int32_t{1} << swizzle.getBase());
   return 1u << llvm::countr_zero(static_cast<unsigned>(align));
 }
+
+//===----------------------------------------------------------------------===//
+// Lowered Fly values
+//
+// A Fly algebra value lowers to core::get_llvm_type of its Core description,
+// exactly as at function boundaries: the packed struct of its dynamic scalars,
+// nested per structural component, or no value at all when it is fully static.
+// A memref lowers to its pointer followed by its layout. Depth-first, the
+// scalars appear in Core's binding order.
+//===----------------------------------------------------------------------===//
+
+/// `fn` applied to `type` cast to its Fly algebra type, a type that lowers to the
+/// packed struct of its Core description; `otherwise` for any other type.
+template <class Result, class Fn> Result visitAlgebraType(Type type, Result otherwise, Fn &&fn) {
+  return llvm::TypeSwitch<Type, Result>(type)
+      .template Case<IntTupleType, LayoutType, ComposedLayoutType, CoordTensorType, TileType,
+                     SwizzleType, CoordSwizzleType>([&](auto value) -> Result { return fn(value); })
+      .Default([&](Type) -> Result { return otherwise; });
+}
+
+/// The lowered struct of a Fly algebra type; null when the value is fully
+/// static, std::nullopt for other types.
+std::optional<LLVM::LLVMStructType> getLoweredType(Type type) {
+  return visitAlgebraType<std::optional<LLVM::LLVMStructType>>(type, std::nullopt, [&](auto value) {
+    return core::get_llvm_type(value.getRef(), *type.getContext());
+  });
+}
+
+/// The value a single-carrier operand lowered to, or null for a static value.
+Value loweredValue(ValueRange lowered) { return lowered.empty() ? Value() : lowered.front(); }
+
+LLVM::LLVMStructType emptyStruct(MLIRContext *ctx) {
+  return LLVM::LLVMStructType::getLiteral(ctx, {});
+}
+
+/// The atom of a tiled copy or MMA; any other type as is.
+Type getAtomType(Type type) {
+  if (auto tiledCopy = dyn_cast<TiledCopyType>(type))
+    return tiledCopy.getCopyAtom();
+  if (auto tiledMma = dyn_cast<TiledMmaType>(type))
+    return tiledMma.getMmaAtom();
+  return type;
+}
+
+/// The op type of a copy or MMA atom; null for any other type.
+Type getAtomOpType(Type atomTy) {
+  if (auto copyAtom = dyn_cast<CopyAtomType>(atomTy))
+    return copyAtom.getCopyOp();
+  if (auto mmaAtom = dyn_cast<MmaAtomType>(atomTy))
+    return mmaAtom.getMmaOp();
+  return {};
+}
+
+/// The atom value an emitter receives: a static atom carries no state.
+Value loweredAtom(OpBuilder &builder, Location loc, ValueRange lowered) {
+  if (!lowered.empty())
+    return lowered.front();
+  return LLVM::UndefOp::create(builder, loc, emptyStruct(builder.getContext()));
+}
+
+SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
+  SmallVector<Value> result;
+  for (ValueRange value : values)
+    llvm::append_range(result, value);
+  return result;
+}
+
+/// The dynamic scalars of a lowered value of Fly type `type`, in Core's binding order.
+FailureOr<SmallVector<Value, 8>> dynamicScalars(OpBuilder &builder, Location loc, Type type,
+                                                ValueRange lowered) {
+  core::EmitContext ctx(builder, loc);
+  // A memref's pointer carrier precedes its layout.
+  if (auto memref = dyn_cast<fly::MemRefType>(type))
+    return core::collect_llvm_scalars(memref.getRef().layout(), loweredValue(lowered.drop_front()),
+                                      ctx);
+  return visitAlgebraType<FailureOr<SmallVector<Value, 8>>>(type, failure(), [&](auto value) {
+    return core::collect_llvm_scalars(value.getRef(), loweredValue(lowered), ctx);
+  });
+}
+
+/// A lowered int tuple bound to its Core profile. A static leaf needs no carrier
+/// and materializes as a constant.
+FailureOr<core::IntTuple<core::EmitOp>> bindLoweredTuple(IntTupleType type, ValueRange lowered,
+                                                         core::EmitContext &ctx) {
+  return core::bind_llvm_value(type.getRef(), loweredValue(lowered), ctx);
+}
+
+/// A struct of type `type` holding `fields`.
+FailureOr<Value> packFields(OpBuilder &builder, Location loc, LLVM::LLVMStructType type,
+                            ValueRange fields) {
+  if (TypeRange(fields) != type.getBody())
+    return failure();
+  Value result = LLVM::UndefOp::create(builder, loc, type);
+  for (auto [i, field] : llvm::enumerate(fields))
+    result = LLVM::InsertValueOp::create(builder, loc, result, field,
+                                         ArrayRef<int64_t>{static_cast<int64_t>(i)});
+  return result;
+}
+
+/// Core's lowered values, with the magic numbers computed the cheap way for
+/// where they run: a host function keeps Core's integer division, while a
+/// kernel computes an i32 multiplier in FP64, which CDNA runs at full rate.
+class CDNA_EmitHooks : public core::EmitHooks {
+public:
+  Value makeFastDivMod(core::EmitContext &ctx, Value divisor) const override {
+    Block *block = ctx.builder.getInsertionBlock();
+    Operation *parent = block ? block->getParentOp() : nullptr;
+    bool onDevice =
+        parent && (isa<gpu::GPUModuleOp>(parent) || parent->getParentOfType<gpu::GPUModuleOp>());
+    if (onDevice && divisor.getType().isInteger(32))
+      return core::emit_op::makeFastDivModF64(ctx, divisor);
+    return core::EmitHooks::makeFastDivMod(ctx, divisor);
+  }
+};
+
+/// Constructors lower to the lowered values of their operands, in the
+/// component order of the result.
+class ConstructorLowering : public ConversionPattern {
+public:
+  ConstructorLowering(StringRef name, const TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, name, 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<ValueRange> operands,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type resultType = op->getResult(0).getType();
+    SmallVector<Type> types;
+    if (failed(getTypeConverter()->convertType(resultType, types)))
+      return failure();
+    SmallVector<Value> fields;
+    if (isa<MakeComposedLayoutOp>(op)) {
+      for (int i : {2, 1, 0})
+        llvm::append_range(fields, operands[i]);
+    } else {
+      for (ValueRange operand : operands)
+        llvm::append_range(fields, operand);
+    }
+    // A memref keeps its carriers separate; other values pack theirs.
+    if (isa<fly::MemRefType>(resultType) || types.empty()) {
+      if (TypeRange(fields) != TypeRange(types))
+        return rewriter.notifyMatchFailure(op, "unexpected lowered operand types");
+      rewriter.replaceOpWithMultiple(op, {fields});
+      return success();
+    }
+    auto structType = dyn_cast<LLVM::LLVMStructType>(types.front());
+    if (types.size() != 1 || !structType)
+      return failure();
+    // A tile's operands are its dynamic scalars, which Core nests per layout;
+    // the other constructors' operands are already the struct's fields.
+    core::EmitContext ctx(rewriter, op->getLoc());
+    FailureOr<Value> packed = failure();
+    if (isa<MakeTileOp>(op)) {
+      core::EmitBindings bindings;
+      llvm::append_range(bindings.scalars, fields);
+      if (auto tile = core::bind(cast<TileType>(resultType).getRef(), bindings, ctx);
+          succeeded(tile))
+        packed = core::build_llvm_value(*tile, ctx);
+    } else if (TypeRange(fields) == structType.getBody()) {
+      packed = core::emit_op::buildLLVMStruct(ctx, fields);
+    }
+    if (failed(packed) || !*packed || (*packed).getType() != structType)
+      return rewriter.notifyMatchFailure(op, "unexpected lowered operand types");
+    rewriter.replaceOp(op, *packed);
+    return success();
+  }
+};
+
+/// Extractors select from the lowered value of their operand.
+class ExtractorLowering : public ConversionPattern {
+public:
+  ExtractorLowering(StringRef name, const TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, name, 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<ValueRange> operands,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    Type sourceType = op->getOperand(0).getType();
+    ValueRange source = operands[0];
+    if (isa<GetLeavesOp>(op)) {
+      auto results = dynamicScalars(rewriter, loc, sourceType, source);
+      SmallVector<Type> resultTypes;
+      if (failed(results) ||
+          failed(getTypeConverter()->convertTypes(op->getResultTypes(), resultTypes)) ||
+          TypeRange(*results) != TypeRange(resultTypes))
+        return failure();
+      rewriter.replaceOp(op, *results);
+      return success();
+    }
+    if (isa<GetScalarOp>(op)) {
+      // A static scalar has no lowered value; it materializes as a constant.
+      core::EmitContext ctx(rewriter, loc);
+      auto tuple = bindLoweredTuple(cast<IntTupleType>(sourceType), source, ctx);
+      if (failed(tuple))
+        return failure();
+      auto ref = tuple->asRef();
+      while (!ref.isLeaf() && ref.rank() == 1)
+        ref = ref.at(0);
+      if (!ref.isLeaf() || ref.getLeaf().scale().isRatio())
+        return failure();
+      auto scalar = ref.getLeaf().scale().materialize(ctx);
+      if (failed(scalar) ||
+          (*scalar).getType() != getTypeConverter()->convertType(op->getResult(0).getType()))
+        return failure();
+      rewriter.replaceOp(op, *scalar);
+      return success();
+    }
+    // get_iter selects a memref's pointer carrier; fly-layout-lowering expanded
+    // a coordinate tensor's.
+    if (!isa<fly::MemRefType>(sourceType))
+      return failure();
+    rewriter.replaceOpWithMultiple(op, {source.take_front()});
+    return success();
+  }
+};
+
+/// Ops that lower to the lowered value of their first operand: a swizzle or a
+/// recast lives on in the pointer type, and a tiled copy or MMA is its atom.
+class ForwardOperandLowering : public ConversionPattern {
+public:
+  ForwardOperandLowering(StringRef name, const TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, name, 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<ValueRange> operands,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithMultiple(op, {operands.front()});
+    return success();
+  }
+};
+
+/// A fast-divmod handle lowers to Core's lowered handle, and the fast division
+/// ops to Core's default emission. make_fast_divmod is where the magic numbers
+/// are computed: on the host for a host function, on the GPU for a kernel.
+class MakeFastDivModOpLowering : public OpConversionPattern<MakeFastDivModOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(MakeFastDivModOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    static const CDNA_EmitHooks hooks;
+    core::EmitContext ctx(rewriter, op.getLoc(), &hooks);
+    rewriter.replaceOp(op, ctx.getHooks().makeFastDivMod(ctx, adaptor.getDivisor()));
+    return success();
+  }
+};
+
+class FastDivModOpLowering : public OpConversionPattern<FastDivModOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(FastDivModOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    core::EmitContext ctx(rewriter, op.getLoc());
+    auto [quotient, remainder] =
+        ctx.getHooks().fastDivMod(ctx, adaptor.getDividend(), adaptor.getDivisor());
+    rewriter.replaceOp(op, ValueRange{quotient, remainder});
+    return success();
+  }
+};
+
+class FastDivModGetDivisorOpLowering : public OpConversionPattern<FastDivModGetDivisorOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(FastDivModGetDivisorOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    core::EmitContext ctx(rewriter, op.getLoc());
+    rewriter.replaceOp(op, ctx.getHooks().getFastDivModDivisor(ctx, adaptor.getDivisor()));
+    return success();
+  }
+};
 
 // Create a freshly named LDS global of `[nbytes x i8]` in `addrSpace`, inserted
 // at the start of `moduleOp`. The symbol name is `prefix` followed by a counter
@@ -155,7 +420,7 @@ public:
 
       LLVM::GlobalOp global =
           createLDSGlobal(rewriter, moduleOp, loc, "__shared_alloc", allocBytesAttr.getInt(),
-                          allocAlignAttr.getInt(), /*addrSpace=*/3);
+                          allocAlignAttr.getInt(), mapToLLVMAddressSpace(AddressSpace::Shared));
       rewriter.replaceOpWithNewOp<LLVM::AddressOfOp>(op, global);
       return success();
     } else if (isTargetAddressSpace<BufferDescAddressAttr>(addrSpaceAttr)) {
@@ -288,13 +553,36 @@ public:
   }
 };
 
-class ApplySwizzleOpLowering : public OpConversionPattern<ApplySwizzleOp> {
+/// A recast keeps the address. A buffer pointer carries an element offset, so a
+/// recast to another storage width rescales it; other pointers pass through.
+class RecastIterOpLowering : public OpConversionPattern<RecastIterOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(ApplySwizzleOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(RecastIterOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getPtr());
+    auto srcTy = cast<fly::PointerType>(op.getSrc().getType());
+    auto dstTy = cast<fly::PointerType>(op.getResult().getType());
+    int64_t srcBits = srcTy.getRef().storageElementBitWidth();
+    int64_t dstBits = dstTy.getRef().storageElementBitWidth();
+    if (!isTargetAddressSpace<BufferDescAddressAttr>(srcTy.getAddressSpace()) ||
+        srcBits == dstBits) {
+      rewriter.replaceOp(op, adaptor.getSrc());
+      return success();
+    }
+    auto loc = op.getLoc();
+    BufferFatPtr bp(srcTy, adaptor.getSrc());
+    Value offset = bp.valOffset(rewriter, loc);
+    auto constant = [&](int64_t value) {
+      return arith::ConstantIntOp::create(rewriter, loc, value, 32);
+    };
+    if (srcBits % dstBits == 0) {
+      offset = arith::MulIOp::create(rewriter, loc, offset, constant(srcBits / dstBits));
+    } else {
+      offset = arith::MulIOp::create(rewriter, loc, offset, constant(srcBits));
+      offset = arith::DivUIOp::create(rewriter, loc, offset, constant(dstBits));
+    }
+    rewriter.replaceOp(op, BufferFatPtr::pack(rewriter, loc, bp.bufferRsrc(rewriter, loc), offset));
     return success();
   }
 };
@@ -317,44 +605,38 @@ public:
   }
 };
 
-class RecastIterOpLowering : public OpConversionPattern<RecastIterOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(RecastIterOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getSrc());
-    return success();
-  }
-};
-
 class AddOffsetOpLowering : public OpConversionPattern<AddOffsetOp> {
 public:
   AddOffsetOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
       : OpConversionPattern<AddOffsetOp>(typeConverter, context) {}
 
-  LogicalResult matchAndRewrite(AddOffsetOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(AddOffsetOp op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    Value base = adaptor.getPtr();
-    Value offset = adaptor.getOffset();
+    Value base = loweredValue(adaptor.getPtr());
 
     auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
     if (!flyPtrTy)
       return failure();
 
-    auto offsetTy = dyn_cast<fly::IntTupleType>(offset.getType());
+    auto offsetTy = dyn_cast<fly::IntTupleType>(op.getOffset().getType());
     IntTupleAttr offsetAttr = offsetTy.getAttr();
     if (!offsetAttr.isLeaf())
       return rewriter.notifyMatchFailure(op, "offset must be a leaf int tuple");
 
+    core::EmitContext ctx(rewriter, loc);
+    auto offset = bindLoweredTuple(offsetTy, adaptor.getOffset(), ctx);
+    if (failed(offset))
+      return failure();
+    auto offsetInt = offset->asRef().getLeaf().scale();
     Value offsetVal;
-    auto offsetInt = offsetAttr.extractIntFromLeaf();
-    if (offsetInt.isStatic()) {
-      offsetVal = arith::ConstantIntOp::create(rewriter, loc, offsetInt.getValue(), 32);
+    if (offsetInt.isStatic() && llvm::isInt<32>(offsetInt.staticValue())) {
+      offsetVal = arith::ConstantIntOp::create(rewriter, loc, offsetInt.staticValue(), 32);
     } else {
-      Operation *defOp = offset.getDefiningOp();
-      offsetVal = defOp->getOperand(0);
+      auto offsetScalar = offsetInt.materialize(ctx);
+      if (failed(offsetScalar))
+        return failure();
+      offsetVal = *offsetScalar;
     }
 
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
@@ -374,19 +656,53 @@ public:
   }
 };
 
-class MakeViewOpLowering : public OpConversionPattern<MakeViewOp> {
-public:
-  MakeViewOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
-      : OpConversionPattern<MakeViewOp>(typeConverter, context) {}
+/// Whether a vector access of `accessTy` through `ptrTy` stays within one
+/// swizzle granule, which the swizzle moves as a whole.
+bool fitsSwizzleGranule(fly::PointerType ptrTy, Type accessTy) {
+  auto vecTy = dyn_cast<VectorType>(accessTy);
+  auto swizzle = ptrTy.getSwizzle();
+  if (!vecTy || swizzle.isTrivialSwizzle())
+    return true;
+  int64_t vecBytes = vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth() / 8;
+  int64_t baseBytes = int64_t{1} << swizzle.getBase();
+  return baseBytes % vecBytes == 0;
+}
 
-  LogicalResult matchAndRewrite(MakeViewOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    // A view's runtime value is its iterator: a pointer for a memref, a coordinate
-    // for a coordinate tensor.
-    rewriter.replaceOp(op, adaptor.getIter());
-    return success();
+/// Loads `type` through the lowered Fly pointer `ptr`: a raw buffer load through a
+/// buffer descriptor, an aligned load through the swizzled LLVM pointer otherwise.
+Value loadThroughPointer(OpBuilder &builder, Location loc, fly::PointerType ptrTy, Value ptr,
+                         Type type) {
+  if (isTargetAddressSpace<BufferDescAddressAttr>(ptrTy.getAddressSpace())) {
+    BufferFatPtr bp(ptrTy, ptr);
+    Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+    auto auxAttr = builder.getI32IntegerAttr(0);
+    ArrayAttr noAttrs;
+    return ROCDL::RawPtrBufferLoadOp::create(builder, loc, type, bp.bufferRsrc(builder, loc),
+                                             bp.swizzleByteOffset(builder, loc), zero, auxAttr,
+                                             noAttrs, noAttrs, noAttrs);
   }
-};
+  ptr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
+                          ptrTy.getSwizzle());
+  return LLVM::LoadOp::create(builder, loc, type, ptr, getLLVMAlignment(ptrTy));
+}
+
+/// Stores `value` through the lowered Fly pointer `ptr`, as `loadThroughPointer` loads.
+void storeThroughPointer(OpBuilder &builder, Location loc, fly::PointerType ptrTy, Value ptr,
+                         Value value) {
+  if (isTargetAddressSpace<BufferDescAddressAttr>(ptrTy.getAddressSpace())) {
+    BufferFatPtr bp(ptrTy, ptr);
+    Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+    auto auxAttr = builder.getI32IntegerAttr(0);
+    ArrayAttr noAttrs;
+    ROCDL::RawPtrBufferStoreOp::create(builder, loc, value, bp.bufferRsrc(builder, loc),
+                                       bp.swizzleByteOffset(builder, loc), zero, auxAttr, noAttrs,
+                                       noAttrs, noAttrs);
+    return;
+  }
+  ptr = applySwizzleOnPtr(builder, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
+                          ptrTy.getSwizzle());
+  LLVM::StoreOp::create(builder, loc, value, ptr, getLLVMAlignment(ptrTy));
+}
 
 class PtrLoadOpLowering : public OpConversionPattern<PtrLoadOp> {
 public:
@@ -394,47 +710,18 @@ public:
 
   LogicalResult matchAndRewrite(PtrLoadOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    Value ptr = adaptor.getPtr();
-
     auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
     if (!flyPtrTy)
       return failure();
-
     Type loadTy = getTypeConverter()->convertType(op.getResult().getType());
     if (!loadTy)
       return rewriter.notifyMatchFailure(op, "failed to convert ptr.load result type");
-
-    if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
-      auto swizzle = flyPtrTy.getSwizzle();
-      if (!swizzle.isTrivialSwizzle()) {
-        int64_t vecBytes =
-            vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth() / 8;
-        int64_t baseBytes = int64_t{1} << swizzle.getBase();
-        if (baseBytes % vecBytes != 0)
-          return rewriter.notifyMatchFailure(
-              op, "vector ptr.load byte size must divide swizzle base granularity");
-      }
-    }
-
-    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
-      BufferFatPtr bp(flyPtrTy, ptr);
-      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
-      auto auxAttr = rewriter.getI32IntegerAttr(0);
-      ArrayAttr noAttrs;
-      Value loaded = ROCDL::RawPtrBufferLoadOp::create(
-          rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
-          zero, auxAttr, noAttrs, noAttrs, noAttrs);
-      rewriter.replaceOp(op, loaded);
-      return success();
-    } else {
-      ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
-                              flyPtrTy.getSwizzle());
-      unsigned align = getLLVMAlignment(flyPtrTy);
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr, align);
-      rewriter.replaceOp(op, loaded);
-      return success();
-    }
+    if (!fitsSwizzleGranule(flyPtrTy, loadTy))
+      return rewriter.notifyMatchFailure(
+          op, "vector ptr.load byte size must divide swizzle base granularity");
+    rewriter.replaceOp(
+        op, loadThroughPointer(rewriter, op.getLoc(), flyPtrTy, adaptor.getPtr(), loadTy));
+    return success();
   }
 };
 
@@ -444,170 +731,93 @@ public:
 
   LogicalResult matchAndRewrite(PtrStoreOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    Value ptr = adaptor.getPtr();
-    Value value = adaptor.getValue();
-
     auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
     if (!flyPtrTy)
       return failure();
-
-    if (auto vecTy = dyn_cast<VectorType>(value.getType())) {
-      auto swizzle = flyPtrTy.getSwizzle();
-      if (!swizzle.isTrivialSwizzle()) {
-        int64_t vecBytes =
-            vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth() / 8;
-        int64_t baseBytes = int64_t{1} << swizzle.getBase();
-        if (baseBytes % vecBytes != 0)
-          return rewriter.notifyMatchFailure(
-              op, "vector ptr.store byte size must divide swizzle base granularity");
-      }
-    }
-
-    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
-      BufferFatPtr bp(flyPtrTy, ptr);
-      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
-      auto auxAttr = rewriter.getI32IntegerAttr(0);
-      ArrayAttr noAttrs;
-      ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, bp.bufferRsrc(rewriter, loc),
-                                         bp.swizzleByteOffset(rewriter, loc), zero, auxAttr,
-                                         noAttrs, noAttrs, noAttrs);
-      rewriter.eraseOp(op);
-      return success();
-    } else {
-      ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
-                              flyPtrTy.getSwizzle());
-      unsigned align = getLLVMAlignment(flyPtrTy);
-      LLVM::StoreOp::create(rewriter, loc, value, ptr, align);
-      rewriter.eraseOp(op);
-      return success();
-    }
+    if (!fitsSwizzleGranule(flyPtrTy, adaptor.getValue().getType()))
+      return rewriter.notifyMatchFailure(
+          op, "vector ptr.store byte size must divide swizzle base granularity");
+    storeThroughPointer(rewriter, op.getLoc(), flyPtrTy, adaptor.getPtr(), adaptor.getValue());
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 
-class MakeCopyAtomOpLowering : public OpConversionPattern<MakeCopyAtomOp> {
+/// An atom lowers to its initial state: nothing for a static atom, the state its
+/// op type builds from the construction arguments for a stateful one, and an
+/// empty struct otherwise.
+template <class OpT> class MakeAtomOpLowering : public OpConversionPattern<OpT> {
 public:
-  using OpConversionPattern<MakeCopyAtomOp>::OpConversionPattern;
+  using OpConversionPattern<OpT>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<OpT>::OpAdaptor;
 
-  LogicalResult matchAndRewrite(MakeCopyAtomOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(OpT op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto copyAtomTy = dyn_cast<CopyAtomType>(op.getResult().getType());
-    if (!copyAtomTy)
-      return rewriter.notifyMatchFailure(op, "not a CopyAtomType");
-    Type convertedTy = getTypeConverter()->convertType(copyAtomTy);
-
-    auto statefulOp = dyn_cast<StatefulOpTypeInterface>(copyAtomTy.getCopyOp());
-    if (statefulOp) {
-      Value state = statefulOp.getAtomState(rewriter, op.getLoc(), adaptor.getArgs());
+    Type atomTy = op.getResult().getType();
+    ValueRange args = adaptor.getOperands();
+    if (cast<MayStaticTypeInterface>(atomTy).isStatic() && args.empty()) {
+      rewriter.replaceOpWithMultiple(op, {ValueRange{}});
+      return success();
+    }
+    if (auto stateful = dyn_cast<StatefulOpTypeInterface>(getAtomOpType(atomTy))) {
+      Value state = stateful.getAtomState(rewriter, op.getLoc(), args);
       if (!state)
         return failure();
       rewriter.replaceOp(op, state);
-    } else if (!adaptor.getArgs().empty()) {
-      return rewriter.notifyMatchFailure(op, "stateless copy atom takes no construction arguments");
-    } else {
-      rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
+      return success();
     }
+    if (!args.empty())
+      return rewriter.notifyMatchFailure(op, "stateless atom takes no construction arguments");
+    rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, this->getTypeConverter()->convertType(atomTy));
     return success();
   }
 };
 
-class MakeMmaAtomOpLowering : public OpConversionPattern<MakeMmaAtomOp> {
-public:
-  using OpConversionPattern<MakeMmaAtomOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(MakeMmaAtomOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getResult().getType());
-    if (!mmaAtomTy)
-      return rewriter.notifyMatchFailure(op, "not a MmaAtomType");
-    Type convertedTy = getTypeConverter()->convertType(mmaAtomTy);
-    auto statefulOp = dyn_cast<StatefulOpTypeInterface>(mmaAtomTy.getMmaOp());
-    if (statefulOp) {
-      Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
-      if (!state)
-        return failure();
-      rewriter.replaceOp(op, state);
-    } else {
-      rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
-    }
-    return success();
+/// An int tuple field value reaches `setAtomState` as a struct of all its
+/// integer leaves: static leaves as constants, dynamic leaves as their scalars.
+FailureOr<Value> tupleFieldValue(OpBuilder &builder, Location loc, IntTupleType type,
+                                 ValueRange lowered) {
+  core::EmitContext ctx(builder, loc);
+  auto tuple = bindLoweredTuple(type, lowered, ctx);
+  if (failed(tuple))
+    return failure();
+  SmallVector<Value> leaves;
+  for (auto leaf : tuple->asRef().leaves()) {
+    auto scale = leaf.scale();
+    if (leaf.isBasis() || scale.isRatio() || scale.isNone())
+      return failure();
+    auto value = scale.materialize(ctx);
+    if (failed(value))
+      return failure();
+    leaves.push_back(*value);
   }
-};
-
-class MakeTiledCopyOpLowering : public OpConversionPattern<MakeTiledCopyOp> {
-public:
-  using OpConversionPattern<MakeTiledCopyOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(MakeTiledCopyOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getCopyAtom());
-    return success();
-  }
-};
-
-class MakeTiledMmaOpLowering : public OpConversionPattern<MakeTiledMmaOp> {
-public:
-  using OpConversionPattern<MakeTiledMmaOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(MakeTiledMmaOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getMmaAtom());
-    return success();
-  }
-};
-
-class GetCopyAtomOpLowering : public OpConversionPattern<GetCopyAtomOp> {
-public:
-  using OpConversionPattern<GetCopyAtomOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(GetCopyAtomOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getTiledCopy());
-    return success();
-  }
-};
-
-class GetMmaAtomOpLowering : public OpConversionPattern<GetMmaAtomOp> {
-public:
-  using OpConversionPattern<GetMmaAtomOp>::OpConversionPattern;
-
-  LogicalResult matchAndRewrite(GetMmaAtomOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getTiledMma());
-    return success();
-  }
-};
+  auto structType =
+      LLVM::LLVMStructType::getLiteral(builder.getContext(), llvm::to_vector(TypeRange(leaves)));
+  return packFields(builder, loc, structType, leaves);
+}
 
 class AtomSetValueOpLowering : public OpConversionPattern<AtomSetValueOp> {
 public:
   using OpConversionPattern<AtomSetValueOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(AtomSetValueOp op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Type origAtomTy = op.getAtom().getType();
-    if (auto tiledCopyTy = dyn_cast<TiledCopyType>(origAtomTy))
-      origAtomTy = tiledCopyTy.getCopyAtom();
-    else if (auto tiledMmaTy = dyn_cast<TiledMmaType>(origAtomTy))
-      origAtomTy = tiledMmaTy.getMmaAtom();
+    auto stateful = dyn_cast_if_present<StatefulOpTypeInterface>(
+        getAtomOpType(getAtomType(op.getAtom().getType())));
+    if (!stateful)
+      return rewriter.notifyMatchFailure(op, "atom is not stateful");
     StringAttr fieldAttr = op.getFieldAttr();
     Location loc = op.getLoc();
 
-    Value structVal = adaptor.getAtom();
-    Value fieldVal = adaptor.getValue();
-    Value result;
-
-    if (auto copyAtomTy = dyn_cast<CopyAtomType>(origAtomTy)) {
-      if (!copyAtomTy.isStateful())
-        return rewriter.notifyMatchFailure(op, "CopyAtom is not stateful");
-      result = copyAtomTy.setAtomState(rewriter, loc, structVal, fieldAttr, fieldVal);
-    } else if (auto mmaAtomTy = dyn_cast<MmaAtomType>(origAtomTy)) {
-      if (!mmaAtomTy.isStateful())
-        return rewriter.notifyMatchFailure(op, "MmaAtom is not stateful");
-      result = mmaAtomTy.setAtomState(rewriter, loc, structVal, fieldAttr, fieldVal);
-    } else {
-      return rewriter.notifyMatchFailure(op, "atom is not CopyAtomType or MmaAtomType");
+    Value structVal = loweredValue(adaptor.getAtom());
+    Value fieldVal = loweredValue(adaptor.getValue());
+    if (auto tupleTy = dyn_cast<IntTupleType>(op.getValue().getType())) {
+      auto tuple = tupleFieldValue(rewriter, loc, tupleTy, adaptor.getValue());
+      if (failed(tuple))
+        return op.emitOpError("expected an int tuple field value of integer leaves");
+      fieldVal = *tuple;
     }
-
+    Value result = stateful.setAtomState(rewriter, loc, structVal, fieldAttr, fieldVal);
     if (!result)
       return rewriter.notifyMatchFailure(op, "setAtomState failed");
 
@@ -616,21 +826,29 @@ public:
   }
 };
 
+/// Replaces an SSA atom call by its result, or erases one that has none.
+void replaceOrErase(ConversionPatternRewriter &rewriter, Operation *op, Value result) {
+  if (op->getNumResults())
+    rewriter.replaceOp(op, result);
+  else
+    rewriter.eraseOp(op);
+}
+
 class CopyAtomCallLowering : public OpConversionPattern<CopyAtomCall> {
 public:
   using OpConversionPattern<CopyAtomCall>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(CopyAtomCall op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(CopyAtomCall op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type copyAtomType = op.getCopyAtom().getType();
     auto copyAtom = dyn_cast<CopyAtomType>(copyAtomType);
     if (!copyAtom)
       return rewriter.notifyMatchFailure(op, "copyAtom is not CopyAtomType");
 
-    Value copyAtomVal = adaptor.getCopyAtom();
-    Value src = adaptor.getSrc();
-    Value dst = adaptor.getDst();
-    Value pred = adaptor.getPred();
+    Value copyAtomVal = loweredAtom(rewriter, op.getLoc(), adaptor.getCopyAtom());
+    Value src = loweredValue(adaptor.getSrc());
+    Value dst = loweredValue(adaptor.getDst());
+    Value pred = loweredValue(adaptor.getPred());
 
     Type srcTy = op.getSrc().getType();
     Type dstTy = op.getDst().getType();
@@ -670,7 +888,7 @@ class CopyAtomCallSSALowering : public OpConversionPattern<CopyAtomCallSSA> {
 public:
   using OpConversionPattern<CopyAtomCallSSA>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(CopyAtomCallSSA op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(CopyAtomCallSSA op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type copyAtomType = op.getCopyAtom().getType();
     auto copyAtom = dyn_cast<CopyAtomType>(copyAtomType);
@@ -680,7 +898,7 @@ public:
     Location loc = op.getLoc();
     bool hasResult = op.getResults().size() > 0;
     Type srcTy = op.getSrc().getType();
-    Value pred = adaptor.getPred();
+    Value pred = loweredValue(adaptor.getPred());
 
     Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
     Type dstTy = op.getDst() ? op.getDst().getType() : Type{};
@@ -701,47 +919,54 @@ public:
         return op.emitOpError("expected a scalar i1 predicate after SSA lowering");
     }
 
-    FailureOr<Value> result;
-    if (pred) {
-      result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
-                                        pred.getType(), adaptor.getCopyAtom(), adaptor.getSrc(),
-                                        adaptor.getDst(), pred);
-    } else {
-      result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
-                                        adaptor.getCopyAtom(), adaptor.getSrc(), adaptor.getDst());
-    }
+    Value atom = loweredAtom(rewriter, loc, adaptor.getCopyAtom());
+    Value src = loweredValue(adaptor.getSrc());
+    Value dst = loweredValue(adaptor.getDst());
+    FailureOr<Value> result =
+        pred ? copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
+                                        pred.getType(), atom, src, dst, pred)
+             : copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy, atom,
+                                        src, dst);
     if (failed(result))
       return failure();
 
-    if (hasResult)
-      rewriter.replaceOp(op, *result);
-    else
-      rewriter.eraseOp(op);
+    replaceOrErase(rewriter, op, *result);
     return success();
   }
 };
+
+/// The lowered pointers of a group of memref operands.
+SmallVector<Value> loweredValues(ArrayRef<ValueRange> lowered) {
+  return llvm::map_to_vector(lowered, [](ValueRange value) { return loweredValue(value); });
+}
 
 class MmaAtomCallLowering : public OpConversionPattern<MmaAtomCall> {
 public:
   using OpConversionPattern<MmaAtomCall>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(MmaAtomCall op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(MmaAtomCall op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getMmaAtom().getType());
     if (!mmaAtomTy)
       return rewriter.notifyMatchFailure(op, "expected MmaAtomType for mmaAtom operand");
 
     Location loc = op.getLoc();
+    Value d = loweredValue(adaptor.getD());
+    Value c = loweredValue(adaptor.getC());
+    auto a = loweredValues(adaptor.getA());
+    auto b = loweredValues(adaptor.getB());
 
-    auto isPointer = [](Value value) { return isa<LLVM::LLVMPointerType>(value.getType()); };
-    if (!isPointer(adaptor.getD()) || !llvm::all_of(adaptor.getA(), isPointer) ||
-        !llvm::all_of(adaptor.getB(), isPointer) || !isPointer(adaptor.getC()))
+    auto isPointer = [](Value value) {
+      return value && isa<LLVM::LLVMPointerType>(value.getType());
+    };
+    if (!isPointer(d) || !llvm::all_of(a, isPointer) || !llvm::all_of(b, isPointer) ||
+        !isPointer(c))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
-    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, op.getD().getType(),
-                                      op.getA().getTypes(), op.getB().getTypes(),
-                                      op.getC().getType(), adaptor.getMmaAtom(), adaptor.getD(),
-                                      adaptor.getA(), adaptor.getB(), adaptor.getC())))
+    if (failed(
+            mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, op.getD().getType(),
+                                   op.getA().getTypes(), op.getB().getTypes(), op.getC().getType(),
+                                   loweredAtom(rewriter, loc, adaptor.getMmaAtom()), d, a, b, c)))
       return failure();
 
     rewriter.eraseOp(op);
@@ -753,57 +978,59 @@ class MmaAtomCallSSALowering : public OpConversionPattern<MmaAtomCallSSA> {
 public:
   using OpConversionPattern<MmaAtomCallSSA>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(MmaAtomCallSSA op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(MmaAtomCallSSA op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     auto mmaAtomTy = dyn_cast<MmaAtomType>(op.getMmaAtom().getType());
     if (!mmaAtomTy)
       return rewriter.notifyMatchFailure(op, "expected MmaAtomType for mmaAtom operand");
 
     Location loc = op.getLoc();
+    auto a = loweredValues(adaptor.getA());
+    auto b = loweredValues(adaptor.getB());
+
     bool hasResult = op.getResults().size() > 0;
 
     Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
     Type dTy = op.getD() ? op.getD().getType() : Type{};
-    Value dPtr = hasResult ? Value{} : adaptor.getD();
+    Value dPtr = hasResult ? Value{} : loweredValue(adaptor.getD());
 
-    auto result =
-        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getTypes(),
-                                  op.getB().getTypes(), op.getC().getType(), adaptor.getMmaAtom(),
-                                  dPtr, adaptor.getA(), adaptor.getB(), adaptor.getC());
+    auto result = mmaAtomTy.emitAtomCallSSA(
+        rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getTypes(), op.getB().getTypes(),
+        op.getC().getType(), loweredAtom(rewriter, loc, adaptor.getMmaAtom()), dPtr, a, b,
+        loweredValue(adaptor.getC()));
     if (failed(result))
       return failure();
 
-    if (hasResult)
-      rewriter.replaceOp(op, *result);
-    else
-      rewriter.eraseOp(op);
+    replaceOrErase(rewriter, op, *result);
     return success();
   }
 };
 
-/// Lower `gpu.launch_func` kernel operands so that any `!fly.memref` values are
-/// replaced by their type-converted builtin `memref` values. This prevents
-/// `unrealized_conversion_cast` materializations from remaining live after
-/// partial conversion (e.g., when the surrounding `func.func` signature has
-/// been converted to builtin memrefs).
+/// Lower `gpu.launch_func` kernel operands to their lowered carriers: a static
+/// Fly value passes nothing, a memref passes its pointer and its layout.
 class GpuLaunchFuncOpLowering : public OpConversionPattern<gpu::LaunchFuncOp> {
 public:
   using OpConversionPattern<gpu::LaunchFuncOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(gpu::LaunchFuncOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(gpu::LaunchFuncOp op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto kernelRef = adaptor.getKernel();
+    auto kernelRef = op.getKernel();
 
     auto grid =
-        gpu::KernelDim3{adaptor.getGridSizeX(), adaptor.getGridSizeY(), adaptor.getGridSizeZ()};
-    auto block =
-        gpu::KernelDim3{adaptor.getBlockSizeX(), adaptor.getBlockSizeY(), adaptor.getBlockSizeZ()};
+        gpu::KernelDim3{loweredValue(adaptor.getGridSizeX()), loweredValue(adaptor.getGridSizeY()),
+                        loweredValue(adaptor.getGridSizeZ())};
+    auto block = gpu::KernelDim3{loweredValue(adaptor.getBlockSizeX()),
+                                 loweredValue(adaptor.getBlockSizeY()),
+                                 loweredValue(adaptor.getBlockSizeZ())};
 
     std::optional<gpu::KernelDim3> clusterSize = std::nullopt;
-    if (adaptor.getClusterSizeX() && adaptor.getClusterSizeY() && adaptor.getClusterSizeZ()) {
-      clusterSize = gpu::KernelDim3{adaptor.getClusterSizeX(), adaptor.getClusterSizeY(),
-                                    adaptor.getClusterSizeZ()};
+    if (op.getClusterSizeX() && op.getClusterSizeY() && op.getClusterSizeZ()) {
+      clusterSize = gpu::KernelDim3{loweredValue(adaptor.getClusterSizeX()),
+                                    loweredValue(adaptor.getClusterSizeY()),
+                                    loweredValue(adaptor.getClusterSizeZ())};
     }
+    Value sharedMemorySize = loweredValue(adaptor.getDynamicSharedMemorySize());
+    auto kernelOperands = flattenValues(adaptor.getKernelOperands());
 
     // Preserve async token result type when present.
     Type asyncTokenType = nullptr;
@@ -811,9 +1038,9 @@ public:
       asyncTokenType = tok.getType();
 
     rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
-        op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(),
-        adaptor.getAsyncObject(), clusterSize);
+        op, kernelRef, grid, block, sharedMemorySize, kernelOperands, asyncTokenType,
+        flattenValues(adaptor.getAsyncDependencies()), loweredValue(adaptor.getAsyncObject()),
+        clusterSize);
     return success();
   }
 };
@@ -850,14 +1077,25 @@ public:
     };
     addSourceMaterialization(bitcastMaterialization);
     addTargetMaterialization(bitcastMaterialization);
-    addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
-      if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
-        return BufferFatPtr::getType(flyMemRefTy.getContext());
-      unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
-      return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
+    // A memref lowers to its pointer, followed by its layout unless that is static.
+    addConversion([&](fly::MemRefType type, SmallVectorImpl<Type> &results) {
+      results.push_back(convertType(PointerType::get(type.getElemTy(), type.getAddressSpace(),
+                                                     type.getAlignment(), type.getSwizzle())));
+      if (auto layout = core::get_llvm_type(type.getRef().layout(), *type.getContext()))
+        results.push_back(layout);
+      return success();
     });
-    addConversion([&](fly::CoordTensorType coordTy) -> Type {
-      return fly::IntTupleType::get(coordTy.getBase());
+    // A fully static algebra value lowers to nothing.
+    addConversion([&](Type type, SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
+      auto lowered = getLoweredType(type);
+      if (!lowered)
+        return std::nullopt;
+      if (*lowered)
+        results.push_back(*lowered);
+      return success();
+    });
+    addConversion([](FastDivModType type) -> Type {
+      return core::emit_op::getFastDivModType(*type.getContext(), type.getDivisorType().getWidth());
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
@@ -865,20 +1103,20 @@ public:
       unsigned as = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
-    addConversion([&](fly::CopyAtomType atomTy) -> Type {
-      if (atomTy.isStateful())
-        return atomTy.getConvertedType(atomTy.getContext());
-      return LLVM::LLVMStructType::getLiteral(atomTy.getContext(), {});
+    // A static atom lowers to nothing and a stateful atom to its state; a tiled
+    // copy or MMA lowers to its atom.
+    addConversion([](Type type, SmallVectorImpl<Type> &results) -> std::optional<LogicalResult> {
+      Type atomTy = getAtomType(type);
+      Type opType = getAtomOpType(atomTy);
+      if (!opType)
+        return std::nullopt;
+      if (!cast<MayStaticTypeInterface>(atomTy).isStatic()) {
+        auto stateful = dyn_cast<StatefulOpTypeInterface>(opType);
+        results.push_back(stateful ? stateful.getConvertedType(type.getContext())
+                                   : emptyStruct(type.getContext()));
+      }
+      return success();
     });
-    addConversion([&](fly::MmaAtomType atomTy) -> Type {
-      if (atomTy.isStateful())
-        return atomTy.getConvertedType(atomTy.getContext());
-      return LLVM::LLVMStructType::getLiteral(atomTy.getContext(), {});
-    });
-    addConversion(
-        [&](fly::TiledCopyType tiledTy) -> Type { return convertType(tiledTy.getCopyAtom()); });
-    addConversion(
-        [&](fly::TiledMmaType tiledTy) -> Type { return convertType(tiledTy.getMmaAtom()); });
   }
 };
 
@@ -886,11 +1124,13 @@ class ExtractAlignedPointerAsIndexLowering
     : public OpConversionPattern<ExtractAlignedPointerAsIndexOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(ExtractAlignedPointerAsIndexOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(ExtractAlignedPointerAsIndexOp op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // fly.memref is a bare pointer; after type conversion the operand is llvm.ptr<AS>.
-    // Cast to the result type (e.g. llvm.ptr<0>) if address spaces differ.
-    Value src = adaptor.getSource();
+    // A memref's first carrier is its pointer, e.g. llvm.ptr<AS>. Cast to the
+    // result type (e.g. llvm.ptr<0>) if address spaces differ.
+    Value src = loweredValue(adaptor.getSource());
+    if (!src)
+      return failure();
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
     if (!resultType)
       resultType = op.getResult().getType();
@@ -901,20 +1141,148 @@ public:
   }
 };
 
-/// Select is type-agnostic, but its operands/results must follow FlyTypeConverter.
+/// Select is type-agnostic: select each lowered carrier of a Fly value.
 class SelectOpTypeConversion : public OpConversionPattern<arith::SelectOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(arith::SelectOp op, OneToNOpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto attrs = op->getAttrs();
-    auto replacement = rewriter.replaceOpWithNewOp<arith::SelectOp>(
-        op, adaptor.getCondition(), adaptor.getTrueValue(), adaptor.getFalseValue());
-    replacement->setAttrs(attrs);
+    Value condition = loweredValue(adaptor.getCondition());
+    ValueRange trueValues = adaptor.getTrueValue();
+    ValueRange falseValues = adaptor.getFalseValue();
+    if (trueValues.size() != falseValues.size())
+      return failure();
+    SmallVector<Value> results;
+    for (auto [trueValue, falseValue] : llvm::zip(trueValues, falseValues)) {
+      auto select =
+          arith::SelectOp::create(rewriter, op.getLoc(), condition, trueValue, falseValue);
+      select->setDiscardableAttrs(op->getDiscardableAttrDictionary());
+      results.push_back(select);
+    }
+    rewriter.replaceOpWithMultiple(op, {results});
     return success();
   }
 };
+
+/// Calls pass and return lowered carriers; discardable attributes are kept.
+class CallOpTypeConversion : public OpConversionPattern<func::CallOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(func::CallOp op, OneToNOpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> resultTypes;
+    SmallVector<unsigned> resultCounts;
+    for (Type type : op.getResultTypes()) {
+      size_t before = resultTypes.size();
+      if (failed(getTypeConverter()->convertType(type, resultTypes)))
+        return failure();
+      resultCounts.push_back(resultTypes.size() - before);
+    }
+    auto call = func::CallOp::create(rewriter, op.getLoc(), op.getCallee(), resultTypes,
+                                     flattenValues(adaptor.getOperands()));
+    call->setDiscardableAttrs(op->getDiscardableAttrDictionary());
+    SmallVector<ValueRange> replacements;
+    unsigned offset = 0;
+    for (unsigned count : resultCounts) {
+      replacements.push_back(call.getResults().slice(offset, count));
+      offset += count;
+    }
+    rewriter.replaceOpWithMultiple(op, replacements);
+    return success();
+  }
+};
+
+class GpuReturnTypeConversion : public OpConversionPattern<gpu::ReturnOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(gpu::ReturnOp op, OneToNOpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<gpu::ReturnOp>(op, flattenValues(adaptor.getOperands()));
+    return success();
+  }
+};
+
+/// Converts a func.func or gpu.func signature to the lowered carriers. The
+/// attributes of a value move to its first carrier; workgroup and private
+/// attributions after the arguments of a gpu.func keep their types.
+class FunctionSignatureConversion : public ConversionPattern {
+public:
+  FunctionSignatureConversion(StringRef name, const TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, name, 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<ValueRange>,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto function = cast<FunctionOpInterface>(op);
+    auto type = dyn_cast<FunctionType>(function.getFunctionType());
+    if (!type)
+      return failure();
+    const TypeConverter &converter = *getTypeConverter();
+    MLIRContext *ctx = op->getContext();
+    auto emptyAttrs = DictionaryAttr::get(ctx);
+
+    TypeConverter::SignatureConversion inputs(type.getNumInputs());
+    if (failed(converter.convertSignatureArgs(type.getInputs(), inputs)))
+      return failure();
+    SmallVector<Attribute> argAttrs(inputs.getConvertedTypes().size(), emptyAttrs);
+    for (unsigned i = 0, e = type.getNumInputs(); i < e; ++i)
+      if (auto mapping = inputs.getInputMapping(i); mapping && mapping->size > 0)
+        argAttrs[mapping->inputNo] =
+            function.getArgAttrDict(i) ? function.getArgAttrDict(i) : emptyAttrs;
+
+    SmallVector<Type> results;
+    SmallVector<Attribute> resultAttrs;
+    for (auto [i, result] : llvm::enumerate(type.getResults())) {
+      size_t before = results.size();
+      if (failed(converter.convertType(result, results)))
+        return failure();
+      for (size_t j = before; j < results.size(); ++j) {
+        DictionaryAttr attrs = j == before ? function.getResultAttrDict(i) : DictionaryAttr();
+        resultAttrs.push_back(attrs ? attrs : emptyAttrs);
+      }
+    }
+
+    if (!function.isExternal()) {
+      Block &entry = function.getFunctionBody().front();
+      TypeConverter::SignatureConversion block(entry.getNumArguments());
+      if (failed(converter.convertSignatureArgs(type.getInputs(), block)))
+        return failure();
+      for (unsigned i = type.getNumInputs(); i < entry.getNumArguments(); ++i)
+        block.addInputs(i, entry.getArgument(i).getType());
+      rewriter.applySignatureConversion(&entry, block, &converter);
+    }
+
+    rewriter.modifyOpInPlace(op, [&] {
+      function.setFunctionTypeAttr(
+          TypeAttr::get(FunctionType::get(ctx, inputs.getConvertedTypes(), results)));
+      function.setAllArgAttrs(argAttrs);
+      function.setAllResultAttrs(resultAttrs);
+    });
+    return success();
+  }
+};
+
+/// Whether `type` is or contains a Fly type.
+bool containsFlyType(Type type) {
+  bool found = false;
+  type.walk([&](Type nested) {
+    StringRef name = nested.getDialect().getNamespace();
+    found |= name == fly::FlyDialect::getDialectNamespace() ||
+             name == fly_rocdl::FlyROCDLDialect::getDialectNamespace();
+  });
+  return found;
+}
+
+/// An operation is legal once no operand, result, or block argument has a Fly type.
+bool hasNoFlyTypes(Operation *op) {
+  auto none = [](TypeRange types) { return llvm::none_of(types, containsFlyType); };
+  return none(op->getOperandTypes()) && none(op->getResultTypes()) &&
+         llvm::all_of(op->getRegions(), [&](Region &region) {
+           return llvm::all_of(region,
+                               [&](Block &block) { return none(block.getArgumentTypes()); });
+         });
+}
 
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
@@ -928,13 +1296,12 @@ public:
 
     ConversionTarget target(getContext());
 
-    target.addLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
-                           gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
-                           ROCDL::ROCDLDialect>();
+    // Every remaining operation is legal unless it still carries a Fly type.
+    target.markUnknownOpDynamicallyLegal(hasNoFlyTypes);
+    target.addDynamicallyLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
+                                      gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
+                                      ROCDL::ROCDLDialect>(hasNoFlyTypes);
     target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
-
-    // Constructors
-    target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
 
@@ -944,11 +1311,10 @@ public:
 
     target.addDynamicallyLegalOp<arith::SelectOp>(
         [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
-    target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
+    target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp, gpu::ReturnOp>(
         [&](Operation *op) { return typeConverter.isLegal(op); });
 
-    // Ensure function signatures are type-converted; otherwise conversions may rely on
-    // inserted unrealized casts that remain live.
+    // Function signatures carry the lowered values of their Fly arguments and results.
     target.addDynamicallyLegalOp<func::FuncOp>(
         [&](func::FuncOp op) { return typeConverter.isSignatureLegal(op.getFunctionType()); });
     target.addDynamicallyLegalOp<gpu::GPUFuncOp>(
@@ -986,28 +1352,40 @@ public:
     patterns.add<MakePtrOpLowering, GetDynSharedOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
     patterns.add<ToLLVMPtrOpLowering>(typeConverter, context);
-    patterns.add<ApplySwizzleOpLowering, RecastIterOpLowering>(typeConverter, context);
     patterns.add<GetBufferRsrcOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
-    patterns.add<MakeViewOpLowering>(typeConverter, context);
+
+    for (auto name : {StaticOp::getOperationName(), MakeIntTupleOp::getOperationName(),
+                      MakeShapeOp::getOperationName(), MakeStrideOp::getOperationName(),
+                      MakeCoordOp::getOperationName(), MakeLayoutOp::getOperationName(),
+                      MakeComposedLayoutOp::getOperationName(), MakeTileOp::getOperationName(),
+                      MakeViewOp::getOperationName()})
+      patterns.add<ConstructorLowering>(name, typeConverter, context);
+    for (auto name : {GetScalarOp::getOperationName(), GetLeavesOp::getOperationName(),
+                      GetIterOp::getOperationName()})
+      patterns.add<ExtractorLowering>(name, typeConverter, context);
+    patterns.add<RecastIterOpLowering>(typeConverter, context);
+    for (auto name : {ApplySwizzleOp::getOperationName(), MakeTiledCopyOp::getOperationName(),
+                      MakeTiledMmaOp::getOperationName(), GetCopyAtomOp::getOperationName(),
+                      GetMmaAtomOp::getOperationName()})
+      patterns.add<ForwardOperandLowering>(name, typeConverter, context);
+    patterns.add<MakeFastDivModOpLowering, FastDivModOpLowering, FastDivModGetDivisorOpLowering>(
+        typeConverter, context);
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
-    patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
-    patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
-    patterns.add<GetCopyAtomOpLowering, GetMmaAtomOpLowering, AtomSetValueOpLowering>(typeConverter,
-                                                                                      context);
+    patterns.add<MakeAtomOpLowering<MakeCopyAtomOp>, MakeAtomOpLowering<MakeMmaAtomOp>>(
+        typeConverter, context);
+    patterns.add<AtomSetValueOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
-
-    patterns.add<SelectOpTypeConversion>(typeConverter, context);
+    patterns.add<SelectOpTypeConversion, GpuReturnTypeConversion>(typeConverter, context);
 
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
-    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
-    populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
-
-    populateCallOpTypeConversionPattern(patterns, typeConverter);
+    for (auto name : {func::FuncOp::getOperationName(), gpu::GPUFuncOp::getOperationName()})
+      patterns.add<FunctionSignatureConversion>(name, typeConverter, context);
+    patterns.add<CallOpTypeConversion>(typeConverter, context);
     populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))

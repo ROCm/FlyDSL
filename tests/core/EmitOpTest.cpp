@@ -517,6 +517,8 @@ TEST_F(EmitOpCategory, BindChecksScalarSignature) {
   ASSERT_EQ(values->scalars.size(), 2u);
   EXPECT_TRUE(values->scalars[0].getType().isInteger(32));
   EXPECT_TRUE(values->scalars[1].getType().isInteger(64));
+  EXPECT_EQ(get_binding_types(profile, ctx),
+            (llvm::SmallVector<mlir::Type, 8>{builder.getI32Type(), builder.getI64Type()}));
   EXPECT_TRUE(mlir::failed(bind(profile, EmitBindings{}, ctx)));
   auto wrong = *values;
   std::swap(wrong.scalars[0], wrong.scalars[1]);
@@ -566,6 +568,8 @@ TEST_F(EmitOpCategory, PointerArithmeticAndTensorBindingKeepOpaqueAddressSpace) 
   auto values = get_bindings(*bound, ctx);
   ASSERT_TRUE(mlir::succeeded(values));
   EXPECT_EQ(values->pointers.front(), pointer.value());
+  EXPECT_EQ(get_binding_types(profile, ctx),
+            (llvm::SmallVector<mlir::Type, 8>{builder.getI32Type()}));
   // A pointer of another context is rejected, as a scalar of another type is.
   auto foreignContext = mlir::MLIRContext();
   foreignContext.loadDialect<mlir::LLVM::LLVMDialect>();
@@ -977,6 +981,8 @@ TEST_F(EmitOpCategory, EmitHooksBindAndEmitFastDivModHandles) {
   EXPECT_EQ(add.getRhs().getDefiningOp()->getName().getStringRef(), "test.divisor");
   // Binding checks the handle type of the hooks.
   auto profile = *IntTuple<Trait>::fromString("?{fdm}");
+  EXPECT_EQ(get_binding_types(profile, ctx),
+            (llvm::SmallVector<mlir::Type, 8>{hooks.getFastDivModType(ctx, 32)}));
   EXPECT_TRUE(mlir::succeeded(bind(profile, EmitBindings{{divisor.value()}, {}}, ctx)));
   EXPECT_TRUE(mlir::failed(bind(profile, EmitBindings{{arg(2).value()}, {}}, ctx)));
   ctx.hooks = nullptr;

@@ -140,6 +140,9 @@ struct EmitBindings {
 
 namespace emit_op {
 
+/// get_leaf_type :: Leaf<Trait> -> mlir::Type
+mlir::Type get_leaf_type(EmitContext &ctx, Leaf<Trait> scale);
+
 struct BindLeaf {
   EmitContext &context;
   const EmitBindings &bindings;
@@ -219,6 +222,23 @@ mlir::FailureOr<EmitBindings> get_bindings(const EmitValue &value, EmitContext &
   if (!valid)
     return mlir::failure();
   return bindings;
+}
+
+/// get_binding_types :: Value<Trait> -> [mlir::Type]
+///
+/// The types of the scalars `bind` takes for `profile`, in binding order.
+/// Pointers are bound separately and have no entry.
+template <class TraitValue>
+llvm::SmallVector<mlir::Type, 8> get_binding_types(const TraitValue &profile, EmitContext &ctx) {
+  auto types = llvm::SmallVector<mlir::Type, 8>{};
+  visit_value(
+      profile,
+      [&](Leaf<Trait> leaf) {
+        if (!leaf.isStatic())
+          types.push_back(emit_op::get_leaf_type(ctx, leaf.scale()));
+      },
+      [](const Pointer<Trait> &) {});
+  return types;
 }
 
 //===----------------------------------------------------------------------===//

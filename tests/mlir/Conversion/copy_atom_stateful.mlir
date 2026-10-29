@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // Stateful CopyAtom lowering tests
 
@@ -93,7 +93,7 @@ func.func @test_set_soffset_then_copy(
     %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>,
     %dst: !fly.memref<f32, register, 1:1>,
     %soff: i32) {
-  // CHECK: %[[NEW_ATOM:.*]] = llvm.insertvalue %{{.*}}, %{{.*}}[0]
+  // CHECK: %[[NEW_ATOM:.*]] = llvm.insertvalue %{{.*}}, %{{.*}}[0] : !llvm.struct<(i32)>
   %new_atom = fly.atom.set_value(%atom, "soffset", %soff) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>
   // CHECK: %[[SOFF_RAW:.*]] = llvm.extractvalue %[[NEW_ATOM]][0]
   // CHECK: %[[SOFF:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
