@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-29T10:19:20Z",
+ "updated": "2026-10-29T10:29:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40857792686,
+   "pr": 1348,
+   "commit": "717c807e8e14796f4fa6663021341015e34b35fc",
+   "branch": "glm-mono-kernel-structure-optmize",
+   "event": "pull_request",
+   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686",
+   "created_at": "2026-10-29T10:28:06Z",
+   "updated_at": "2026-10-29T10:28:07Z",
+   "actor": "james-huang09",
+   "jobs": []
+  },
+  {
+   "run_id": 40856601212,
+   "pr": 1348,
+   "commit": "08d6c7797c7b1e55916d89f0c5c3909922b19fa2",
+   "branch": "glm-mono-kernel-structure-optmize",
+   "event": "pull_request",
+   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40856601212",
+   "created_at": "2026-10-29T10:19:07Z",
+   "updated_at": "2026-10-29T10:28:07Z",
+   "actor": "james-huang09",
+   "jobs": []
+  },
   {
    "run_id": 40854060000,
    "pr": 1347,
@@ -1737,67 +1767,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 40467037462,
-   "pr": null,
-   "commit": "b95df7730f34e48c2e466b2a207ea6efa69f6ab1",
-   "branch": "tdm-filler-contiguous-first",
-   "event": "pull_request",
-   "title": "[ROCDL] Put the contiguous mode's filler dim at the front",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467037462",
-   "created_at": "2026-10-27T07:25:31Z",
-   "updated_at": "2026-10-27T13:40:42Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T07:41:15Z",
-     "completed_at": "2026-10-27T08:42:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467037462/job/122069832993",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T07:41:06Z",
-     "completed_at": "2026-10-27T08:13:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467037462/job/122069833064"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T12:31:16Z",
-     "completed_at": "2026-10-27T13:40:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40467037462/job/122069833072"
-    }
-   ]
-  },
-  {
-   "run_id": 40466948139,
-   "pr": null,
-   "commit": "0f0edb72cdf487b8a827878d2f4ae95d0c8adea5",
-   "branch": "tdm-filler-contiguous-first",
-   "event": "pull_request",
-   "title": "[ROCDL] Put the contiguous mode's filler dim at the front",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40466948139",
-   "created_at": "2026-10-27T07:24:39Z",
-   "updated_at": "2026-10-27T07:26:15Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
