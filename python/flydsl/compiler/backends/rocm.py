@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import functools
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,44 @@ from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
 
 log = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _rocdl_has_arch_option() -> bool:
+    """Return True if rocdl-attach-target supports the ``arch`` option (newer LLVM)."""
+    try:
+        from ..._mlir import ir
+        from ..._mlir.passmanager import PassManager
+
+        with ir.Context():
+            PassManager.parse("builtin.module(rocdl-attach-target{arch=gfx942})")
+        return True
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _rocdl_has_wavesize_option() -> bool:
+    """Return True if rocdl-attach-target uses ``wavesize`` instead of ``wave64``."""
+    try:
+        from ..._mlir import ir
+        from ..._mlir.passmanager import PassManager
+
+        with ir.Context():
+            PassManager.parse("builtin.module(rocdl-attach-target{wavesize=64})")
+        return True
+    except Exception:
+        return False
+
+
+def _rocdl_wave_option(warp_size: int) -> dict:
+    """Return the wave-size option dict for rocdl-attach-target.
+
+    Newer LLVM uses ``wavesize=<int>``, older uses ``wave64=<bool>``.
+    """
+    if _rocdl_has_wavesize_option():
+        return {"wavesize": warp_size}
+    return {"wave64": "true" if warp_size == 64 else "false"}
 
 
 def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
@@ -80,6 +119,9 @@ class RocmBackend(BaseBackend):
                 "Set HSA_XNACK=1 and HSA_DISABLE_FRAGMENT_ALLOCATOR=1."
             )
 
+        warp_size = get_warp_size(chip)
+        wave_opt = _rocdl_wave_option(warp_size)
+
         rocdl_opts = {
             "O": 2,
             "abi": 600,
@@ -92,8 +134,10 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "true" if get_warp_size(chip) == 64 else "false",
+            **wave_opt,
         }
+        if asan_enabled and _rocdl_has_arch_option():
+            rocdl_opts["arch"] = f"{chip}:xnack+"
 
         ktrace_fragments = []
         if _ktrace_tracing_enabled(compile_hints):
