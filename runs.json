@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-10-29T07:16:38Z",
+ "updated": "2026-10-29T08:05:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40839199904,
+   "pr": 1238,
+   "commit": "ace9f6b40588a8213366cf3d34704d271152a0a4",
+   "branch": "migrate-kernels-tiled-tdm",
+   "event": "pull_request",
+   "title": "Migrate kernels tiled tdm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904",
+   "created_at": "2026-10-29T08:01:22Z",
+   "updated_at": "2026-10-29T08:03:02Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 40837202943,
+   "pr": 1313,
+   "commit": "02eff54a34ec824ee055feb33953b1e808641aa9",
+   "branch": "pr/feat-core-layout-replacement",
+   "event": "pull_request",
+   "title": "[Core] Replace the Fly layout implementation with the Core library",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943",
+   "created_at": "2026-10-29T07:42:56Z",
+   "updated_at": "2026-10-29T07:44:28Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 40836241717,
+   "pr": 1336,
+   "commit": "a951a793762348e7fcf9538337988c83239913b5",
+   "branch": "zhimding/ktrace_low_overhead_1027",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40836241717",
+   "created_at": "2026-10-29T07:33:56Z",
+   "updated_at": "2026-10-29T07:35:27Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 40835799901,
+   "pr": 1346,
+   "commit": "d45adb16c3925eec77c6d96bf37ec41703cf397b",
+   "branch": "xyw/mega_moe_merge",
+   "event": "pull_request",
+   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901",
+   "created_at": "2026-10-29T07:29:53Z",
+   "updated_at": "2026-10-29T07:45:15Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 40833810850,
    "pr": 1238,
@@ -10,13 +70,41 @@
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
    "title": "Migrate kernels tiled tdm",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850",
    "created_at": "2026-10-29T07:11:13Z",
-   "updated_at": "2026-10-29T07:12:55Z",
+   "updated_at": "2026-10-29T08:02:39Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-29T07:44:31Z",
+     "completed_at": "2026-10-29T08:01:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220468"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-29T07:46:09Z",
+     "completed_at": "2026-10-29T08:02:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220493"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-29T07:45:03Z",
+     "completed_at": "2026-10-29T08:00:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220547"
+    }
+   ]
   },
   {
    "run_id": 40821294719,
@@ -207,19 +295,19 @@
    "branch": "jli/gpu-asan",
    "event": "pull_request",
    "title": "[WIP][feat] support gpu asan feature ",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348",
    "created_at": "2026-10-29T02:30:40Z",
-   "updated_at": "2026-10-29T06:32:44Z",
+   "updated_at": "2026-10-29T07:47:25Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-29T06:32:44Z",
+     "started_at": "2026-10-29T07:47:24Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348/job/123301301220"
     },
@@ -1782,184 +1870,6 @@
    "updated_at": "2026-10-27T02:55:40Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 40435060404,
-   "pr": null,
-   "commit": "3b3290739a9cea4c046848f09608ab68a949c245",
-   "branch": "fix/ktrace-low-perturbation",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Reduce KTRACE overhead from about 30% to under 2% on MI355X GEMMs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40435060404",
-   "created_at": "2026-10-27T01:51:52Z",
-   "updated_at": "2026-10-27T02:55:03Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-27T02:15:22Z",
-     "completed_at": "2026-10-27T02:45:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40435060404/job/121968945556"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T02:15:30Z",
-     "completed_at": "2026-10-27T02:55:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40435060404/job/121968945585"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T02:14:44Z",
-     "completed_at": "2026-10-27T02:54:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40435060404/job/121968945589"
-    }
-   ]
-  },
-  {
-   "run_id": 40402291556,
-   "pr": 1333,
-   "commit": "4a9d6dd4b3c554c25e1df986911d70af2f7623df",
-   "branch": "promote-regmem-keep-loop-attrs",
-   "event": "pull_request",
-   "title": "[Bugfix][Dialect] Don't drop range(..., unroll=N) hints in fly-promote-regmem-to-vectorssa",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40402291556",
-   "created_at": "2026-10-26T21:11:51Z",
-   "updated_at": "2026-10-27T03:09:06Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-26T21:33:52Z",
-     "completed_at": "2026-10-26T23:01:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40402291556/job/121860578670",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T02:15:37Z",
-     "completed_at": "2026-10-27T03:09:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40402291556/job/121860578671"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-26T21:32:02Z",
-     "completed_at": "2026-10-26T21:56:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40402291556/job/121860578874"
-    }
-   ]
-  },
-  {
-   "run_id": 40395880271,
-   "pr": null,
-   "commit": "d6296731fed6e87355143c9aa0d013b8425a2cbd",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40395880271",
-   "created_at": "2026-10-26T20:28:02Z",
-   "updated_at": "2026-10-27T14:26:26Z",
-   "actor": "Qubitium",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T11:42:27Z",
-     "completed_at": "2026-10-27T12:57:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40395880271/job/122168518841",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T13:46:01Z",
-     "completed_at": "2026-10-27T14:26:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40395880271/job/122168518955"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T11:49:28Z",
-     "completed_at": "2026-10-27T12:08:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40395880271/job/122168518997"
-    }
-   ]
-  },
-  {
-   "run_id": 40362651138,
-   "pr": null,
-   "commit": "8fdabcb209990566e484b95c788921f6e6ce101a",
-   "branch": "fix/dlpack-layout-fill-retains-tensor",
-   "event": "pull_request",
-   "title": "[Fix] Don't retain the last tensor in layout-dynamic DLPack fills",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40362651138",
-   "created_at": "2026-10-26T16:48:31Z",
-   "updated_at": "2026-10-26T20:20:46Z",
-   "actor": "josh-schell-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-26T19:16:36Z",
-     "completed_at": "2026-10-26T20:20:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40362651138/job/121724838483"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-26T17:12:47Z",
-     "completed_at": "2026-10-26T17:46:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40362651138/job/121724838600"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-26T17:12:00Z",
-     "completed_at": "2026-10-26T17:40:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40362651138/job/121724838707"
-    }
-   ]
   }
  ]
 }
