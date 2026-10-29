@@ -20,10 +20,10 @@ def FlyKtrace_TokenType : FlyKtrace_TypeDef<"Token", "token"> {
     slot the START record occupies -- ranges pair by slot rather than by name,
     because N iterations of one loop share a name but must not share a pairing.
 
-    An inactive token carries UNPAIRED_SLOT, so whether a token records is part
-    of the loop-carried slot itself: across an `scf.for` that merges an inactive
-    initialiser with an in-body `range_start`, `range_stop` checks the value at
-    run time without a branch.
+    An inactive token carries 0, which no slot takes, so whether a token records
+    is part of the loop-carried slot itself: across an `scf.for` that merges an
+    inactive initialiser with an in-body `range_start`, `range_stop` checks the
+    value at run time without a branch.
 
     The ops that produce and consume it take `AnyType`, so this type is a
     convention the frontend follows rather than a verified constraint: the

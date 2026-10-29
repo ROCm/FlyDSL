@@ -230,6 +230,41 @@ def _branch_in_loop():
 
 
 @flyc.kernel
+def _pointer_if_kernel(a: fx.Tensor, b: fx.Tensor, out: fx.Tensor):
+    i = fx.thread_idx.x
+    p = fx.get_iter(a)
+    if i % fx.Int32(64) >= fx.Int32(32):
+        ktrace.mark("upper")
+        p = fx.get_iter(a) + i
+    else:
+        ktrace.mark("lower")
+        p = fx.get_iter(b) + i
+    out[i] = p[0]
+    ktrace.mark("after")
+
+
+@flyc.jit
+def _pointer_if(a: fx.Tensor, b: fx.Tensor, out: fx.Tensor):
+    _pointer_if_kernel(a, b, out).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+
+@flyc.kernel
+def _uneven_trips_kernel(lower_trips: fx.Int32, upper_trips: fx.Int32):
+    lane = fx.thread_idx.x % fx.Int32(64)
+    trips = lower_trips + (upper_trips - lower_trips) * (lane // fx.Int32(32))
+    stage = ktrace.inactive_token("stage")
+    for _ in fx.range(0, trips, 1):
+        ktrace.range_stop(stage)
+        stage = ktrace.range_start("stage")
+    ktrace.range_stop(stage)
+
+
+@flyc.jit
+def _uneven_trips(lower_trips: fx.Int32, upper_trips: fx.Int32):
+    _uneven_trips_kernel(lower_trips, upper_trips).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+
+@flyc.kernel
 def _inactive_kernel():
     ktrace.range_stop(ktrace.inactive_token("never"))
     ktrace.mark("only")
@@ -541,6 +576,30 @@ def test_lanes_that_record_apart_keep_their_records(launch, expected):
     records = sorted(trace._snapshot(), key=lambda r: r["slot"])
     names = {v: k for k, v in trace._names.items()}
     assert [names[r["event_id"]] for r in records] == expected, "one group of lanes overwrote the other's records"
+
+
+def test_pointer_valued_branches_keep_both_records():
+    a = torch.full((64,), 1.0, device="cuda")
+    b = torch.full((64,), 2.0, device="cuda")
+    out = torch.zeros(64, device="cuda")
+    with ktrace.capture("pointer_if") as trace:
+        _pointer_if(a, b, out)
+    records = sorted(trace._snapshot(), key=lambda r: r["slot"])
+    names = {v: k for k, v in trace._names.items()}
+    order = [names[r["event_id"]] for r in records]
+    assert order == ["upper", "lower", "after"], "one branch overwrote the other's record"
+    torch.testing.assert_close(out, torch.where(torch.arange(64, device="cuda") >= 32, a, b))
+
+
+@pytest.mark.parametrize("lower_trips, upper_trips", [(0, 1), (1, 0), (1, 3), (3, 1)])
+def test_lanes_that_leave_a_loop_apart_close_every_range_once(lower_trips, upper_trips):
+    with ktrace.capture("uneven") as trace:
+        _uneven_trips(lower_trips, upper_trips)
+    records = trace._snapshot()
+    starts = sorted(r["slot"] for r in records if r["kind"] == ktrace.KIND_RANGE_START)
+    stops = sorted(r["start_slot"] for r in records if r["kind"] == ktrace.KIND_RANGE_STOP)
+    assert len(starts) == max(lower_trips, upper_trips)
+    assert stops == starts, "a range was closed twice or left open"
 
 
 def test_an_inactive_token_stop_takes_no_slot():

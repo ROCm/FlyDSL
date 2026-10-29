@@ -15,14 +15,18 @@ module attributes {gpu.container_module} {
       // CHECK-NOT: unrealized_conversion_cast
 
       // CHECK: %[[COUNT:.*]] = llvm.alloca
-      // CHECK: %[[SEED:.*]] = llvm.mlir.constant(-1 : i32)
+      // An inactive token is 0, which no slot takes.
+      // CHECK: arith.constant 4 : index
+      // CHECK-NEXT: %[[SEED:.*]] = llvm.mlir.constant(0 : i32)
       %init = fly_ktrace.inactive_token -> !fly_ktrace.token
 
       // Each iteration advances the wave's count, so its records take fresh slots. The first
-      // iteration's stop sees the seed, which takes no slot and stores out of bounds.
+      // iteration's stop sees the seed, which takes no slot and stores out of bounds. Lanes that
+      // left the loop earlier hold older tokens, so the stop takes the highest one.
       // CHECK: scf.for {{.*}} iter_args(%[[TOK:.*]] = %[[SEED]]) -> (i32)
       // CHECK-NOT: scf.if
-      // CHECK: %[[START:.*]] = rocdl.readfirstlane %[[TOK]]
+      // CHECK: %[[LATEST:.*]] = llvm.call_intrinsic "llvm.amdgcn.wave.reduce.umax"(%[[TOK]]
+      // CHECK-NEXT: %[[START:.*]] = rocdl.readfirstlane %[[LATEST]]
       // CHECK: %[[ACTIVE:.*]] = arith.cmpi ne, %[[START]], %{{.*}} : i32
       // CHECK: llvm.load %[[COUNT]]
       // CHECK: arith.extui %[[ACTIVE]] : i1 to i32

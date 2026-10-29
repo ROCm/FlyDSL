@@ -99,12 +99,13 @@ def FlyKtrace_RangeStopOp : FlyKtrace_Op<"range_stop"> {
   let summary = "Close the range opened by a token.";
   let description = [{
     The token operand becomes the record's start_slot field, which is what the
-    host pairs on. It must execute under the same guard as its `range_start` --
-    see that op.
+    host pairs on. The lanes that reach a stop can hold different tokens, as after
+    a loop they leave at different iterations: the stop closes the latest range
+    any of them started, which is the highest slot they hold.
 
-    An inactive token holds UNPAIRED_SLOT, and its stop records nothing: the
-    lowering compares the slot against that sentinel instead of branching, so a
-    loop-carried token adds no control flow to the loop.
+    An inactive token is 0, below every slot, and a stop whose lanes all hold it
+    records nothing: the lowering compares the slot against 0 instead of
+    branching, so a loop-carried token adds no control flow to the loop.
   }];
 
   let arguments = (ins AnyType:$token, StrAttr:$event_name,
@@ -132,8 +133,9 @@ def FlyKtrace_InactiveTokenOp : FlyKtrace_Op<"inactive_token", [Pure]> {
     range_stop(stage)
     ```
 
-    The lowering gives it UNPAIRED_SLOT, a value no record's slot can take, and
-    `range_stop` on that value writes nothing and takes no slot.
+    The lowering gives it 0, which no record's slot can take, and `range_stop`
+    writes nothing and takes no slot when every lane that reaches it holds that
+    value.
   }];
 
   let arguments = (ins);

@@ -8,7 +8,8 @@ def FlyKtraceToROCDLConversionPass : Pass<"convert-fly-ktrace-to-rocdl"> {
   let description = [{
     Rewrites each `fly_ktrace.*` op into the timestamp read and the record stores
     that write a trace record, behind a prologue that claims the wave's slots from
-    its partition, leaving behind only `llvm.*`, `rocdl.*`, `scf.*` and `arith.*` ops.
+    its partition, leaving behind only `llvm.*`, `rocdl.*`, `scf.*`, `arith.*` and
+    `ub.poison` ops.
     Events carry no branch and no atomic: a wave's event count lives in a register,
     and stores the wave may not make are dropped by its buffer descriptor's bound.
     After every region that records, the wave agrees on its count, and an `scf.if`
@@ -28,6 +29,7 @@ def FlyKtraceToROCDLConversionPass : Pass<"convert-fly-ktrace-to-rocdl"> {
     "scf::SCFDialect",
     "LLVM::LLVMDialect",
     "ROCDL::ROCDLDialect",
-    "gpu::GPUDialect"
+    "gpu::GPUDialect",
+    "ub::UBDialect"
   ];
 }

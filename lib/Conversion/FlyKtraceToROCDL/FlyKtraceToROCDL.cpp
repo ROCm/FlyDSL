@@ -7,6 +7,7 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -36,7 +37,9 @@ constexpr uint32_t kKindRangePop = 2;
 constexpr uint32_t kKindRangeStart = 3;
 constexpr uint32_t kKindRangeStop = 4;
 
-constexpr int64_t kUnpairedSlot = 0xFFFFFFFF;
+// No slot is 0, because the buffer header comes first, so the highest token the lanes of a wave
+// hold is the latest range any of them started, and it is this one only if none did.
+constexpr int64_t kInactiveToken = 0;
 
 constexpr int64_t kDefaultCapacitySlots = (64 << 20) / kRecordBytes - 1;
 
@@ -102,12 +105,11 @@ Value firstActiveLane(OpBuilder &b, Location loc) {
   return LLVM::TruncOp::create(b, loc, b.getI32Type(), cttz);
 }
 
-// The highest count any active lane holds. Every event after a lane-divergent branch therefore
-// takes a slot past the ones that branch used. For a wave-uniform count this is a copy.
-Value waveMax(OpBuilder &b, Location loc, Value count) {
+// The highest value any active lane holds. For a wave-uniform value this is a copy.
+Value waveMax(OpBuilder &b, Location loc, Value value) {
   Type i32 = b.getI32Type();
   Value max =
-      callIntrinsic(b, loc, "llvm.amdgcn.wave.reduce.umax", i32, {count, i32Const(b, loc, 0)});
+      callIntrinsic(b, loc, "llvm.amdgcn.wave.reduce.umax", i32, {value, i32Const(b, loc, 0)});
   return ROCDL::ReadfirstlaneOp::create(b, loc, i32, max);
 }
 
@@ -392,20 +394,12 @@ bool recordsEvents(Region &region) {
       .wasInterrupted();
 }
 
-// A value for lanes that never read it; null if the type has no constant to stand in.
-Value placeholder(OpBuilder &b, Location loc, Type type) {
-  if (auto zero = dyn_cast_or_null<TypedAttr>(b.getZeroAttr(type)))
-    return arith::ConstantOp::create(b, loc, zero);
-  if (LLVM::isCompatibleType(type))
-    return LLVM::ZeroOp::create(b, loc, type);
-  return Value();
-}
-
 // The lanes of a wave that diverge at an scf.if run both branches, one after the other, and a
 // lane's count only advances in the branch it takes, so both branches would number their events
 // from the same count. Such an if becomes two: the first runs the then branch, and the second
 // forwards the first's results to those lanes and runs the else branch, so the wave can agree on
-// its count in between (syncCountAfterRegions).
+// its count in between (syncCountAfterRegions). The lanes that take the else branch never read
+// the first if's results, so it yields them poison, which every result type has.
 void splitIfsThatRecordOnBothSides(gpu::GPUFuncOp kernel) {
   SmallVector<scf::IfOp> ifs;
   kernel.walk([&](scf::IfOp op) {
@@ -418,17 +412,10 @@ void splitIfsThatRecordOnBothSides(gpu::GPUFuncOp kernel) {
     auto first = scf::IfOp::create(b, loc, op.getResultTypes(), op.getCondition(),
                                    /*addThenBlock=*/true, /*addElseBlock=*/true);
     b.setInsertionPointToStart(first.elseBlock());
-    SmallVector<Value> unused;
+    SmallVector<Value> unread;
     for (Type type : op.getResultTypes())
-      unused.push_back(placeholder(b, loc, type));
-    if (llvm::is_contained(unused, Value())) {
-      first.erase();
-      op.emitWarning("ktrace: both branches of this scf.if record events, but one of its result "
-                     "types has no placeholder constant, so the branches of a lane-divergent "
-                     "wave may overwrite each other's records");
-      continue;
-    }
-    scf::YieldOp::create(b, loc, unused);
+      unread.push_back(ub::PoisonOp::create(b, loc, type));
+    scf::YieldOp::create(b, loc, unread);
     first.getThenRegion().takeBody(op.getThenRegion());
 
     b.setInsertionPointAfter(first);
@@ -483,10 +470,12 @@ void expandEvent(Operation *op, const EventShape &shape, const KernelTraceState 
   if (shape.startSlot) {
     assert(shape.startSlot.getType() == i32 &&
            "range_stop's token must already be lowered to its i32 slot");
-    startSlot = ROCDL::ReadfirstlaneOp::create(b, loc, i32, shape.startSlot);
-    // The stop of an inactive token takes no slot and its stores go out of bounds.
+    // The lanes that reach a stop can hold different tokens, and some none, as after a loop they
+    // leave at different iterations. The stop closes the latest range they started; if none of
+    // them started one, it takes no slot and its stores go out of bounds.
+    startSlot = waveMax(b, loc, shape.startSlot);
     active = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, startSlot,
-                                   i32Const(b, loc, kUnpairedSlot));
+                                   i32Const(b, loc, kInactiveToken));
   }
 
   Value issued = waveMax(b, loc, LLVM::LoadOp::create(b, loc, i32, st.counter));
@@ -690,7 +679,7 @@ struct FlyKtraceToROCDLConversionPass
       for (Operation *op : events) {
         if (isa<InactiveTokenOp>(op)) {
           OpBuilder b(op);
-          Value seed = i32Const(b, op->getLoc(), kUnpairedSlot);
+          Value seed = i32Const(b, op->getLoc(), kInactiveToken);
           op->getResult(0).replaceAllUsesWith(seed);
           op->erase();
           continue;

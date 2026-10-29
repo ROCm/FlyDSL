@@ -23,7 +23,8 @@ module attributes {gpu.container_module} {
       // CHECK: %[[TOKEN:.*]] = arith.addi %[[REGION]], %[[IN_REGION]] : i32
       %t = fly_ktrace.range_start "phase" -> !fly_ktrace.token
 
-      // CHECK: %[[START:.*]] = rocdl.readfirstlane %[[TOKEN]] : i32
+      // CHECK: %[[LATEST:.*]] = llvm.call_intrinsic "llvm.amdgcn.wave.reduce.umax"(%[[TOKEN]]
+      // CHECK-NEXT: %[[START:.*]] = rocdl.readfirstlane %[[LATEST]] : i32
       // CHECK: llvm.mlir.constant(67108865 : i32)
       // CHECK: %[[LANE3:.*]] = llvm.mlir.constant(3 : i32)
       // CHECK: llvm.insertelement %[[START]], %{{.*}}[%[[LANE3]] : i32] : vector<4xi32>

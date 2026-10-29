@@ -81,7 +81,9 @@ python examples/07-ktrace_wave_timeline.py --layers 3
 
 Use `with ktrace.range(...)` when both endpoints fit in one source block.
 `range_push` and `range_pop` pair in LIFO order along the executed path. A token
-range pairs on its token, which every lane of the wave holds.
+range pairs on its token. The lanes that reach a `range_stop` can hold different
+tokens, as after a loop they leave at different iterations: the stop closes the
+latest range any of them started, and records nothing if none did.
 
 A wave numbers its events in a register. An event in a lane-divergent branch
 takes the wave's next slot. After every branch or loop that records, the lanes of

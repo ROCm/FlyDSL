@@ -10,13 +10,13 @@ module attributes {gpu.container_module} {
     gpu.func @both_sides(%cond: i1, %a: i32, %b: i32, %buf: !fly.ptr<i8, global>) kernel {
       // CHECK: %[[COUNT:.*]] = llvm.alloca {{.*}} x i32
 
-      // The then branch runs first; the lanes that take the else branch get a zero they never read.
+      // The then branch runs first; the lanes that take the else branch get poison they never read.
       // CHECK: %[[FIRST:.*]] = scf.if %[[COND]] -> (i32) {
       // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"
       // CHECK: scf.yield %[[A]] : i32
       // CHECK-NEXT: } else {
-      // CHECK-NEXT: %[[ZERO:.*]] = arith.constant 0 : i32
-      // CHECK-NEXT: scf.yield %[[ZERO]] : i32
+      // CHECK-NEXT: %[[UNREAD:.*]] = ub.poison : i32
+      // CHECK-NEXT: scf.yield %[[UNREAD]] : i32
       // CHECK-NEXT: }
 
       // The wave agrees on its count before the else branch numbers its events.
@@ -46,6 +46,37 @@ module attributes {gpu.container_module} {
       %sum = arith.addi %r, %r : i32
       %wide = arith.extui %sum : i32 to i64
       fly_ktrace.mark "after" payload %wide : i64
+      gpu.return
+    }
+
+    // Results without a constant, such as the pointer each branch of a tensor-valued if
+    // computes, are split the same way.
+    // CHECK-LABEL: gpu.func @pointer_results
+    // CHECK-SAME: (%[[COND:[^:]+]]: i1, %[[A:[^:]+]]: !fly.ptr<f32, global>, %[[B:[^:]+]]: !fly.ptr<f32, global>
+    gpu.func @pointer_results(%cond: i1, %a: !fly.ptr<f32, global>, %b: !fly.ptr<f32, global>,
+                              %buf: !fly.ptr<i8, global>) kernel {
+      // CHECK: %[[FIRST:.*]] = scf.if %[[COND]] -> (!fly.ptr<f32, global>) {
+      // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"
+      // CHECK: scf.yield %[[A]] : !fly.ptr<f32, global>
+      // CHECK-NEXT: } else {
+      // CHECK-NEXT: %[[UNREAD:.*]] = ub.poison : !fly.ptr<f32, global>
+      // CHECK-NEXT: scf.yield %[[UNREAD]] : !fly.ptr<f32, global>
+      // CHECK-NEXT: }
+      // CHECK: llvm.call_intrinsic "llvm.amdgcn.wave.reduce.umax"
+      // CHECK: %[[SECOND:.*]] = scf.if %[[COND]] -> (!fly.ptr<f32, global>) {
+      // CHECK-NEXT: scf.yield %[[FIRST]] : !fly.ptr<f32, global>
+      // CHECK-NEXT: } else {
+      // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"
+      // CHECK: scf.yield %[[B]] : !fly.ptr<f32, global>
+      // CHECK: fly.ptr.load(%[[SECOND]])
+      %p = scf.if %cond -> (!fly.ptr<f32, global>) {
+        fly_ktrace.mark "upper"
+        scf.yield %a : !fly.ptr<f32, global>
+      } else {
+        fly_ktrace.mark "lower"
+        scf.yield %b : !fly.ptr<f32, global>
+      }
+      %v = fly.ptr.load(%p) : (!fly.ptr<f32, global>) -> f32
       gpu.return
     }
 
