@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T08:05:04Z",
+ "updated": "2026-10-29T08:14:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40839915872,
+   "pr": 1336,
+   "commit": "26c8f2bb094aba9c9641bf58853fc2996db5b075",
+   "branch": "zhimding/ktrace_low_overhead_1027",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839915872",
+   "created_at": "2026-10-29T08:07:38Z",
+   "updated_at": "2026-10-29T08:12:40Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
   {
    "run_id": 40839199904,
    "pr": 1238,
@@ -10,11 +25,11 @@
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
    "title": "Migrate kernels tiled tdm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904",
    "created_at": "2026-10-29T08:01:22Z",
-   "updated_at": "2026-10-29T08:03:02Z",
+   "updated_at": "2026-10-29T08:03:08Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
    "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40836241717",
    "created_at": "2026-10-29T07:33:56Z",
-   "updated_at": "2026-10-29T07:35:27Z",
+   "updated_at": "2026-10-29T08:12:40Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -55,13 +70,41 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901",
    "created_at": "2026-10-29T07:29:53Z",
-   "updated_at": "2026-10-29T07:45:15Z",
+   "updated_at": "2026-10-29T08:05:05Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-29T08:07:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569928"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-29T08:05:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569948"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-29T08:05:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569987"
+    }
+   ]
   },
   {
    "run_id": 40833810850,
@@ -1855,21 +1898,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40445723484/job/122001289434"
     }
    ]
-  },
-  {
-   "run_id": 40441116437,
-   "pr": null,
-   "commit": "3b3290739a9cea4c046848f09608ab68a949c245",
-   "branch": "fix/ktrace-low-perturbation",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Reduce KTRACE overhead from about 30% to under 2% on MI355X GEMMs",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40441116437",
-   "created_at": "2026-10-27T02:54:16Z",
-   "updated_at": "2026-10-27T02:55:40Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
