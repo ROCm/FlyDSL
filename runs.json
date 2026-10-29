@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-29T18:03:00Z",
+ "updated": "2026-10-29T18:09:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40926988002,
+   "pr": 1336,
+   "commit": "2586d18a3995c858291b0dbcd69e08d1bb8f5513",
+   "branch": "zhimding/ktrace_low_overhead_1027",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40926988002",
+   "created_at": "2026-10-29T18:02:15Z",
+   "updated_at": "2026-10-29T18:07:44Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 40926964338,
+   "pr": 1343,
+   "commit": "63db2605de13dc1f89ed396006f6a0b6ddad8907",
+   "branch": "fix/debug-call-chain-scopes",
+   "event": "pull_request",
+   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40926964338",
+   "created_at": "2026-10-29T18:02:06Z",
+   "updated_at": "2026-10-29T18:02:06Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 40926789877,
    "pr": 1343,
@@ -239,11 +269,11 @@
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
    "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886",
    "created_at": "2026-10-29T08:30:52Z",
-   "updated_at": "2026-10-29T17:11:35Z",
+   "updated_at": "2026-10-29T18:07:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -258,19 +288,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-29T17:11:35Z",
-     "completed_at": null,
+     "completed_at": "2026-10-29T18:02:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886/job/123606600465"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-29T17:12:28Z",
-     "completed_at": null,
+     "completed_at": "2026-10-29T18:07:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886/job/123606600559"
     }
    ]
@@ -740,7 +770,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608",
    "created_at": "2026-10-28T21:00:24Z",
-   "updated_at": "2026-10-29T18:01:19Z",
+   "updated_at": "2026-10-29T18:02:59Z",
    "actor": "hanli0612",
    "jobs": []
   },
@@ -1796,67 +1826,6 @@
    "updated_at": "2026-10-27T11:33:24Z",
    "actor": "RElbers",
    "jobs": []
-  },
-  {
-   "run_id": 40486962233,
-   "pr": null,
-   "commit": "851179e81d8a7501332991e4a36132da25ba3445",
-   "branch": "location-chain-typed-bindings",
-   "event": "pull_request",
-   "title": "[Bugfix] Show the user's source line in DSL compile errors",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40486962233",
-   "created_at": "2026-10-27T10:14:43Z",
-   "updated_at": "2026-10-27T11:17:35Z",
-   "actor": "RElbers",
-   "jobs": []
-  },
-  {
-   "run_id": 40485665639,
-   "pr": 1336,
-   "commit": "430586121a989b05c8b28da1d7e108bb3fd1a581",
-   "branch": "zhimding/ktrace_low_overhead_1027",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40485665639",
-   "created_at": "2026-10-27T10:04:37Z",
-   "updated_at": "2026-10-27T18:01:14Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T11:47:13Z",
-     "completed_at": "2026-10-27T12:52:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40485665639/job/122170573154",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T12:34:31Z",
-     "completed_at": "2026-10-27T12:58:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40485665639/job/122170573210"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T16:12:33Z",
-     "completed_at": "2026-10-27T18:01:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40485665639/job/122170573266"
-    }
-   ]
   }
  ]
 }
