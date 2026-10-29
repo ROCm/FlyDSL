@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T08:14:44Z",
+ "updated": "2026-10-29T08:32:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40842670886,
+   "pr": 1336,
+   "commit": "2586d18a3995c858291b0dbcd69e08d1bb8f5513",
+   "branch": "zhimding/ktrace_low_overhead_1027",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886",
+   "created_at": "2026-10-29T08:30:52Z",
+   "updated_at": "2026-10-29T08:30:54Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 40839915872,
    "pr": 1336,
@@ -10,11 +25,11 @@
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
    "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839915872",
    "created_at": "2026-10-29T08:07:38Z",
-   "updated_at": "2026-10-29T08:12:40Z",
+   "updated_at": "2026-10-29T08:30:54Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "pr/feat-core-layout-replacement",
    "event": "pull_request",
    "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943",
    "created_at": "2026-10-29T07:42:56Z",
-   "updated_at": "2026-10-29T07:44:28Z",
+   "updated_at": "2026-10-29T08:20:54Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1850,52 +1865,6 @@
      "started_at": "2026-10-27T06:33:21Z",
      "completed_at": "2026-10-27T07:02:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40459654153/job/122047788247"
-    }
-   ]
-  },
-  {
-   "run_id": 40445723484,
-   "pr": null,
-   "commit": "6904258260cf098522bca50efe3d69c801837d76",
-   "branch": "fix/ktrace-low-perturbation",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Reduce KTRACE overhead from about 30% to under 2% on MI355X GEMMs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40445723484",
-   "created_at": "2026-10-27T03:43:09Z",
-   "updated_at": "2026-10-27T06:11:50Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T04:00:21Z",
-     "completed_at": "2026-10-27T05:08:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40445723484/job/122001289350",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T03:59:34Z",
-     "completed_at": "2026-10-27T06:11:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40445723484/job/122001289408"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T04:00:03Z",
-     "completed_at": "2026-10-27T04:30:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40445723484/job/122001289434"
     }
    ]
   }
