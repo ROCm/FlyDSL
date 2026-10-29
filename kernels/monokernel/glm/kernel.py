@@ -1154,6 +1154,41 @@ def build_glm5_monokernel(
                 gpu.barrier()
                 return tots
 
+            def block_sums_f64(vs):
+                """Retain precision before the index query's BF16 rounding boundary."""
+                ws = []
+                for v in vs:
+                    for sh in range_constexpr(6):
+                        bits = v.bitcast(fx.Int64)
+                        lo = _xshfl(fx.Int32(bits), 32 >> sh)
+                        hi = _xshfl(fx.Int32(bits >> 32), 32 >> sh)
+                        other = (fx.Int64(fx.Uint32(lo)) | (fx.Int64(hi) << 32)).bitcast(fx.Float64)
+                        v = v + other
+                    ws.append(v)
+                # Some row layouts only promise four-byte alignment for red.
+                # Exchange each double as two words rather than recasting it.
+                if lane == 0:
+                    for i in range_constexpr(len(vs)):
+                        bits = ws[i].bitcast(fx.Int64)
+                        index = 2 * (i * WAVES + wave)
+                        lds_st(red, index, fx.Int32(bits).bitcast(fx.Float32))
+                        lds_st(red, index + 1, fx.Int32(bits >> 32).bitcast(fx.Float32))
+                gpu.barrier()
+
+                def load_sum(index):
+                    lo = lds_ld(red, index * 2).bitcast(fx.Int32)
+                    hi = lds_ld(red, index * 2 + 1).bitcast(fx.Int32)
+                    return (fx.Int64(fx.Uint32(lo)) | (fx.Int64(hi) << 32)).bitcast(fx.Float64)
+
+                tots = []
+                for i in range_constexpr(len(vs)):
+                    t = load_sum(i * WAVES)
+                    for w in range_constexpr(1, WAVES):
+                        t = t + load_sum(i * WAVES + w)
+                    tots.append(t)
+                gpu.barrier()
+                return tots
+
             def block_maxs(vs):
                 """Block-wide maxima of several per-thread values with one LDS exchange."""
                 ws = [wave_max(v) for v in vs]
@@ -1680,7 +1715,7 @@ def build_glm5_monokernel(
                                 )
                 return scales
 
-            def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S):
+            def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S, precise=False):
                 """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
                 ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
                 ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm."""
@@ -1689,26 +1724,39 @@ def build_glm5_monokernel(
                 gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
                 sss = []
                 for s in range_constexpr(count):
-                    ss = fx.Float32(0.0)
+                    ss = fx.Float64(0.0) if const_expr(precise) else fx.Float32(0.0)
                     for i in range_constexpr(per):
                         for a in vals[s * per + i]:
+                            if const_expr(precise):
+                                a = fx.Float64(a)
                             ss = ss + a * a
                     sss.append(ss)
                 if const_expr(mark is not None):
                     stamp(mark[0], mark[1], 6)
-                rstds = [_rsq(tot * (1.0 / n) + EPS) for tot in block_sums(sss)]
+                if const_expr(precise):
+                    rstds = [
+                        fx.Float64(1.0) / fx.sqrt(tot * (1.0 / n) + EPS, fastmath="none") for tot in block_sums_f64(sss)
+                    ]
+                else:
+                    rstds = [_rsq(tot * (1.0 / n) + EPS) for tot in block_sums(sss)]
                 if const_expr(mark is not None):
                     stamp(mark[0], mark[1], 7)
                 for s in range_constexpr(count):
                     for i in range_constexpr(per):
                         a = vals[s * per + i]
                         for j in range_constexpr(2):
+                            if const_expr(precise):
+                                v0 = fx.Float32(fx.Float64(a[2 * j]) * rstds[s] * fx.Float64(gs[i][2 * j]))
+                                v1 = fx.Float32(fx.Float64(a[2 * j + 1]) * rstds[s] * fx.Float64(gs[i][2 * j + 1]))
+                            else:
+                                v0 = a[2 * j] * rstds[s] * gs[i][2 * j]
+                                v1 = a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]
                             lds_st(
                                 xs,
                                 (s * n + ks[i]) // 2 + j,
                                 bf16_pair(
-                                    a[2 * j] * rstds[s] * gs[i][2 * j],
-                                    a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1],
+                                    v0,
+                                    v1,
                                 ),
                             )
                 return rstds
@@ -2628,7 +2676,9 @@ def build_glm5_monokernel(
                     def ld_qa_one(sks):
                         return ld_qa([(s_norm, k) for _, k in sks])
 
-                    stage_x_rmsnorm(ld_qa_one, Q_LORA, g_q, count=1)
+                    # FP4 amplifies a one-ULP normalized query difference into a
+                    # different quantized value. Keep this small reduction precise.
+                    stage_x_rmsnorm(ld_qa_one, Q_LORA, g_q, count=1, precise=indexer_quant)
                     stamp("q_norm", s_norm, 2)
                     gpu.barrier()
                     k = tid * 4
@@ -2692,7 +2742,7 @@ def build_glm5_monokernel(
                         # Buffer offsets are 32-bit bytes. Long paged caches can
                         # exceed 4 GiB; rebase the descriptor at this uniform row.
                         store_slot = slot
-                        if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        if const_expr(use_atom_kv_cache):
                             cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
                             r_kv = _rsrc(kv_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
                             r_pe = _rsrc(pe_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
@@ -5189,7 +5239,7 @@ def build_glm5_monokernel(
                     def gather_old_kv():
                         """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                         krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
-                        if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        if const_expr(use_atom_kv_cache):
                             # Each gathered row is wave-uniform; retain two independent
                             # row loads while putting its full byte address in the base.
                             cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
@@ -5643,7 +5693,7 @@ def build_glm5_monokernel(
                     def gather_old_kv():
                         """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                         krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
-                        if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        if const_expr(use_atom_kv_cache):
                             # Each gathered row is wave-uniform; retain two independent
                             # row loads while putting its full byte address in the base.
                             cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
@@ -8588,6 +8638,11 @@ def build_glm5_monokernel(
                         overwritten_mask = fx.Int64(rocdl.ballot(T.i64, overwritten))
                         commit_owner = (commit_slot >= 0) & (overwritten_mask == 0)
                         if commit_owner:
+                            # Buffer instructions use a 32-bit byte offset. Rebase
+                            # each cache row with 64-bit arithmetic before storing.
+                            cache_element_bytes = 1 if const_expr(cache_fp8) else 2
+                            commit_kv = kv_cache + fx.Int64(commit_slot) * (QK_DIM * cache_element_bytes)
+                            commit_pe = pe_cache + fx.Int64(commit_slot) * (QK_DIM * cache_element_bytes)
                             committed_kv = getf(mb("kvnew"), bid * KV_LORA + tid)
                             if const_expr(cache_fp8):
                                 kv_pair8 = fx.Int32(
@@ -8599,13 +8654,11 @@ def build_glm5_monokernel(
                                 if lane % 4 == 0:
                                     bo.buffer_store(
                                         kv_pair8 | (kv_upper8 << 16),
-                                        _rsrc(kv_cache),
-                                        commit_slot * (QK_DIM // 4) + tid // 4,
+                                        _rsrc(commit_kv),
+                                        tid // 4,
                                     )
                             else:
-                                bo.buffer_store(
-                                    committed_kv.to(fx.BFloat16), _rsrc(kv_cache), commit_slot * QK_DIM + tid
-                                )
+                                bo.buffer_store(committed_kv.to(fx.BFloat16), _rsrc(commit_kv), tid)
                             if tid < PE_DIM // 2:
                                 committed_pe0, committed_pe1 = get2(mb("penew"), bid * PE_DIM + tid * 2)
                                 if const_expr(cache_fp8):
@@ -8616,16 +8669,16 @@ def build_glm5_monokernel(
                                     if lane % 2 == 0:
                                         bo.buffer_store(
                                             pe_pair8 | (pe_upper8 << 16),
-                                            _rsrc(pe_cache),
-                                            commit_slot * (QK_DIM // 4) + KV_LORA // 4 + tid // 2,
+                                            _rsrc(commit_pe),
+                                            KV_LORA // 4 + tid // 2,
                                         )
                                 else:
                                     bo.buffer_store(
                                         fx.Vector.from_elements([committed_pe0, committed_pe1], fx.Float32).to(
                                             fx.BFloat16
                                         ),
-                                        _rsrc(pe_cache),
-                                        commit_slot * QK_DIM + KV_LORA + tid * 2,
+                                        _rsrc(commit_pe),
+                                        KV_LORA + tid * 2,
                                     )
 
             # These Python helpers emit IR into the same kernel; they do not launch kernels.
