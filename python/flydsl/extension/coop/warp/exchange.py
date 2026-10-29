@@ -74,6 +74,9 @@ _LAYOUT_CACHE = {}
 
 class _WarpExchangeMeta(WarpPrimitiveMeta):
     def __getitem__(cls, params):
+        # Params are (dtype, width, count[, algorithm]) or
+        # (dtype, src_layout, dst_layout[, algorithm]).
+        # Handle the layout form here. The former is delegated to the base class.
         params = params if isinstance(params, tuple) else (params,)
         if not any(isinstance(param, Layout) for param in params[1:3]):
             return super().__getitem__(params)
@@ -86,14 +89,14 @@ class _WarpExchangeMeta(WarpPrimitiveMeta):
         algorithm = params[3] if len(params) == 4 else cls._default_algorithm
         if algorithm is WarpExchangeAlgorithm.SHUFFLE:
             raise ValueError("Layout scatter supports only Shared")
-        # Reuse the existing dtype, width, item-count and policy validation/cache.
         base = super().__getitem__((dtype, width, count, algorithm))
-        _scatter_layout_inverse(src, width, count, "src_layout")
-        inverse = _scatter_layout_inverse(dst, width, count, "dst_layout")
+        _scatter_layout_shape(dst, "dst_layout")
         src_spec = src.shape.unpack(), src.stride.unpack()
         dst_spec = dst.shape.unpack(), dst.stride.unpack()
         key = (base, src_spec, dst_spec)
         if key not in _LAYOUT_CACHE:
+            _scatter_layout_inverse(src, width, count, "src_layout")
+            inverse = _scatter_layout_inverse(dst, width, count, "dst_layout")
             rank_layout = composition(inverse, src)
             specialized = type(
                 f"{cls.__name__}[{dtype.__name__}, {src_spec}, {dst_spec}, {algorithm.name}]",
@@ -104,8 +107,6 @@ class _WarpExchangeMeta(WarpPrimitiveMeta):
                     _rank_layout_spec=(rank_layout.shape.unpack(), rank_layout.stride.unpack()),
                 ),
             )
-            # Layout planning precedes scratch construction. Cache only immutable
-            # Python descriptors, never MLIR values owned by a compilation context.
             specialized.SharedStorage = specialized._make_storage()
             _LAYOUT_CACHE[key] = specialized
         return _LAYOUT_CACHE[key]
@@ -364,14 +365,6 @@ class WarpExchange(WarpPrimitive, metaclass=_WarpExchangeMeta):
             fx.barrier()  # Finish reading scratch before reusing it.
             shared_y = fx.coop.WarpExchange[fx.Int32, 4, 2, fx.coop.WarpExchangeAlgorithm.Shared].scatter_to_striped(x, ranks, storage=storage)
             fx.barrier()  # Finish reading scratch before it is reused.
-
-            # One wave64 block: MFMA rows -> four consecutive output columns.
-            src = fx.make_layout(((16, 4), 4), ((1, 64), 16))
-            dst = fx.make_layout((64, 4), (4, 1))
-            P = fx.coop.WarpExchange[fx.Float32, src, dst]
-            storage = fx.SharedAllocator().allocate(P.SharedStorage).peek()
-            y = P.scatter_to_striped(x, storage=storage)
-            fx.barrier()  # Before reusing storage.
         """
         cls._check()
         algorithm = cls.algorithm

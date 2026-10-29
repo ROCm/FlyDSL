@@ -201,7 +201,7 @@ def test_scatter_layout_specialization():
 @pytest.mark.l0_backend_agnostic
 @pytest.mark.parametrize("side", [0, 1])
 @pytest.mark.parametrize("case", ["rank", "shape", "dynamic", "overlap", "holes", "type"])
-def test_scatter_layout_specialization_diagnostics(insert_point, side, case):
+def test_scatter_layout_specialization_diagnostics(side, case):
     valid = fx.make_layout((8, 4), (4, 1))
     invalid = {
         "rank": lambda: fx.make_layout(32, 1),
