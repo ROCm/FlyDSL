@@ -93,7 +93,11 @@ def run_rank(
     model_tp=None,
     vary_expert_scales=False,
 ):
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     if cur_pos < 0 or cur_pos + S > max_seq:
         raise ValueError("positions must fit max_seq")
@@ -300,7 +304,11 @@ def bench_rank(
     model_tp=None,
 ):
     """HIP-graph replay of ``GLM5_LAUNCHES_PER_STEP`` layers; returns us per layer."""
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     if cur_pos < 0 or cur_pos + S > max_seq:
         raise ValueError("positions must fit max_seq")
@@ -350,24 +358,6 @@ def bench_rank(
 
     if npes > 1:
         dist.barrier()
-    if os.environ.get("MLA_MOE_TIMELINE"):
-        top = Glm5MonoKernel(
-            W,
-            S,
-            rank=rank,
-            npes=npes,
-            group=group,
-            with_indexer=with_indexer,
-            index_max_seq=max_seq,
-            indexer_cp=indexer_cp,
-            timeline=True,
-        )
-        for _ in range(3):
-            top.forward(h, pos_t, kv, pe, indices, cos, sin, x_out=x, index_cache=index_cache)
-        torch.cuda.synchronize()
-        if rank == 0:
-            print(top.timeline_report(), flush=True)
-        top.close()
     # a HIP graph of LAYERS layer launches + one step bump, like a decode step
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -624,7 +614,11 @@ def test_reference_default_dtype():
 
 def test_router_preserves_close_scores():
     """A higher expert score must win even when its lead is below 256 FP32 ULPs."""
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     dev = torch.device("cuda", 0)
     W = make_weights(0, device=dev)

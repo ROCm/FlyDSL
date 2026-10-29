@@ -26,6 +26,8 @@ import torch.multiprocessing as mp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from glm_observer import attach_observer
+
 from kernels.monokernel.config import (
     AttentionWeight,
     KvCacheLayout,
@@ -38,6 +40,8 @@ from kernels.monokernel.glm.reference import indexer_golden
 from kernels.monokernel.packing import pack_ptpc_fp8
 from kernels.monokernel.reference import attention_mats, scale_shape
 from kernels.monokernel.weights import LayerWeights
+
+attach_observer(Glm5MonoKernel)
 
 
 def make_weights(rank, npes=4):
@@ -160,7 +164,10 @@ def worker(rank, port, args):
     for S in args.samples:
         if rank == 0:
             print(f"starting TP{npes} S={S} native_fp4_mfma={native} fused_indexer={args.fused_indexer}", flush=True)
-        op = make_op(S, launches_per_step=16, timeline=args.debug_progress)
+        op = make_op(
+            S,
+            launches_per_step=16,
+        )
         h = torch.randn(
             (S, W.config.hidden),
             dtype=torch.bfloat16,
@@ -238,10 +245,8 @@ def worker(rank, port, args):
                 block_tables=block_tables,
             )
 
-        launch(0, not args.debug_progress)
+        launch(0, True)
         torch.cuda.synchronize()
-        if args.debug_progress:
-            op.advance_step()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             for layer in range(16):
@@ -250,31 +255,9 @@ def worker(rank, port, args):
         for _ in range(20):
             graph.replay()
         torch.cuda.synchronize()
-        if args.debug_progress and rank == 0:
-            print(op.timeline_report(), flush=True)
         if args.fused_indexer:
             data = op.intermediates()
             selected = data["indices"]
-            if args.debug_progress and rank == 0:
-                stats = {}
-                for name, value in data.items():
-                    if name in ("sel", "indices"):
-                        continue
-                    floats = value.float()
-                    valid = floats[torch.isfinite(floats)]
-                    stats[name] = (
-                        int(torch.isnan(floats).sum()),
-                        int(torch.isinf(floats).sum()),
-                        float(valid.abs().max()) if valid.numel() else None,
-                    )
-                print(
-                    "fused diagnostics (nan, inf, max abs finite):",
-                    stats,
-                    "index range:",
-                    selected.min().item(),
-                    selected.max().item(),
-                    flush=True,
-                )
             if not bool(((selected >= 0) & (selected <= positions[:, None])).all().item()):
                 raise RuntimeError(f"fused indexer selected an invalid token for TP{npes} S={S}")
             if args.check_golden:
@@ -430,7 +413,6 @@ if __name__ == "__main__":
     parser.add_argument("--native", type=int, choices=(0, 1), default=1)
     parser.add_argument("--replays", type=int, default=32)
     parser.add_argument("--fused-indexer", action="store_true")
-    parser.add_argument("--debug-progress", action="store_true")
     parser.add_argument("--split-bf16-kv", action="store_true")
     parser.add_argument("--check-golden", action="store_true")
     parser.add_argument("--shuffled-pages", action="store_true")
