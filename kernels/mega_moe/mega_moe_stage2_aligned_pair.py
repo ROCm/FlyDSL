@@ -134,7 +134,7 @@ def _pair_routewise_half_scatter(lds_a, lds_b, n_block_idx, wave, lane, *,
         ]
         local_max = fabs_f32(values[0])
         for q in range_constexpr(1, ALIGNED_PAIR_SCATTER_VEC):
-            local_max = local_max.maximumf(fabs_f32(values[q]))
+            local_max = fx.max(local_max, fabs_f32(values[q]))
         max_bits = local_max.bitcast(fx.Int32)
         for xor_lane in (1, 2):
             if xor_lane < 32 // ALIGNED_PAIR_SCATTER_VEC:
@@ -143,9 +143,7 @@ def _pair_routewise_half_scatter(lds_a, lds_b, n_block_idx, wave, lane, *,
                     (lane ^ fx.Int32(xor_lane)) * fx.Int32(4),
                     max_bits,
                 )
-                local_max = local_max.maximumf(
-                    fx.Int32(remote_bits).bitcast(fx.Float32)
-                )
+                local_max = fx.max(local_max, fx.Int32(remote_bits).bitcast(fx.Float32))
                 max_bits = local_max.bitcast(fx.Int32)
         scale_group_lanes = 32 // ALIGNED_PAIR_SCATTER_VEC
         leader_lane = lane & fx.Int32(~(scale_group_lanes - 1))

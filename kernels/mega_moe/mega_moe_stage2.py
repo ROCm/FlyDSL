@@ -170,7 +170,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
             ]
             local_max = fabs_f32(vals[0])
             for q in range_constexpr(1, scatter_vec):
-                local_max = local_max.maximumf(fabs_f32(vals[q]))
+                local_max = fx.max(local_max, fabs_f32(vals[q]))
             max_bits = local_max.bitcast(fx.Int32)
             for xor_lane in (1, 2):
                 if xor_lane < 32 // scatter_vec:
@@ -180,7 +180,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
                         max_bits,
                     )
                     remote_max = fx.Int32(remote_bits).bitcast(fx.Float32)
-                    local_max = local_max.maximumf(remote_max)
+                    local_max = fx.max(local_max, remote_max)
                     max_bits = local_max.bitcast(fx.Int32)
             scale_group_lanes = 32 // scatter_vec
             leader_lane = lane & fx.Int32(~(scale_group_lanes - 1))

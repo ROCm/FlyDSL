@@ -623,11 +623,11 @@ class MfmaScaleGU:
 
 def _group_absmax(vals, shuffle_offs, c64):
     """|max| over ``vals`` and over the lanes ``lane ^ off`` for each offset."""
-    m = vals[0].maximumf(fx.Float32(0.0) - vals[0])
+    m = fx.max(vals[0], fx.Float32(0.0) - vals[0])
     for v in vals[1:]:
-        m = m.maximumf(v.maximumf(fx.Float32(0.0) - v))
+        m = fx.max(m, fx.max(v, fx.Float32(0.0) - v))
     for off in shuffle_offs:
-        m = m.maximumf(m.shuffle_xor(fx.Int32(off), c64))
+        m = fx.max(m, m.shuffle_xor(fx.Int32(off), c64))
     return m
 
 
@@ -722,7 +722,7 @@ class SiluQuantEpilogue:
             return Vec.from_elements(elems, fx.Float32)
         limit = fx.Float32(self._swiglu_limit)
         elems = [
-            self._silu(-(-gv[i]).maximumf(-limit)) * fx.clampf(uv[i], -limit, limit)
+            self._silu(-fx.max(-gv[i], -limit)) * fx.clampf(uv[i], -limit, limit)
             for i in range_constexpr(4)
         ]
         return Vec.from_elements(elems, fx.Float32)
@@ -834,11 +834,11 @@ class SiluQuantEpilogue:
                 frag = fx.make_view(f32_iter, fx.make_layout(EVEC, 1)).load()
                 v0 = frag[0]
                 v1 = frag[1]
-                a0 = v0.maximumf(fx.Float32(0.0) - v0)
-                a1 = v1.maximumf(fx.Float32(0.0) - v1)
-                m = a0.maximumf(a1)
+                a0 = fx.max(v0, fx.Float32(0.0) - v0)
+                a1 = fx.max(v1, fx.Float32(0.0) - v1)
+                m = fx.max(a0, a1)
                 for off in (1, 2, 4, 8):
-                    m = m.maximumf(m.shuffle_xor(fx.Int32(off), c64))
+                    m = fx.max(m, m.shuffle_xor(fx.Int32(off), c64))
                 max_rounded = (m.bitcast(fx.Int32) + fx.Int32(0x400000)) & fx.Int32(0xFF800000)
                 _e = (max_rounded >> fx.Int32(23)) - fx.Int32(2 if self._is_fp4 else 8)
                 e8m0_v = (_e > fx.Int32(0)).select(_e, fx.Int32(0))

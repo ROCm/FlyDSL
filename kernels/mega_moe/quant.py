@@ -41,7 +41,7 @@ def emit_per_1x32_mx_fp8_group(in_buf, out_buf, scale_buf, group_id):
     for chunk in range_constexpr(GROUP // 8):
         raw = _load_i32x4(in_buf, in_vec + fx.Int32(chunk))
         values = fx.Vector(raw).bitcast(fx.BFloat16).to(fx.Float32)
-        local_max = local_max.maximumf(fmath.absf(values).reduce(ReductionOp.MAX))
+        local_max = fx.max(local_max, fmath.absf(values).reduce(ReductionOp.MAX))
         for elem in range_constexpr(8):
             act.append(values[elem])
 
@@ -73,7 +73,7 @@ def emit_per_1x32_mx_fp4_group(in_buf, out_buf, scale_buf, group_id):
     for chunk in range_constexpr(GROUP // 8):
         raw = _load_i32x4(in_buf, in_vec + fx.Int32(chunk))
         values = fx.Vector(raw).bitcast(fx.BFloat16).to(fx.Float32)
-        local_max = local_max.maximumf(fmath.absf(values).reduce(ReductionOp.MAX))
+        local_max = fx.max(local_max, fmath.absf(values).reduce(ReductionOp.MAX))
         for elem in range_constexpr(8):
             act.append(values[elem])
 
