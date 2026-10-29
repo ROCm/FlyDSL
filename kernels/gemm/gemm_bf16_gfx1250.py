@@ -6,7 +6,7 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
-from flydsl.expr.rocdl import cluster, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import check_smem_capacity
@@ -86,6 +86,7 @@ def launch_gemm_bf16(
         arg_a: fx.Pointer,
         arg_b: fx.Pointer,
         i32_m: fx.Int32,
+        i32_n: fx.Int32,
         i32_k: fx.Int32,
         i32_lda: fx.Int32,
         i32_ldb: fx.Int32,
@@ -114,7 +115,7 @@ def launch_gemm_bf16(
             a_mask, b_mask = 0, 0
         blk_m = bid_x * tile_m
         blk_n = bid_y * tile_n
-        mn_oob = i32_m - blk_m  # valid M rows (A / C)
+        mn_oob = i32_m - blk_m  # valid M rows (A; C clamps via the tensor extent)
 
         arena = fx.SharedAllocator(static=False)
         arena.allocate(ARENA_B)
@@ -132,43 +133,41 @@ def launch_gemm_bf16(
         def _lv(ptr, shape, stride):
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
 
-        def _tdm(gt, outer, stride, mask):  # single-warp row-tile atom, dim0 clamped
-            atom = fx.rocdl.make_tdm_atom(
-                gt,
-                [outer, None],
-                strides=[stride, None],
-                num_warps=1,
-                pad_interval=KB,
-                pad_amount=LDS_PAD,
-                early_timeout=True,
+        def _tdm(gt, tile, mask):  # single-warp row-tile atom; row slack in the box is the pad
+            atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
+                fx.rocdl.TensorLoad(), gt, fx.make_layout(tile, (LDS_ROW, 1)), tile, num_warps=1
             )
-            return fx.atom_set_value(atom, "workgroup_mask", mask)
+            atom = fx.atom_set_value(atom, "workgroup_mask", mask)
+            return atom, fx.zipped_divide(coord, tile)[None, (0, None)]
 
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gC_base = fx.recast_iter(fx.PointerType.get(elem_cls.ir_type, arg_c.address_space), arg_c)
 
+        # The view spans the whole K row, so the K tail needs no per-iteration extent
+        # write: zipped_divide yields the tail tile and boundary_check clamps it.
         a_jobs = [
-            (2 * p, p, _gv(gA_base, fx.Int64(blk_m + p * A_ROWS) * lda_b, (A_ROWS, KB), (KB, 1)))
+            (2 * p, p, _gv(gA_base, fx.Int64(blk_m + p * A_ROWS) * lda_b, (mn_oob - p * A_ROWS, k_bytes), (lda_b, 1)))
             for p in range_constexpr(tdm_parts)
         ]
         b_jobs = [
-            (2 * p + 1, p, _gv(gB_base, fx.Int64(blk_n + p * B_ROWS) * ldb_b, (B_ROWS, KB), (KB, 1)))
+            (2 * p + 1, p, _gv(gB_base, fx.Int64(blk_n + p * B_ROWS) * ldb_b, (B_ROWS, k_bytes), (ldb_b, 1)))
             for p in range_constexpr(tdm_parts)
         ]
-        tdm_jobs = [
-            (w, _tdm(gt, mn_oob - p * A_ROWS, lda_b, a_mask), gt, p * A_ROWS * LDS_ROW, A_ROWS) for w, p, gt in a_jobs
-        ] + [(w, _tdm(gt, None, ldb_b, b_mask), gt, STAGE_A + p * B_ROWS * LDS_ROW, B_ROWS) for w, p, gt in b_jobs]
+        tdm_jobs = [(w, _tdm(gt, (A_ROWS, KB), a_mask), p * A_ROWS * LDS_ROW, A_ROWS) for w, p, gt in a_jobs] + [
+            (w, _tdm(gt, (B_ROWS, KB), b_mask), STAGE_A + p * B_ROWS * LDS_ROW, B_ROWS) for w, p, gt in b_jobs
+        ]
 
         def issue(s, kt):
             pa = _buf_ptr(s)
-            koff = fx.Int64(kt) * fx.Int64(KB)
-            k_left = k_bytes - fx.Int32(kt) * KB
+            kti = fx.Int32(kt)
             for j in range_constexpr(len(tdm_jobs)):
-                w, atom, gt, lds_off, rows = tdm_jobs[j]
+                w, (atom, blk), lds_off, rows = tdm_jobs[j]
+                dst = pa if const_expr(lds_off == 0) else fx.add_offset(pa, lds_off)
+                box = _lv(dst, ((rows, KB), 1), ((LDS_ROW, 1), rows * LDS_ROW))
+                ts, tg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), box, blk)
                 if wave == w % num_waves:
-                    dst = pa if const_expr(lds_off == 0) else fx.add_offset(pa, lds_off)
-                    fx.copy(atom, gt, _lv(dst, (rows, KB), (LDS_ROW, 1)), imm_offset=koff, extent_1=k_left)
+                    fx.copy(atom, tg[None, kti], ts[None, 0])
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -265,16 +264,24 @@ def launch_gemm_bf16(
                 h = accs[wm * wmma_n_rep + wn].to(elem_cls)
                 fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * EB)
         workgroup_barrier(use_cluster=False)
-        gtC = _gv(gC_base, fx.Int64(blk_m) * ldc64 + fx.Int64(blk_n), (tile_m, tile_n), (tile_n, 1))
-        atomC = fx.rocdl.make_tdm_atom(
-            gtC,
-            [mn_oob, None],
-            strides=[ldc64, None],
-            num_warps=num_waves,
-            early_timeout=False,
+        gC_full = fx.Tensor(fx.make_view(gC_base, fx.make_layout((i32_m, i32_n), (ldc64, 1))))
+        sC_box = fx.make_layout((tile_m, tile_n), (tile_n, 1))
+        atomC, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorStore(), gC_full, sC_box, (tile_m, tile_n), num_warps=num_waves
         )
-        fx.copy(atomC, _lv(fx.recast_iter(elem_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)), gtC)
-        tdm_ops.tensor_wait(0)
+        # Keep the N-tile axis as a rest so mode-0 stays the nested box; it is selected
+        # at the copy below. Consuming both rest modes here collapses mode-0 and
+        # tdm_partition then rejects the operand.
+        blkC = fx.zipped_divide(coordC, (tile_m, tile_n))[None, (bid_x, None)]
+        sC_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(elem_cls, base_ptr),
+                fx.make_layout(((tile_m, tile_n), 1), ((tile_n, 1), tile_m * tile_n)),
+            )
+        )
+        tCs, tCg = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
+        fx.copy(atomC, tCs[None, 0], tCg[None, bid_y])
+        rocdl.s_wait_tensorcnt(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = N // tile_n
@@ -286,6 +293,7 @@ def launch_gemm_bf16(
         arg_a,
         arg_b,
         i32_m,
+        N,
         K,
         i32_lda,
         i32_ldb,
