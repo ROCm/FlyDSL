@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T01:25:59Z",
+ "updated": "2026-10-30T01:36:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40986644706,
+   "pr": 1349,
+   "commit": "6ce558bb9b2a44b9fb2a0b7e7768856acaf7beaa",
+   "branch": "jli/gfx1250-strict-cherrypick",
+   "event": "pull_request",
+   "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40986644706",
+   "created_at": "2026-10-30T01:34:26Z",
+   "updated_at": "2026-10-30T01:35:08Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40985468978,
    "pr": 1349,
@@ -10,11 +25,11 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40985468978",
    "created_at": "2026-10-30T01:22:33Z",
-   "updated_at": "2026-10-30T01:23:42Z",
+   "updated_at": "2026-10-30T01:34:50Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -824,19 +839,19 @@
    "branch": "fix/debug-call-chain-scopes",
    "event": "pull_request",
    "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608",
    "created_at": "2026-10-28T21:00:24Z",
-   "updated_at": "2026-10-29T18:22:19Z",
+   "updated_at": "2026-10-30T01:31:54Z",
    "actor": "hanli0612",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-29T18:22:19Z",
+     "started_at": "2026-10-30T01:31:53Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608/job/123646155769"
     },
@@ -1806,52 +1821,6 @@
      "started_at": "2026-10-27T15:54:54Z",
      "completed_at": "2026-10-27T16:21:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272/job/122298620097"
-    }
-   ]
-  },
-  {
-   "run_id": 40503668803,
-   "pr": null,
-   "commit": "8e3df813f740192ff06d16a27b6b026a769ed5b4",
-   "branch": "location-chain-typed-bindings",
-   "event": "pull_request",
-   "title": "[Bugfix] Show the user's source line in DSL compile errors",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40503668803",
-   "created_at": "2026-10-27T12:25:44Z",
-   "updated_at": "2026-10-27T19:42:48Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T15:23:40Z",
-     "completed_at": "2026-10-27T15:54:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40503668803/job/122281511043"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T16:12:20Z",
-     "completed_at": "2026-10-27T19:42:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40503668803/job/122281511064"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T13:09:24Z",
-     "completed_at": "2026-10-27T14:20:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40503668803/job/122281513319",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
