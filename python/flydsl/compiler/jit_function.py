@@ -1422,7 +1422,10 @@ class JitFunction:
 
         sig = self._sig
         # Re-read env vars on every call.
-        key_parts = [("_env_", _cache_invalidating_env_values(self._backend_target)), ("_target_", self._backend_target)]
+        key_parts = [
+            ("_env_", _cache_invalidating_env_values(self._backend_target)),
+            ("_target_", self._backend_target),
+        ]
         if effective_hints is None:
             effective_hints = self._effective_compile_hints()
         if effective_hints:
