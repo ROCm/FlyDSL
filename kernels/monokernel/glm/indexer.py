@@ -10,6 +10,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import PE_DIM
+from kernels.monokernel.glm.context import StageContext
+from kernels.monokernel.glm.interfaces import IndexerInput, IndexerOutput
 from kernels.monokernel.glm.layout import INDEX_DIM, INDEX_HEADS, INDEX_KEYS_PER_TASK, INDEX_Q_ROWS, WAVES
 from kernels.monokernel.layout import CM_DEV, CM_SYS, THREADS
 from kernels.monokernel.ops import read_lane_i32
@@ -19,7 +21,13 @@ from kernels.monokernel.ops import xred as _xred
 
 
 @flyc.jit
-def emit_indexer(plan, state, tools):
+def indexer(inputs: IndexerInput, outputs: IndexerOutput, ctx: StageContext):
+    plan = ctx.plan
+    indices_name = outputs.kv_indices.name
+    indices_ready_name = outputs.ready.name
+    weights_name = inputs.query.weights.name
+    q_quant_name = inputs.query.q_quant.name
+    q_name = inputs.query.q.name
     CP_PARTS = plan.CP_PARTS
     CP_RANKS = plan.CP_RANKS
     G = plan.G
@@ -43,41 +51,41 @@ def emit_indexer(plan, state, tools):
     indexer_quant = plan.indexer_quant
     topk = plan.topk
     with_indexer = plan.with_indexer
-    bid = state.bid
-    indices = state.indices
-    keys = state.keys
-    lane = state.lane
-    peer_dst = state.peer_dst
-    red = state.red
-    rope_cos = state.rope_cos
-    rope_sin = state.rope_sin
-    sym = state.sym
-    tag = state.tag
-    tid = state.tid
-    wave = state.wave
-    xs = state.xs
-    ld_rope = tools.ld_rope
-    row_position = tools.row_position
-    index_request_start = tools.index_request_start
-    index_page_slot = tools.index_page_slot
-    lds_ld = tools.lds_ld
-    lds_st = tools.lds_st
-    bf16_pair = tools.bf16_pair
-    mb = tools.mb
-    cp_local_rank = tools.cp_local_rank
-    cp_peer = tools.cp_peer
-    cp_buffer = tools.cp_buffer
-    put = tools.put
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    get = tools.get
-    getf = tools.getf
-    get_bf2_many = tools.get_bf2_many
-    start = tools.start
+    bid = ctx.execution.thread.block_id
+    index_cache = inputs.query.kv_buffer
+    keys = ctx.execution.workspace.routing_ids
+    lane = ctx.execution.thread.lane_id
+    peer_dst = ctx.execution.parallel.peer_destination
+    red = ctx.execution.workspace.reduction
+    cos = inputs.rope.cos
+    sin = inputs.rope.sin
+    sym = ctx.execution.parallel.buffer
+    tag = ctx.execution.thread.epoch
+    tid = ctx.execution.thread.thread_id
+    wave = ctx.execution.thread.wave_id
+    xs = ctx.execution.workspace.activations
+    ld_rope = ctx.ops.memory.ld_rope
+    row_position = ctx.ops.memory.row_position
+    index_request_start = ctx.ops.memory.index_request_start
+    index_page_slot = ctx.ops.memory.index_page_slot
+    lds_ld = ctx.ops.memory.lds_ld
+    lds_st = ctx.ops.memory.lds_st
+    bf16_pair = ctx.ops.memory.bf16_pair
+    mb = ctx.ops.memory.mb
+    cp_local_rank = ctx.ops.memory.cp_local_rank
+    cp_peer = ctx.ops.memory.cp_peer
+    cp_buffer = ctx.ops.memory.cp_buffer
+    put = ctx.ops.memory.put
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    get = ctx.ops.memory.get
+    getf = ctx.ops.memory.getf
+    get_bf2_many = ctx.ops.memory.get_bf2_many
+    start = ctx.ops.memory.start
 
     # ====================== 4b. fused sparse index score + exact top-2048
     if const_expr(with_indexer):
-        r_index_cache = _rsrc(indices)
+        r_index_cache = _rsrc(index_cache)
         N_INDEX_SPLIT = INDEX_CAPACITY // INDEX_KEYS_PER_TASK
 
         def use_long_index(s):
@@ -161,7 +169,7 @@ def emit_indexer(plan, state, tools):
                     if tid < INDEX_HEADS * INDEX_QUERY_REUSE:
                         word = fx.Int32(
                             bo.buffer_load(
-                                _rsrc(mb("index_w")),
+                                _rsrc(mb(weights_name)),
                                 (s * INDEX_HEADS + tid) * 2,
                                 vec_width=1,
                                 dtype=T.i32,
@@ -179,7 +187,7 @@ def emit_indexer(plan, state, tools):
                         for query in range_constexpr(INDEX_QUERY_REUSE):
                             get(mb("index_ready"), s + query)
                     if tid < INDEX_HEADS * INDEX_QUERY_REUSE:
-                        lds_st(keys, tid, get(mb("index_w"), s * INDEX_HEADS + tid))
+                        lds_st(keys, tid, get(mb(weights_name), s * INDEX_HEADS + tid))
                 # Every key group reuses the same 32x128 query.  Stage and RoPE
                 # it once per scoring CTA instead of polling and rotating it in
                 # each of the four key-group wave pairs.
@@ -200,7 +208,7 @@ def emit_indexer(plan, state, tools):
                             qword = fx.min(fx.Int32(Q_WORDS - 2), qword)
                             raw = fx.Vector(
                                 bo.buffer_load(
-                                    _rsrc(mb("index_q_quant")),
+                                    _rsrc(mb(q_quant_name)),
                                     (s * INDEX_HEADS * 20 + qword) * 2,
                                     vec_width=4,
                                     dtype=T.i32,
@@ -212,7 +220,7 @@ def emit_indexer(plan, state, tools):
                         q_pairs = poll(
                             [
                                 (
-                                    mb("index_q_quant"),
+                                    mb(q_quant_name),
                                     s * INDEX_HEADS * 20
                                     + (
                                         qbatch * 2 * THREADS + tid * 2
@@ -237,7 +245,7 @@ def emit_indexer(plan, state, tools):
                         q_source = (
                             cp_buffer("index_cp_q", sym)
                             if const_expr(SHARD_INDEX_Q)
-                            else (mb("ugp") + fx.Int64(INDEX_ROT_OFF * 8) if INDEX_PRE_ROPE else mb("index_q"))
+                            else (mb("ugp") + fx.Int64(INDEX_ROT_OFF * 8) if INDEX_PRE_ROPE else mb(q_name))
                         )
                         q_words = poll(
                             [(q_source, s * INDEX_Q_ROWS // 2 + pair, 1) for pair in q_pairs],
@@ -252,11 +260,11 @@ def emit_indexer(plan, state, tools):
                                 q0, q1 = bf2_f32(q_word[0])
                                 if kq < PE_DIM:
                                     c = ld_rope(
-                                        _rsrc(rope_cos),
+                                        _rsrc(cos),
                                         row_position(s) * (PE_DIM // 2) + kq // 2,
                                     )
                                     sn = ld_rope(
-                                        _rsrc(rope_sin),
+                                        _rsrc(sin),
                                         row_position(s) * (PE_DIM // 2) + kq // 2,
                                     )
                                     q0, q1 = q0 * c - q1 * sn, q0 * sn + q1 * c
@@ -274,7 +282,7 @@ def emit_indexer(plan, state, tools):
                         preload_tile = index_tile_base + preload_part + wave // 2
                         preload_key = preload_tile * INDEX_KEYS_PER_TASK + (wave % 2) * 32 + lane % 32
                         safe_key = fx.min(reuse_shard_begin + preload_key, row_position(s + INDEX_QUERY_REUSE - 1))
-                        key_base4 = indices + fx.Int64(index_page_slot(s, safe_key)) * INDEX_FP4_BYTES
+                        key_base4 = index_cache + fx.Int64(index_page_slot(s, safe_key)) * INDEX_FP4_BYTES
                         operands4 = []
                         for kstep in range_constexpr(2):
                             key_ptr4 = fx.inttoptr(
@@ -329,7 +337,7 @@ def emit_indexer(plan, state, tools):
                                     if const_expr(INDEX_QUERY_REUSE > 1):
                                         if query_begin != reuse_shard_begin:
                                             other_base4 = (
-                                                indices
+                                                index_cache
                                                 + fx.Int64(index_page_slot(s + query, safe_key)) * INDEX_FP4_BYTES
                                             )
                                             other_ptr4 = fx.inttoptr(
@@ -435,7 +443,7 @@ def emit_indexer(plan, state, tools):
                                     # pointer preserves the full address without assuming
                                     # contiguous pages or narrowing to a buffer byte offset.
                                     key_addr = (
-                                        indices
+                                        index_cache
                                         + fx.Int64(index_page_slot(s, safe_key)) * (INDEX_DIM * 2)
                                         + fx.Int64(k * 2)
                                     )
@@ -1539,7 +1547,7 @@ def emit_indexer(plan, state, tools):
                             for pair in range_constexpr(topk // (2 * THREADS)):
                                 bo.buffer_store(
                                     fx.Vector.from_elements(index_pairs[pair], fx.Int32),
-                                    _rsrc(mb("indices")),
+                                    _rsrc(mb(indices_name)),
                                     s * topk + pair * (2 * THREADS) + 2 * tid,
                                     cache_modifier=CM_DEV,
                                 )
@@ -1560,7 +1568,7 @@ def emit_indexer(plan, state, tools):
                                     )[0][0]
                                 bo.buffer_store(
                                     value,
-                                    _rsrc(mb("indices")),
+                                    _rsrc(mb(indices_name)),
                                     s * topk + j,
                                     cache_modifier=CM_DEV,
                                 )
@@ -1581,14 +1589,14 @@ def emit_indexer(plan, state, tools):
                                 )[0][0]
                             bo.buffer_store(
                                 value,
-                                _rsrc(mb("indices")),
+                                _rsrc(mb(indices_name)),
                                 s * topk + j,
                                 cache_modifier=CM_DEV,
                             )
                     fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
                     gpu.barrier()
                     if tid == 0:
-                        put(mb("indices_ready"), s, fx.Int32(1))
+                        put(mb(indices_ready_name), s, fx.Int32(1))
 
         if const_expr(not TILED_INDEXER or indexer_cp):
             for s in range(start("index_select"), S, G):
@@ -1695,7 +1703,7 @@ def emit_indexer(plan, state, tools):
                         prefix_mask |= 255 << shift
 
                     threshold = prefix
-                    r_index_out = _rsrc(mb("indices"))
+                    r_index_out = _rsrc(mb(indices_name))
                     items = (LOCAL_INDEX_CAPACITY + THREADS - 1) // THREADS
                     item_indices = [tid * items + j for j in range_constexpr(items)]
                     item_keys = [fx.Uint32(lds_ld(xs, fx.min(i, bound - 1)).bitcast(fx.Int32)) for i in item_indices]
@@ -1771,4 +1779,4 @@ def emit_indexer(plan, state, tools):
                     fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
                     gpu.barrier()
                     if tid == 0:
-                        put(mb("indices_ready"), s, fx.Int32(1))
+                        put(mb(indices_ready_name), s, fx.Int32(1))

@@ -23,11 +23,11 @@ class ReductionsTools(NamedTuple):
 
 
 @flyc.jit
-def build_reductions(plan, state, memory):
+def build_reductions(plan, execution, memory):
     indexer_quant = plan.indexer_quant
-    lane = state.lane
-    red = state.red
-    wave = state.wave
+    lane = execution.thread.lane_id
+    red = execution.workspace.reduction
+    wave = execution.thread.wave_id
     lds_ld = memory.lds_ld
     lds_st = memory.lds_st
 

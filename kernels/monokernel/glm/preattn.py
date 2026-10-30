@@ -11,6 +11,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import EPS, HIDDEN, KV_LORA, NOPE_DIM, PE_DIM, Q_LORA
+from kernels.monokernel.glm.context import StageContext
+from kernels.monokernel.glm.interfaces import PreattnInput, PreattnOutput
 from kernels.monokernel.glm.layout import (
     BLOCKS,
     INDEX_DIM,
@@ -35,16 +37,22 @@ from kernels.monokernel.ops import xshfl as _xshfl
 
 
 class PreattnStages(NamedTuple):
-    input_qkv: Callable
-    query_norm: Callable
-    cache: Callable
-    query_projection: Callable
+    rmsnorm_qkv: Callable
+    rmsnorm_q: Callable
+    rope_cache: Callable
+    q_proj: Callable
     index_quant: Callable
-    absorbed_query: Callable
+    q_absorb: Callable
 
 
 @flyc.jit
-def build_preattn(plan, state, tools):
+def preattn(inputs: PreattnInput, outputs: PreattnOutput, ctx: StageContext):
+    plan = ctx.plan
+    weights_name = outputs.index.weights.name
+    q_name = outputs.index.q.name
+    rope_name = outputs.q.rope.name
+    q_quant_name = outputs.index.q_quant.name
+    latent_name = outputs.q.latent.name
     CACHE_TILE = plan.CACHE_TILE
     COHORT_ROW_TILES = plan.COHORT_ROW_TILES
     CP_RANKS = plan.CP_RANKS
@@ -81,87 +89,87 @@ def build_preattn(plan, state, tools):
     total_samples = plan.total_samples
     use_atom_kv_cache = plan.use_atom_kv_cache
     with_indexer = plan.with_indexer
-    bid = state.bid
-    full_bid = state.full_bid
-    full_indptr = state.full_indptr
-    full_positions = state.full_positions
-    full_scratch = state.full_scratch
-    full_slots = state.full_slots
-    g_in = state.g_in
-    g_kv = state.g_kv
-    g_q = state.g_q
-    indices = state.indices
-    kv_cache = state.kv_cache
-    lane = state.lane
-    outs = state.outs
-    pe_cache = state.pe_cache
-    peer_dst = state.peer_dst
-    r_h = state.r_h
-    red = state.red
-    rope_cos = state.rope_cos
-    rope_sin = state.rope_sin
-    row_offset = state.row_offset
-    s_q_b = state.s_q_b
-    s_qkv_a = state.s_qkv_a
-    s_uk = state.s_uk
-    sym = state.sym
-    tid = state.tid
-    w_q_b = state.w_q_b
-    w_qkv_a = state.w_qkv_a
-    w_uk = state.w_uk
-    wave = state.wave
-    xs = state.xs
-    ld_f32 = tools.ld_f32
-    ld_bf16 = tools.ld_bf16
-    ld_rope = tools.ld_rope
-    quant_index_pair = tools.quant_index_pair
-    row_position = tools.row_position
-    row_slot = tools.row_slot
-    row_writes_cache = tools.row_writes_cache
-    index_page_slot = tools.index_page_slot
-    lds_ld = tools.lds_ld
-    lds_st = tools.lds_st
-    bf16_round = tools.bf16_round
-    index_arg = tools.index_arg
-    mb = tools.mb
-    cp_local_rank = tools.cp_local_rank
-    cp_peer = tools.cp_peer
-    cp_buffer = tools.cp_buffer
-    put = tools.put
-    put2 = tools.put2
-    put_bf = tools.put_bf
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    hint_wait = tools.hint_wait
-    getf = tools.getf
-    getf_many = tools.getf_many
-    get2_many = tools.get2_many
-    get2 = tools.get2
-    block_sums = tools.block_sums
-    block_sum = tools.block_sum
-    unit_fp8x2 = tools.unit_fp8x2
-    unit_bf16 = tools.unit_bf16
-    unit_attention = tools.unit_attention
-    mma_units = tools.mma_units
-    run_units = tools.run_units
-    reduce_rows = tools.reduce_rows
-    emit_out = tools.emit_out
-    pick = tools.pick
-    attention_b_word = tools.attention_b_word
-    emit_ptpc = tools.emit_ptpc
-    stage_x_rmsnorm_ptpc = tools.stage_x_rmsnorm_ptpc
-    stage_x_pairs_ptpc = tools.stage_x_pairs_ptpc
-    stage_x_rmsnorm = tools.stage_x_rmsnorm
-    load_x_rmsnorm = tools.load_x_rmsnorm
-    stage_x_pairs = tools.stage_x_pairs
-    start = tools.start
-    n_sel = tools.n_sel
+    bid = ctx.execution.thread.block_id
+    full_bid = ctx.execution.thread.global_block_id
+    full_indptr = ctx.execution.tokens.all_indptr
+    full_positions = ctx.execution.tokens.all_positions
+    full_scratch = ctx.execution.workspace.all_scratch
+    full_slots = ctx.execution.tokens.all_slots
+    input_norm_weight = inputs.weights.input_norm
+    kv_norm_weight = inputs.weights.kv_norm
+    query_norm_weight = inputs.weights.query_norm
+    index_cache = outputs.index.kv_buffer
+    kv_buffer = outputs.cache.kv_buffer
+    lane = ctx.execution.thread.lane_id
+    outs = ctx.execution.workspace.output
+    rope_buffer = outputs.cache.rope_buffer
+    peer_dst = ctx.execution.parallel.peer_destination
+    hidden_states = inputs.hidden_states
+    red = ctx.execution.workspace.reduction
+    cos = inputs.rope.cos
+    sin = inputs.rope.sin
+    row_offset = ctx.execution.thread.row_offset
+    q_scale = inputs.weights.q_proj.scale
+    qkv_scale = inputs.weights.qkv_proj.scale
+    q_absorb_scale = inputs.weights.q_absorb.scale
+    sym = ctx.execution.parallel.buffer
+    tid = ctx.execution.thread.thread_id
+    q_weight = inputs.weights.q_proj.weight
+    qkv_weight = inputs.weights.qkv_proj.weight
+    q_absorb_weight = inputs.weights.q_absorb.weight
+    wave = ctx.execution.thread.wave_id
+    xs = ctx.execution.workspace.activations
+    ld_f32 = ctx.ops.memory.ld_f32
+    ld_bf16 = ctx.ops.memory.ld_bf16
+    ld_rope = ctx.ops.memory.ld_rope
+    quant_index_pair = ctx.ops.quantization.quant_index_pair
+    row_position = ctx.ops.memory.row_position
+    row_slot = ctx.ops.memory.row_slot
+    row_writes_cache = ctx.ops.memory.row_writes_cache
+    index_page_slot = ctx.ops.memory.index_page_slot
+    lds_ld = ctx.ops.memory.lds_ld
+    lds_st = ctx.ops.memory.lds_st
+    bf16_round = ctx.ops.memory.bf16_round
+    index_arg = ctx.ops.memory.index_arg
+    mb = ctx.ops.memory.mb
+    cp_local_rank = ctx.ops.memory.cp_local_rank
+    cp_peer = ctx.ops.memory.cp_peer
+    cp_buffer = ctx.ops.memory.cp_buffer
+    put = ctx.ops.memory.put
+    put2 = ctx.ops.memory.put2
+    put_bf = ctx.ops.memory.put_bf
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    hint_wait = ctx.ops.memory.hint_wait
+    getf = ctx.ops.memory.getf
+    getf_many = ctx.ops.memory.getf_many
+    get2_many = ctx.ops.memory.get2_many
+    get2 = ctx.ops.memory.get2
+    block_sums = ctx.ops.reductions.block_sums
+    block_sum = ctx.ops.reductions.block_sum
+    unit_fp8x2 = ctx.ops.gemm.unit_fp8x2
+    unit_bf16 = ctx.ops.gemm.unit_bf16
+    unit_attention = ctx.ops.gemm.unit_attention
+    mma_units = ctx.ops.gemm.mma_units
+    run_units = ctx.ops.gemm.run_units
+    reduce_rows = ctx.ops.gemm.reduce_rows
+    emit_out = ctx.ops.gemm.emit_out
+    pick = ctx.ops.memory.pick
+    attention_b_word = ctx.ops.gemm.attention_b_word
+    emit_ptpc = ctx.ops.gemm.emit_ptpc
+    stage_x_rmsnorm_ptpc = ctx.ops.normalization.stage_x_rmsnorm_ptpc
+    stage_x_pairs_ptpc = ctx.ops.normalization.stage_x_pairs_ptpc
+    stage_x_rmsnorm = ctx.ops.normalization.stage_x_rmsnorm
+    load_x_rmsnorm = ctx.ops.normalization.load_x_rmsnorm
+    stage_x_pairs = ctx.ops.normalization.stage_x_pairs
+    start = ctx.ops.memory.start
+    n_sel = ctx.ops.memory.n_sel
 
     def ld_qa(sks):
         v = get2_many([(mb("q_a"), s * Q_LORA + k + j) for s, k in sks for j in (0, 2)])
         return [list(v[2 * i]) + list(v[2 * i + 1]) for i in range(len(sks))]
 
-    def input_qkv():
+    def rmsnorm_qkv():
         if const_expr(INPUT_NORM_ONCE):
             # One resident CTA per token publishes the exact normalized BF16 input.
             # Reader retirement precedes UV reuse through the grid join or QKV completion polls.
@@ -172,7 +180,7 @@ def build_preattn(plan, state, tools):
                     for sn, k in sks:
                         packed = fx.Vector(
                             bo.buffer_load(
-                                r_h,
+                                hidden_states,
                                 (bid * HIDDEN + k) // 2,
                                 vec_width=2,
                                 dtype=T.i32,
@@ -182,7 +190,7 @@ def build_preattn(plan, state, tools):
                         result.append([values[j] for j in range(4)])
                     return result
 
-                stage_x_rmsnorm(input_norm_load, HIDDEN, g_in, count=1)
+                stage_x_rmsnorm(input_norm_load, HIDDEN, input_norm_weight, count=1)
                 gpu.barrier()
                 for input_norm_round in range_constexpr(HIDDEN // (2 * THREADS)):
                     input_norm_word = tid + input_norm_round * THREADS
@@ -196,7 +204,7 @@ def build_preattn(plan, state, tools):
 
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)
-        r_wqa, r_sqa = _rsrc(w_qkv_a), _rsrc(s_qkv_a)
+        r_wqa, r_sqa = _rsrc(qkv_weight), _rsrc(qkv_scale)
         QA_NKC = HIDDEN // 64
         QA_UNITS = QA_NKC // (attention_k_chunks_per_unit * WAVES)
         if const_expr(with_indexer):
@@ -419,7 +427,7 @@ def build_preattn(plan, state, tools):
                                 qin_sample = tid // INDEX_TILE
                                 qin_row = t * INDEX_TILE + tid % INDEX_TILE
                                 put(
-                                    mb("index_w"),
+                                    mb(weights_name),
                                     qin_sample * INDEX_HEADS + qin_row,
                                     lds_ld(outs, tid),
                                 )
@@ -447,7 +455,7 @@ def build_preattn(plan, state, tools):
                         for s, k in sks:
                             w = fx.Vector(
                                 bo.buffer_load(
-                                    r_h,
+                                    hidden_states,
                                     ((sample_base + s) * HIDDEN + k) // 2,
                                     vec_width=2,
                                     dtype=T.i32,
@@ -458,17 +466,19 @@ def build_preattn(plan, state, tools):
                         return res
 
                     if const_expr(S <= SAMPLE_TILE):
-                        h_ld = load_x_rmsnorm(ld_h, HIDDEN, g_in, group_count)
+                        h_ld = load_x_rmsnorm(ld_h, HIDDEN, input_norm_weight, group_count)
                         pre = [u_qa(c) for c in range(QA_UNITS)]
                         if const_expr(attention_ptpc):
-                            qa_scales = stage_x_rmsnorm_ptpc(ld_h, HIDDEN, g_in, loaded=h_ld, count=group_count)
+                            qa_scales = stage_x_rmsnorm_ptpc(
+                                ld_h, HIDDEN, input_norm_weight, loaded=h_ld, count=group_count
+                            )
                         else:
-                            stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld, count=group_count)
+                            stage_x_rmsnorm(ld_h, HIDDEN, input_norm_weight, loaded=h_ld, count=group_count)
                     else:
                         if const_expr(attention_ptpc):
-                            qa_scales = stage_x_rmsnorm_ptpc(ld_h, HIDDEN, g_in, count=group_count)
+                            qa_scales = stage_x_rmsnorm_ptpc(ld_h, HIDDEN, input_norm_weight, count=group_count)
                         else:
-                            stage_x_rmsnorm(ld_h, HIDDEN, g_in, count=group_count)
+                            stage_x_rmsnorm(ld_h, HIDDEN, input_norm_weight, count=group_count)
                         pre = [u_qa(c) for c in range(QA_UNITS)]
                     gpu.barrier()
                     acc = run_units(u_qa, QA_UNITS, QA_UNITS, pre)
@@ -541,12 +551,12 @@ def build_preattn(plan, state, tools):
                                     s = sample_base + tid // INDEX_TILE
                                     row = t * INDEX_TILE + tid % INDEX_TILE
                                     put(
-                                        mb("index_w"),
+                                        mb(weights_name),
                                         s * INDEX_HEADS + row,
                                         lds_ld(outs, tid),
                                     )
 
-    def query_norm():
+    def rmsnorm_q():
         # ===================== 2. one q_a RMSNorm CTA per sample, shared downstream
         for s_norm in range(start("q_norm"), S, G):
             s_norm = fx.Int32(s_norm)
@@ -563,7 +573,7 @@ def build_preattn(plan, state, tools):
 
             # FP4 amplifies a one-ULP normalized query difference into a
             # different quantized value. Keep this small reduction precise.
-            stage_x_rmsnorm(ld_qa_one, Q_LORA, g_q, count=1, precise=indexer_quant)
+            stage_x_rmsnorm(ld_qa_one, Q_LORA, query_norm_weight, count=1, precise=indexer_quant)
             gpu.barrier()
             k = tid * 4
             w0 = lds_ld(xs, k // 2)
@@ -572,25 +582,25 @@ def build_preattn(plan, state, tools):
             a2, a3 = bf2_f32(w1.bitcast(fx.Int32))
             put_bf(mb("q_an"), s_norm * Q_LORA + k, [a0, a1, a2, a3])
 
-    def cache():
+    def rope_cache():
         # ================ 3. KV RMSNorm + k_pe RoPE -> cache (+ this launch's rows)
         for t in range(start("cache"), S // CACHE_TILE, G):
             sample_base = fx.Int32(t) * CACHE_TILE if const_expr(CACHE_TILE < S) else fx.Int32(0)
-            r_kv = _rsrc(kv_cache)
-            r_pe = _rsrc(pe_cache)
+            r_kv = _rsrc(kv_buffer)
+            r_pe = _rsrc(rope_buffer)
             # gamma and the RoPE factors are issued ahead of the wait
-            g = ld_bf16(_rsrc(g_kv), tid)
+            g = ld_bf16(_rsrc(kv_norm_weight), tid)
             tpe = tid % (PE_DIM // 2)
             cs = [
                 ld_rope(
-                    _rsrc(rope_cos),
+                    _rsrc(cos),
                     row_position(sample_base + s) * (PE_DIM // 2) + tpe,
                 )
                 for s in range(CACHE_TILE)
             ]
             sns = [
                 ld_rope(
-                    _rsrc(rope_sin),
+                    _rsrc(sin),
                     row_position(sample_base + s) * (PE_DIM // 2) + tpe,
                 )
                 for s in range(CACHE_TILE)
@@ -623,8 +633,8 @@ def build_preattn(plan, state, tools):
                 store_slot = slot
                 if const_expr(use_atom_kv_cache):
                     cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
-                    r_kv = _rsrc(kv_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
-                    r_pe = _rsrc(pe_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
+                    r_kv = _rsrc(kv_buffer + fx.Int64(_uniform(slot)) * cache_row_bytes)
+                    r_pe = _rsrc(rope_buffer + fx.Int64(_uniform(slot)) * cache_row_bytes)
                     store_slot = fx.Int32(0)
                 active = row_writes_cache(s) & (not DEFER_OFF_CACHE)
                 if const_expr(use_atom_kv_cache and not DEFER_OFF_CACHE and CACHE_TILE < S):
@@ -706,7 +716,7 @@ def build_preattn(plan, state, tools):
                 # Optional MXFP4 quantizes in this same coordinate system;
                 # it does not add a Hadamard transform to Q or K.
                 r_gik, r_bik = _rsrc(index_arg(5)), _rsrc(index_arg(6))
-                r_index_cache = _rsrc(indices)
+                r_index_cache = _rsrc(index_cache)
                 for local_s in range_constexpr(CACHE_TILE):
                     s = sample_base + local_s
                     ik = getf(mb("index_k"), s * INDEX_DIM + fx.min(tid, INDEX_DIM - 1))
@@ -726,7 +736,7 @@ def build_preattn(plan, state, tools):
                         if const_expr(indexer_quant):
                             pair4, word4, exponent = quant_index_pair(v0, v1)
                             scale4 = (exponent << 23).bitcast(fx.Float32)
-                            key_base = indices + fx.Int64(index_page_slot(s, row_position(s))) * INDEX_FP4_BYTES
+                            key_base = index_cache + fx.Int64(index_page_slot(s, row_position(s))) * INDEX_FP4_BYTES
                             if lane % 4 == 0:
                                 bo.buffer_store(word4, _rsrc(key_base), i0 // 8)
                                 put(mb("index_k_quant"), s * 20 + i0 // 8, word4)
@@ -741,7 +751,7 @@ def build_preattn(plan, state, tools):
                             v0, v1 = restored[0], restored[1]
                         elif const_expr(TILED_INDEXER):
                             # Uniform current-key row base, full 64-bit physical address.
-                            key_base = indices + fx.Int64(index_page_slot(s, row_position(s))) * (INDEX_DIM * 2)
+                            key_base = index_cache + fx.Int64(index_page_slot(s, row_position(s))) * (INDEX_DIM * 2)
                             bo.buffer_store(
                                 fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
                                 _rsrc(key_base),
@@ -758,12 +768,12 @@ def build_preattn(plan, state, tools):
                     if tid == 0:
                         put(mb("index_ready"), s, fx.Int32(1))
 
-    def query_projection():
+    def q_proj():
         # =============================================== 4. normalized q_a -> q_b (+RoPE)
         def emit_index_query(qs, qt, qr):
             values = [lds_ld(outs, qs * INDEX_TILE + qr + j) for j in range(4)]
             offset = qs * INDEX_Q_ROWS + qt * INDEX_TILE + qr
-            put_bf(mb("index_q"), offset, values)
+            put_bf(mb(q_name), offset, values)
             if const_expr(INDEX_PRE_ROPE and not indexer_quant):
                 # Keep the first BF16 rounding used by the raw query mailbox.
                 rounded = [bf16_round(v) for v in values]
@@ -772,15 +782,15 @@ def build_preattn(plan, state, tools):
                     q0, q1 = rounded[pair * 2], rounded[pair * 2 + 1]
                     qk = (qt * INDEX_TILE + qr + pair * 2) % INDEX_DIM
                     if qk < PE_DIM:
-                        qc = ld_rope(_rsrc(rope_cos), row_position(qs) * (PE_DIM // 2) + qk // 2)
-                        qsn = ld_rope(_rsrc(rope_sin), row_position(qs) * (PE_DIM // 2) + qk // 2)
+                        qc = ld_rope(_rsrc(cos), row_position(qs) * (PE_DIM // 2) + qk // 2)
+                        qsn = ld_rope(_rsrc(sin), row_position(qs) * (PE_DIM // 2) + qk // 2)
                         q0, q1 = q0 * qc - q1 * qsn, q0 * qsn + q1 * qc
                     rotated += [q0, q1]
                 # Keep rotated queries above the later mid quantization region.
                 # Its readiness tags must never alias within this epoch.
                 put_bf(mb("ugp"), 2 * INDEX_ROT_OFF + offset, rotated)
 
-        r_wqb, r_sqb = _rsrc(w_q_b), _rsrc(s_q_b)
+        r_wqb, r_sqb = _rsrc(q_weight), _rsrc(q_scale)
         QB_NKC = Q_LORA // 64
         QB_UNITS = QB_NKC // (attention_k_chunks_per_unit * WAVES)
         if const_expr(with_indexer):
@@ -858,8 +868,8 @@ def build_preattn(plan, state, tools):
                         qb_end = fx.Int32(bo.buffer_load(_rsrc(full_indptr), qb_row + 1, vec_width=1, dtype=T.i32))
                         qb_slot = fx.Int32(bo.buffer_load(_rsrc(full_slots), qb_row * 2, vec_width=1, dtype=T.i32))
                         qpos = ((qb_end > qb_begin) | (qb_slot >= 0)).select(qpos, fx.Int32(0))
-                        qcos = ld_rope(_rsrc(rope_cos), qpos * (PE_DIM // 2) + qk // 2)
-                        qsin = ld_rope(_rsrc(rope_sin), qpos * (PE_DIM // 2) + qk // 2)
+                        qcos = ld_rope(_rsrc(cos), qpos * (PE_DIM // 2) + qk // 2)
+                        qsin = ld_rope(_rsrc(sin), qpos * (PE_DIM // 2) + qk // 2)
                         q0 = lds_ld(outs, qb_local * Q_B_TILE + qr)
                         q1 = lds_ld(outs, qb_local * Q_B_TILE + qr + 1)
                         put_bf(
@@ -916,8 +926,8 @@ def build_preattn(plan, state, tools):
                                         bo.buffer_load(_rsrc(full_slots), index_row * 2, vec_width=1, dtype=T.i32)
                                     )
                                     qp = ((qe > qb) | (qs >= 0)).select(qp, fx.Int32(0))
-                                    qc = ld_rope(_rsrc(rope_cos), qp * (PE_DIM // 2) + qk // 2)
-                                    qsn = ld_rope(_rsrc(rope_sin), qp * (PE_DIM // 2) + qk // 2)
+                                    qc = ld_rope(_rsrc(cos), qp * (PE_DIM // 2) + qk // 2)
+                                    qsn = ld_rope(_rsrc(sin), qp * (PE_DIM // 2) + qk // 2)
                                     q0, q1 = q0 * qc - q1 * qsn, q0 * qsn + q1 * qc
                                 rotated += [q0, q1]
                             put_bf(index_dst + SC["ugp"], 2 * INDEX_ROT_OFF + index_offset, rotated)
@@ -972,10 +982,10 @@ def build_preattn(plan, state, tools):
                         i = hoff - NOPE_DIM + pr * 2
                         x0 = lds_ld(outs, s * Q_B_TILE + pr * 2)
                         x1 = lds_ld(outs, s * Q_B_TILE + pr * 2 + 1)
-                        c = ld_rope(_rsrc(rope_cos), row_position(s) * (PE_DIM // 2) + i // 2)
-                        sn = ld_rope(_rsrc(rope_sin), row_position(s) * (PE_DIM // 2) + i // 2)
+                        c = ld_rope(_rsrc(cos), row_position(s) * (PE_DIM // 2) + i // 2)
+                        sn = ld_rope(_rsrc(sin), row_position(s) * (PE_DIM // 2) + i // 2)
                         put_bf(
-                            mb("q_pe"),
+                            mb(rope_name),
                             (s * H + head) * PE_DIM + i,
                             [x0 * c - x1 * sn, x0 * sn + x1 * c],
                         )
@@ -1068,27 +1078,27 @@ def build_preattn(plan, state, tools):
                 qs, qhead = qtask // INDEX_HEADS, qtask % INDEX_HEADS
                 if tid < INDEX_DIM // 2:
                     qk = tid * 2
-                    q_source = cp_buffer("index_cp_q", sym) if const_expr(SHARD_INDEX_Q) else mb("index_q")
+                    q_source = cp_buffer("index_cp_q", sym) if const_expr(SHARD_INDEX_Q) else mb(q_name)
                     raw = poll(
                         [(q_source, (qs * INDEX_Q_ROWS + qhead * INDEX_DIM + qk) // 2, 1)],
                         scope="system" if SHARD_INDEX_Q else "agent",
                     )[0][0]
                     q0, q1 = bf2_f32(raw)
                     if qk < PE_DIM:
-                        c = ld_rope(_rsrc(rope_cos), row_position(qs) * (PE_DIM // 2) + qk // 2)
-                        sn = ld_rope(_rsrc(rope_sin), row_position(qs) * (PE_DIM // 2) + qk // 2)
+                        c = ld_rope(_rsrc(cos), row_position(qs) * (PE_DIM // 2) + qk // 2)
+                        sn = ld_rope(_rsrc(sin), row_position(qs) * (PE_DIM // 2) + qk // 2)
                         q0, q1 = q0 * c - q1 * sn, q0 * sn + q1 * c
                     _, word4, exponent = quant_index_pair(q0, q1)
                     if lane % 4 == 0:
-                        put(mb("index_q_quant"), qtask * 20 + qk // 8, word4)
+                        put(mb(q_quant_name), qtask * 20 + qk // 8, word4)
                     if lane % 16 == 0:
-                        put(mb("index_q_quant"), qtask * 20 + 16 + qk // 32, exponent)
+                        put(mb(q_quant_name), qtask * 20 + 16 + qk // 32, exponent)
                 gpu.barrier()
 
-    def absorbed_query():
+    def q_absorb():
         # ==================================== 4. absorbed query: q_lat = W_UK^T q_nope
         # 8 row groups (128 latent rows of one head) x 3 chunks: one row group per wave
-        r_wuk, r_suk = _rsrc(w_uk), _rsrc(s_uk)
+        r_wuk, r_suk = _rsrc(q_absorb_weight), _rsrc(q_absorb_scale)
         UK_NKC = NOPE_DIM // 64
         for t in range(start("uk"), N_UK, G):
             t = fx.Int32(t)
@@ -1160,16 +1170,16 @@ def build_preattn(plan, state, tools):
                         value = bf16_round(value * ptpc_scale)
                     vals.append(value)
                 put_bf(
-                    mb("q_lat"),
+                    mb(latent_name),
                     (s * H + head) * KV_LORA + (t % UK_PER_HEAD) * UK_TILE + r0,
                     vals,
                 )
 
     return PreattnStages(
-        input_qkv=input_qkv,
-        query_norm=query_norm,
-        cache=cache,
-        query_projection=query_projection,
+        rmsnorm_qkv=rmsnorm_qkv,
+        rmsnorm_q=rmsnorm_q,
+        rope_cache=rope_cache,
+        q_proj=q_proj,
         index_quant=index_quant,
-        absorbed_query=absorbed_query,
+        q_absorb=q_absorb,
     )

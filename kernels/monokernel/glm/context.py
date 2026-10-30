@@ -4,13 +4,13 @@
 """Explicit specialization and per-tile state for inlined stage emitters.
 
 KernelPlan is a tuple so FlyDSL includes every option in closure cache identity.
-TileState and DeviceTools exist only during IR construction, never on the GPU.
+Execution and operation contexts exist only during IR construction, never on the GPU.
 """
 
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 
 class KernelPlan(NamedTuple):
@@ -170,167 +170,86 @@ class KernelPlan(NamedTuple):
 
 
 @dataclass(frozen=True)
-class TileState:
-    """Per-tile address/view expressions and thread/rank/epoch state.
-
-    Every value is created inside the kernel trace; stages never mutate this
-    bundle or carry it across GPU launches. LDS contents may change in place.
-    """
-
-    attn_keys: object
-    bias: object
-    bid: object
-    cur_pos: object
-    dnw: object
-    full_bid: object
-    full_indptr: object
-    full_out: object
-    full_positions: object
-    full_scratch: object
-    full_slots: object
-    full_sym: object
-    g_in: object
-    g_kv: object
-    g_post: object
-    g_q: object
-    indices: object
-    keys: object
-    ktile: object
-    kv_cache: object
-    lane: object
-    lds: object
-    misc: object
-    outs: object
-    pe_cache: object
-    peer_dst: object
-    peer_offset: object
-    peer_slot: object
-    petile: object
-    pl: object
-    pos0: object
-    positions: object
-    r_h: object
-    r_peers: object
-    rank: object
-    red: object
-    rope_cos: object
-    rope_sin: object
+class ThreadContext:
+    block_id: object
+    global_block_id: object
+    thread_id: object
+    lane_id: object
+    wave_id: object
+    tile_id: object
     row_offset: object
-    row_tile: object
-    s_dn: object
-    s_o: object
-    s_q_b: object
-    s_qkv_a: object
-    s_ug: object
-    s_uk: object
-    s_uv: object
-    scratch: object
-    slot_mapping: object
-    sparse_kv_indptr: object
-    sym: object
-    tag: object
-    tid: object
-    index_params: object
-    v4f: object
-    w_dn: object
-    w_o: object
-    w_q_b: object
-    w_qkv_a: object
-    w_r: object
-    w_ug: object
-    w_uk: object
-    w_uv: object
-    wave: object
-    x_out: object
-    xs: object
+    epoch: object
 
 
 @dataclass(frozen=True)
-class DeviceTools:
-    """Inlined expression emitters shared by every computation stage."""
+class Workspace:
+    scratch: object
+    all_scratch: object
+    lds: object
+    activations: object
+    reduction: object
+    output: object
+    routing_ids: object
+    routing_weights: object
+    temporary: object
+    kv_tile: object
+    rope_tile: object
+    probabilities: object
+    vector_type: object
 
-    quant_moe: Callable
-    ld_f32: Callable
-    ld_bf16: Callable
-    ld_rope: Callable
-    quant_index_pair: Callable
-    row_index_bounds: Callable
-    row_active: Callable
-    row_position: Callable
-    row_slot: Callable
-    row_writes_cache: Callable
-    index_request_start: Callable
-    index_page_slot: Callable
-    lds_ld: Callable
-    lds_st: Callable
-    bf16_pair: Callable
-    bf16_round: Callable
-    index_arg: Callable
-    mb: Callable
-    cp_local_rank: Callable
-    cp_peer: Callable
-    cp_buffer: Callable
-    put: Callable
-    put2: Callable
-    put_bf: Callable
-    bf2_f32: Callable
-    poll: Callable
-    hint_wait: Callable
-    pre_poll: Callable
-    get: Callable
-    getf: Callable
-    getf_many: Callable
-    get2_many: Callable
-    get2: Callable
-    get_bf2_many: Callable
-    wave_sum: Callable
-    wave_max: Callable
-    block_sums: Callable
-    block_sums_f64: Callable
-    block_maxs: Callable
-    block_sum: Callable
-    unit_fp8: Callable
-    unit_fp8x2: Callable
-    unit_f8f8: Callable
-    unit_ptpc: Callable
-    unit_ptpc64: Callable
-    unit_mxfp4: Callable
-    unit_mxfp4_bf16: Callable
-    unit_native_mxfp4: Callable
-    lds_mxfp8: Callable
-    unit_bf16: Callable
-    unit_attention: Callable
-    mma_units: Callable
-    run_units: Callable
-    reduce_rows: Callable
-    emit_out: Callable
-    pick: Callable
-    attention_b_word: Callable
-    emit_ptpc: Callable
-    emit_ptpc_scalar: Callable
-    stage_x_rmsnorm_ptpc: Callable
-    stage_x_pairs_ptpc: Callable
-    stage_x_rmsnorm: Callable
-    load_x_rmsnorm: Callable
-    stage_x_pairs: Callable
-    quant_scaled: Callable
-    quant_mxfp8: Callable
-    pack_moe4: Callable
-    publish_moe_quant: Callable
-    moe_roundtrip: Callable
-    stage_xq: Callable
-    st_f8: Callable
-    st_mxfp8: Callable
-    st_ptpc: Callable
-    load_bias: Callable
-    route_top8: Callable
-    ffn_owner_reduce: Callable
-    o_owner_reduce: Callable
-    peer_reduce: Callable
-    dcp_merge_latent: Callable
-    start: Callable
-    n_sel: Callable
-    dn_route: Callable
+
+@dataclass(frozen=True)
+class ParallelContext:
+    rank: object
+    peer_table: object
+    peer_destination: object
+    peer_offset: object
+    peer_slot: object
+    buffer: object
+    all_buffer: object
+
+
+@dataclass(frozen=True)
+class TokenMetadata:
+    block_tables: object
+    positions: object
+    slot_mapping: object
+    kv_indptr: object
+    all_positions: object
+    all_slots: object
+    all_indptr: object
+    first_position: object
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Scheduling, scratch ownership and communication; no model activations/weights."""
+
+    thread: ThreadContext
+    workspace: Workspace
+    parallel: ParallelContext
+    tokens: TokenMetadata
+
+
+@dataclass(frozen=True)
+class Operations:
+    """Shared primitives grouped by operation instead of a flat list of callbacks."""
+
+    memory: object
+    reductions: object
+    gemm: object
+    normalization: object
+    quantization: object
+    communication: object
+
+
+@dataclass(frozen=True)
+class StageContext:
+    """Compile-time implementation context, separate from each op's tensor contract."""
+
+    plan: KernelPlan
+    execution: ExecutionContext
+    ops: Operations
 
 
 def stage_source_key(source_dir: Path | None = None) -> str:

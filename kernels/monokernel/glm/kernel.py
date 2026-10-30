@@ -78,14 +78,46 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import HIDDEN, INTER, SOFTMAX_SCALE, AttentionWeight, KvCacheLayout
-from kernels.monokernel.glm.attention import build_attention
-from kernels.monokernel.glm.cache import commit_cache
-from kernels.monokernel.glm.context import TileState, stage_source_key
-from kernels.monokernel.glm.indexer import emit_indexer
+from kernels.monokernel.glm.attention import attention
+from kernels.monokernel.glm.cache import cache_commit
+from kernels.monokernel.glm.context import (
+    ExecutionContext,
+    ParallelContext,
+    StageContext,
+    ThreadContext,
+    TokenMetadata,
+    Workspace,
+    stage_source_key,
+)
+from kernels.monokernel.glm.indexer import indexer
+from kernels.monokernel.glm.interfaces import (
+    AttentionInput,
+    AttentionOutput,
+    AttentionWeights,
+    IndexerInput,
+    IndexerOutput,
+    IndexQuery,
+    IndexWeights,
+    KvCache,
+    LinearWeight,
+    Mailbox,
+    MlaQuery,
+    MoeOutput,
+    MoeStage1Input,
+    MoeStage1Output,
+    MoeStage2Input,
+    PreattnInput,
+    PreattnOutput,
+    PreattnWeights,
+    QuantizedActivation,
+    Rope,
+    RouterInput,
+    RouterOutput,
+)
 from kernels.monokernel.glm.layout import BLOCKS
-from kernels.monokernel.glm.moe import emit_moe_down, emit_moe_up, emit_router
+from kernels.monokernel.glm.moe import moe_stage1, moe_stage2, router
 from kernels.monokernel.glm.plan import build_plan
-from kernels.monokernel.glm.preattn import build_preattn
+from kernels.monokernel.glm.preattn import preattn
 from kernels.monokernel.glm.tools import build_tools
 from kernels.monokernel.layout import LAYER_SLOTS, THREADS
 from kernels.monokernel.ops import rsrc as _rsrc
@@ -214,7 +246,6 @@ def build_glm5_monokernel(
         red = xs + RED_OFF
         outs = xs + OUT_OFF
         pl = xs  # score Q is dead before split probabilities are written
-        attn_keys = keys
         ktile = xs + KT_OFF  # f32-typed views holding raw bf16 pairs
         petile = xs + PT_OFF
         v4f = fx.Vector.make_type(4, fx.Float32)
@@ -258,90 +289,139 @@ def build_glm5_monokernel(
             pv = fx.Vector(bo.buffer_load(r_peers, fx.min(wave, W - 1) * 2, vec_width=2, dtype=T.i32))
             peer_dst = ((fx.Int64(_uniform(pv[1])) << 32) | fx.Int64(fx.Uint32(_uniform(pv[0])))) + peer_offset
 
-            # ------------------------------------------------------------ helpers
-            state = TileState(
-                attn_keys=attn_keys,
-                bias=bias,
-                bid=bid,
-                cur_pos=cur_pos,
-                dnw=dnw,
-                full_bid=full_bid,
-                full_indptr=full_indptr,
-                full_out=full_out,
-                full_positions=full_positions,
-                full_scratch=full_scratch,
-                full_slots=full_slots,
-                full_sym=full_sym,
-                g_in=g_in,
-                g_kv=g_kv,
-                g_post=g_post,
-                g_q=g_q,
-                indices=indices,
-                keys=keys,
-                ktile=ktile,
-                kv_cache=kv_cache,
-                lane=lane,
-                lds=lds,
-                misc=misc,
-                outs=outs,
-                pe_cache=pe_cache,
-                peer_dst=peer_dst,
-                peer_offset=peer_offset,
-                peer_slot=peer_slot,
-                petile=petile,
-                pl=pl,
-                pos0=pos0,
-                positions=positions,
-                r_h=r_h,
-                r_peers=r_peers,
-                rank=rank,
-                red=red,
-                rope_cos=rope_cos,
-                rope_sin=rope_sin,
-                row_offset=row_offset,
-                row_tile=row_tile,
-                s_dn=s_dn,
-                s_o=s_o,
-                s_q_b=s_q_b,
-                s_qkv_a=s_qkv_a,
-                s_ug=s_ug,
-                s_uk=s_uk,
-                s_uv=s_uv,
-                scratch=scratch,
-                slot_mapping=slot_mapping,
-                sparse_kv_indptr=sparse_kv_indptr,
-                sym=sym,
-                tag=tag,
-                tid=tid,
-                index_params=index_params,
-                v4f=v4f,
-                w_dn=w_dn,
-                w_o=w_o,
-                w_q_b=w_q_b,
-                w_qkv_a=w_qkv_a,
-                w_r=w_r,
-                w_ug=w_ug,
-                w_uk=w_uk,
-                w_uv=w_uv,
-                wave=wave,
-                x_out=x_out,
-                xs=xs,
+            execution = ExecutionContext(
+                thread=ThreadContext(
+                    block_id=bid,
+                    global_block_id=full_bid,
+                    thread_id=tid,
+                    lane_id=lane,
+                    wave_id=wave,
+                    tile_id=row_tile,
+                    row_offset=row_offset,
+                    epoch=tag,
+                ),
+                workspace=Workspace(
+                    scratch=scratch,
+                    all_scratch=full_scratch,
+                    lds=lds,
+                    activations=xs,
+                    reduction=red,
+                    output=outs,
+                    routing_ids=keys,
+                    routing_weights=dnw,
+                    temporary=misc,
+                    kv_tile=ktile,
+                    rope_tile=petile,
+                    probabilities=pl,
+                    vector_type=v4f,
+                ),
+                parallel=ParallelContext(
+                    rank=rank,
+                    peer_table=r_peers,
+                    peer_destination=peer_dst,
+                    peer_offset=peer_offset,
+                    peer_slot=peer_slot,
+                    buffer=sym,
+                    all_buffer=full_sym,
+                ),
+                tokens=TokenMetadata(
+                    block_tables=cur_pos,
+                    positions=positions,
+                    slot_mapping=slot_mapping,
+                    kv_indptr=sparse_kv_indptr,
+                    all_positions=full_positions,
+                    all_slots=full_slots,
+                    all_indptr=full_indptr,
+                    first_position=pos0,
+                ),
             )
-            tools = build_tools(plan, state)
-            put = tools.put
-            get = tools.get
+            index_weights = IndexWeights(index_params)
+            ctx = StageContext(plan, execution, build_tools(plan, execution, index_weights))
+            put, get = ctx.ops.memory.put, ctx.ops.memory.get
+
+            # Named tensor contracts expose the producer/consumer edges. These
+            # descriptors create no buffers or instructions; tagged views are
+            # resolved only at the original load/store sites.
+            rope = Rope(rope_cos, rope_sin)
+            cache = KvCache(kv_cache, pe_cache)
+            query = MlaQuery(latent=Mailbox("q_lat"), rope=Mailbox("q_pe"))
+            index_query = IndexQuery(
+                kv_buffer=indices,
+                q=Mailbox("index_q"),
+                q_quant=Mailbox("index_q_quant"),
+                weights=Mailbox("index_w"),
+            )
+            pre_input = PreattnInput(
+                hidden_states=r_h,
+                weights=PreattnWeights(
+                    input_norm=g_in,
+                    query_norm=g_q,
+                    kv_norm=g_kv,
+                    qkv_proj=LinearWeight(w_qkv_a, s_qkv_a),
+                    q_proj=LinearWeight(w_q_b, s_q_b),
+                    q_absorb=LinearWeight(w_uk, s_uk),
+                    index=index_weights,
+                ),
+                rope=rope,
+            )
+            pre_output = PreattnOutput(q=query, index=index_query, cache=cache)
+            selected = IndexerOutput(kv_indices=Mailbox("indices"), ready=Mailbox("indices_ready"))
+            attn_input = AttentionInput(
+                kv_indices=selected.kv_indices if with_indexer else indices,
+                indices_ready=selected.ready,
+                q=pre_output.q,
+                cache=pre_output.cache,
+                residual=r_h,
+                weights=AttentionWeights(
+                    v_proj=LinearWeight(w_uv, s_uv),
+                    out_proj=LinearWeight(w_o, s_o),
+                ),
+            )
+            attn_output = AttentionOutput(o=Mailbox("o"), hidden_states=Mailbox("a"))
+            router_input = RouterInput(hidden_states=attn_output.hidden_states, norm_weight=g_post, gate=w_r)
+            router_output = RouterOutput(
+                gating_output=Mailbox("scores"),
+                hidden_states=QuantizedActivation(
+                    data=Mailbox("xq"),
+                    scale=Mailbox("xqs"),
+                    dequant=Mailbox("xqd"),
+                ),
+            )
+            expert_input = MoeStage1Input(
+                hidden_states=attn_output.hidden_states,
+                gating_output=router_output.gating_output,
+                activation=router_output.hidden_states,
+                e_score_correction_bias=bias,
+                norm_weight=g_post,
+                w1=LinearWeight(w_ug, s_ug),
+            )
+            expert_output = MoeStage1Output(
+                intermediate=Mailbox("mid"),
+                topk_ids=Mailbox("sel"),
+                topk_weights=Mailbox("prob"),
+            )
+            down_input = MoeStage2Input(
+                hidden_states=expert_output.intermediate,
+                topk_ids=expert_output.topk_ids,
+                topk_weights=expert_output.topk_weights,
+                gating_output=router_output.gating_output,
+                e_score_correction_bias=bias,
+                residual=attn_output.hidden_states,
+                w2=LinearWeight(w_dn, s_dn),
+            )
+            layer_output = MoeOutput(out=x_out, all_out=full_out)
 
             # These Python helpers emit IR into the same kernel; they do not launch kernels.
             if const_expr(_partition in ("full", "front")):
-                preattn = build_preattn(plan, state, tools)
+                pre = preattn(pre_input, pre_output, ctx)
                 # Input RMSNorm, QKV/index K projections, normalized query and cache publication.
-                preattn.input_qkv()
-                preattn.query_norm()
-                preattn.cache()
+                pre.rmsnorm_qkv()
+                pre.rmsnorm_q()
+                pre.rope_cache()
                 # Query/RoPE and index-query preparation share the projection operands.
-                preattn.query_projection()
-                preattn.index_quant()
-                preattn.absorbed_query()
+                pre.q_proj()
+                pre.index_quant()
+                pre.q_absorb()
                 if const_expr(COHORT_ROW_TILES and not plan.FRONT_PAYLOAD_RETIRE and _partition == "full"):
                     # Every cohort finishes its front tasks before cross-tile reads.
                     # Indexed mode publishes cache stores; external-index mode keeps
@@ -363,19 +443,19 @@ def build_glm5_monokernel(
                     gpu.barrier()
                     fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
             if const_expr(_partition in ("full", "index")):
-                emit_indexer(plan, state, tools)
+                indexer(IndexerInput(index_query, rope, index_weights), selected, ctx)
             if const_expr(_partition in ("full", "back")):
-                attention = build_attention(plan, state, tools)
+                attn = attention(attn_input, attn_output, ctx)
                 # Sparse QK/softmax/PV, reader retirement, split merge and W_UV.
-                attention.sparse()
-                attention.merge()
+                attn.mla_decode()
+                attn.mla_reduce()
                 # W_o, TP attention reduction and residual publish the MoE input.
-                attention.output()
+                attn.output_projection()
                 # Router and quantized gate/up/down retain their task and mailbox dependencies.
-                emit_router(plan, state, tools)
-                emit_moe_up(plan, state, tools)
-                emit_moe_down(plan, state, tools)
-                commit_cache(plan, state, tools)
+                router(router_input, router_output, ctx)
+                moe_stage1(expert_input, expert_output, ctx)
+                moe_stage2(down_input, layer_output, ctx)
+                cache_commit(cache, ctx)
 
             if const_expr(ROW_TILES > 1 and not COHORT_ROW_TILES):
                 if row_tile + 1 < ROW_TILES:

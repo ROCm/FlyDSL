@@ -35,16 +35,16 @@ class QuantizationTools(NamedTuple):
 
 
 @flyc.jit
-def build_quantization(plan, state, memory, reductions):
+def build_quantization(plan, execution, memory, reductions):
     UG_SCALE_ROW = plan.UG_SCALE_ROW
     UG_X_ROW = plan.UG_X_ROW
     native_fp4_mfma = plan.native_fp4_mfma
     activation_fp4 = plan.activation_fp4
     native_fp4_mfma = plan.native_fp4_mfma
-    lane = state.lane
-    misc = state.misc
-    tid = state.tid
-    xs = state.xs
+    lane = execution.thread.lane_id
+    misc = execution.workspace.temporary
+    tid = execution.thread.thread_id
+    xs = execution.workspace.activations
     lds_st = memory.lds_st
     bf16_round = memory.bf16_round
     mb = memory.mb
@@ -130,15 +130,15 @@ def build_quantization(plan, state, memory, reductions):
             return out4[0], out4[1]
         return _fp8_roundtrip(q0, q1)
 
-    def stage_xq(samples):
+    def stage_xq(samples, input_name, scale_name):
         """Poll the router's packed FP8 activation + block scales of ``samples``
         (sample list, or one runtime sample) into LDS, slot 0 for one runtime sample.
         """
         nxw = HIDDEN // 4 // THREADS
         nscale = XQ_GROUPS if native_fp4_mfma else XQ_BLOCKS
         got = poll(
-            [(mb("xq"), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
-            + [(mb("xqs"), sx * nscale + fx.min(tid, nscale - 1), 1) for sx in samples]
+            [(mb(input_name), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
+            + [(mb(scale_name), sx * nscale + fx.min(tid, nscale - 1), 1) for sx in samples]
         )
         for j in range_constexpr(len(samples)):
             for i in range_constexpr(nxw):

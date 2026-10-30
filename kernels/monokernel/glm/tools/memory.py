@@ -55,7 +55,7 @@ class MemoryTools(NamedTuple):
 
 
 @flyc.jit
-def build_memory(plan, state):
+def build_memory(plan, execution, index_weights):
     CP_RANKS = plan.CP_RANKS
     G = plan.G
     S = plan.S
@@ -69,23 +69,23 @@ def build_memory(plan, state):
     indexer_cp = plan.indexer_cp
     rope_dtype = plan.rope_dtype
     use_atom_kv_cache = plan.use_atom_kv_cache
-    bid = state.bid
-    cur_pos = state.cur_pos
-    lane = state.lane
-    peer_offset = state.peer_offset
-    peer_slot = state.peer_slot
-    pos0 = state.pos0
-    positions = state.positions
-    r_peers = state.r_peers
-    rank = state.rank
-    row_offset = state.row_offset
-    scratch = state.scratch
-    slot_mapping = state.slot_mapping
-    sparse_kv_indptr = state.sparse_kv_indptr
-    sym = state.sym
-    tag = state.tag
-    index_params = state.index_params
-    wave = state.wave
+    bid = execution.thread.block_id
+    cur_pos = execution.tokens.block_tables
+    lane = execution.thread.lane_id
+    peer_offset = execution.parallel.peer_offset
+    peer_slot = execution.parallel.peer_slot
+    pos0 = execution.tokens.first_position
+    positions = execution.tokens.positions
+    r_peers = execution.parallel.peer_table
+    rank = execution.parallel.rank
+    row_offset = execution.thread.row_offset
+    scratch = execution.workspace.scratch
+    slot_mapping = execution.tokens.slot_mapping
+    sparse_kv_indptr = execution.tokens.kv_indptr
+    sym = execution.parallel.buffer
+    tag = execution.thread.epoch
+    index_params = index_weights.params
+    wave = execution.thread.wave_id
 
     def ld_f32(r, i):
         return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))

@@ -39,20 +39,20 @@ class GemmTools(NamedTuple):
 
 
 @flyc.jit
-def build_gemm(plan, state, memory):
+def build_gemm(plan, execution, memory):
     S = plan.S
     activation_fp4 = plan.activation_fp4
     atom_experts = plan.atom_experts
     attention_bf16 = plan.attention_bf16
     attention_ptpc = plan.attention_ptpc
-    lane = state.lane
-    misc = state.misc
-    outs = state.outs
-    red = state.red
-    tid = state.tid
-    v4f = state.v4f
-    wave = state.wave
-    xs = state.xs
+    lane = execution.thread.lane_id
+    misc = execution.workspace.temporary
+    outs = execution.workspace.output
+    red = execution.workspace.reduction
+    tid = execution.thread.thread_id
+    v4f = execution.workspace.vector_type
+    wave = execution.thread.wave_id
+    xs = execution.workspace.activations
     ld_f32 = memory.ld_f32
     lds_ld = memory.lds_ld
     lds_st = memory.lds_st

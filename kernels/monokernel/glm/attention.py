@@ -12,6 +12,8 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import FP8_MAX, HIDDEN, KV_LORA, PE_DIM, Q_LORA, V_DIM
+from kernels.monokernel.glm.context import StageContext
+from kernels.monokernel.glm.interfaces import AttentionInput, AttentionOutput
 from kernels.monokernel.glm.layout import (
     N_QKV_A,
     N_ROW_TILES,
@@ -36,13 +38,18 @@ from kernels.monokernel.ops import xshfl as _xshfl
 
 
 class AttentionStages(NamedTuple):
-    sparse: Callable
-    merge: Callable
-    output: Callable
+    mla_decode: Callable
+    mla_reduce: Callable
+    output_projection: Callable
 
 
 @flyc.jit
-def build_attention(plan, state, tools):
+def attention(inputs: AttentionInput, outputs: AttentionOutput, ctx: StageContext):
+    plan = ctx.plan
+    latent_name = inputs.q.latent.name
+    rope_name = inputs.q.rope.name
+    o_name = outputs.o.name
+    hidden_states_name = outputs.hidden_states.name
     COHORT_ROW_TILES = plan.COHORT_ROW_TILES
     DEFER_OFF_CACHE = plan.DEFER_OFF_CACHE
     DN_UNION_CANDIDATE = plan.DN_UNION_CANDIDATE
@@ -86,76 +93,78 @@ def build_attention(plan, state, tools):
     use_atom_kv_cache = plan.use_atom_kv_cache
     uv_scale_rows = plan.uv_scale_rows
     with_indexer = plan.with_indexer
-    attn_keys = state.attn_keys
-    full_bid = state.full_bid
-    full_scratch = state.full_scratch
-    full_slots = state.full_slots
-    indices = state.indices
-    ktile = state.ktile
-    kv_cache = state.kv_cache
-    lane = state.lane
-    misc = state.misc
-    outs = state.outs
-    pe_cache = state.pe_cache
-    petile = state.petile
-    pl = state.pl
-    pos0 = state.pos0
-    r_h = state.r_h
-    red = state.red
-    row_offset = state.row_offset
-    s_o = state.s_o
-    s_uv = state.s_uv
-    scratch = state.scratch
-    tag = state.tag
-    tid = state.tid
-    v4f = state.v4f
-    w_o = state.w_o
-    w_uv = state.w_uv
-    wave = state.wave
-    xs = state.xs
-    ld_f32 = tools.ld_f32
-    row_index_bounds = tools.row_index_bounds
-    row_slot = tools.row_slot
-    row_writes_cache = tools.row_writes_cache
-    index_page_slot = tools.index_page_slot
-    lds_ld = tools.lds_ld
-    lds_st = tools.lds_st
-    bf16_pair = tools.bf16_pair
-    bf16_round = tools.bf16_round
-    mb = tools.mb
-    put = tools.put
-    put_bf = tools.put_bf
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    hint_wait = tools.hint_wait
-    pre_poll = tools.pre_poll
-    get = tools.get
-    get2_many = tools.get2_many
-    get2 = tools.get2
-    wave_sum = tools.wave_sum
-    wave_max = tools.wave_max
-    unit_attention = tools.unit_attention
-    run_units = tools.run_units
-    reduce_rows = tools.reduce_rows
-    emit_out = tools.emit_out
-    attention_b_word = tools.attention_b_word
-    emit_ptpc = tools.emit_ptpc
-    emit_ptpc_scalar = tools.emit_ptpc_scalar
-    stage_x_pairs_ptpc = tools.stage_x_pairs_ptpc
-    stage_x_pairs = tools.stage_x_pairs
-    st_ptpc = tools.st_ptpc
-    o_owner_reduce = tools.o_owner_reduce
-    peer_reduce = tools.peer_reduce
-    dcp_merge_latent = tools.dcp_merge_latent
-    start = tools.start
-    n_sel = tools.n_sel
+    key_indices = ctx.execution.workspace.routing_ids
+    full_bid = ctx.execution.thread.global_block_id
+    full_scratch = ctx.execution.workspace.all_scratch
+    full_slots = ctx.execution.tokens.all_slots
+    kv_indices = inputs.kv_indices if not plan.with_indexer else fx.Int64(0)
+    indices_name = inputs.kv_indices.name if plan.with_indexer else "indices"
+    indices_ready_name = inputs.indices_ready.name
+    key_tile = ctx.execution.workspace.kv_tile
+    kv_buffer = inputs.cache.kv_buffer
+    lane = ctx.execution.thread.lane_id
+    misc = ctx.execution.workspace.temporary
+    outs = ctx.execution.workspace.output
+    rope_buffer = inputs.cache.rope_buffer
+    rope_tile = ctx.execution.workspace.rope_tile
+    probabilities = ctx.execution.workspace.probabilities
+    first_position = ctx.execution.tokens.first_position
+    residual = inputs.residual
+    red = ctx.execution.workspace.reduction
+    row_offset = ctx.execution.thread.row_offset
+    out_scale = inputs.weights.out_proj.scale
+    v_scale = inputs.weights.v_proj.scale
+    scratch = ctx.execution.workspace.scratch
+    tag = ctx.execution.thread.epoch
+    tid = ctx.execution.thread.thread_id
+    v4f = ctx.execution.workspace.vector_type
+    out_weight = inputs.weights.out_proj.weight
+    v_weight = inputs.weights.v_proj.weight
+    wave = ctx.execution.thread.wave_id
+    xs = ctx.execution.workspace.activations
+    ld_f32 = ctx.ops.memory.ld_f32
+    row_index_bounds = ctx.ops.memory.row_index_bounds
+    row_slot = ctx.ops.memory.row_slot
+    row_writes_cache = ctx.ops.memory.row_writes_cache
+    index_page_slot = ctx.ops.memory.index_page_slot
+    lds_ld = ctx.ops.memory.lds_ld
+    lds_st = ctx.ops.memory.lds_st
+    bf16_pair = ctx.ops.memory.bf16_pair
+    bf16_round = ctx.ops.memory.bf16_round
+    mb = ctx.ops.memory.mb
+    put = ctx.ops.memory.put
+    put_bf = ctx.ops.memory.put_bf
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    hint_wait = ctx.ops.memory.hint_wait
+    pre_poll = ctx.ops.memory.pre_poll
+    get = ctx.ops.memory.get
+    get2_many = ctx.ops.memory.get2_many
+    get2 = ctx.ops.memory.get2
+    wave_sum = ctx.ops.reductions.wave_sum
+    wave_max = ctx.ops.reductions.wave_max
+    unit_attention = ctx.ops.gemm.unit_attention
+    run_units = ctx.ops.gemm.run_units
+    reduce_rows = ctx.ops.gemm.reduce_rows
+    emit_out = ctx.ops.gemm.emit_out
+    attention_b_word = ctx.ops.gemm.attention_b_word
+    emit_ptpc = ctx.ops.gemm.emit_ptpc
+    emit_ptpc_scalar = ctx.ops.gemm.emit_ptpc_scalar
+    stage_x_pairs_ptpc = ctx.ops.normalization.stage_x_pairs_ptpc
+    stage_x_pairs = ctx.ops.normalization.stage_x_pairs
+    st_ptpc = ctx.ops.quantization.st_ptpc
+    o_owner_reduce = ctx.ops.communication.o_owner_reduce
+    peer_reduce = ctx.ops.communication.peer_reduce
+    dcp_merge_latent = ctx.ops.communication.dcp_merge_latent
+    start = ctx.ops.memory.start
+    n_sel = ctx.ops.memory.n_sel
 
-    def sparse():
+    def mla_decode():
         # ================================== 5. sparse MLA split: 32 keys x 8 heads
         if const_expr(SPLIT_ALL_HEADS):
-            r_kv = _rsrc(kv_cache)
-            r_pe = _rsrc(pe_cache)
-            r_idx = _rsrc(indices)
+            r_kv = _rsrc(kv_buffer)
+            r_pe = _rsrc(rope_buffer)
+            r_idx = _rsrc(kv_indices)
             KPW = SPLIT_KEYS // WAVES
 
             def split_keys(t, s):
@@ -166,14 +175,14 @@ def build_attention(plan, state, tools):
                     sparse = index_end > index_base
                 else:
                     index_base = s * topk
-                    kv_len = pos0 + s + 1
+                    kv_len = first_position + s + 1
                     sparse = kv_len > topk
                     nkeys = sparse.select(fx.Int32(topk), kv_len)
                 if const_expr(with_indexer):
                     if sparse:
                         if wave == 0:
                             if lane == 0:
-                                get(mb("indices_ready"), s)
+                                get(mb(indices_ready_name), s)
                             # Only wave 0 consumes the compact index payload; its
                             # divergent ready poll reconverges before this acquire.
                             fx.memory_fence(
@@ -189,14 +198,14 @@ def build_attention(plan, state, tools):
                             if sparse:
                                 idx = fx.Int32(
                                     bo.buffer_load(
-                                        _rsrc(mb("indices")),
+                                        _rsrc(mb(indices_name)),
                                         s * topk + k_cl,
                                         vec_width=1,
                                         dtype=T.i32,
                                         cache_modifier=CM_DEV,
                                     )
                                 )
-                            lds_st(attn_keys, lane, index_page_slot(s, idx))
+                            lds_st(key_indices, lane, index_page_slot(s, idx))
                         elif const_expr(use_atom_kv_cache):
                             idx = fx.Int32(0)
                             if sparse:
@@ -208,7 +217,7 @@ def build_attention(plan, state, tools):
                                         dtype=T.i32,
                                     )
                                 )
-                            lds_st(attn_keys, lane, idx)
+                            lds_st(key_indices, lane, idx)
                         else:
                             idx = fx.Int32(
                                 bo.buffer_load(
@@ -218,19 +227,19 @@ def build_attention(plan, state, tools):
                                     dtype=T.i32,
                                 )
                             )
-                            lds_st(attn_keys, lane, sparse.select(idx, k_cl))
+                            lds_st(key_indices, lane, sparse.select(idx, k_cl))
                 return nkeys, sparse
 
             def gather_old_kv():
                 """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
-                krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
+                krows = [lds_ld(key_indices, wave * KPW + jj) for jj in range(KPW)]
                 if const_expr(use_atom_kv_cache):
                     # Each gathered row is wave-uniform; retain two independent
                     # row loads while putting its full byte address in the base.
                     cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
                     for gather_base in range_constexpr(0, KPW, 2):
                         descriptors = [
-                            _rsrc(kv_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
+                            _rsrc(kv_buffer + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
                             for part in range(min(2, KPW - gather_base))
                         ]
                         raw_values = [
@@ -249,12 +258,14 @@ def build_attention(plan, state, tools):
                             value = _fp8_to_bf16x8(raw[0], raw[1]) if const_expr(cache_fp8) else raw
                             fx.ptr_store(
                                 value.bitcast(fx.Float32),
-                                ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                key_tile + ((wave * KPW + gather_base + part) * KS + lane * 4),
                             )
                         if lane < (PE_DIM // 8 if const_expr(cache_fp8) else PE_DIM // 2):
                             pe_values = [
                                 bo.buffer_load(
-                                    _rsrc(pe_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes),
+                                    _rsrc(
+                                        rope_buffer + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes
+                                    ),
                                     KV_LORA // (4 if cache_fp8 else 2) + lane * (2 if cache_fp8 else 1),
                                     vec_width=2 if cache_fp8 else 1,
                                     dtype=T.i32,
@@ -266,11 +277,11 @@ def build_attention(plan, state, tools):
                                     raw = fx.Vector(pe_values[part])
                                     fx.ptr_store(
                                         _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                        petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                        rope_tile + ((wave * KPW + gather_base + part) * PS + lane * 4),
                                     )
                                 else:
                                     lds_st(
-                                        petile,
+                                        rope_tile,
                                         (wave * KPW + gather_base + part) * PS + lane,
                                         fx.Int32(pe_values[part]).bitcast(fx.Float32),
                                     )
@@ -293,7 +304,7 @@ def build_attention(plan, state, tools):
                             raw = gather_kv[part]
                             fx.ptr_store(
                                 _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                key_tile + ((wave * KPW + gather_base + part) * KS + lane * 4),
                             )
                         if lane < PE_DIM // 8:
                             gather_pe = [
@@ -311,7 +322,7 @@ def build_attention(plan, state, tools):
                                 raw = gather_pe[part]
                                 fx.ptr_store(
                                     _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                    petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                    rope_tile + ((wave * KPW + gather_base + part) * PS + lane * 4),
                                 )
                 elif const_expr(
                     COHORT_ROW_TILES and not with_indexer and native_fp4_mfma and npes == 4 and not cache_fp8
@@ -333,7 +344,7 @@ def build_attention(plan, state, tools):
                         for gather_part in range_constexpr(2):
                             fx.ptr_store(
                                 gather_kv[gather_part].bitcast(fx.Float32),
-                                ktile + ((wave * KPW + gather_base + gather_part) * KS + lane * 4),
+                                key_tile + ((wave * KPW + gather_base + gather_part) * KS + lane * 4),
                             )
                         if lane < PE_DIM // 2:
                             gather_pe = [
@@ -342,7 +353,7 @@ def build_attention(plan, state, tools):
                             ]
                             for gather_part in range_constexpr(2):
                                 lds_st(
-                                    petile,
+                                    rope_tile,
                                     (wave * KPW + gather_base + gather_part) * PS + lane,
                                     gather_pe[gather_part],
                                 )
@@ -354,7 +365,7 @@ def build_attention(plan, state, tools):
                             raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
                             fx.ptr_store(
                                 _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 8:
                                 pe_raw = fx.Vector(
@@ -367,7 +378,7 @@ def build_attention(plan, state, tools):
                                 )
                                 fx.ptr_store(
                                     _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
-                                    petile + (j * PS + lane * 4),
+                                    rope_tile + (j * PS + lane * 4),
                                 )
                         else:
                             kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
@@ -379,14 +390,14 @@ def build_attention(plan, state, tools):
                                     dtype=T.i32,
                                 )
                             )
-                            fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
+                            fx.ptr_store(kv8.bitcast(fx.Float32), key_tile + (j * KS + lane * 4))
                             if lane < PE_DIM // 2:
                                 pe_row = (
                                     krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
                                     if const_expr(use_atom_kv_cache)
                                     else krows[jj] * (PE_DIM // 2) + lane
                                 )
-                                lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
+                                lds_st(rope_tile, j * PS + lane, ld_f32(r_pe, pe_row))
 
             def patch_new_kv():
                 """Patch the cache version visible at this tile's serial boundary."""
@@ -399,7 +410,7 @@ def build_attention(plan, state, tools):
                     visible_row = (lane < row_offset + S) & (lane < total_samples) & (incoming_slot >= 0)
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
-                        physical_key = _uniform(lds_ld(attn_keys, j))
+                        physical_key = _uniform(lds_ld(key_indices, j))
                         version_mask = fx.Int64(rocdl.ballot(T.i64, visible_row & (incoming_slot == physical_key)))
                         if version_mask != 0:
                             incoming_row = fx.Int32(63) - fx.Int32(fmath.ctlz(version_mask))
@@ -415,18 +426,18 @@ def build_attention(plan, state, tools):
                             words = [bf16_pair(a0, a1) for a0, a1 in kvp]
                             fx.ptr_store(
                                 fx.Vector.from_elements(words, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 2:
                                 a0, a1 = get2(source_scratch + SC["penew"], source_row * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                                lds_st(rope_tile, j * PS + lane, bf16_pair(a0, a1))
                 else:
                     if const_expr(use_atom_kv_cache):
                         new_active = [row_writes_cache(new_s) for new_s in range(S)]
                         new_slots = [row_slot(new_s) for new_s in range(S)]
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
-                        kr = lds_ld(attn_keys, j)
+                        kr = lds_ld(key_indices, j)
                         if const_expr(use_atom_kv_cache):
                             sn = fx.Int32(-1)
                             for new_s in range_constexpr(S):
@@ -434,18 +445,18 @@ def build_attention(plan, state, tools):
                                 sn = match.select(fx.Int32(new_s), sn)
                             is_new = sn >= 0
                         else:
-                            is_new = kr >= pos0
-                            sn = kr - pos0
+                            is_new = kr >= first_position
+                            sn = kr - first_position
                         if is_new:
                             kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
                             w = [bf16_pair(a0, a1) for a0, a1 in kvp]
                             fx.ptr_store(
                                 fx.Vector.from_elements(w, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 2:
                                 a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                                lds_st(rope_tile, j * PS + lane, bf16_pair(a0, a1))
 
             N_HEAD_GROUPS = 1
             for tt in range(start("split"), S * N_HEAD_GROUPS * N_SPLIT, G):
@@ -484,13 +495,13 @@ def build_attention(plan, state, tools):
                 qv = poll(
                     [
                         (
-                            mb("q_lat"),
+                            mb(latent_name),
                             (s * H * KV_LORA + (tid + i * THREADS) * 4) // 2,
                             2,
                         )
                         for i in range(NQ)
                     ]
-                    + [(mb("q_pe"), (s * H * PE_DIM + tpe * 4) // 2, 2)]
+                    + [(mb(rope_name), (s * H * PE_DIM + tpe * 4) // 2, 2)]
                 )
                 for i in range_constexpr(NQ):
                     w4 = tid + i * THREADS
@@ -546,7 +557,7 @@ def build_attention(plan, state, tools):
                     p_n = _xshfl(p, 1)
                     if (lane < SPLIT_KEYS) & (lane % 2 == 0):
                         lds_st(
-                            pl,
+                            probabilities,
                             softmax_head * (SPLIT_KEYS // 2) + lane // 2,
                             bf16_pair(p, p_n),
                         )
@@ -564,11 +575,11 @@ def build_attention(plan, state, tools):
                     c1 = fx.full(4, 0.0, fx.Float32)
                     for js in range_constexpr(SPLIT_KEYS // 32):
                         a = fx.ptr_load(
-                            pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4),
+                            probabilities + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4),
                             result_type=v4f,
                         ).bitcast(fx.BFloat16)
                         ws = [
-                            fx.ptr_load(ktile + ((js * 32 + (lane // 16) * 8 + i) * KS + dw)).bitcast(fx.Int32)
+                            fx.ptr_load(key_tile + ((js * 32 + (lane // 16) * 8 + i) * KS + dw)).bitcast(fx.Int32)
                             for i in range(8)
                         ]
                         w_lo = [(ws[2 * i] & 0xFFFF) | (ws[2 * i + 1] << 16) for i in range(4)]
@@ -591,9 +602,9 @@ def build_attention(plan, state, tools):
                     put(mb("sp_l"), (s * N_SPLIT + t) * H + h, l0)
                     put(mb("sp_l"), (s * N_SPLIT + t) * H + h + WAVES, l1)
         else:
-            r_kv = _rsrc(kv_cache)
-            r_pe = _rsrc(pe_cache)
-            r_idx = _rsrc(indices)
+            r_kv = _rsrc(kv_buffer)
+            r_pe = _rsrc(rope_buffer)
+            r_idx = _rsrc(kv_indices)
             KPW = SPLIT_GATHER_KEYS // WAVES
 
             def split_keys(t, s):
@@ -604,14 +615,14 @@ def build_attention(plan, state, tools):
                     sparse = index_end > index_base
                 else:
                     index_base = s * topk
-                    kv_len = pos0 + s + 1
+                    kv_len = first_position + s + 1
                     sparse = kv_len > topk
                     nkeys = sparse.select(fx.Int32(topk), kv_len)
                 if const_expr(with_indexer):
                     if sparse:
                         if wave == 0:
                             if lane == 0:
-                                get(mb("indices_ready"), s)
+                                get(mb(indices_ready_name), s)
                             # Only wave 0 consumes the compact index payload; its
                             # divergent ready poll reconverges before this acquire.
                             fx.memory_fence(
@@ -627,14 +638,14 @@ def build_attention(plan, state, tools):
                             if sparse:
                                 idx = fx.Int32(
                                     bo.buffer_load(
-                                        _rsrc(mb("indices")),
+                                        _rsrc(mb(indices_name)),
                                         s * topk + k_cl,
                                         vec_width=1,
                                         dtype=T.i32,
                                         cache_modifier=CM_DEV,
                                     )
                                 )
-                            lds_st(attn_keys, lane, index_page_slot(s, idx))
+                            lds_st(key_indices, lane, index_page_slot(s, idx))
                         elif const_expr(use_atom_kv_cache):
                             idx = fx.Int32(0)
                             if sparse:
@@ -646,7 +657,7 @@ def build_attention(plan, state, tools):
                                         dtype=T.i32,
                                     )
                                 )
-                            lds_st(attn_keys, lane, idx)
+                            lds_st(key_indices, lane, idx)
                         else:
                             idx = fx.Int32(
                                 bo.buffer_load(
@@ -656,19 +667,19 @@ def build_attention(plan, state, tools):
                                     dtype=T.i32,
                                 )
                             )
-                            lds_st(attn_keys, lane, sparse.select(idx, k_cl))
+                            lds_st(key_indices, lane, sparse.select(idx, k_cl))
                 return nkeys, sparse
 
             def gather_old_kv():
                 """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
-                krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
+                krows = [lds_ld(key_indices, wave * KPW + jj) for jj in range(KPW)]
                 if const_expr(use_atom_kv_cache):
                     # Each gathered row is wave-uniform; retain two independent
                     # row loads while putting its full byte address in the base.
                     cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
                     for gather_base in range_constexpr(0, KPW, 2):
                         descriptors = [
-                            _rsrc(kv_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
+                            _rsrc(kv_buffer + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
                             for part in range(min(2, KPW - gather_base))
                         ]
                         raw_values = [
@@ -687,12 +698,14 @@ def build_attention(plan, state, tools):
                             value = _fp8_to_bf16x8(raw[0], raw[1]) if const_expr(cache_fp8) else raw
                             fx.ptr_store(
                                 value.bitcast(fx.Float32),
-                                ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                key_tile + ((wave * KPW + gather_base + part) * KS + lane * 4),
                             )
                         if lane < (PE_DIM // 8 if const_expr(cache_fp8) else PE_DIM // 2):
                             pe_values = [
                                 bo.buffer_load(
-                                    _rsrc(pe_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes),
+                                    _rsrc(
+                                        rope_buffer + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes
+                                    ),
                                     KV_LORA // (4 if cache_fp8 else 2) + lane * (2 if cache_fp8 else 1),
                                     vec_width=2 if cache_fp8 else 1,
                                     dtype=T.i32,
@@ -704,11 +717,11 @@ def build_attention(plan, state, tools):
                                     raw = fx.Vector(pe_values[part])
                                     fx.ptr_store(
                                         _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                        petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                        rope_tile + ((wave * KPW + gather_base + part) * PS + lane * 4),
                                     )
                                 else:
                                     lds_st(
-                                        petile,
+                                        rope_tile,
                                         (wave * KPW + gather_base + part) * PS + lane,
                                         fx.Int32(pe_values[part]).bitcast(fx.Float32),
                                     )
@@ -731,7 +744,7 @@ def build_attention(plan, state, tools):
                             raw = gather_kv[part]
                             fx.ptr_store(
                                 _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                key_tile + ((wave * KPW + gather_base + part) * KS + lane * 4),
                             )
                         if lane < PE_DIM // 8:
                             gather_pe = [
@@ -749,7 +762,7 @@ def build_attention(plan, state, tools):
                                 raw = gather_pe[part]
                                 fx.ptr_store(
                                     _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                    petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                    rope_tile + ((wave * KPW + gather_base + part) * PS + lane * 4),
                                 )
                 else:
                     for jj in range_constexpr(KPW):
@@ -759,7 +772,7 @@ def build_attention(plan, state, tools):
                             raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
                             fx.ptr_store(
                                 _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 8:
                                 pe_raw = fx.Vector(
@@ -772,7 +785,7 @@ def build_attention(plan, state, tools):
                                 )
                                 fx.ptr_store(
                                     _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
-                                    petile + (j * PS + lane * 4),
+                                    rope_tile + (j * PS + lane * 4),
                                 )
                         else:
                             kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
@@ -784,14 +797,14 @@ def build_attention(plan, state, tools):
                                     dtype=T.i32,
                                 )
                             )
-                            fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
+                            fx.ptr_store(kv8.bitcast(fx.Float32), key_tile + (j * KS + lane * 4))
                             if lane < PE_DIM // 2:
                                 pe_row = (
                                     krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
                                     if const_expr(use_atom_kv_cache)
                                     else krows[jj] * (PE_DIM // 2) + lane
                                 )
-                                lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
+                                lds_st(rope_tile, j * PS + lane, ld_f32(r_pe, pe_row))
 
             def patch_new_kv():
                 """Patch the cache version visible at this tile's serial boundary."""
@@ -804,7 +817,7 @@ def build_attention(plan, state, tools):
                     visible_row = (lane < row_offset + S) & (lane < total_samples) & (incoming_slot >= 0)
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
-                        physical_key = _uniform(lds_ld(attn_keys, j))
+                        physical_key = _uniform(lds_ld(key_indices, j))
                         version_mask = fx.Int64(rocdl.ballot(T.i64, visible_row & (incoming_slot == physical_key)))
                         if version_mask != 0:
                             incoming_row = fx.Int32(63) - fx.Int32(fmath.ctlz(version_mask))
@@ -820,18 +833,18 @@ def build_attention(plan, state, tools):
                             words = [bf16_pair(a0, a1) for a0, a1 in kvp]
                             fx.ptr_store(
                                 fx.Vector.from_elements(words, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 2:
                                 a0, a1 = get2(source_scratch + SC["penew"], source_row * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                                lds_st(rope_tile, j * PS + lane, bf16_pair(a0, a1))
                 else:
                     if const_expr(use_atom_kv_cache):
                         new_active = [row_writes_cache(new_s) for new_s in range(S)]
                         new_slots = [row_slot(new_s) for new_s in range(S)]
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
-                        kr = lds_ld(attn_keys, j)
+                        kr = lds_ld(key_indices, j)
                         if const_expr(use_atom_kv_cache):
                             sn = fx.Int32(-1)
                             for new_s in range_constexpr(S):
@@ -839,18 +852,18 @@ def build_attention(plan, state, tools):
                                 sn = match.select(fx.Int32(new_s), sn)
                             is_new = sn >= 0
                         else:
-                            is_new = kr >= pos0
-                            sn = kr - pos0
+                            is_new = kr >= first_position
+                            sn = kr - first_position
                         if is_new:
                             kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
                             w = [bf16_pair(a0, a1) for a0, a1 in kvp]
                             fx.ptr_store(
                                 fx.Vector.from_elements(w, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                                key_tile + (j * KS + lane * 4),
                             )
                             if lane < PE_DIM // 2:
                                 a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                                lds_st(rope_tile, j * PS + lane, bf16_pair(a0, a1))
 
             N_HEAD_GROUPS = H // WAVES
             for tt in range(start("split"), S * N_HEAD_GROUPS * N_SPLIT_TASKS, G):
@@ -889,13 +902,13 @@ def build_attention(plan, state, tools):
                 qv = poll(
                     [
                         (
-                            mb("q_lat"),
+                            mb(latent_name),
                             (s * H * KV_LORA + (tid + i * THREADS) * 4) // 2,
                             2,
                         )
                         for i in range(NQ)
                     ]
-                    + [(mb("q_pe"), (s * H * PE_DIM + tpe * 4) // 2, 2)]
+                    + [(mb(rope_name), (s * H * PE_DIM + tpe * 4) // 2, 2)]
                 )
                 for i in range_constexpr(NQ):
                     w4 = tid + i * THREADS
@@ -950,7 +963,7 @@ def build_attention(plan, state, tools):
                     lsum = wave_sum(p)
                     p_n = _xshfl(p, 1)
                     if (lane < SPLIT_KEYS) & (lane % 2 == 0):
-                        lds_st(pl, h * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n))
+                        lds_st(probabilities, h * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n))
                     gpu.barrier()
                     # O = P V on MFMA: heads M, keys K, latent dims N.  Each V word holds
                     # a dim pair (even dim low), so one read feeds two MFMAs (even / odd dims):
@@ -961,12 +974,12 @@ def build_attention(plan, state, tools):
                         c1 = fx.full(4, 0.0, fx.Float32)
                         for js in range_constexpr(SPLIT_KEYS // 32):
                             a = fx.ptr_load(
-                                pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4),
+                                probabilities + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4),
                                 result_type=v4f,
                             ).bitcast(fx.BFloat16)
                             ws = [
                                 fx.ptr_load(
-                                    ktile + ((split_part * SPLIT_KEYS + js * 32 + (lane // 16) * 8 + i) * KS + dw)
+                                    key_tile + ((split_part * SPLIT_KEYS + js * 32 + (lane // 16) * 8 + i) * KS + dw)
                                 ).bitcast(fx.Int32)
                                 for i in range(8)
                             ]
@@ -990,7 +1003,7 @@ def build_attention(plan, state, tools):
                     if const_expr(split_part + 1 < SPLIT_TASK_PAIR):
                         gpu.barrier()
 
-    def merge():
+    def mla_reduce():
         if const_expr(FRONT_PAYLOAD_RETIRE):
             # Each global QKV task reads all rows of one 16-row group.
             # Its q_a/kv_a stores follow the last operand read, MFMA and
@@ -1019,7 +1032,7 @@ def build_attention(plan, state, tools):
 
         # ========================== 6. split merge + W_UV: o = W_UV (softmax . KV)
         # 4 row groups x 8 chunks: 2 waves per row group, 4 chunks each
-        r_wuv, r_suv = _rsrc(w_uv), _rsrc(s_uv)
+        r_wuv, r_suv = _rsrc(v_weight), _rsrc(v_scale)
         UV_NKC = KV_LORA // 64
         UV_R = UV_TILE // 16
         UV_WPR = WAVES // UV_R
@@ -1178,7 +1191,7 @@ def build_attention(plan, state, tools):
                         if tid < UV_TILE // 4:
                             r = tid * 4
                             put_bf(
-                                mb("o"),
+                                mb(o_name),
                                 s * O_K + local_t * UV_TILE + r,
                                 [lds_ld(outs, r + j) for j in range(4)],
                             )
@@ -1241,10 +1254,10 @@ def build_attention(plan, state, tools):
                     put_bf(uv_dst + SC["o"], (uv_row % S) * O_K + uv_t * UV_TILE + uv_r, [uv_v0, uv_v1])
                 gpu.barrier()
 
-    def output():
+    def output_projection():
         # ====================== 7. W_o + attention TP peer reduce + residual -> a
         # 2 row groups x 32 chunks: 4 waves per row group, 8 chunks each
-        r_wo, r_so = _rsrc(w_o), _rsrc(s_o)
+        r_wo, r_so = _rsrc(out_weight), _rsrc(out_scale)
         O_NKC = O_K // 64
         O_R = ROW_TILE // 16
         O_WPR = WAVES // O_R
@@ -1273,7 +1286,7 @@ def build_attention(plan, state, tools):
             hint_wait(
                 S * N_UV,
                 lambda k: (
-                    mb("o"),
+                    mb(o_name),
                     (k // N_UV) * O_K + (k % N_UV) * UV_TILE + UV_TILE - 1,
                 ),
             )
@@ -1293,7 +1306,7 @@ def build_attention(plan, state, tools):
                 w = fx.Vector.from_elements(
                     [
                         bo.buffer_load(
-                            r_h,
+                            residual,
                             (s * HIDDEN + row) // 2,
                             vec_width=1,
                             dtype=T.i32,
@@ -1308,14 +1321,14 @@ def build_attention(plan, state, tools):
                 o_owner_reduce(
                     t,
                     resid_h,
-                    lambda s, row, v0, v1: put_bf(mb("a"), s * HIDDEN + row, [v0, v1]),
+                    lambda s, row, v0, v1: put_bf(mb(hidden_states_name), s * HIDDEN + row, [v0, v1]),
                 )
             else:
                 peer_reduce(
                     "attn",
                     t,
                     resid_h,
-                    lambda s, row, v0, v1: put_bf(mb("a"), s * HIDDEN + row, [v0, v1]),
+                    lambda s, row, v0, v1: put_bf(mb(hidden_states_name), s * HIDDEN + row, [v0, v1]),
                 )
 
-    return AttentionStages(sparse=sparse, merge=merge, output=output)
+    return AttentionStages(mla_decode=mla_decode, mla_reduce=mla_reduce, output_projection=output_projection)

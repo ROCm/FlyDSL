@@ -93,7 +93,8 @@ same stream. The index partition uses its own grid and LDS layout.
 | --- | --- |
 | `kernel.py` | Public factory, per-tile setup, stage order, tile barriers and launches |
 | `plan.py` | Compile-time format selection, task placement, cohorts and overlaid LDS geometry |
-| `context.py` | Immutable `KernelPlan`, per-tile `TileState`, and shared `DeviceTools` interfaces |
+| `context.py` | Compile-time plan, execution metadata and grouped shared operations |
+| `interfaces.py` | Semantic inputs, outputs, weights and lazy tensor views for stage boundaries |
 | `preattn.py` | Input/QKV normalization, projections, RoPE, index Q/K preparation and cache publication |
 | `indexer.py` | BF16/FP4 index scores and exact local/distributed sparse selection |
 | `attention.py` | Sparse MLA, split merge, W_UV/W_o and attention TP residual |
@@ -110,12 +111,31 @@ single versus three-kernel launches. Pre-attention and attention factories
 return named inline stages so their implementations can stay in their modules
 without hiding the execution order.
 
-Each stage declares the exact plan fields, memory views and tools it needs at
-its entry. These aliases preserve the DSL's local and loop-carried variable
-scopes. The context objects exist during Python IR construction, with no device
-allocation or additional kernel launches. `KernelPlan` is a named tuple so all
-specialization values participate in FlyDSL's closure cache key; stage and tool
-factories use `@flyc.jit` so their transitive source dependencies are tracked.
+Stage interfaces take `inputs`, `outputs` and `ctx`. Tensor contracts live in
+`interfaces.py`; `ctx` contains only the compile-time plan, thread/tile state,
+workspace, token metadata, communication and shared operations. Model weights
+and activation edges are explicit op inputs, not fields in a global state bag.
+`LinearWeight(weight, scale)` keeps each projection's parameters together.
+Mailboxes are lazy views of existing scratch: resolving them at each original
+load/store site preserves the readiness protocol and IR emission order.
+
+Names follow AITER's op contracts: `hidden_states`, `q`, `kv_buffer`,
+`kv_indices`, `gating_output`, `topk_ids`, `topk_weights`, `w1` and `w2`.
+The main sequence calls `rmsnorm_qkv`, `rmsnorm_q`, `rope_cache`, `q_proj`,
+`index_quant`, `q_absorb`, `mla_decode`, `mla_reduce`, `output_projection`,
+`router`, `moe_stage1` and `moe_stage2`. This is semantic alignment, not a
+call-through to AITER or a torch-tensor ABI: sparse MLA retains separate latent
+and RoPE buffers and online-softmax max/sum scratch; `mla_reduce` includes W_UV.
+The router publishes sigmoid scores and quantized activations; the expert
+stages retain GLM's bias-corrected top-k, shared expert and TP residual rules.
+Some down schedules recompute routes from scores, so those scores and the
+correction bias remain explicit stage-2 inputs as well as top-k outputs.
+
+The stage-local aliases preserve the DSL's local and loop-carried scopes.
+Context objects exist during Python IR construction, with no device allocation
+or additional launches. `KernelPlan` is a named tuple so specialization values
+participate in FlyDSL's closure cache key; stage and tool factories use
+`@flyc.jit` so their transitive source dependencies are tracked.
 For older runtimes whose dependency walk stops at directory boundaries, the
 factory also captures `stage_source_key()` in the kernel closure. This digest
 covers every GLM Python module and tool; it affects cache identity and emits no

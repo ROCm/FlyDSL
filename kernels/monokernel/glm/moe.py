@@ -10,6 +10,15 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import EPS, HIDDEN, INTER, MOE_SLOTS, N_EXPERTS, SCALE_BM, SHARED_EXPERT, TOP_K
+from kernels.monokernel.glm.context import StageContext
+from kernels.monokernel.glm.interfaces import (
+    MoeOutput,
+    MoeStage1Input,
+    MoeStage1Output,
+    MoeStage2Input,
+    RouterInput,
+    RouterOutput,
+)
 from kernels.monokernel.glm.layout import (
     BLOCKS,
     N_ROUTER,
@@ -26,6 +35,7 @@ from kernels.monokernel.glm.layout import (
     sample_wave_batches,
     ug_split,
 )
+from kernels.monokernel.glm.tools.routing import build_routing
 from kernels.monokernel.layout import CM_SYS, THREADS, atom_mxfp4_scale_index
 from kernels.monokernel.ops import (
     bpermute_i32,
@@ -51,39 +61,45 @@ from kernels.monokernel.ops import (
 
 
 @flyc.jit
-def emit_router(plan, state, tools):
-    quant_moe = tools.quant_moe
+def router(inputs: RouterInput, outputs: RouterOutput, ctx: StageContext):
+    plan = ctx.plan
+    hidden_states_name = inputs.hidden_states.name
+    data_name = outputs.hidden_states.data.name
+    dequant_name = outputs.hidden_states.dequant.name
+    scale_name = outputs.hidden_states.scale.name
+    gating_output_name = outputs.gating_output.name
+    quant_moe = ctx.ops.quantization.quant_moe
     DN_UNION_CANDIDATE = plan.DN_UNION_CANDIDATE
     G = plan.G
     S = plan.S
     index_request_width = plan.index_request_width
     indexer_cp = plan.indexer_cp
     native_fp4_mfma = plan.native_fp4_mfma
-    g_post = state.g_post
-    lane = state.lane
-    red = state.red
-    tid = state.tid
-    w_r = state.w_r
-    wave = state.wave
-    ld_bf16 = tools.ld_bf16
-    lds_ld = tools.lds_ld
-    mb = tools.mb
-    put = tools.put
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    hint_wait = tools.hint_wait
-    unit_bf16 = tools.unit_bf16
-    run_units = tools.run_units
-    stage_x_rmsnorm = tools.stage_x_rmsnorm
-    publish_moe_quant = tools.publish_moe_quant
-    moe_roundtrip = tools.moe_roundtrip
-    start = tools.start
+    norm_weight = inputs.norm_weight
+    lane = ctx.execution.thread.lane_id
+    red = ctx.execution.workspace.reduction
+    tid = ctx.execution.thread.thread_id
+    gate_weight = inputs.gate
+    wave = ctx.execution.thread.wave_id
+    ld_bf16 = ctx.ops.memory.ld_bf16
+    lds_ld = ctx.ops.memory.lds_ld
+    mb = ctx.ops.memory.mb
+    put = ctx.ops.memory.put
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    hint_wait = ctx.ops.memory.hint_wait
+    unit_bf16 = ctx.ops.gemm.unit_bf16
+    run_units = ctx.ops.gemm.run_units
+    stage_x_rmsnorm = ctx.ops.normalization.stage_x_rmsnorm
+    publish_moe_quant = ctx.ops.quantization.publish_moe_quant
+    moe_roundtrip = ctx.ops.quantization.moe_roundtrip
+    start = ctx.ops.memory.start
 
     if const_expr(DN_UNION_CANDIDATE and index_request_width == 6 and not indexer_cp):
         # ====== 8. post-attn RMSNorm -> router scores + this task's FP8 activation blocks
         # Two samples per CTA, retaining the original per-sample K-fold and rounding.
         # Reuse weights across two live MFMA columns; 192 tasks retain the original CTA base.
-        r_wr = _rsrc(w_r)
+        r_wr = _rsrc(gate_weight)
         R_NKC = HIDDEN // 64
         for tt in range(start("router"), (S // 2) * N_ROUTER, G):
             tt = fx.Int32(tt)
@@ -114,13 +130,13 @@ def emit_router(plan, state, tools):
             hint_wait(
                 N_ROW_TILES,
                 lambda k: (
-                    mb("a"),
+                    mb(hidden_states_name),
                     router_sample * HIDDEN + k * ROW_TILE + ROW_TILE - 1,
                 ),
             )
             # this task's FP8 activation block inputs ride along with the staging loads:
             # wave w quantizes block w * N_ROUTER + t of this CTA's sample.
-            r_gp = _rsrc(g_post)
+            r_gp = _rsrc(norm_weight)
             x_blk = (wave % XQ_WAVES) * N_ROUTER + t
             x_local_sample = fx.min(wave // XQ_WAVES, 1)
             x_s = router_sample + x_local_sample
@@ -130,36 +146,36 @@ def emit_router(plan, state, tools):
             xa = []
 
             def ld_a(sks):
-                specs = [(mb("a"), ((router_sample + s) * HIDDEN + k) // 2, 2) for s, k in sks]
-                specs.append((mb("a"), (x_s * HIDDEN + xk) // 2, 1))
+                specs = [(mb(hidden_states_name), ((router_sample + s) * HIDDEN + k) // 2, 2) for s, k in sks]
+                specs.append((mb(hidden_states_name), (x_s * HIDDEN + xk) // 2, 1))
                 v = poll(specs, batch=len(specs))
                 xa.append(bf2_f32(v[-1][0]))
                 return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[:-1]]
 
-            rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post, count=2)
+            rstds = stage_x_rmsnorm(ld_a, HIDDEN, norm_weight, count=2)
             # this task's FP8 activation blocks go out ahead of the gate GEMV
             if x_ok:
                 x_rstd = (x_local_sample == 0).select(rstds[0], rstds[1])
                 a0, a1 = xa[0]
                 q0, q1, qs = quant_moe(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
-                publish_moe_quant(mb("xq"), x_s * HIDDEN + xk, q0, q1)
+                publish_moe_quant(mb(data_name), x_s * HIDDEN + xk, q0, q1)
                 d0, d1 = moe_roundtrip(q0, q1)
                 qscale = (qs << 23).bitcast(fx.Float32) if const_expr(native_fp4_mfma) else qs
                 bo.buffer_store(
                     fx.Vector.from_elements([d0 * qscale, d1 * qscale], fx.Float32),
-                    _rsrc(mb("xqd")),
+                    _rsrc(mb(dequant_name)),
                     x_s * HIDDEN + xk,
                 )
                 if const_expr(native_fp4_mfma):
                     if lane % 16 == 0:
                         put(
-                            mb("xqs"),
+                            mb(scale_name),
                             x_s * XQ_GROUPS + x_blk * 4 + lane // 16,
                             qs,
                         )
                 else:
                     if lane == 0:
-                        put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                        put(mb(scale_name), x_s * XQ_BLOCKS + x_blk, qs)
             gpu.barrier()
             acc = run_units(u_r, R_CPW, R_CPW, pre)
             fx.ptr_store(
@@ -179,7 +195,7 @@ def emit_router(plan, state, tools):
                             (w * 64 + f * ROUTER_TILE + n + 16 * (m // 4)) * 4 + m % 4,
                         )
                 put(
-                    mb("scores"),
+                    mb(gating_output_name),
                     (router_sample + n) * N_EXPERTS + t * ROUTER_TILE + r,
                     _rcp(1.0 + _exp(-logit)),
                 )
@@ -189,7 +205,7 @@ def emit_router(plan, state, tools):
         # One sample per CTA: 1 row group x 96 chunks (bf16), 8 waves split K.
         # S > 1 gets S times as many independent router CTAs instead of serializing
         # every sample's normalization and output columns inside one CTA.
-        r_wr = _rsrc(w_r)
+        r_wr = _rsrc(gate_weight)
         R_NKC = HIDDEN // 64
         for tt in range(start("router"), S * N_ROUTER, G):
             tt = fx.Int32(tt)
@@ -220,13 +236,13 @@ def emit_router(plan, state, tools):
             hint_wait(
                 N_ROW_TILES,
                 lambda k: (
-                    mb("a"),
+                    mb(hidden_states_name),
                     router_sample * HIDDEN + k * ROW_TILE + ROW_TILE - 1,
                 ),
             )
             # this task's FP8 activation block inputs ride along with the staging loads:
             # wave w quantizes block w * N_ROUTER + t of this CTA's sample.
-            r_gp = _rsrc(g_post)
+            r_gp = _rsrc(norm_weight)
             x_blk = wave * N_ROUTER + t
             x_s = router_sample
             x_ok = (wave < XQ_WAVES) & (x_blk < XQ_BLOCKS)
@@ -235,36 +251,36 @@ def emit_router(plan, state, tools):
             xa = []
 
             def ld_a(sks):
-                specs = [(mb("a"), (router_sample * HIDDEN + k) // 2, 2) for s, k in sks]
-                specs.append((mb("a"), (x_s * HIDDEN + xk) // 2, 1))
+                specs = [(mb(hidden_states_name), (router_sample * HIDDEN + k) // 2, 2) for s, k in sks]
+                specs.append((mb(hidden_states_name), (x_s * HIDDEN + xk) // 2, 1))
                 v = poll(specs, batch=len(specs))
                 xa.append(bf2_f32(v[-1][0]))
                 return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[:-1]]
 
-            rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post, count=1)
+            rstds = stage_x_rmsnorm(ld_a, HIDDEN, norm_weight, count=1)
             # this task's FP8 activation blocks go out ahead of the gate GEMV
             if x_ok:
                 x_rstd = rstds[0]
                 a0, a1 = xa[0]
                 q0, q1, qs = quant_moe(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
-                publish_moe_quant(mb("xq"), x_s * HIDDEN + xk, q0, q1)
+                publish_moe_quant(mb(data_name), x_s * HIDDEN + xk, q0, q1)
                 d0, d1 = moe_roundtrip(q0, q1)
                 qscale = (qs << 23).bitcast(fx.Float32) if const_expr(native_fp4_mfma) else qs
                 bo.buffer_store(
                     fx.Vector.from_elements([d0 * qscale, d1 * qscale], fx.Float32),
-                    _rsrc(mb("xqd")),
+                    _rsrc(mb(dequant_name)),
                     x_s * HIDDEN + xk,
                 )
                 if const_expr(native_fp4_mfma):
                     if lane % 16 == 0:
                         put(
-                            mb("xqs"),
+                            mb(scale_name),
                             x_s * XQ_GROUPS + x_blk * 4 + lane // 16,
                             qs,
                         )
                 else:
                     if lane == 0:
-                        put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                        put(mb(scale_name), x_s * XQ_BLOCKS + x_blk, qs)
             gpu.barrier()
             acc = run_units(u_r, R_CPW, R_CPW, pre)
             fx.ptr_store(
@@ -284,14 +300,28 @@ def emit_router(plan, state, tools):
                             (w * 64 + f * ROUTER_TILE + n + 16 * (m // 4)) * 4 + m % 4,
                         )
                 put(
-                    mb("scores"),
+                    mb(gating_output_name),
                     router_sample * N_EXPERTS + t * ROUTER_TILE + r,
                     _rcp(1.0 + _exp(-logit)),
                 )
 
 
 @flyc.jit
-def emit_moe_up(plan, state, tools):
+def moe_stage1(inputs: MoeStage1Input, outputs: MoeStage1Output, ctx: StageContext):
+    plan = ctx.plan
+    hidden_states_name = inputs.hidden_states.name
+    intermediate_name = outputs.intermediate.name
+    topk_ids_name = outputs.topk_ids.name
+    topk_weights_name = outputs.topk_weights.name
+    activation_data = inputs.activation.data.name
+    activation_scale = inputs.activation.scale.name
+    routing = build_routing(
+        plan,
+        ctx.execution,
+        ctx.ops.memory,
+        inputs.gating_output,
+        inputs.e_score_correction_bias,
+    )
     COHORT_ROW_TILES = plan.COHORT_ROW_TILES
     DN_UNION_ALIGNED = plan.DN_UNION_ALIGNED
     DN_UNION_CANDIDATE = plan.DN_UNION_CANDIDATE
@@ -315,51 +345,51 @@ def emit_moe_up(plan, state, tools):
     native_fp4_mfma = plan.native_fp4_mfma
     paired_ug_rows = plan.paired_ug_rows
     total_samples = plan.total_samples
-    bid = state.bid
-    dnw = state.dnw
-    full_bid = state.full_bid
-    full_scratch = state.full_scratch
-    g_post = state.g_post
-    keys = state.keys
-    lane = state.lane
-    misc = state.misc
-    outs = state.outs
-    red = state.red
-    row_tile = state.row_tile
-    s_ug = state.s_ug
-    tid = state.tid
-    w_ug = state.w_ug
-    wave = state.wave
-    xs = state.xs
-    ld_f32 = tools.ld_f32
-    ld_bf16 = tools.ld_bf16
-    lds_ld = tools.lds_ld
-    lds_st = tools.lds_st
-    mb = tools.mb
-    put = tools.put
-    put2 = tools.put2
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    hint_wait = tools.hint_wait
-    get = tools.get
-    get2 = tools.get2
-    block_sum = tools.block_sum
-    unit_mxfp4 = tools.unit_mxfp4
-    unit_native_mxfp4 = tools.unit_native_mxfp4
-    mma_units = tools.mma_units
-    reduce_rows = tools.reduce_rows
-    emit_out = tools.emit_out
-    quant_scaled = tools.quant_scaled
-    quant_mxfp8 = tools.quant_mxfp8
-    publish_moe_quant = tools.publish_moe_quant
-    stage_xq = tools.stage_xq
-    st_f8 = tools.st_f8
-    st_mxfp8 = tools.st_mxfp8
-    load_bias = tools.load_bias
-    route_top8 = tools.route_top8
-    start = tools.start
-    n_sel = tools.n_sel
-    dn_route = tools.dn_route
+    bid = ctx.execution.thread.block_id
+    dnw = ctx.execution.workspace.routing_weights
+    full_bid = ctx.execution.thread.global_block_id
+    full_scratch = ctx.execution.workspace.all_scratch
+    norm_weight = inputs.norm_weight
+    keys = ctx.execution.workspace.routing_ids
+    lane = ctx.execution.thread.lane_id
+    misc = ctx.execution.workspace.temporary
+    outs = ctx.execution.workspace.output
+    red = ctx.execution.workspace.reduction
+    row_tile = ctx.execution.thread.tile_id
+    w1_scale = inputs.w1.scale
+    tid = ctx.execution.thread.thread_id
+    w1 = inputs.w1.weight
+    wave = ctx.execution.thread.wave_id
+    xs = ctx.execution.workspace.activations
+    ld_f32 = ctx.ops.memory.ld_f32
+    ld_bf16 = ctx.ops.memory.ld_bf16
+    lds_ld = ctx.ops.memory.lds_ld
+    lds_st = ctx.ops.memory.lds_st
+    mb = ctx.ops.memory.mb
+    put = ctx.ops.memory.put
+    put2 = ctx.ops.memory.put2
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    hint_wait = ctx.ops.memory.hint_wait
+    get = ctx.ops.memory.get
+    get2 = ctx.ops.memory.get2
+    block_sum = ctx.ops.reductions.block_sum
+    unit_mxfp4 = ctx.ops.gemm.unit_mxfp4
+    unit_native_mxfp4 = ctx.ops.gemm.unit_native_mxfp4
+    mma_units = ctx.ops.gemm.mma_units
+    reduce_rows = ctx.ops.gemm.reduce_rows
+    emit_out = ctx.ops.gemm.emit_out
+    quant_scaled = ctx.ops.quantization.quant_scaled
+    quant_mxfp8 = ctx.ops.quantization.quant_mxfp8
+    publish_moe_quant = ctx.ops.quantization.publish_moe_quant
+    stage_xq = ctx.ops.quantization.stage_xq
+    st_f8 = ctx.ops.quantization.st_f8
+    st_mxfp8 = ctx.ops.quantization.st_mxfp8
+    load_bias = routing.load_bias
+    route_top8 = routing.route_top8
+    start = ctx.ops.memory.start
+    n_sel = ctx.ops.memory.n_sel
+    dn_route = routing.dn_route
 
     # ================================ 9. expert up/gate + SiLU
     # 2 row groups (16 gate + 16 up rows) x 96 chunks: 4 waves per group, 24 chunks each
@@ -385,7 +415,7 @@ def emit_moe_up(plan, state, tools):
             # block -> X[0] (fp8 values in bf16), block scales -> misc[8:]
             NB = XQ_BLOCKS // WAVES
             ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
-            r_gp = _rsrc(g_post)
+            r_gp = _rsrc(norm_weight)
             gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
             bs = load_bias()
             w_rg = (
@@ -398,11 +428,11 @@ def emit_moe_up(plan, state, tools):
                 nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
                 r_wug = _rsrc(
-                    w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
+                    w1 + fx.Int64(e) * fx.Int64(UG_W_BYTES),
                     nw,
                 )
                 r_sug = _rsrc(
-                    s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
+                    w1_scale + fx.Int64(e) * fx.Int64(UG_S_BYTES),
                     ns,
                 )
                 unit = wave * (UG8_CPW // 2) + cc
@@ -453,14 +483,14 @@ def emit_moe_up(plan, state, tools):
             pre = [u_ug8(cc, fx.Int32(SHARED_EXPERT), has_sh) for cc in range(UG8_CPW // 2)]
             hint_wait(
                 N_ROW_TILES,
-                lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1),
+                lambda k: (mb(hidden_states_name), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1),
             )
             # the sum of squares takes the router's element partition and order
             # (stage_x_rmsnorm), so rstd -- and every FP8 rounding -- is bit-identical
             NQ4 = HIDDEN // (4 * THREADS)
             got = poll(
-                [(mb("a"), (s_u * HIDDEN + (tid + i * THREADS) * 4) // 2, 2) for i in range(NQ4)]
-                + [(mb("a"), (s_u * HIDDEN + k) // 2, 1) for k in ks_]
+                [(mb(hidden_states_name), (s_u * HIDDEN + (tid + i * THREADS) * 4) // 2, 2) for i in range(NQ4)]
+                + [(mb(hidden_states_name), (s_u * HIDDEN + k) // 2, 1) for k in ks_]
             )
             av = [bf2_f32(w[0]) for w in got[NQ4:]]
             ss = fx.Float32(0.0)
@@ -516,17 +546,17 @@ def emit_moe_up(plan, state, tools):
                 u0, u1 = lds_ld(outs, o + UG8 + r), lds_ld(outs, o + UG8 + r + 1)
                 if has_sh | (tid >= UG8 // 2):
                     put2(
-                        mb("mid"),
+                        mb(intermediate_name),
                         (tid < UG8 // 2).select(fx.Int32(0), slot) * expert_inter + c * UG8 + r,
                         g0 * _rcp(1.0 + _exp(-g0)) * u0,
                         g1 * _rcp(1.0 + _exp(-g1)) * u1,
                     )
             if (c == 0) & (tid == 0):  # routing record (debug / tests)
-                put(mb("sel"), slot, e_sel)
-                put(mb("prob"), slot, lds_ld(misc, 0))
+                put(mb(topk_ids_name), slot, e_sel)
+                put(mb(topk_weights_name), slot, lds_ld(misc, 0))
                 if has_sh:
-                    put(mb("sel"), 0, fx.Int32(SHARED_EXPERT))
-                    put(mb("prob"), 0, fx.Float32(1.0))
+                    put(mb(topk_ids_name), 0, fx.Int32(SHARED_EXPERT))
+                    put(mb(topk_weights_name), 0, fx.Float32(1.0))
             if const_expr(expert_inter > G):
                 gpu.barrier()
     elif const_expr(S > 1):
@@ -543,15 +573,15 @@ def emit_moe_up(plan, state, tools):
             w_ln = lane if paired_ug_rows else (lane & -16) | ((c % 2) * 8 + lane % 8)
             s_rg = (lane // 32) * (expert_inter // 16) + c // 2
             if const_expr(live is None):
-                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
-                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
+                rw = _rsrc(w1 + fx.Int64(e) * fx.Int64(UG_W_BYTES))
+                rs = _rsrc(w1_scale + fx.Int64(e) * fx.Int64(UG_S_BYTES))
             else:
                 rw = _rsrc(
-                    w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
+                    w1 + fx.Int64(e) * fx.Int64(UG_W_BYTES),
                     live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
                 )
                 rs = _rsrc(
-                    s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
+                    w1_scale + fx.Int64(e) * fx.Int64(UG_S_BYTES),
                     live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
                 )
             sn = n_sel() if sample is None else fx.Int32(sample)
@@ -613,20 +643,20 @@ def emit_moe_up(plan, state, tools):
         gpu.barrier()
         stage_ug_first = atom_experts or (expert_mxfp4 and S > 4)
         if const_expr(stage_ug_first and not GLOBAL_UG):
-            stage_xq(list(range(S)))
+            stage_xq(list(range(S)), activation_data, activation_scale)
             gpu.barrier()
         if const_expr(GLOBAL_UG):
             # Publish the original route once per cohort before global work.
             if (bid == 0) & (tid < S * MOE_SLOTS):
-                put(mb("sel"), tid, lds_ld(keys, tid))
-                put(mb("prob"), tid, lds_ld(dnw, tid))
+                put(mb(topk_ids_name), tid, lds_ld(keys, tid))
+                put(mb(topk_weights_name), tid, lds_ld(dnw, tid))
             gpu.barrier()
             if tid < total_samples * MOE_SLOTS:
                 gu_row = tid // MOE_SLOTS
                 gu_local = (gu_row % S) * MOE_SLOTS + tid % MOE_SLOTS
                 gu_scratch = full_scratch + fx.Int64(gu_row // S) * TILE_SCRATCH_BYTES
-                gu_route = get(gu_scratch + fx.Int64(SC["sel"]), gu_local)
-                gu_prob = get(gu_scratch + fx.Int64(SC["prob"]), gu_local)
+                gu_route = get(gu_scratch + fx.Int64(SC[topk_ids_name]), gu_local)
+                gu_prob = get(gu_scratch + fx.Int64(SC[topk_weights_name]), gu_local)
                 lds_st(keys, tid, gu_route)
                 lds_st(dnw, tid, gu_prob.bitcast(fx.Float32))
             gpu.barrier()
@@ -1005,19 +1035,19 @@ def emit_moe_up(plan, state, tools):
                             ugpair_v0, ugpair_v1 = lds_ld(outs, ugpair_o + UG8), lds_ld(outs, ugpair_o + UG8 + 1)
                             ugpair_c = ugpair_cbase + ugpair_part
                             put2(
-                                mb("mid"),
+                                mb(intermediate_name),
                                 (ugpair_sample * MOE_SLOTS + ugpair_slot) * expert_inter + ugpair_c * UG8 + ugpair_r,
                                 ugpair_g0 * _rcp(1.0 + _exp(-ugpair_g0)) * ugpair_v0,
                                 ugpair_g1 * _rcp(1.0 + _exp(-ugpair_g1)) * ugpair_v1,
                             )
                             if (ugpair_c == 0) & (ugpair_r == 0):
                                 put(
-                                    mb("sel"),
+                                    mb(topk_ids_name),
                                     ugpair_sample * MOE_SLOTS + ugpair_slot,
                                     ugpair_expert,
                                 )
                                 put(
-                                    mb("prob"),
+                                    mb(topk_weights_name),
                                     ugpair_sample * MOE_SLOTS + ugpair_slot,
                                     lds_ld(
                                         dnw,
@@ -1050,15 +1080,15 @@ def emit_moe_up(plan, state, tools):
                             g0, g1 = lds_ld(outs, sample * 16 + r), lds_ld(outs, sample * 16 + r + 1)
                             v0, v1 = lds_ld(outs, sample * 16 + UG8 + r), lds_ld(outs, sample * 16 + UG8 + r + 1)
                             put2(
-                                mb("mid"),
+                                mb(intermediate_name),
                                 (sample * MOE_SLOTS + slot) * expert_inter + c * UG8 + r,
                                 g0 * _rcp(1.0 + _exp(-g0)) * v0,
                                 g1 * _rcp(1.0 + _exp(-g1)) * v1,
                             )
                             if (c == 0) & (r == 0):
-                                put(mb("sel"), sample * MOE_SLOTS + slot, expert)
+                                put(mb(topk_ids_name), sample * MOE_SLOTS + slot, expert)
                                 put(
-                                    mb("prob"),
+                                    mb(topk_weights_name),
                                     sample * MOE_SLOTS + slot,
                                     lds_ld(dnw, sample * MOE_SLOTS + slot),
                                 )
@@ -1084,7 +1114,7 @@ def emit_moe_up(plan, state, tools):
                         sn = n if shared else fx.Int32(sample)
                         sl = fx.Int32(0) if shared else slot
                         put2(
-                            mb("mid"),
+                            mb(intermediate_name),
                             (sn * MOE_SLOTS + sl) * expert_inter + c * UG8 + r,
                             g0 * _rcp(1.0 + _exp(-g0)) * v0,
                             g1 * _rcp(1.0 + _exp(-g1)) * v1,
@@ -1093,12 +1123,12 @@ def emit_moe_up(plan, state, tools):
                         sn = tid if shared else fx.Int32(sample)
                         sl = fx.Int32(0) if shared else slot
                         put(
-                            mb("sel"),
+                            mb(topk_ids_name),
                             sn * MOE_SLOTS + sl,
                             lds_ld(keys, sn * MOE_SLOTS + sl),
                         )
                         put(
-                            mb("prob"),
+                            mb(topk_weights_name),
                             sn * MOE_SLOTS + sl,
                             lds_ld(dnw, sn * MOE_SLOTS + sl),
                         )
@@ -1108,7 +1138,7 @@ def emit_moe_up(plan, state, tools):
                 if const_expr(not stage_ug_first and task_round == 0):
                     # Native weights can be prefetched while router activations
                     # arrive. ATOM tiles retain their lower-register staging order.
-                    stage_xq(list(range(S)))
+                    stage_xq(list(range(S)), activation_data, activation_scale)
                     gpu.barrier()
                 if has_sh:
                     reduce_rows(
@@ -1142,7 +1172,7 @@ def emit_moe_up(plan, state, tools):
         # removing the same quantization from every down CTA.
         for mid_chunk in range(bid * WAVES + wave, S * MOE_SLOTS * expert_inter // 128, G * WAVES):
             mid_chunk = fx.Int32(mid_chunk)
-            a0, a1 = get2(mb("mid"), mid_chunk * 128 + lane * 2)
+            a0, a1 = get2(mb(intermediate_name), mid_chunk * 128 + lane * 2)
             q0, q1, mid_exponent = quant_mxfp8(a0, a1)
             publish_moe_quant(mb("ugp"), mid_chunk * 128 + lane * 2, q0, q1)
             if lane % 16 == 0:
@@ -1155,7 +1185,19 @@ def emit_moe_up(plan, state, tools):
 
 
 @flyc.jit
-def emit_moe_down(plan, state, tools):
+def moe_stage2(inputs: MoeStage2Input, outputs: MoeOutput, ctx: StageContext):
+    plan = ctx.plan
+    topk_ids_name = inputs.topk_ids.name
+    topk_weights_name = inputs.topk_weights.name
+    hidden_states_name = inputs.hidden_states.name
+    residual_name = inputs.residual.name
+    routing = build_routing(
+        plan,
+        ctx.execution,
+        ctx.ops.memory,
+        inputs.gating_output,
+        inputs.e_score_correction_bias,
+    )
     DNW_OFF = plan.DNW_OFF
     DN_COHORT_PAIR = plan.DN_COHORT_PAIR
     DN_CONTIG_CONTRIBUTIONS = plan.DN_CONTIG_CONTRIBUTIONS
@@ -1223,54 +1265,54 @@ def emit_moe_down(plan, state, tools):
     native_fp4_mfma = plan.native_fp4_mfma
     npes = plan.npes
     with_indexer = plan.with_indexer
-    dnw = state.dnw
-    full_bid = state.full_bid
-    full_out = state.full_out
-    full_scratch = state.full_scratch
-    full_sym = state.full_sym
-    keys = state.keys
-    lane = state.lane
-    lds = state.lds
-    misc = state.misc
-    outs = state.outs
-    peer_dst = state.peer_dst
-    peer_slot = state.peer_slot
-    rank = state.rank
-    red = state.red
-    row_tile = state.row_tile
-    s_dn = state.s_dn
-    tid = state.tid
-    v4f = state.v4f
-    w_dn = state.w_dn
-    wave = state.wave
-    x_out = state.x_out
-    xs = state.xs
-    lds_ld = tools.lds_ld
-    lds_st = tools.lds_st
-    bf16_pair = tools.bf16_pair
-    mb = tools.mb
-    put_bf = tools.put_bf
-    bf2_f32 = tools.bf2_f32
-    poll = tools.poll
-    hint_wait = tools.hint_wait
-    get = tools.get
-    get2_many = tools.get2_many
-    unit_f8f8 = tools.unit_f8f8
-    unit_mxfp4_bf16 = tools.unit_mxfp4_bf16
-    unit_native_mxfp4 = tools.unit_native_mxfp4
-    mma_units = tools.mma_units
-    run_units = tools.run_units
-    reduce_rows = tools.reduce_rows
-    quant_scaled = tools.quant_scaled
-    quant_mxfp8 = tools.quant_mxfp8
-    st_f8 = tools.st_f8
-    st_mxfp8 = tools.st_mxfp8
-    load_bias = tools.load_bias
-    ffn_owner_reduce = tools.ffn_owner_reduce
-    peer_reduce = tools.peer_reduce
-    start = tools.start
-    n_sel = tools.n_sel
-    dn_route = tools.dn_route
+    dnw = ctx.execution.workspace.routing_weights
+    full_bid = ctx.execution.thread.global_block_id
+    all_out = outputs.all_out
+    full_scratch = ctx.execution.workspace.all_scratch
+    full_sym = ctx.execution.parallel.all_buffer
+    keys = ctx.execution.workspace.routing_ids
+    lane = ctx.execution.thread.lane_id
+    lds = ctx.execution.workspace.lds
+    misc = ctx.execution.workspace.temporary
+    outs = ctx.execution.workspace.output
+    peer_dst = ctx.execution.parallel.peer_destination
+    peer_slot = ctx.execution.parallel.peer_slot
+    rank = ctx.execution.parallel.rank
+    red = ctx.execution.workspace.reduction
+    row_tile = ctx.execution.thread.tile_id
+    w2_scale = inputs.w2.scale
+    tid = ctx.execution.thread.thread_id
+    v4f = ctx.execution.workspace.vector_type
+    w2 = inputs.w2.weight
+    wave = ctx.execution.thread.wave_id
+    out = outputs.out
+    xs = ctx.execution.workspace.activations
+    lds_ld = ctx.ops.memory.lds_ld
+    lds_st = ctx.ops.memory.lds_st
+    bf16_pair = ctx.ops.memory.bf16_pair
+    mb = ctx.ops.memory.mb
+    put_bf = ctx.ops.memory.put_bf
+    bf2_f32 = ctx.ops.memory.bf2_f32
+    poll = ctx.ops.memory.poll
+    hint_wait = ctx.ops.memory.hint_wait
+    get = ctx.ops.memory.get
+    get2_many = ctx.ops.memory.get2_many
+    unit_f8f8 = ctx.ops.gemm.unit_f8f8
+    unit_mxfp4_bf16 = ctx.ops.gemm.unit_mxfp4_bf16
+    unit_native_mxfp4 = ctx.ops.gemm.unit_native_mxfp4
+    mma_units = ctx.ops.gemm.mma_units
+    run_units = ctx.ops.gemm.run_units
+    reduce_rows = ctx.ops.gemm.reduce_rows
+    quant_scaled = ctx.ops.quantization.quant_scaled
+    quant_mxfp8 = ctx.ops.quantization.quant_mxfp8
+    st_f8 = ctx.ops.quantization.st_f8
+    st_mxfp8 = ctx.ops.quantization.st_mxfp8
+    load_bias = routing.load_bias
+    ffn_owner_reduce = ctx.ops.communication.ffn_owner_reduce
+    peer_reduce = ctx.ops.communication.peer_reduce
+    start = ctx.ops.memory.start
+    n_sel = ctx.ops.memory.n_sel
+    dn_route = routing.dn_route
 
     # ======== 10. mid FP8 quant + expert down + route weighting + MoE TP reduce
     # 2 row groups x (sample tile * 9 slots * 4) chunks: 4 waves per group.
@@ -1320,8 +1362,8 @@ def emit_moe_down(plan, state, tools):
         def unit(expert, slot, kc, coefficient):
             sn = fx.min(lane % 16, S - 1)
             row = sn * SLOTS + slot
-            wb = _rsrc(w_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
-            sb = _rsrc(s_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
+            wb = _rsrc(w2 + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
+            sb = _rsrc(w2_scale + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
             rg = tile * (output_rows // 16) + gu + (DN_FULL_TASKS if output_rows == 16 else 0)
             raw = fx.Vector(
                 bo.buffer_load(
@@ -1603,7 +1645,7 @@ def emit_moe_down(plan, state, tools):
             token = pair_row_tile * S + si
             bo.buffer_store(
                 fx.Vector.from_elements([r0 + t0, r1 + t1], fx.Float32).to(fx.BFloat16),
-                _rsrc(full_out),
+                _rsrc(all_out),
                 token * HIDDEN + output_row,
             )
 
@@ -1637,8 +1679,8 @@ def emit_moe_down(plan, state, tools):
         def unit(expert, slot, kc, coefficient):
             sn = fx.min(lane % 16, DN_PAIR_ROWS - 1)
             row = sn * SLOTS + slot
-            wb = _rsrc(w_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
-            sb = _rsrc(s_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
+            wb = _rsrc(w2 + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
+            sb = _rsrc(w2_scale + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
             rg = tile * (output_rows // 16) + gu + (DN_PAIR_FULL if output_rows == 16 else 0)
             raw = fx.Vector(
                 bo.buffer_load(
@@ -1859,8 +1901,8 @@ def emit_moe_down(plan, state, tools):
             cohort = pair_row_tile + token // S
             ptr = full_scratch + fx.Int64(cohort) * TILE_SCRATCH_BYTES
             item = (token % S) * MOE_SLOTS + tid % MOE_SLOTS
-            lds_st(pair_keys, tid, get(ptr + fx.Int64(SC["sel"]), item))
-            lds_st(pair_probs, tid, get(ptr + fx.Int64(SC["prob"]), item).bitcast(fx.Float32))
+            lds_st(pair_keys, tid, get(ptr + fx.Int64(SC[topk_ids_name]), item))
+            lds_st(pair_probs, tid, get(ptr + fx.Int64(SC[topk_weights_name]), item).bitcast(fx.Float32))
         gpu.barrier()
         # Rebuild cohort-local expert metadata expected by ordered down union;
         # wave-local masks only occupy the otherwise-idle reduction workspace.
@@ -1960,11 +2002,11 @@ def emit_moe_down(plan, state, tools):
                     kc = q % DN_NKC
                     e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
                     wb = _rsrc(
-                        w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
+                        w2 + fx.Int64(e) * fx.Int64(DN_W_BYTES),
                         (None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0))),
                     )
                     sb = _rsrc(
-                        s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
+                        w2_scale + fx.Int64(e) * fx.Int64(DN_S_BYTES),
                         (None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0))),
                     )
 
@@ -2076,7 +2118,7 @@ def emit_moe_down(plan, state, tools):
                     hint_wait(
                         N_UG,
                         lambda k: (
-                            mb("mid"),
+                            mb(hidden_states_name),
                             (k // (MOE_SLOTS * I_PER_SLOT) * MOE_SLOTS + (k // I_PER_SLOT) % MOE_SLOTS) * expert_inter
                             + (k % I_PER_SLOT) * UG_TILE
                             + UG_TILE
@@ -2138,7 +2180,7 @@ def emit_moe_down(plan, state, tools):
                             mids = get2_many(
                                 [
                                     (
-                                        mb("mid"),
+                                        mb(hidden_states_name),
                                         fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
                                     )
                                     for b in range(
@@ -2265,8 +2307,8 @@ def emit_moe_down(plan, state, tools):
                             dsg_coefficient = (((dsg_token_mask >> dsg_sn) & 1) != 0).select(
                                 lds_ld(dnw, dsg_mid_row), fx.Float32(0.0)
                             )
-                            dsg_wb = _rsrc(w_dn + fx.Int64(dsg_expert) * fx.Int64(DN_W_BYTES))
-                            dsg_sb = _rsrc(s_dn + fx.Int64(dsg_expert) * fx.Int64(DN_S_BYTES))
+                            dsg_wb = _rsrc(w2 + fx.Int64(dsg_expert) * fx.Int64(DN_W_BYTES))
+                            dsg_sb = _rsrc(w2_scale + fx.Int64(dsg_expert) * fx.Int64(DN_S_BYTES))
                             dsg_units.extend(
                                 [
                                     unit_native_mxfp4(
@@ -2332,12 +2374,12 @@ def emit_moe_down(plan, state, tools):
             def store_x(s, row, v0, v1):
                 bo.buffer_store(
                     fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
-                    _rsrc(x_out),
+                    _rsrc(out),
                     s * HIDDEN + row,
                 )
 
             def residual_a(s, row):
-                return bf2_f32(get(mb("a"), (s * HIDDEN + row) // 2))
+                return bf2_f32(get(mb(residual_name), (s * HIDDEN + row) // 2))
 
             if const_expr(
                 native_fp4_mfma

@@ -26,7 +26,7 @@ class CommunicationTools(NamedTuple):
 
 
 @flyc.jit
-def build_communication(plan, state, memory, reductions):
+def build_communication(plan, execution, memory, reductions):
     D = plan.D
     DN_TILE = plan.DN_TILE
     L = plan.L
@@ -35,18 +35,18 @@ def build_communication(plan, state, memory, reductions):
     S = plan.S
     SY = plan.SY
     W = plan.W
-    lane = state.lane
-    misc = state.misc
-    outs = state.outs
-    peer_dst = state.peer_dst
-    peer_offset = state.peer_offset
-    peer_slot = state.peer_slot
-    r_peers = state.r_peers
-    rank = state.rank
-    sym = state.sym
-    tid = state.tid
-    wave = state.wave
-    xs = state.xs
+    lane = execution.thread.lane_id
+    misc = execution.workspace.temporary
+    outs = execution.workspace.output
+    peer_dst = execution.parallel.peer_destination
+    peer_offset = execution.parallel.peer_offset
+    peer_slot = execution.parallel.peer_slot
+    r_peers = execution.parallel.peer_table
+    rank = execution.parallel.rank
+    sym = execution.parallel.buffer
+    tid = execution.thread.thread_id
+    wave = execution.thread.wave_id
+    xs = execution.workspace.activations
     lds_ld = memory.lds_ld
     lds_st = memory.lds_st
     bf16_pair = memory.bf16_pair

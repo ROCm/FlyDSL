@@ -27,13 +27,13 @@ class NormalizationTools(NamedTuple):
 
 
 @flyc.jit
-def build_normalization(plan, state, memory, reductions):
+def build_normalization(plan, execution, memory, reductions):
     INDEX_BF16_OFF = plan.INDEX_BF16_OFF
     INDEX_Q_BF16_OFF = plan.INDEX_Q_BF16_OFF
     S = plan.S
     with_indexer = plan.with_indexer
-    tid = state.tid
-    xs = state.xs
+    tid = execution.thread.thread_id
+    xs = execution.workspace.activations
     lds_st = memory.lds_st
     bf16_pair = memory.bf16_pair
     mb = memory.mb

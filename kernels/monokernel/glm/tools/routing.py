@@ -22,13 +22,14 @@ class RoutingTools(NamedTuple):
 
 
 @flyc.jit
-def build_routing(plan, state, memory):
+def build_routing(plan, execution, memory, gating_output, e_score_correction_bias):
     S = plan.S
-    bias = state.bias
-    dnw = state.dnw
-    keys = state.keys
-    lane = state.lane
-    wave = state.wave
+    gating_output_name = gating_output.name
+    bias = e_score_correction_bias
+    dnw = execution.workspace.routing_weights
+    keys = execution.workspace.routing_ids
+    lane = execution.thread.lane_id
+    wave = execution.thread.wave_id
     ld_f32 = memory.ld_f32
     lds_st = memory.lds_st
     mb = memory.mb
@@ -51,7 +52,7 @@ def build_routing(plan, state, memory):
         if const_expr(bs is None):
             bs = load_bias()
         if const_expr(raws is None):
-            raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
+            raws = getf_many([(mb(gating_output_name), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
         ks = []
         for i in range_constexpr(N_EXPERTS // 64):
             kb = (raws[i] + bs[i]).bitcast(fx.Int32)
