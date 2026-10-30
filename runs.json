@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T13:55:24Z",
+ "updated": "2026-10-30T14:29:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -192,11 +192,11 @@
    "branch": "glm-mono-kernel-structure-optmize",
    "event": "pull_request",
    "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383",
    "created_at": "2026-10-30T07:31:25Z",
-   "updated_at": "2026-10-30T07:47:46Z",
+   "updated_at": "2026-10-30T14:28:00Z",
    "actor": "james-huang09",
    "jobs": [
     {
@@ -214,19 +214,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T13:46:42Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T14:27:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106910"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T07:47:46Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T13:56:27Z",
+     "completed_at": "2026-10-30T14:12:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952107048"
     }
    ]
@@ -299,20 +299,20 @@
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
    "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152",
    "created_at": "2026-10-30T06:56:21Z",
-   "updated_at": "2026-10-30T13:17:40Z",
+   "updated_at": "2026-10-30T14:06:56Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T12:59:46Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T14:06:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152/job/123940857095"
     },
     {
@@ -403,11 +403,11 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215",
    "created_at": "2026-10-30T06:21:08Z",
-   "updated_at": "2026-10-30T12:35:53Z",
+   "updated_at": "2026-10-30T14:03:28Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -443,9 +443,9 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T12:35:53Z",
+     "started_at": "2026-10-30T14:03:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/124065374560"
     },
