@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T10:08:02Z",
+ "updated": "2026-10-30T10:20:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -581,19 +581,19 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr2-attention-common",
    "event": "pull_request",
    "title": "[Kernel][FA] Add arch-neutral attention common, abi, philox and dispatch modules (2/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T05:33:00Z",
+   "updated_at": "2026-10-30T10:07:30Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:33:00Z",
+     "started_at": "2026-10-30T10:07:30Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506968"
     },
@@ -609,10 +609,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T10:02:36Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T10:16:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910507037"
     }
    ]
@@ -762,11 +762,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr4-forward",
    "event": "pull_request",
    "title": "[Kernel][FA] Add the gfx950 attention forward kernel (dual-wave and wide bodies) (4/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961",
    "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T09:26:09Z",
+   "updated_at": "2026-10-30T10:18:52Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -793,10 +793,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T09:26:08Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T10:18:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961/job/123909315346"
     }
    ]
