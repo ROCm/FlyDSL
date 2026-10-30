@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T07:33:34Z",
+ "updated": "2026-10-30T08:12:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41024656082,
+   "pr": null,
+   "commit": "becb97213fc105916486e1c00e03a0e916cf6cdf",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41024656082",
+   "created_at": "2026-10-30T08:10:17Z",
+   "updated_at": "2026-10-30T08:10:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41020605383,
    "pr": 1348,
@@ -10,13 +25,41 @@
    "branch": "glm-mono-kernel-structure-optmize",
    "event": "pull_request",
    "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383",
    "created_at": "2026-10-30T07:31:25Z",
-   "updated_at": "2026-10-30T07:32:18Z",
+   "updated_at": "2026-10-30T07:47:46Z",
    "actor": "james-huang09",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T07:47:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106906"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T07:47:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106910"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T07:47:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952107048"
+    }
+   ]
   },
   {
    "run_id": 41020519519,
@@ -126,38 +169,38 @@
    "branch": "main",
    "event": "push",
    "title": "Migrate kernels tiled tdm (#1238)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015460592",
    "created_at": "2026-10-30T06:40:30Z",
-   "updated_at": "2026-10-30T06:59:46Z",
+   "updated_at": "2026-10-30T08:10:18Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-30T06:59:46Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T08:10:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015460592/job/123936559121"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-30T06:59:46Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T08:10:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015460592/job/123936559224"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-30T06:59:46Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T08:10:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015460592/job/123936559299"
     }
    ]
@@ -356,9 +399,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:35:09Z",
+     "started_at": "2026-10-30T07:36:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911138851"
     },
@@ -374,11 +417,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T07:11:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911139031"
+     "completed_at": "2026-10-30T07:47:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911139031",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -408,10 +454,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T06:47:36Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T07:36:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506988"
     },
     {
@@ -478,20 +524,20 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr7-interface",
    "event": "pull_request",
    "title": "[Kernel][FA] Route flydsl_flash_attn_func to the new gfx950 bf16/f16 kernels (7/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231231",
    "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T05:28:51Z",
+   "updated_at": "2026-10-30T07:50:58Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T05:28:51Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T07:35:09Z",
+     "completed_at": "2026-10-30T07:50:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231231/job/123909300144"
     },
     {
@@ -509,10 +555,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T06:47:31Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T07:35:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231231/job/123909300181"
     }
    ]
@@ -623,9 +669,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:45:31Z",
+     "started_at": "2026-10-30T08:10:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099531"
     },
@@ -641,9 +687,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:45:31Z",
+     "started_at": "2026-10-30T07:50:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099563"
     }
@@ -681,7 +727,7 @@
   },
   {
    "run_id": 41003388106,
-   "pr": 1346,
+   "pr": null,
    "commit": "6c0787b6a652bc73b6e097c526387038dd27402c",
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
@@ -1358,7 +1404,7 @@
   },
   {
    "run_id": 40835799901,
-   "pr": 1346,
+   "pr": null,
    "commit": "d45adb16c3925eec77c6d96bf37ec41703cf397b",
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
@@ -1510,7 +1556,7 @@
   },
   {
    "run_id": 40818895010,
-   "pr": 1346,
+   "pr": null,
    "commit": "d45adb16c3925eec77c6d96bf37ec41703cf397b",
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
@@ -1556,7 +1602,7 @@
   },
   {
    "run_id": 40817634446,
-   "pr": 1346,
+   "pr": null,
    "commit": "0efbca73194e867a4c25ec86adae33e149f9c6d5",
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
@@ -1868,21 +1914,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40699551857",
    "created_at": "2026-10-28T13:46:39Z",
    "updated_at": "2026-10-28T14:13:47Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 40698992908,
-   "pr": null,
-   "commit": "3bd27e07ff38a826532526dcaee29f518fd6e1f9",
-   "branch": "codex/ci-mi350-runtime",
-   "event": "pull_request",
-   "title": "[CI] Run correctness and benchmark comparisons in separate jobs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40698992908",
-   "created_at": "2026-10-28T13:43:02Z",
-   "updated_at": "2026-10-28T14:29:14Z",
    "actor": "coderfeli",
    "jobs": []
   }
