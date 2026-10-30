@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T02:43:41Z",
+ "updated": "2026-10-30T02:45:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40993276813,
+   "pr": 1349,
+   "commit": "005498149157f5f2057142e452ee0e694ea860ae",
+   "branch": "jli/gfx1250-strict-cherrypick",
+   "event": "pull_request",
+   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813",
+   "created_at": "2026-10-30T02:42:47Z",
+   "updated_at": "2026-10-30T02:43:56Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40993051888,
    "pr": 1349,
@@ -10,11 +25,11 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993051888",
    "created_at": "2026-10-30T02:40:26Z",
-   "updated_at": "2026-10-30T02:41:48Z",
+   "updated_at": "2026-10-30T02:43:38Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -1777,52 +1792,6 @@
    "updated_at": "2026-10-27T15:27:46Z",
    "actor": "Qubitium",
    "jobs": []
-  },
-  {
-   "run_id": 40530869698,
-   "pr": null,
-   "commit": "3c6a1099c8f3e577d58e341fed213a547b8f668f",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Sync both wave groups before the gfx950 A16W16 HTI GEMM read\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40530869698",
-   "created_at": "2026-10-27T15:25:43Z",
-   "updated_at": "2026-10-27T20:12:10Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T16:21:25Z",
-     "completed_at": "2026-10-27T16:46:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40530869698/job/122310347670"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T16:12:41Z",
-     "completed_at": "2026-10-27T17:17:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40530869698/job/122310347686",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T18:33:50Z",
-     "completed_at": "2026-10-27T20:12:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40530869698/job/122310347725"
-    }
-   ]
   }
  ]
 }
