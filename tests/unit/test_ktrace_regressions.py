@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -209,3 +210,33 @@ print(json.dumps({
     assert Path(result["path"]).stat().st_size > 0
     assert result["instants"][:11] == expected[:11]
     assert len(result["instants"]) == len(expected)
+
+
+_OVERFLOW_PROBE = """
+import json, os, re, sys
+os.environ["FLYDSL_KTRACE_BUFFER_BYTES"] = sys.argv[1]
+import flydsl.compiler as flyc
+from flydsl.expr import ktrace
+
+@flyc.kernel
+def kernel():
+    ktrace.mark("w")
+
+@flyc.jit
+def launch():
+    kernel().launch(grid=(64, 1, 1), block=(256, 1, 1))
+
+try:
+    with ktrace.capture("grid") as trace:
+        launch()
+    print(json.dumps({"waves": len({(r["block"], r["wave_id"]) for r in trace._snapshot()})}))
+except RuntimeError as exc:
+    print(json.dumps({"error": str(exc)}))
+"""
+
+
+def test_buffer_overflow_suggests_a_size_that_records_the_grid(tmp_path):
+    overflowed = _run_probe(tmp_path, _OVERFLOW_PROBE, str(32 << 10))
+    assert "trace overflowed" in overflowed.get("error", ""), overflowed
+    suggested = re.search(r"FLYDSL_KTRACE_BUFFER_BYTES>=(\d+)", overflowed["error"]).group(1)
+    assert _run_probe(tmp_path, _OVERFLOW_PROBE, suggested) == {"waves": 256}

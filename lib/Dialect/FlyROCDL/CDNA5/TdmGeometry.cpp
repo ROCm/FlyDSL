@@ -434,15 +434,19 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
                         : Scalar::getDynamic(i, /*fromShape=*/false);
   }
 
-  // The single contiguous global mode.
+  // The single contiguous global mode, counting only modes that are axes: a degenerate
+  // leaf's stride is unobservable and must not make the tensor look ambiguous.
   int32_t contiguousMode = -1;
   {
     int32_t found = 0;
-    for (int32_t i = 0; i < numModes; ++i)
+    for (int32_t i = 0; i < numModes; ++i) {
+      if (!isMovableMode(modeExtent[i], modeStride[i]))
+        continue;
       if (modeStride[i].isStatic && modeStride[i].value == 1) {
         contiguousMode = i;
         ++found;
       }
+    }
     if (found != 1)
       contiguousMode = -1;
   }
@@ -508,6 +512,20 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
     return failure();
   SmallVector<VectorEntry> vector = *vectorOr;
 
+  // `coalesce` compares basis strides by coefficient alone, so it can join two different
+  // global modes: `(2,2,2):(1E0,2E1,1E1)` comes back as `(4,2):(1E0,1E1)`, four elements of
+  // a two-element mode. A box built from that run spans the wrong modes and nothing below
+  // notices, but the run can never take more of a mode than the tile does.
+  {
+    SmallVector<int64_t> taken(numModes, 1);
+    for (const VectorEntry &e : vector)
+      if ((taken[e.mode] *= e.extent) > tileExtent[e.mode])
+        return emitError() << "internal: the LDS run takes " << taken[e.mode]
+                           << " elements of global mode " << e.mode << " but the tile takes only "
+                           << tileExtent[e.mode]
+                           << "; coalescing this LDS layout joined two global modes";
+  }
+
   // Residual traversal stays in ITER instead of changing the logical atom's
   // size through hardware descriptor iteration.
   llvm::DenseSet<int32_t> coveredModes;
@@ -516,6 +534,8 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   // Missing global modes are appended afterwards, so they never change this choice.
   SmallVector<RawDim> dims;
   for (const VectorEntry &e : vector) {
+    // Not `isMovableMode`: this is how much of the mode the tile takes, not whether the
+    // mode is an axis. The filler below restores the coordinate.
     if (e.extent == 1)
       continue;
     const Scalar &stride = modeStride[e.mode];
@@ -537,11 +557,12 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   for (int32_t i = 0; i < numModes; ++i) {
     if (coveredModes.contains(i))
       continue;
-    if (modeExtent[i].isStatic && modeExtent[i].value == 1)
+    if (!isMovableMode(modeExtent[i], modeStride[i]))
       continue;
-    if (modeStride[i].isStatic && modeStride[i].value == 0)
-      continue;
-    dims.push_back({1, {i}, modeStride[i]});
+    if (i == contiguousMode)
+      dims.insert(dims.begin(), {1, {i}, modeStride[i]});
+    else
+      dims.push_back({1, {i}, modeStride[i]});
   }
 
   // The lowering hardwires descriptor dim 0's stride to 1, so dim 0 must be the contiguous
@@ -694,13 +715,9 @@ FailureOr<SmallVector<Attribute>> axisBasisPerMode(MLIRContext *ctx, const Geome
     int32_t axis = clampableOnly ? descRank - 1 - static_cast<int32_t>(descDim)
                                  : static_cast<int32_t>(descDim);
     for (int32_t mode : dim.modes) {
-      // A size-1 axis has only coordinate 0 and a stride-0 one is a
-      // broadcast; neither can move the tile, so neither gets a basis.
       const Scalar &extent = geometry.modeExtent[mode];
       const Scalar &stride = geometry.modeStride[mode];
-      if (extent.isStatic && extent.value == 1)
-        continue;
-      if (stride.isStatic && stride.value == 0)
+      if (!isMovableMode(extent, stride))
         continue;
       if (dim.modes.size() == 1) {
         byMode[mode] = BasisAttr::get(IntAttr::getStatic(ctx, 1), axis);

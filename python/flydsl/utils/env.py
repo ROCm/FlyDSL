@@ -245,7 +245,7 @@ class DebugEnvManager(EnvManager):
 
     env_prefix = "DEBUG"
 
-    dump_asm = OptBool(False, description="Dump ASM to file")
+    dump_asm = OptBool(False, description="Dump only the final ISA to file (FLYDSL_DUMP_IR without the IR stages)")
     dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
     dump_dir = OptStr(
         str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR"

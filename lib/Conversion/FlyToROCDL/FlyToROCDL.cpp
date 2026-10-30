@@ -11,8 +11,10 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -916,6 +918,21 @@ public:
   }
 };
 
+/// Poison has no value to convert, so a poison of a Fly type becomes one of its converted type.
+class PoisonOpTypeConversion : public OpConversionPattern<ub::PoisonOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ub::PoisonOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type converted = getTypeConverter()->convertType(op.getType());
+    if (!converted)
+      return failure();
+    rewriter.replaceOpWithNewOp<ub::PoisonOp>(op, converted, op.getValue());
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -944,6 +961,11 @@ public:
 
     target.addDynamicallyLegalOp<arith::SelectOp>(
         [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
+    // Poison of a builtin type, such as a small-float vector, is left to the LLVM lowering.
+    target.addDynamicallyLegalOp<ub::PoisonOp>([&](ub::PoisonOp op) {
+      Type type = op.getType();
+      return isa<BuiltinDialect>(type.getDialect()) || typeConverter.isLegal(type);
+    });
     target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
         [&](Operation *op) { return typeConverter.isLegal(op); });
 
@@ -1000,6 +1022,7 @@ public:
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
     patterns.add<SelectOpTypeConversion>(typeConverter, context);
+    patterns.add<PoisonOpTypeConversion>(typeConverter, context);
 
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);

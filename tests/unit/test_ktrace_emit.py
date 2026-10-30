@@ -95,7 +95,8 @@ def test_slot_reservation_atomic_is_hoisted_to_the_prologue(monkeypatch):
 
     text = _expanded(launch)
     assert text.count('llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"') == 3, "each event needs its own timestamp"
-    assert text.count("atomicrmw") == 5
+    assert text.count("atomicrmw") == 2, "only the launch count and the wave's claim may be atomic, not an event"
+    assert text.rindex("atomicrmw") < text.index("s.memrealtime"), "an atomic was emitted after the prologue"
     assert text.count("llvm.mlir.global") == 0
 
 
@@ -455,7 +456,9 @@ def test_loop_call_site_records_every_iteration(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     body = _expanded(launch).split("scf.for", 1)[1]
-    assert "atomicrmw" in body, "slot index is compile-time; loop iterations will collide"
+    assert re.search(
+        r"llvm\.store .*!llvm\.ptr<5>", body
+    ), "the loop does not advance the event count; iterations collide"
 
 
 def test_decode_skips_each_waves_counter_word():
@@ -516,21 +519,27 @@ def test_dispatch_ids_separate_repeated_kernel_launches():
     assert len([track for track in tracks if track["name"].startswith("launch ")]) == 2
 
 
-def test_range_start_yields_the_slot_its_record_occupies(monkeypatch):
+def test_events_add_no_branches(monkeypatch):
     _frontend_only(monkeypatch, enable=True)
 
     @flyc.kernel
     def annotated():
-        tok = ktrace.range_start("span")
-        ktrace.range_stop(tok)
+        ktrace.mark("start", fx.Int32(7))
+        with ktrace.range("scoped"):
+            stage = ktrace.inactive_token("k_tile")
+            for _ in fx.range(0, 8, 1):
+                ktrace.range_stop(stage)
+                stage = ktrace.range_start("k_tile")
+            ktrace.range_stop(stage)
 
     @flyc.jit
     def launch():
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     text = _expanded(launch)
-    assert text.count("scf.yield") >= 4, "slot must be yielded out of both guards"
-    assert "scf.if" in text
+    assert text.count("scf.if") == 2, "only the launch count and the claim may branch; an event added a branch"
+    assert text.count('"s_buffer_store_dword') == 2 + 2 * 6 + 1, "each event is two straight-line scalar stores"
+    assert text.count("llvm.amdgcn.s.dcache.wb") == 1, "the wave does not write its scalar stores back"
 
 
 def test_reading_a_trace_re_arms_the_buffer(monkeypatch, tmp_path):
@@ -561,9 +570,6 @@ def test_reading_a_trace_re_arms_the_buffer(monkeypatch, tmp_path):
                 }
             ]
 
-        def claimed_slots(self):
-            return 0 if self.zeroed else 8
-
         def launch_count(self):
             return 0 if self.zeroed else 1
 
@@ -593,9 +599,6 @@ def test_reset_survives_an_overflow(monkeypatch):
 
         def read_records(self):
             raise RuntimeError("trace overflowed: waves claimed 999 slots")
-
-        def claimed_slots(self):
-            return 999
 
         def reset(self):
             self.zeroed += 1
@@ -780,20 +783,21 @@ def test_environment_switches_off_on_off_without_recompiling_off(monkeypatch):
     assert snapshot.read().summary() is None
 
 
-def test_suppressed_store_yields_an_unpairable_slot(monkeypatch):
+def test_inactive_token_stop_is_dropped_without_a_branch(monkeypatch):
     _frontend_only(monkeypatch, enable=True)
 
     @flyc.kernel
     def annotated():
-        token = ktrace.range_start("r")
-        ktrace.range_stop(token)
+        ktrace.range_stop(ktrace.inactive_token("r"))
 
     @flyc.jit
     def launch():
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     text = _expanded(launch)
-    assert "-1 : i32" in text, "the suppressed-store branch no longer yields the sentinel"
+    assert re.search(r"arith\.cmpi ne, %\S+, %\S+ : i32", text), "the stop does not test its token for the sentinel"
+    assert "llvm.mlir.constant(8192 : i32)" in text, "an inactive stop is not sent past the wave's region"
+    assert text.count("scf.if") == 2, "the inactive-token check became a branch"
 
 
 def test_store_bounds_use_unsigned_compares(monkeypatch):
@@ -808,8 +812,8 @@ def test_store_bounds_use_unsigned_compares(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     text = _expanded(launch)
-    assert re.search(r"arith\.cmpi\s+ult", text), "store bounds are not unsigned"
-    assert not re.search(r"arith\.cmpi\s+slt", text), "a signed bounds compare survived"
+    assert re.search(r"arith\.minui", text), "the per-wave event index is not clamped unsigned"
+    assert not re.search(r"arith\.cmpi\s+s[lg][te]", text), "a signed bounds compare survived"
 
 
 def test_range_stop_without_a_start_is_dropped():
@@ -878,9 +882,6 @@ def test_collect_and_summary_agree_on_an_empty_trace(monkeypatch):
     from flydsl.expr.rocdl import ktrace_emit
 
     class _EmptyBuffer:
-        def claimed_slots(self):
-            return 0
-
         def launch_count(self):
             return 0
 
@@ -917,9 +918,6 @@ def test_a_traced_launch_invalidates_cached_records(monkeypatch):
     reads = []
 
     class _Buffer:
-        def claimed_slots(self):
-            return 0
-
         def read_records(self):
             reads.append(1)
             return []
@@ -1315,21 +1313,144 @@ def test_importing_the_runtime_does_not_pull_in_expr():
     assert out.stdout.strip() == "False", "importing flydsl.runtime now pulls in flydsl.expr"
 
 
-def test_overflow_message_suggests_a_size_that_actually_works():
+@pytest.mark.parametrize("buffer_bytes", [64 << 10, 64 << 20], ids=["one_partition", "partitioned"])
+def test_overflow_message_suggests_a_size_that_actually_works(buffer_bytes):
     from flydsl.runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
 
-    claimed = 256
-    buf = ktrace_buffer.TraceBuffer(device_ptr=0x1000, capacity_slots=claimed - 1, device_id=-1)
+    buf = ktrace_buffer.TraceBuffer(
+        device_ptr=0x1000, capacity_slots=buffer_bytes // ktrace_format.RECORD_BYTES - 1, device_id=-1
+    )
+    layout = buf.layout
+    busiest = layout.capacity(0) + 1
+    claimed = [busiest] + [1] * (layout.partitions - 1)
     with pytest.raises(RuntimeError, match="trace overflowed") as excinfo:
-        with mock.patch.object(type(buf), "claimed_slots", lambda self: claimed):
+        with mock.patch.object(type(buf), "claimed_waves", lambda self: claimed):
             buf.read_records()
 
     suggested = int(re.search(r"FLYDSL_KTRACE_BUFFER_BYTES>=(\d+)", str(excinfo.value)).group(1))
-    resulting_capacity = suggested // ktrace_format.RECORD_BYTES - 1
-    assert resulting_capacity >= claimed, (
-        f"suggested {suggested} bytes yields {resulting_capacity} slots for {claimed} claimed -- "
-        "the caller would hit the same error again"
+    grown = ktrace_format.layout(suggested // ktrace_format.RECORD_BYTES - 1)
+    # A larger buffer only splits partitions, so each must hold the busiest one's waves.
+    assert grown.partitions >= layout.partitions
+    assert grown.capacity(grown.partitions - 1) >= busiest, (
+        f"suggested {suggested} bytes holds {grown.capacity(grown.partitions - 1)} waves per partition for "
+        f"{busiest} -- the caller would hit the same error again"
     )
+
+
+def test_layout_partitions_grow_with_the_buffer():
+    previous = 0
+    for shift in range(12, 32):
+        total = (1 << shift) // ktrace_format.RECORD_BYTES
+        layout = ktrace_format.layout(total - 1)
+        assert layout.partitions & (layout.partitions - 1) == 0 and layout.partitions <= ktrace_format.MAX_PARTITIONS
+        assert layout.partitions >= previous, "a larger buffer must never merge partitions"
+        assert layout.header_slots == ktrace_format.CURSOR_STRIDE_SLOTS * (layout.partitions + 1)
+        assert layout.header_slots + layout.wave_slots == total, "the regions do not end at the buffer's end"
+        assert sum(layout.capacity(p) for p in range(layout.partitions)) == layout.regions
+        assert layout.partitions == 1 or layout.capacity(layout.partitions - 1) >= ktrace_format.MIN_PARTITION_WAVES
+        previous = layout.partitions
+    assert ktrace_format.layout((64 << 20) // ktrace_format.RECORD_BYTES - 1).partitions == 64
+
+
+def test_pass_layout_matches_the_decoder():
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[2] / "lib/Conversion/FlyKtraceToROCDL/FlyKtraceToROCDL.cpp"
+    if not src.exists():
+        pytest.skip("C++ pass not present in this checkout")
+    text = src.read_text()
+    for constant, expected in (
+        ("kCursorStrideSlots", ktrace_format.CURSOR_STRIDE_SLOTS),
+        ("kLaunchCountByte", ktrace_format.LAUNCH_COUNT_BYTE),
+    ):
+        m = re.search(rf"{constant}\s*=\s*(\d+)", text)
+        assert m and int(m.group(1)) == expected, f"pass {constant} does not match the decoder's {expected}"
+
+    capacity = (64 << 20) // ktrace_format.RECORD_BYTES - 1
+    layout = ktrace_format.layout(capacity)
+    source = f"""
+    module attributes {{gpu.container_module, fly_ktrace.capacity_slots = {capacity} : i32,
+                        fly_ktrace.partitions = {layout.partitions} : i32}} {{
+      gpu.module @kernels [#rocdl.target<chip = "gfx950">] {{
+        gpu.func @probe(%buf: !fly.ptr<i8, global>) kernel {{
+          fly_ktrace.mark "x"
+          gpu.return
+        }}
+      }}
+    }}
+    """
+    with ir.Context():
+        module = ir.Module.parse(source)
+        PassManager.parse("builtin.module(convert-fly-ktrace-to-rocdl)").run(module.operation)
+        expanded = str(module)
+    for value in (layout.header_slots, layout.wave_slots, layout.regions, layout.partitions):
+        assert f"llvm.mlir.constant({value} : i32)" in expanded, f"the pass does not use the decoder's {value}"
+
+
+def test_decode_flags_a_wave_that_ran_past_a_short_region():
+    import struct
+
+    from flydsl.runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
+
+    header = struct.pack("<IIQQII", 9, 0, 0, 0, 0, 0)
+    events = b"".join(struct.pack("<QQIIII", 100 + i, 0, 0, 0, 1, 0) for i in range(5))
+    records, overflowed = ktrace_buffer.decode_records(header + events, first_slot=40)
+    assert [r["slot"] for r in records] == [41, 42, 43, 44, 45]
+    assert overflowed == [(40, 9, 5)], "a wave that issued 9 events into 5 slots was not flagged"
+
+
+def test_read_records_decodes_each_partition(monkeypatch):
+    import struct
+
+    from flydsl.runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
+
+    capacity = (64 << 20) // ktrace_format.RECORD_BYTES - 1
+    buf = ktrace_buffer.TraceBuffer(device_ptr=0, capacity_slots=capacity, device_id=-1)
+    layout = buf.layout
+    memory = bytearray((capacity + 1) * ktrace_format.RECORD_BYTES)
+
+    def wave(partition, index, *events):
+        start = layout.header_slots + (index * layout.partitions + partition) * ktrace_format.EVENTS_PER_WAVE
+        struct.pack_into("<IIQQII", memory, start * ktrace_format.RECORD_BYTES, len(events), 0, 5, 9, partition, 0)
+        for i, (kind, start_slot) in enumerate(events):
+            struct.pack_into(
+                "<QQIIII",
+                memory,
+                (start + 1 + i) * ktrace_format.RECORD_BYTES,
+                100 + i,
+                0,
+                0,
+                0,
+                (kind << 24) | 1,
+                start_slot,
+            )
+        return start
+
+    first = wave(3, 0, (ktrace.KIND_MARK, 0))
+    second = wave(3, 1, (ktrace.KIND_RANGE_START, 0))
+    struct.pack_into(
+        "<QQIIII",
+        memory,
+        (second + 2) * ktrace_format.RECORD_BYTES,
+        300,
+        0,
+        0,
+        0,
+        (ktrace.KIND_RANGE_STOP << 24) | 1,
+        second + 1,
+    )
+    struct.pack_into("<I", memory, second * ktrace_format.RECORD_BYTES, 2)
+    last = wave(layout.partitions - 1, 0, (ktrace.KIND_MARK, 0))
+    for partition, waves in ((3, 2), (layout.partitions - 1, 1)):
+        struct.pack_into("<I", memory, layout.cursor_byte(partition), waves)
+
+    monkeypatch.setattr(type(buf), "_read", lambda self, offset, nbytes, what: bytes(memory[offset : offset + nbytes]))
+    records = buf.read_records()
+
+    assert sorted(r["slot"] for r in records) == sorted([first + 1, second + 1, second + 2, last + 1])
+    assert {r["block"][0] for r in records} == {3, layout.partitions - 1}
+    phases = ktrace_trace.summarize(records, {"x": 1})["phases"]
+    assert phases["x"]["count"] == 3, "the token range in partition 3 did not pair on its start slot"
 
 
 def test_a_rejected_name_merge_leaves_the_table_untouched():

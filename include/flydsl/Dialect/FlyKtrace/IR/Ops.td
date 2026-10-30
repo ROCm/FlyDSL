@@ -16,8 +16,8 @@ class FlyKtrace_Op<string mnemonic, list<Trait> traits = []>
 def FlyKtrace_MarkOp : FlyKtrace_Op<"mark"> {
   let summary = "Record one point event.";
   let description = [{
-    Expands to a timestamped record written by the first active lane of the wave.
-    Carries no result: a point event is never paired with anything.
+    Expands to one timestamped record per wave, in the next slot of the wave's
+    region. Carries no result: a point event is never paired with anything.
 
     `event_name` is the user-facing phase name. It stays a string here and is
     resolved to the 24-bit id the device writes when the host reads the trace
@@ -82,10 +82,8 @@ def FlyKtrace_RangeStartOp : FlyKtrace_Op<"range_start"> {
     Preferred over push/pop when the close site is not lexically nested -- notably
     across loop iterations, where the token rides an `scf.for` iter_arg.
 
-    The paired `range_stop` must execute under the same guard. Only the first active
-    lane holds a real slot; the rest carry UNPAIRED_SLOT, so if the two endpoints run
-    with different lanes active the end has nothing to pair on and the range is
-    dropped.
+    The slot is wave-uniform: every active lane holds it, so the paired `range_stop`
+    pairs whichever of those lanes reach it.
   }];
 
   let arguments = (ins StrAttr:$event_name, Optional<I64>:$payload,
@@ -101,13 +99,13 @@ def FlyKtrace_RangeStopOp : FlyKtrace_Op<"range_stop"> {
   let summary = "Close the range opened by a token.";
   let description = [{
     The token operand becomes the record's start_slot field, which is what the
-    host pairs on. It must execute under the same guard as its `range_start` --
-    see that op.
+    host pairs on. The lanes that reach a stop can hold different tokens, as after
+    a loop they leave at different iterations: the stop closes the latest range
+    any of them started, which is the highest slot they hold.
 
-    An inactive token must not record, but this op does not express that: the
-    frontend has already wrapped it in an `scf.if` on the token's companion `i1`
-    before the op is built. See FlyKtrace_TokenType for why that flag is not part
-    of the type.
+    An inactive token is 0, below every slot, and a stop whose lanes all hold it
+    records nothing: the lowering compares the slot against 0 instead of
+    branching, so a loop-carried token adds no control flow to the loop.
   }];
 
   let arguments = (ins AnyType:$token, StrAttr:$event_name,
@@ -135,12 +133,9 @@ def FlyKtrace_InactiveTokenOp : FlyKtrace_Op<"inactive_token", [Pure]> {
     range_stop(stage)
     ```
 
-    Recording nothing is expressed by the companion `i1` the frontend keeps
-    beside the token, not by this op -- `range_stop` is already wrapped in an
-    `scf.if` on that flag before it is built. See FlyKtrace_TokenType. This op
-    therefore only has to supply a value of the right type for the iter_arg;
-    the lowering gives it UNPAIRED_SLOT so that a token which somehow did reach
-    a store could not alias a real record's slot.
+    The lowering gives it 0, which no record's slot can take, and `range_stop`
+    writes nothing and takes no slot when every lane that reaches it holds that
+    value.
   }];
 
   let arguments = (ins);

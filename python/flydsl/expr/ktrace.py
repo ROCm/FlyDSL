@@ -44,30 +44,21 @@ def tracing_enabled() -> bool:
 
 class RangeToken:
 
-    __slots__ = ("_slot", "_is_none", "_event_name")
+    __slots__ = ("_slot", "_event_name")
 
-    def __init__(self, slot, is_none, event_name: str | None = None):
+    def __init__(self, slot, event_name: str | None = None):
         self._slot = slot
-        self._is_none = is_none
         self._event_name = event_name
 
     def __extract_to_ir_values__(self) -> list:
-        return [self._slot, self._is_none]
+        return [self._slot]
 
     @classmethod
     def __construct_from_ir_values__(cls, values: list, exemplar: "RangeToken | None" = None) -> "RangeToken":
-        return cls(values[0], values[1], exemplar._event_name if exemplar is not None else None)
+        return cls(values[0], exemplar._event_name if exemplar is not None else None)
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"RangeToken(event_name={self._event_name!r})"
-
-
-def _i1_const(value: bool):
-    from .._mlir import ir
-    from .._mlir.dialects import arith
-
-    i1 = ir.IntegerType.get_signless(1)
-    return arith.ConstantOp(i1, ir.IntegerAttr.get(i1, int(value))).result
 
 
 def _disabled_token(event_name: str | None) -> RangeToken:
@@ -76,7 +67,7 @@ def _disabled_token(event_name: str | None) -> RangeToken:
 
     i32 = ir.IntegerType.get_signless(32)
     slot = arith.ConstantOp(i32, ir.IntegerAttr.get(i32, 0)).result
-    return RangeToken(slot, _i1_const(True), event_name)
+    return RangeToken(slot, event_name)
 
 
 def mark(event_name: str, payload: Any = None) -> None:
@@ -130,7 +121,7 @@ def range_start(event_name: str, payload: Any = None) -> RangeToken:
 @dsl_loc_tracing
 def _range_start_impl(event_name, payload) -> RangeToken:
     slot = _build_annotation(event_name, KIND_RANGE_START, payload=payload)
-    return RangeToken(slot, _i1_const(False), event_name)
+    return RangeToken(slot, event_name)
 
 
 def range_stop(token: RangeToken, payload: Any = None) -> None:
@@ -141,15 +132,7 @@ def range_stop(token: RangeToken, payload: Any = None) -> None:
 
 @dsl_loc_tracing
 def _range_stop_impl(token, payload) -> None:
-    from .._mlir import ir
-    from .._mlir.dialects import scf
-    from .numeric import Boolean
-
-    cond = Boolean(token._is_none) == Boolean(False)
-    if_op = scf.IfOp(cond.ir_value(), [], has_else=False)
-    with ir.InsertionPoint(if_op.then_block):
-        _build_annotation(token._event_name, KIND_RANGE_STOP, payload=payload, start_slot=token)
-        scf.YieldOp([])
+    _build_annotation(token._event_name, KIND_RANGE_STOP, payload=payload, start_slot=token)
 
 
 @dsl_loc_tracing
@@ -158,7 +141,7 @@ def inactive_token(event_name: str) -> RangeToken:
         return _disabled_token(event_name)
     from .._mlir.dialects import fly_ktrace
 
-    return RangeToken(fly_ktrace.inactive_token(_token_type()), _i1_const(True), event_name)
+    return RangeToken(fly_ktrace.inactive_token(_token_type()), event_name)
 
 
 def _token_type():

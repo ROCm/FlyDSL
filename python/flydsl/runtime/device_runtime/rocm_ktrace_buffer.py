@@ -48,8 +48,12 @@ class TraceBuffer:
     capacity_slots: int
     device_id: int = -1
 
+    @property
+    def layout(self) -> _format.Layout:
+        return _format.layout(self.capacity_slots)
+
     def synchronize(self) -> None:
-        self.claimed_slots()
+        self.launch_count()
 
     def reset(self) -> None:
         self._require_own_device()
@@ -72,54 +76,62 @@ class TraceBuffer:
                 "separate processes."
             )
 
-    def claimed_slots(self) -> int:
+    def _read(self, offset: int, nbytes: int, what: str) -> bytes:
         self._require_own_device()
-        out = ctypes.c_uint32(0)
-        _check(
-            _runtime().mgpuTraceBufferRead(ctypes.byref(out), ctypes.c_void_p(self.device_ptr), 4),
-            "reading the trace cursor",
-        )
-        return int(out.value)
+        raw = (ctypes.c_char * nbytes)()
+        _check(_runtime().mgpuTraceBufferRead(raw, ctypes.c_void_p(self.device_ptr + offset), nbytes), what)
+        return bytes(raw)
+
+    def claimed_waves(self) -> list[int]:
+        """Waves each partition has numbered since the last reset; past its regions on overflow."""
+        layout = self.layout
+        raw = self._read(0, layout.header_slots * _format.RECORD_BYTES, "reading the trace counters")
+        return [struct.unpack_from("<I", raw, layout.cursor_byte(p))[0] for p in range(layout.partitions)]
 
     def launch_count(self) -> int:
-        self._require_own_device()
-        out = ctypes.c_uint32(0)
-        _check(
-            _runtime().mgpuTraceBufferRead(ctypes.byref(out), ctypes.c_void_p(self.device_ptr + 4), 4),
-            "reading the trace launch count",
-        )
-        return int(out.value)
+        raw = self._read(_format.LAUNCH_COUNT_BYTE, 4, "reading the trace launch count")
+        return struct.unpack("<I", raw)[0]
 
     def read_records(self) -> list[dict]:
-        claimed = self.claimed_slots()
-        if claimed > self.capacity_slots:
-            needed = (claimed + 1) * _format.RECORD_BYTES
+        layout = self.layout
+        claimed = self.claimed_waves()
+        excess, partition = max((waves - layout.capacity(p), p) for p, waves in enumerate(claimed))
+        busiest = max(claimed)
+        if excess > 0:
             raise RuntimeError(
-                f"trace overflowed: waves claimed {claimed} slots, buffer holds "
-                f"{self.capacity_slots}. Re-run with FLYDSL_KTRACE_BUFFER_BYTES>={needed}, "
-                f"a block filter (capture(blocks=...) or FLYDSL_KTRACE_BLOCKS), or fewer launches between reads."
+                f"trace overflowed: one of the buffer's {layout.partitions} partitions numbered "
+                f"{claimed[partition]} waves but holds {layout.capacity(partition)}. Re-run with "
+                f"FLYDSL_KTRACE_BUFFER_BYTES>={_bytes_holding(busiest, layout)}, a block filter "
+                "(capture(blocks=...) or FLYDSL_KTRACE_BLOCKS), or fewer launches between reads."
             )
 
-        nbytes = claimed * _format.RECORD_BYTES
-        if nbytes == 0:
+        # The regions in use are a prefix: partition p's last wave sits in region (waves - 1) * partitions + p.
+        regions = max(((waves - 1) * layout.partitions + p + 1 for p, waves in enumerate(claimed) if waves), default=0)
+        if not regions:
             return []
-        raw = (ctypes.c_char * nbytes)()
-        _check(
-            _runtime().mgpuTraceBufferRead(raw, ctypes.c_void_p(self.device_ptr + _format.RECORD_BYTES), nbytes),
-            "reading the trace records",
+        nslots = min(regions * _format.EVENTS_PER_WAVE, layout.wave_slots)
+        raw = self._read(
+            layout.header_slots * _format.RECORD_BYTES, nslots * _format.RECORD_BYTES, "reading the trace records"
         )
-        records, overflowed = decode_records(bytes(raw))
+        records, overflowed = decode_records(raw, first_slot=layout.header_slots)
         if overflowed:
-            worst = max(count for _, count in overflowed)
-            raise RuntimeError(
-                f"trace truncated: {len(overflowed)} wave(s) emitted more than "
-                f"{_format.EVENTS_PER_WAVE - 1} events (worst: {worst}). The records past "
-                "that point were dropped, so ranges are unbalanced and phases would be "
-                "mispaired -- a plausible-looking timeline for the wrong phase. Annotate "
-                "at a coarser granularity or sample fewer loop iterations. Increasing "
-                "FLYDSL_KTRACE_BUFFER_BYTES or filtering other blocks does not increase "
-                "the per-wave event limit."
-            )
+            worst = max(attempted for _, attempted, _ in overflowed)
+            if all(holds == _format.EVENTS_PER_WAVE - 1 for _, _, holds in overflowed):
+                cause = (
+                    f"emitted more than {_format.EVENTS_PER_WAVE - 1} events (worst: {worst}). The records past "
+                    "that point were dropped, so ranges are unbalanced and phases would be "
+                    "mispaired -- a plausible-looking timeline for the wrong phase. Annotate "
+                    "at a coarser granularity or sample fewer loop iterations. Increasing "
+                    "FLYDSL_KTRACE_BUFFER_BYTES or filtering other blocks does not increase "
+                    "the per-wave event limit."
+                )
+            else:
+                cause = (
+                    f"ran out of room at the end of a trace partition (worst: {worst} events). The records past "
+                    "that point were dropped, so ranges are unbalanced. Re-run with "
+                    f"FLYDSL_KTRACE_BUFFER_BYTES>={_bytes_holding(busiest, layout)} or a block filter."
+                )
+            raise RuntimeError(f"trace truncated: {len(overflowed)} wave(s) {cause}")
         return records
 
 
@@ -140,22 +152,39 @@ def _decode_payload(bits: int, packed: int):
     raise ValueError(f"ktrace: unknown payload type {encoding}")
 
 
-def decode_records(raw: bytes) -> tuple[list[dict], list[tuple[int, int]]]:
+def _bytes_holding(waves: int, layout: _format.Layout) -> int:
+    """A buffer size whose every partition holds ``waves`` waves. Partitions only split as the buffer
+    grows, so no partition of the larger buffer is busier than the busiest one now."""
+    nbytes = (layout.header_slots + waves * layout.partitions * _format.EVENTS_PER_WAVE) * _format.RECORD_BYTES
+    while True:
+        grown = _format.layout(nbytes // _format.RECORD_BYTES - 1)
+        if grown.capacity(grown.partitions - 1) >= waves:
+            return nbytes
+        nbytes *= 2
+
+
+def decode_records(raw: bytes, first_slot: int = 1) -> tuple[list[dict], list[tuple[int, int, int]]]:
+    """Decode consecutive wave regions whose first header is at slot ``first_slot``. Also returns
+    (header slot, events issued, events the region holds) for every wave that issued more events
+    than its region holds."""
     per_wave = _format.EVENTS_PER_WAVE
+    total = len(raw) // _format.RECORD_BYTES
     out = []
     overflowed = []
     dispatch_id = 0
     queue_id = 0
     block = (0, 0, 0)
     wave_id = 0
-    for off in range(0, len(raw) - _format.RECORD_BYTES + 1, _format.RECORD_BYTES):
-        abs_slot = off // _format.RECORD_BYTES + 1
-        if per_wave > 0 and (abs_slot - 1) % per_wave == 0:
+    for index in range(total):
+        off = index * _format.RECORD_BYTES
+        abs_slot = first_slot + index
+        if index % per_wave == 0:
             attempted, wave_word, dispatch_id, queue_id, block_x, block_y = struct.unpack_from("<IIQQII", raw, off)
             block = (block_x, block_y, wave_word >> 8)
             wave_id = wave_word & 0xFF
-            if attempted > per_wave - 1:
-                overflowed.append((abs_slot // per_wave, attempted))
+            holds = min(per_wave, total - index) - 1
+            if attempted > holds:
+                overflowed.append((abs_slot, attempted, holds))
             continue
         ts, payload, hw_id, xcc_id, packed, start_slot = struct.unpack_from("<QQIIII", raw, off)
         if ts == 0:

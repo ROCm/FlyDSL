@@ -446,9 +446,18 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
+    _run_pass_manager(pm, module)
+
+
+def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
+    """Run *pm* on *module*, raising a failure as a DSLCompileError that points at the user's source."""
     with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
+        except ir.MLIRError as exc:
+            # PassManager.run captures the errors into the MLIRError before any other handler sees them.
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError(str(exc), diagnostics=records) from exc
         except Exception as exc:
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
@@ -456,8 +465,9 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
 def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend) -> str:
     """Identify the complete lowering input within this process.
 
-    ``asm`` is the prepared module text that lowering parses on a miss. Do not
-    elide constants/resources or canonicalize away attributes. ``backend.hash()``
+    ``asm`` is the prepared module text, omitting source locations when DWARF
+    is disabled. Lowering retains locations for diagnostics. Do not elide
+    constants/resources or canonicalize away attributes. ``backend.hash()``
     may carry live toolchain configuration, so it is read per request; the loaded
     compiler files cannot change in-process, so only :func:`_disk_cache_key`
     fingerprints them.
@@ -485,13 +495,14 @@ class MlirCompiler:
     def prepare(cls, module: ir.Module, *, backend, compile_hints: dict, link_libs=None):
         """Render the exact lowering input: hinted module text and resolved pipeline.
 
-        The text follows the location policy; it is both the artifact key input
-        and what :meth:`compile` parses on a miss.
+        The text follows the cache location policy. On a miss, :meth:`compile`
+        parses the same prepared module with source locations for diagnostics.
         """
         try:
             module.operation.verify()
         except ir.MLIRError as exc:
-            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError("MLIR verification failed", diagnostics=records) from exc
 
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         asm = module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info, assume_verified=True)
@@ -525,8 +536,17 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        dump_enabled = env.debug.dump_ir
+        # FLYDSL_DEBUG_DUMP_ASM takes the FLYDSL_DUMP_IR path but writes only the final ISA.
+        dump_ir = env.debug.dump_ir
+        dump_enabled = dump_ir or env.debug.dump_asm
         dump_dir = Path(env.debug.dump_dir).resolve()
+
+        if dump_enabled and not dump_ir and external_binary:
+            raise RuntimeError(
+                "FLYDSL_DEBUG_DUMP_ASM is not supported with "
+                "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
+                "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
+            )
 
         with _llvm_ctx:
             if dump_enabled:
@@ -534,10 +554,11 @@ class MlirCompiler:
                 kernel_names = _infer_kernel_names_from_asm(asm)
                 subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
                 dump_dir = dump_dir / _sanitize_path_component(subdir)
-                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+                if dump_ir:
+                    print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-                print(f"[flydsl.compile] dump 00_origin -> {out}")
+                    out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                    print(f"[flydsl.compile] dump 00_origin -> {out}")
 
                 asm_for_isa = None
                 llir = None
@@ -551,15 +572,12 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with dsl_ir_diagnostics(module.context) as diags:
-                        try:
-                            pm.run(module.operation)
-                        except Exception as exc:
-                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
+                    _run_pass_manager(pm, module)
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
-                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+                    if dump_ir:
+                        out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                        print(f"[flydsl.compile] dump {stage_name} -> {out}")
 
                     if frag.strip() == "reconcile-unrealized-casts":
                         asm_for_isa = stage_asm
@@ -588,8 +606,9 @@ class MlirCompiler:
 
                 if llir is not None:
                     ll_name = f"{next_stage:02d}_llvm_ir"
-                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    if dump_ir:
+                        (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                        print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
                     next_stage += 1
 
                 if asm_for_isa is not None:
@@ -616,13 +635,6 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
-
-                    if env.debug.dump_asm:
-                        raise RuntimeError(
-                            "FLYDSL_DEBUG_DUMP_ASM is not supported with "
-                            "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
-                            "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
-                        )
 
                     run_external_binary_codegen(
                         module,
@@ -939,9 +951,9 @@ class JitFunction:
 
     def _ensure_cache_manager(self):
         run_only = env.runtime.run_only
-        if run_only and env.debug.dump_ir:
+        if run_only and (env.debug.dump_ir or env.debug.dump_asm):
             raise ValueError(
-                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1 or FLYDSL_DEBUG_DUMP_ASM=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
             )
         cache_root = env.runtime.cache_dir
@@ -1118,7 +1130,8 @@ class JitFunction:
             cache_key = _artifact_cache_key(asm, config, backend)
             # Link libraries and Python post-load initializers live outside the IR:
             # reuse such artifacts only in-process, never from disk.
-            manager = None if traced.extern_linked or env.debug.dump_ir else self.cache_manager
+            dumping = env.debug.dump_ir or env.debug.dump_asm
+            manager = None if traced.extern_linked or dumping else self.cache_manager
             compiled_func = self._mem_cache.get(cache_key)
             disk_key = None if manager is None else _disk_cache_key(cache_key)
             if compiled_func is None and manager is not None:
@@ -1149,15 +1162,10 @@ class JitFunction:
                             # Pin event IDs this process already assigned. They stay out of the
                             # key: accept_cached rejects a cached binary whose IDs conflict.
                             _attach_ktrace_config(traced.module, True, known_names=name_table())
-                            asm = traced.module.operation.get_asm(
-                                enable_debug_info=env.debug.enable_debug_info, assume_verified=True
-                            )
-                        compiled_module = MlirCompiler.compile(asm, func_name=self.func.__name__, config=config)
-                        source_ir = (
-                            asm
-                            if env.debug.enable_debug_info
-                            else traced.module.operation.get_asm(enable_debug_info=True, assume_verified=True)
-                        )
+                        # Keep source locations for pass diagnostics even when DWARF is off.
+                        # The key omits them unless debug info affects the generated artifact.
+                        source_ir = traced.module.operation.get_asm(enable_debug_info=True, assume_verified=True)
+                        compiled_module = MlirCompiler.compile(source_ir, func_name=self.func.__name__, config=config)
                         compiled_func = CompiledArtifact(
                             compiled_module,
                             self.func.__name__,
