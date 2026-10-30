@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T04:52:05Z",
+ "updated": "2026-10-30T05:03:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41005986921,
+   "pr": 1350,
+   "commit": "0eba88ed1d5fe89865cb2ebfbd027900a9055c69",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41005986921",
+   "created_at": "2026-10-30T05:00:27Z",
+   "updated_at": "2026-10-30T05:01:47Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 41004973509,
    "pr": 1350,
@@ -25,13 +40,41 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106",
    "created_at": "2026-10-30T04:31:38Z",
-   "updated_at": "2026-10-30T04:33:31Z",
+   "updated_at": "2026-10-30T04:51:59Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-30T04:52:23Z",
+     "completed_at": "2026-10-30T04:54:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123898549082"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-30T04:52:21Z",
+     "completed_at": "2026-10-30T05:01:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123898549108"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T04:51:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123898549159"
+    }
+   ]
   },
   {
    "run_id": 40993276813,
@@ -1806,21 +1849,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40540351513",
    "created_at": "2026-10-27T16:22:58Z",
    "updated_at": "2026-10-28T13:46:30Z",
-   "actor": "Qubitium",
-   "jobs": []
-  },
-  {
-   "run_id": 40539991300,
-   "pr": null,
-   "commit": "a17b7c68434d43d9ed409956b0c2ed085780eb51",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40539991300",
-   "created_at": "2026-10-27T16:20:46Z",
-   "updated_at": "2026-10-27T16:20:46Z",
    "actor": "Qubitium",
    "jobs": []
   }
