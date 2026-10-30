@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-30T06:36:26Z",
+ "updated": "2026-10-30T06:43:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41015460592,
+   "pr": null,
+   "commit": "a80ebee6fd0ef768622b38fc6670ef07b459c504",
+   "branch": "main",
+   "event": "push",
+   "title": "Migrate kernels tiled tdm (#1238)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015460592",
+   "created_at": "2026-10-30T06:40:30Z",
+   "updated_at": "2026-10-30T06:41:48Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 41015058975,
+   "pr": null,
+   "commit": "b2656b836a6dae4734d918314d7d028f4709ce18",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics (#1336)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41015058975",
+   "created_at": "2026-10-30T06:36:23Z",
+   "updated_at": "2026-10-30T06:41:32Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41013570215,
    "pr": 1346,
@@ -820,7 +850,7 @@
   },
   {
    "run_id": 40861222658,
-   "pr": 1238,
+   "pr": null,
    "commit": "d3c3398f93d1232b30dd0f5e8264cbc74f5ef7e5",
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
@@ -1031,7 +1061,7 @@
   },
   {
    "run_id": 40839915872,
-   "pr": 1336,
+   "pr": null,
    "commit": "26c8f2bb094aba9c9641bf58853fc2996db5b075",
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
@@ -1046,7 +1076,7 @@
   },
   {
    "run_id": 40839199904,
-   "pr": 1238,
+   "pr": null,
    "commit": "ace9f6b40588a8213366cf3d34704d271152a0a4",
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
@@ -1138,7 +1168,7 @@
   },
   {
    "run_id": 40836241717,
-   "pr": 1336,
+   "pr": null,
    "commit": "a951a793762348e7fcf9538337988c83239913b5",
    "branch": "zhimding/ktrace_low_overhead_1027",
    "event": "pull_request",
@@ -1217,7 +1247,7 @@
   },
   {
    "run_id": 40833810850,
-   "pr": 1238,
+   "pr": null,
    "commit": "7f439907d9891c3b4a91e03d8dbab1821c3c63ba",
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
@@ -1800,67 +1830,6 @@
      "started_at": "2026-10-28T12:19:48Z",
      "completed_at": "2026-10-28T13:46:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40676104571/job/122811483287"
-    }
-   ]
-  },
-  {
-   "run_id": 40674075040,
-   "pr": null,
-   "commit": "f50e9c5e58eb47ae1067787e9be3611c63979478",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Put the contiguous mode's filler dim at the front (#1309)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40674075040",
-   "created_at": "2026-10-28T10:41:10Z",
-   "updated_at": "2026-10-28T10:56:52Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 40668518934,
-   "pr": 1341,
-   "commit": "fe64233cb2cbcaacef0df78b86f9d42c95404dbb",
-   "branch": "pr/fix-dump-asm",
-   "event": "pull_request",
-   "title": "[Fix] Make FLYDSL_DEBUG_DUMP_ASM dump the final ISA",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40668518934",
-   "created_at": "2026-10-28T09:59:20Z",
-   "updated_at": "2026-10-28T15:40:51Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T11:02:51Z",
-     "completed_at": "2026-10-28T11:29:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40668518934/job/122774999070"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T14:43:16Z",
-     "completed_at": "2026-10-28T15:40:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40668518934/job/122774999136"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T11:02:16Z",
-     "completed_at": "2026-10-28T12:15:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40668518934/job/122774999174",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
