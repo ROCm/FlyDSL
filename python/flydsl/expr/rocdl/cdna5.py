@@ -223,6 +223,8 @@ def make_tiled_tdm_atom(
     init_boundary_check=True,
     atomic_barrier=False,
     internal_type=None,
+    index_tensor=None,
+    index_bits=32,
 ):
     """Build a wave-scoped CDNA5 TDM copy atom and its coordinate tensor.
 
@@ -244,6 +246,16 @@ def make_tiled_tdm_atom(
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
     * ``internal_type`` — reserved; currently must be ``None``.
+    * ``index_tensor`` — passing it selects indexed addressing: the outer dimension
+      is not walked, it is listed. The tensor holds one ``Int32`` row index per row of
+      the tile. A load then gathers those rows and a store scatters to them.
+    * ``index_bits`` — index width, 16 or 32. It bounds how many rows one issue
+      carries, since the index list occupies fixed descriptor storage: 16 rows at
+      16 bits, 8 at 32.
+
+    Indexed addressing is 2D only, and the per-row span must be a whole multiple of
+    4 bytes. A row index at or past the tensor's row count reads zero on a load and
+    is dropped on a store, which is how a short tile masks its unused rows.
 
     Example:
         Loading a 128x64 tile of a row-major ``gA`` into LDS.
@@ -290,6 +302,26 @@ def make_tiled_tdm_atom(
     if internal_type is not None:
         raise ValueError("internal_type must be None for now")
 
+    if index_tensor is None:
+        index_bits = 0
+    else:
+        if index_bits not in (16, 32):
+            raise ValueError(f"index_bits must be 16 or 32, got {index_bits}")
+        if getattr(index_tensor, "element_type", None) is not Int32:
+            raise TypeError(
+                f"the index tensor must hold Int32 row indices, got {getattr(index_tensor, 'element_type', None)}"
+            )
+        tile_rank = len(tdm_tile) if not isinstance(tdm_tile, ir.Value) else None
+        if tile_rank is not None and tile_rank != 2:
+            raise ValueError(f"indexed addressing is 2D only, got a rank-{tile_rank} tiler")
+        if tile_rank is not None:
+            rows = tdm_tile[0]
+            max_rows = 16 if index_bits == 16 else 8
+            if isinstance(rows, int) and rows > max_rows:
+                raise ValueError(
+                    f"one indexed issue carries at most {max_rows} rows at {index_bits}-bit indices, got {rows}"
+                )
+
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
     # value's type and the derivation reads it there.
@@ -300,6 +332,7 @@ def make_tiled_tdm_atom(
         num_warps=num_warps,
         cache_modifier=op.cache_modifier,
         atomic_barrier=bool(atomic_barrier),
+        index_bits=index_bits,
         internal_type=(
             None
             if internal_type is None
@@ -322,6 +355,12 @@ def tdm_partition(
 ):
     """Partition ``(TDM_Tile, rest...)`` tensors, returning ``(shared, global)``.
 
+    Pass ``gtensor`` as ``[coord_tensor, index_tensor]`` for an atom built with an
+    index tensor; the result then carries a third entry, that warp's slice of the row
+    list, and the pair goes back to :func:`copy` as ``[coord, index]``. With more than
+    one warp the index tensor's outermost mode selects the warp, so each warp reads
+    its own rows.
+
     Each result has shape ``((ATOM, ITER), rest...)``. ATOM contains exactly
     one warp's issue (the atom's NumVal). WARP selects consecutive chunks in the
     same compact LDS traversal used to build the descriptor; ITER advances by
@@ -342,6 +381,12 @@ def tdm_partition(
     )
     from ..typing import static
 
+    index = None
+    if isinstance(gtensor, (list, tuple)):
+        if len(gtensor) != 2:
+            raise ValueError(f"tdm_partition: gtensor must be a tensor or [coord, index], got {len(gtensor)} entries")
+        gtensor, index = gtensor
+
     n_warps = size(warp_layout).unpack()
     if n_warps < 1 or cosize(warp_layout).unpack() != n_warps or size(right_inverse(warp_layout)).unpack() != n_warps:
         raise ValueError("warp layout must bijectively map participants to consecutive IDs starting at zero")
@@ -360,4 +405,8 @@ def tdm_partition(
         tiled = group(tiled, 0, 2)
         return coalesce(tiled, make_int_tuple(((1, 1),)))
 
-    return apply(stensor), apply(gtensor)
+    if index is None:
+        return apply(stensor), apply(gtensor)
+    # The row list is already one issue wide per warp, so it is selected rather than
+    # composed: the partition layout describes the data tile, not the index vector.
+    return apply(stensor), apply(gtensor), (index if n_warps == 1 else index[warp_id])

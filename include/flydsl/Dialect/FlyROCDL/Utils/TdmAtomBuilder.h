@@ -31,6 +31,13 @@ FailureOr<Type> tdmStoreOpType(MLIRContext *ctx, const tdm::Geometry &geometry, 
                                int32_t cacheModifier, int32_t indexBits,
                                function_ref<InFlightDiagnostic()> emitError);
 
+/// Emit one CDNA5 TDM call whose outer dim is addressed by the row list in `index`.
+/// Kept off `CopyOpTypeInterface` because the index operand is specific to this target:
+/// every other atom would carry a parameter it can never use.
+LogicalResult emitTdmIndexedCall(OpBuilder &builder, Location loc, Type copyAtomTy, Type srcTy,
+                                 Type dstTy, Type indexTy, Value atomVal, Value src, Value dst,
+                                 Value index);
+
 FailureOr<fly::LayoutType> tdmPartitionLayout(Type atomType, Type stensorType, Type gtensorType,
                                               int32_t numWarps,
                                               function_ref<InFlightDiagnostic()> emitError);

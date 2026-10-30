@@ -376,7 +376,7 @@ def Fly_CopyAtomCall : Fly_Op<"copy_atom_call", [AttrSizedOperandSegments]> {
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_TensorLikeType:$src,
                        Fly_TensorLikeType:$dst, Optional<Fly_MemRef>:$pred,
                        Optional<Fly_TensorLikeType>:$index);
-  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? (`,` `index` `=` $index^)? `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`index` $index^)? (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
@@ -458,7 +458,7 @@ def Fly_MmaMakeFragmentOp : Fly_Op<"mma.make_fragment", [Pure, DeclareOpInterfac
 def Fly_CopyOp : Fly_Op<"copy", [AttrSizedOperandSegments]> {
   let arguments = (ins AnyType:$copyAtom, Fly_TensorLikeType:$src, Fly_TensorLikeType:$dst,
                        Optional<Fly_MemRef>:$pred, Optional<Fly_TensorLikeType>:$index);
-  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? (`,` `index` `=` $index^)? `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`index` $index^)? (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {
   let summary = "Fully expand tiled GEMM with variadic A and B operand groups";
