@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-30T08:52:55Z",
+ "updated": "2026-10-30T09:26:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41032580481,
+   "pr": 1332,
+   "commit": "8d2c042348a4719323a1cf4662f3e484c8ff09ad",
+   "branch": "fix/rocm-gpu-detection",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41032580481",
+   "created_at": "2026-10-30T09:19:25Z",
+   "updated_at": "2026-10-30T09:19:25Z",
+   "actor": "Qubitium",
+   "jobs": []
+  },
+  {
+   "run_id": 41029808879,
+   "pr": null,
+   "commit": "3c76d7a9e143e330d2a4d38d6579b8db200fbe77",
+   "branch": "fix/rocm-gpu-detection",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41029808879",
+   "created_at": "2026-10-30T08:56:22Z",
+   "updated_at": "2026-10-30T08:56:22Z",
+   "actor": "Qubitium",
+   "jobs": []
+  },
   {
    "run_id": 41025736481,
    "pr": 1355,
@@ -10,13 +40,41 @@
    "branch": "claude-plugin-marketplace",
    "event": "pull_request",
    "title": "[Misc] Publish FlyDSL skills as a Claude Code plugin",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481",
    "created_at": "2026-10-30T08:20:07Z",
-   "updated_at": "2026-10-30T08:22:04Z",
+   "updated_at": "2026-10-30T08:52:42Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:52:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244345"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:52:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244358"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:52:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244379"
+    }
+   ]
   },
   {
    "run_id": 41025557359,
@@ -212,9 +270,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T07:13:03Z",
+     "started_at": "2026-10-30T09:09:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152/job/123940857178"
     }
@@ -295,11 +353,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T08:26:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/123931315491"
+     "completed_at": "2026-10-30T08:58:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/123931315491",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -338,11 +399,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T08:35:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904089"
+     "completed_at": "2026-10-30T09:08:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904089",
+     "machine": "smci350-odcdh2-a08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -466,10 +530,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T08:28:18Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T08:57:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911139027"
     },
     {
@@ -567,9 +631,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:29:01Z",
+     "started_at": "2026-10-30T09:14:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231727/job/123909347902"
     }
@@ -720,11 +784,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr6-backward",
    "event": "pull_request",
    "title": "[Kernel][FA] Add gfx950 attention backward (dQ and dK/dV) ported from AOTriton 0.14 (6/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078",
    "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T05:45:31Z",
+   "updated_at": "2026-10-30T09:12:10Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -739,9 +803,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:45:31Z",
+     "started_at": "2026-10-30T09:12:09Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099546"
     },
@@ -1889,67 +1953,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40705569863/job/122898665147"
     }
    ]
-  },
-  {
-   "run_id": 40703867392,
-   "pr": null,
-   "commit": "f37f7a2b98f295902240f9f96612222003578b40",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Handle Numeric conversion recursively (#1294)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40703867392",
-   "created_at": "2026-10-28T14:13:45Z",
-   "updated_at": "2026-10-28T16:50:50Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T14:53:05Z",
-     "completed_at": "2026-10-28T16:14:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40703867392/job/122892797333",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T15:12:09Z",
-     "completed_at": "2026-10-28T15:35:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40703867392/job/122892797416"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-28T14:52:03Z",
-     "completed_at": "2026-10-28T16:50:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40703867392/job/122892797526"
-    }
-   ]
-  },
-  {
-   "run_id": 40700764529,
-   "pr": 1272,
-   "commit": "76f40e1c1fc502351ba51b40361d4a8c9ba2fd18",
-   "branch": "rdmma-benchmark",
-   "event": "pull_request",
-   "title": "[Benchmark] fix rdna gemm benchmark option",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40700764529",
-   "created_at": "2026-10-28T13:54:26Z",
-   "updated_at": "2026-10-28T13:54:26Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
