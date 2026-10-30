@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T08:20:37Z",
+ "updated": "2026-10-30T08:52:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41025736481,
+   "pr": 1355,
+   "commit": "133102b7b88431d868402d52235559e847e20a32",
+   "branch": "claude-plugin-marketplace",
+   "event": "pull_request",
+   "title": "[Misc] Publish FlyDSL skills as a Claude Code plugin",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481",
+   "created_at": "2026-10-30T08:20:07Z",
+   "updated_at": "2026-10-30T08:22:04Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 41025557359,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Misc] Bump version to 0.4.2 (#1354)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359",
    "created_at": "2026-10-30T08:18:27Z",
-   "updated_at": "2026-10-30T08:19:08Z",
+   "updated_at": "2026-10-30T08:41:36Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:41:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162622"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:41:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162647"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T08:41:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162685"
+    }
+   ]
   },
   {
    "run_id": 41024656082,
@@ -252,9 +295,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T06:42:37Z",
+     "started_at": "2026-10-30T08:26:02Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/123931315491"
     },
@@ -295,9 +338,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T06:31:31Z",
+     "started_at": "2026-10-30T08:35:20Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904089"
     },
@@ -404,11 +447,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr3-config",
    "event": "pull_request",
    "title": "[Kernel][FA] Add gfx950 attention metadata, knobs and traits config (3/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T05:35:10Z",
+   "updated_at": "2026-10-30T08:35:26Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -423,9 +466,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:35:09Z",
+     "started_at": "2026-10-30T08:28:18Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911139027"
     },
@@ -539,11 +582,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr7-interface",
    "event": "pull_request",
    "title": "[Kernel][FA] Route flydsl_flash_attn_func to the new gfx950 bf16/f16 kernels (7/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231231",
    "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T07:50:58Z",
+   "updated_at": "2026-10-30T08:51:18Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -604,11 +647,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T05:45:13Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008068"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T08:20:07Z",
+     "completed_at": "2026-10-30T08:50:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008068",
+     "machine": "smci350-odcdh2-a08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -684,10 +730,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T08:10:48Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T08:28:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099531"
     },
     {
@@ -702,11 +748,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T07:50:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099563"
+     "completed_at": "2026-10-30T08:20:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230078/job/123914099563",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1899,21 +1948,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40700764529",
    "created_at": "2026-10-28T13:54:26Z",
    "updated_at": "2026-10-28T13:54:26Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 40700114605,
-   "pr": 1332,
-   "commit": "6097da7bd423556daad45c1e4ab6aee290089d73",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40700114605",
-   "created_at": "2026-10-28T13:50:17Z",
-   "updated_at": "2026-10-28T13:50:17Z",
    "actor": "coderfeli",
    "jobs": []
   }
