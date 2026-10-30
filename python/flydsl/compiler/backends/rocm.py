@@ -168,16 +168,6 @@ class RocmBackend(BaseBackend):
 
     # -- cache / fingerprint ---------------------------------------------
 
-    def native_lib_patterns(self) -> List[str]:
-        return [
-            "_mlirDialectsFly*.so",
-            "libFly*.so",
-            "libfly_rocm_aot_runtime.a",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
-        ]
-
     def jit_runtime_lib_basenames(self) -> List[str]:
         return [
             "libfly_jit_runtime.so",

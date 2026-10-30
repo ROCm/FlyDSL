@@ -398,17 +398,22 @@ def test_a_numerically_wrong_candidate_cannot_win(monkeypatch, failure_mode):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     poisoned = 512
 
-    original_run = _softmax_tuner._run_with_hints
+    original_candidate = _softmax_tuner._candidate
 
     def sabotage(compiler_opts, args, kwargs):
-        if kwargs.get("BLOCK_THREADS") == poisoned and failure_mode == "no-op":
-            return None
-        result = original_run(compiler_opts, args, kwargs)
-        if kwargs.get("BLOCK_THREADS") == poisoned:
-            args[1].zero_()  # launches fine, computes garbage
-        return result
+        run = original_candidate(compiler_opts, args, kwargs)
+        if kwargs.get("BLOCK_THREADS") != poisoned:
+            return run
 
-    monkeypatch.setattr(_softmax_tuner, "_run_with_hints", sabotage)
+        def poisoned_run():
+            if failure_mode == "no-op":
+                return
+            run()
+            args[1].zero_()  # launches fine, computes garbage
+
+        return poisoned_run
+
+    monkeypatch.setattr(_softmax_tuner, "_candidate", sabotage)
 
     # Make the poisoned candidate the fastest, so only the gate can keep it from winning.
     def bench(call, warmup, rep):

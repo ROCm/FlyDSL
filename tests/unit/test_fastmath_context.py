@@ -286,18 +286,13 @@ def test_explicit_fastmath_hint_overrides_fast_fp_math_default():
 @pytest.mark.rocm_lower
 @requires_gpu
 def test_hint_changes_cache_key():
-    """The fastmath hint must be part of the cache key (rides _hints_)."""
-    _fm_launch_hinted._ensure_sig()
-    sig = _fm_launch_hinted._sig
-    bound = sig.bind()
-    bound.apply_defaults()
-
-    _fm_launch_hinted.compile_hints = {}
-    key_none = _fm_launch_hinted._resolve_and_make_cache_key(bound.arguments)
-    _fm_launch_hinted.compile_hints = {"fastmath": "fast"}
-    key_fast = _fm_launch_hinted._resolve_and_make_cache_key(bound.arguments)
-    _fm_launch_hinted.compile_hints = {"fastmath": "contract"}
-    key_contract = _fm_launch_hinted._resolve_and_make_cache_key(bound.arguments)
+    """The fastmath hint changes the traced IR, and with it the artifact key."""
+    keys = []
+    for hints in ({}, {"fastmath": "fast"}, {"fastmath": "contract"}):
+        _fm_launch_hinted.compile_hints = hints
+        _fm_launch_hinted._compile_only()
+        keys.append(_fm_launch_hinted._last_compiled[0])
+    key_none, key_fast, key_contract = keys
 
     assert key_none != key_fast
     assert key_fast != key_contract

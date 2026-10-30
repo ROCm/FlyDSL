@@ -79,7 +79,7 @@ vec_add(A, B, C, 1024)
    - `.launch()` emits the specialized `gpu.func` and `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
    - `CompiledArtifact` stores the compiled module and lazily owns the resulting ExecutionEngine
-4. Subsequent calls with the same type signature use the cached binary
+4. Subsequent calls trace again and reuse the cached binary when the generated MLIR and compilation configuration match
 
 ---
 
@@ -154,7 +154,7 @@ class MyCustomAdaptor:
     def __get_ir_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __cache_signature__(self):
+    def __cache_signature__(self):  # optional; only cache_signature() reads it
         return (...)  # every property that can change generated code
 
     def __c_abi_spec__(self):
@@ -607,34 +607,107 @@ gpu.barrier()
 
 ### 9.1 Automatic caching
 
-JIT-compiled functions are cached automatically:
+Every ordinary `@flyc.jit` call and every new `flyc.compile(...)` request traces
+the current Python launcher and its kernels before checking compiled artifacts.
+An unchanged trace reuses the artifact and skips lowering and code generation.
+Tracing still executes Python code, so its side effects and cost occur on cache
+hits too.
 
-- **In-memory cache** — keyed by argument type signature
-- **Disk cache** — stored in `~/.flydsl/cache/` (configurable via `FLYDSL_RUNTIME_CACHE_DIR`)
-- **Cache key** includes: source code hash, dependency sources, closure values, FlyDSL version, LLVM version
+The artifact key is a SHA-256 over the complete prepared MLIR module, target and
+backend fingerprint, pass pipeline, LLVM options and codegen environment
+variables. The module includes host launches, all GPU kernels, constants and
+attributes. Normal builds omit source locations; debug builds include them. Disk
+entries additionally hash the compiler toolchain files, which cannot change
+inside a running process. Python argument values never select an artifact on
+their own; each traced call rebuilds its argument adapter.
 
-### 9.2 Cache invalidation
+The disk store holds one `<key>.pkl` per artifact in `~/.flydsl/cache/<function name>/`,
+or under `$FLYDSL_RUNTIME_CACHE_DIR`. `FLYDSL_RUNTIME_ENABLE_CACHE=0` disables disk
+caching; in-memory artifact reuse remains active and still requires a fresh trace.
 
-The cache is invalidated when:
+### 9.2 Changes to Python code and compile-time state
 
-- Source code of the function or its dependencies changes
-- Argument types change (different tensor shapes/dtypes)
-- `Constexpr` values change
-- FlyDSL or LLVM version changes
+A helper rebind, changed global or closure value, mutable captured object, or
+different `self` instance is observed by the next ordinary JIT/compile request.
+If it changes the generated MLIR, the request selects a new artifact. This also
+works for helpers in other directories and calls inside nested Python functions;
+there is no Python dependency-source walker. Changes that produce identical
+MLIR and configuration can reuse the same artifact.
 
-### 9.3 Disk cache invalidation
+Tracing executes the currently loaded Python objects. Editing a file requires
+reloading/redefining its functions or starting a new process. A helper's own
+memoization can still return an old value. Restart after rebuilding FlyDSL or
+replacing compiler libraries: compiler-file fingerprints are cached within a
+process and loaded native code is not hot-reloaded.
 
-The JIT disk cache auto-invalidates when kernel source code or closure values change. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only when modifying C++ passes or non-closure helper functions:
+The toolchain fingerprint of disk entries hashes FlyDSL's Python sources at run
+time and takes the native libraries' SHA-256 from `_mlir/_mlir_libs/_native_digest.py`,
+which every build regenerates after the libraries (wheels ship it as built). If
+that file is missing or lists other files, the libraries are hashed at run time
+with a warning. Change libraries only by rebuilding: a library replaced by hand
+under its old name keeps the old digest.
 
-```bash
-FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py  # or: rm -rf ~/.flydsl/cache
+External libraries and Python post-load initializers are not represented by
+MLIR, so artifacts using either are reused only in-process and never written
+to disk. Rebuilding a linked library in place requires a new process.
+Ktrace buffer configuration enters the key. Event IDs are assigned at compilation
+from this process's name table and stay out of the key; a cached artifact whose
+IDs conflict with a live binary is rebuilt.
+
+### 9.3 Fixed compiled callables
+
+For repeated launches without frontend tracing, keep the `CompiledFunction`
+returned by `flyc.compile(...)`:
+
+```python
+compiled = flyc.compile(launch, *specialization_args)
+compiled(*runtime_args)
 ```
 
-### 9.4 Compile-only mode
+The returned callable retains the selected specialization. Its calls do not
+retrace or detect changes to Python helpers/captures; request a new callable with
+`flyc.compile(...)` when those changes should take effect. Arguments must remain
+compatible with that specialization. With live device arguments, the initial
+`flyc.compile(...)` request also launches once; compile placeholders defer launch.
 
-```bash
-COMPILE_ONLY=1 python my_script.py
+FlyDSL does not record Python dependencies or add specialization guards as part
+of artifact caching.
+
+Anything that launches the same specialization repeatedly — benchmark loops,
+per-step runtime wrappers, graph-capture setup — must hold a `CompiledFunction`
+instead of calling the `@flyc.jit` function, or it pays a full trace per launch
+and benchmarks measure tracing. `_run_compiled` in `kernels/common/tensor_shim.py`
+keeps one handle per launcher object, which is valid when the launcher's factory fixes
+every compile-time input. `@autotune` times a `@jit` function through one handle
+per config; a plain callable it wraps must dispatch through handles itself.
+
+When one launcher serves arguments that specialize differently (dtype, rank,
+static layout), key the handles with `cache_signature` of each argument's
+registered `JitArgument` adapter:
+
+```python
+from flydsl.compiler import JitArgumentRegistry
+from flydsl.compiler.protocol import cache_signature
+
+handles = {}
+
+def signature(value):
+    adapter, _ = JitArgumentRegistry.get(type(value))
+    return cache_signature(adapter(value) if adapter else value)
+
+def run(tile, *runtime_args):
+    key = (tile, *map(signature, runtime_args))
+    compiled = handles.get(key)
+    if compiled is None:
+        handles[key] = flyc.compile(launch, tile, *runtime_args)  # Compiles and launches once.
+    else:
+        compiled(tile, *runtime_args)
 ```
+
+A hit costs the signatures plus the handle call, tens of microseconds. `Constexpr`
+values have no runtime slot, so put them into the key yourself, as `tile` above.
+Changes to captured Python state are not detected; start a new cache when they
+should take effect.
 
 ---
 
@@ -645,6 +718,9 @@ COMPILE_ONLY=1 python my_script.py
 ```bash
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./my_dumps python my_script.py
 ```
+
+Dumping bypasses the disk store, so each process dumps its first compilation of
+every artifact; later requests in the process reuse the in-memory artifact.
 
 ### 10.2 Printing IR
 

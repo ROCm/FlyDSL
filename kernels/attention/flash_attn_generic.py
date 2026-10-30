@@ -38,6 +38,7 @@ from kernels.attention.flash_attn_utils import (
     daz_denormal_attr,
 )
 from kernels.common.kernels_common import dtype_to_elem_type
+from kernels.common.tensor_shim import _run_compiled
 
 
 def build_flash_attn_func_module_primary(
@@ -604,8 +605,21 @@ def build_flash_attn_func_module_primary(
         ls = lse if lse is not None else Out
         skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return launch_flash_attn_generic(
-                Q, K, V, Out, ls, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
+            return _run_compiled(
+                launch_flash_attn_generic,
+                Q,
+                K,
+                V,
+                Out,
+                ls,
+                cq,
+                ck,
+                bt,
+                block_table_stride,
+                batch_size,
+                seq_len,
+                skv,
+                fx.Stream(stream),
             )
 
     def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, lse=None, stream=None):

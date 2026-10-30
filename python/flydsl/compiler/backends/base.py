@@ -129,12 +129,6 @@ class BaseBackend(metaclass=ABCMeta):
         return f"{self.target}"
 
     @abstractmethod
-    def native_lib_patterns(self) -> List[str]:
-        """Glob patterns (relative to ``_mlir/_mlir_libs/``) whose content
-        is hashed into the toolchain fingerprint ``_flydsl_key``."""
-        ...
-
-    @abstractmethod
     def jit_runtime_lib_basenames(self) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""
         ...

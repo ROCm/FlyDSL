@@ -1,488 +1,544 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
-"""Coverage for the cache-key completeness work: env-var drift, nested jit/kernel
-args, globals-drift detection, and the ir.Type fallback in ``_arg_cache_sig``."""
+# Copyright (c) 2026 FlyDSL Project Contributors
+"""IR-addressed artifact reuse across traces, processes and configurations."""
 
-from __future__ import annotations
-
-import inspect
+import importlib.util
+import json
+import os
+import subprocess
+import sys
 import textwrap
+from array import array
+from dataclasses import dataclass
 
 import pytest
-import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler import jit_function
-from flydsl.compiler.protocol import cache_signature
+from flydsl.compiler import jit_function as jf
+from flydsl.compiler.backends import get_backend
+from flydsl.compiler.jit_argument import JitArgumentRegistry
+from flydsl.compiler.kernel_function import CompilationContext
 
+pytestmark = pytest.mark.l1a_compile_no_target_dialect
 
-def _key(jit_fn, *args):
-    jit_fn._ensure_sig()
-    bound = jit_fn._sig.bind(*args)
-    bound.apply_defaults()
-    return jit_fn._resolve_and_make_cache_key(bound.arguments)
 
-
-def test_env_var_drift_changes_cache_key(monkeypatch):
-    @flyc.jit
-    def k(A: fx.Tensor):
-        pass
-
-    A = torch.zeros(8, dtype=torch.float32)
-
-    monkeypatch.setenv("FLYDSL_COMPILE_OPT_LEVEL", "2")
-    k1 = _key(k, A)
-
-    monkeypatch.setenv("FLYDSL_COMPILE_OPT_LEVEL", "0")
-    k2 = _key(k, A)
-
-    assert k1 != k2, "cache key must change when whitelisted env var changes"
-
-
-def test_globals_drift_default_raises(tmp_path, monkeypatch):
-    """mutating a referenced global must raise."""
-    src = tmp_path / "drift_default.py"
-    src.write_text(
-        "import flydsl.compiler as flyc\n"
-        "import flydsl.expr as fx\n"
-        "FOO = 1\n"
-        "@flyc.jit\n"
-        "def k(A: fx.Tensor):\n"
-        "    _ = FOO\n"
-        "    return A\n"
-    )
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("drift_default", src)
-    mod = importlib.util.module_from_spec(spec)
-    monkeypatch.setenv("COMPILE_ONLY", "1")  # auto-restored, no leak across tests
-    spec.loader.exec_module(mod)
-    A = torch.zeros(8, dtype=torch.float32)
-    mod.k(A)
-    mod.FOO = 2
-    with pytest.raises(RuntimeError, match="FOO"):
-        mod.k(A)
-
-
-def test_env_var_not_cached_within_process(monkeypatch):
-    """Regression: env var lookup must re-read os.environ on every call.
-
-    A previous implementation wrapped _cache_invalidating_env_values in
-    lru_cache(maxsize=1), which froze the first observed values into every
-    subsequent cache key — flipping FLYDSL_COMPILE_OPT_LEVEL mid-process
-    produced a silent stale-hit.
-    """
-
-    @flyc.jit
-    def k(A: fx.Tensor):
-        pass
-
-    A = torch.zeros(8, dtype=torch.float32)
-
-    monkeypatch.setenv("FLYDSL_COMPILE_OPT_LEVEL", "2")
-    k1 = _key(k, A)
-    monkeypatch.setenv("FLYDSL_COMPILE_OPT_LEVEL", "0")
-    k2 = _key(k, A)
-    assert k1 != k2
-
-
-def test_cache_key_is_device_independent():
-    """The cache key's target is arch-only, with no device id component.
-
-    The compiled kernel binary is device-independent, so a single in-process
-    artifact / func_exe is shared across same-arch GPUs (as on main). Folding a
-    device id into the key would needlessly split the cache per device.
-    """
-    from flydsl.compiler.backends import GPUTarget, get_backend
-
-    @flyc.jit
-    def k(A: fx.Tensor):
-        pass
-
-    A = torch.zeros(8, dtype=torch.float32)
-    k._ensure_sig()
-    key1 = _key(k, A)
-    target_entry = next(v for n, v in key1 if n == "_target_")
-    assert isinstance(target_entry, GPUTarget)
-    assert target_entry == get_backend().target
-
-
-def test_globals_snapshot_folded_into_cache_key_default_mode():
-    """Regression: the stable globals snapshot must be folded into the cache key
-    so two processes sharing a disk cache but observing different global values
-    cannot collide.
-
-    Each process is a fresh JitFunction instance that snapshots the global value
-    it observes on its first call (the snapshot is then memoized — within one
-    process a later change raises via drift detection rather than re-keying). So
-    cross-process divergence is modelled here by two independent module loads
-    with different ``FOO`` values, not by mutating one instance in place.
-    """
-    import importlib.util
-    import tempfile
-    import textwrap
-
-    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
-        f.write(textwrap.dedent("""
-                import flydsl.compiler as flyc
-                import flydsl.expr as fx
-
-                FOO = 7
-
-                @flyc.jit
-                def k(A: fx.Tensor):
-                    # reference FOO so it lands in co_names and the snapshot
-                    _ = FOO
-                """))
-        path = f.name
-
-    def _full_key(jit_fn, *args):
-        jit_fn._ensure_sig()
-        bound = jit_fn._sig.bind(*args)
-        bound.apply_defaults()
-        return jit_fn._build_full_cache_key(bound.arguments)
-
-    def _load_with_foo(name, foo):
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.FOO = foo  # set before first call, as a second process would observe it
-        return mod
-
-    A = torch.zeros(8, dtype=torch.float32)
-    # Two independent "processes" observing FOO=7 vs FOO=99 on their first call.
-    k1 = _full_key(_load_with_foo("_gkmod_a", 7).k, A)
-    k2 = _full_key(_load_with_foo("_gkmod_b", 99).k, A)
-    assert k1 != k2, "stable globals snapshot must be in cache key in default mode"
-
-
-def test_cache_signature_requires_protocol_method():
-    """Types lacking __cache_signature__ must raise — no silent type-only collapse.
-
-    With __cache_signature__ promoted to a required JitArgument protocol method,
-    cache_signature() no longer falls back to str(ir.Type). Unknown leaf objects
-    bottom out at the Constexpr encoder, which only accepts the supported scalar
-    shapes, so arbitrary instances raise instead of colliding under a shared key.
-    """
-
-    class _NoSig:
-        pass
-
-    with pytest.raises(TypeError, match="__cache_signature__"):
-        cache_signature(_NoSig())
-
-
-def _load_mod(tmp_path, name, body):
-    import importlib.util
-
-    src = tmp_path / f"{name}.py"
-    src.write_text(textwrap.dedent(body))
-    spec = importlib.util.spec_from_file_location(name, src)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _reset_manager_key(jit_fn):
-    jit_fn.manager_key = None
-    jit_fn._manager_owner_cls = None
-    jit_fn.cache_manager = None
-
-
-def _manager_key(jit_fn, *, reset=False):
-    if reset:
-        _reset_manager_key(jit_fn)
-    jit_fn._ensure_cache_manager()
-    return jit_fn.manager_key
-
-
-def test_container_global_folded_by_value_not_collapsed(tmp_path):
-    """A tuple/list/dict global must be folded into the key by *content*, not
-    collapsed to ('obj', <type>). Two independent loads (≈ two processes)
-    observing CFG=(128, 64) vs CFG=(128, 32) must produce different keys."""
-    body = (
-        "import flydsl.compiler as flyc\n"
-        "import flydsl.expr as fx\n"
-        "CFG = (128, 64)\n"
-        "@flyc.jit\n"
-        "def k(A: fx.Tensor):\n"
-        "    _ = CFG\n"
-        "    return A\n"
-    )
-
-    def _full_key(mod):
-        mod.k._ensure_sig()
-        bound = mod.k._sig.bind(torch.zeros(8, dtype=torch.float32))
-        bound.apply_defaults()
-        return mod.k._build_full_cache_key(bound.arguments)
-
-    k1 = _full_key(_load_mod(tmp_path, "cfg_a", body))
-    k2 = _full_key(_load_mod(tmp_path, "cfg_b", body.replace("(128, 64)", "(128, 32)")))
-    assert k1 != k2, "container global contents must participate in the cache key"
-
-
-def test_dict_global_inplace_mutation_raises(tmp_path, monkeypatch):
-    """In-place mutation of a referenced dict/list global must be detected by
-    drift (value-based snapshot), not silently reuse the old artifact."""
-    mod = _load_mod(
-        tmp_path,
-        "cfg_mut",
-        "import flydsl.compiler as flyc\n"
-        "import flydsl.expr as fx\n"
-        "CFG = {'tile': 64}\n"
-        "@flyc.jit\n"
-        "def k(A: fx.Tensor):\n"
-        "    _ = CFG\n"
-        "    return A\n",
-    )
-    monkeypatch.setenv("COMPILE_ONLY", "1")
-    A = torch.zeros(8, dtype=torch.float32)
-    mod.k(A)
-    mod.CFG["tile"] = 128  # in-place mutation (same object id)
-    with pytest.raises(RuntimeError, match="CFG"):
-        mod.k(A)
-
-
-def test_drift_baseline_is_per_owner_cls():
-    """A JIT method reused across owner classes must drift-check each class
-    against its own baseline, not the first owner's. Otherwise a global seen only
-    under the second owner is skipped (not in the first owner's baseline) and a
-    later mutation silently reuses the memoized key segment instead of raising."""
-    from flydsl.compiler.jit_function import _snapshot_refs
-
-    @flyc.jit
-    def launch(A: fx.Tensor):
-        return A
-
-    # Two owner classes whose discovered refs read different module globals.
-    g = {"__name__": "m", "FOO": 1, "BAR": 1}
-
-    class A:
-        pass
-
-    class B:
-        pass
-
-    launch._global_refs_cache[A] = [("FOO", "m", g)]
-    launch._global_refs_cache[B] = [("BAR", "m", g)]
-    launch._used_global_vals[A] = _snapshot_refs(launch._global_refs_cache[A], stable=False)
-    launch._used_global_vals[B] = _snapshot_refs(launch._global_refs_cache[B], stable=False)
-
-    g["BAR"] = 2  # mutate a global seen only under owner B
-
-    launch._check_globals_drift(A)  # A's baseline (FOO) unchanged → no raise
-    with pytest.raises(RuntimeError, match="BAR"):
-        launch._check_globals_drift(B)  # B's own baseline catches the BAR drift
-
-
-def test_top_level_launch_named_jit_does_not_recurse_forever(tmp_path, monkeypatch):
-    """A top-level ``@flyc.jit`` named ``launch`` whose body calls
-    ``kernel(...).launch(...)`` must not blow the stack while building its key.
-    """
-    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "launch_attr_collision",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
-
-        @flyc.kernel
-        def my_kernel(C: fx.Tensor):
-            pass
-
-        @flyc.jit
-        def launch(C: fx.Tensor):
-            my_kernel(C).launch(grid=(1, 1, 1), block=[1, 1, 1])
-        """,
-    )
-
-    key1 = _manager_key(mod.launch, reset=True)  # must not raise RecursionError
-    key2 = _manager_key(mod.launch)
-    dep_sources = jit_function._collect_dependency_sources(mod.launch.func, inspect.getfile(mod.launch.func))
-
-    assert key1 == key2
-    assert any("my_kernel" in source for source in dep_sources)
-
-
-def test_jit_self_reference_does_not_recurse_forever(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "jit_self_ref",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
-
-        @flyc.jit
-        def solo(A: fx.Tensor):
-            _ = solo
-            return A
-        """,
-    )
-
-    key1 = _manager_key(mod.solo, reset=True)
-    key2 = _manager_key(mod.solo)
-
-    assert key1 == key2
-
-
-def test_mutually_referential_jits_do_not_recurse_forever(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "jit_mutual_ref",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
-
-        @flyc.jit
-        def first(A: fx.Tensor):
-            _ = second
-            return A
-
-        @flyc.jit
-        def second(A: fx.Tensor):
-            _ = first
-            return A
-        """,
-    )
-
-    _reset_manager_key(mod.first)
-    _reset_manager_key(mod.second)
-    first_key = _manager_key(mod.first)
-    second_key = _manager_key(mod.second)
-
-    assert first_key == _manager_key(mod.first)
-    assert second_key == _manager_key(mod.second)
-
-
-def test_in_progress_stack_is_thread_local():
-    """Each thread must get its own in-progress set."""
-    import threading
-
-    main_stack = jit_function._keys_in_progress()
-    assert jit_function._keys_in_progress() is main_stack
-
-    other = {}
-
-    def worker():
-        other["stack"] = jit_function._keys_in_progress()
-
-    t = threading.Thread(target=worker)
-    t.start()
-    t.join()
-
-    assert other["stack"] is not main_stack
-
-
-def test_key_computation_leaves_no_in_progress_leak(tmp_path, monkeypatch):
-    """The in-progress stack must be empty again after keying."""
-    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "jit_no_leak",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
-
-        @flyc.jit
-        def solo(A: fx.Tensor):
-            _ = solo
-            return A
-        """,
-    )
-
-    _manager_key(mod.solo, reset=True)
-    assert jit_function._keys_in_progress() == set()
-
-
-def test_enum_closures_reach_the_cache_key():
-    """Regression: a captured enum selects code but left no trace in the key.
-
-    An enum member is not a scalar and has no source of its own to hash, so
-    ``_collect_closure_scalar_vals`` used to drop it. Two kernels differing only
-    by ``ReductionOp.ADD`` versus ``ReductionOp.MAX`` then shared a cache entry,
-    and the second one silently ran the first one's code.
-    """
-
-    def vals(op):
-        def traced():
-            return op
-
-        return jit_function._collect_closure_scalar_vals(traced)
-
-    baseline = vals(fx.ReductionOp.ADD)
-    assert baseline == vals(fx.ReductionOp.ADD), "the identity must be stable"
-    assert vals(fx.ReductionOp.MAX) != baseline
-
-    # No address, or the key would differ between processes and never hit.
-    assert not any("0x" in v for v in baseline), baseline
-
-
-def test_captured_dtype_class_reaches_the_cache_key():
-    """A captured dtype class must change the cache key.
-
-    fp16 and bf16 can share the same captured scalars. The class is not a
-    scalar or a function object, so it has to be recorded on the type branch.
-    """
-
-    def vals(dtype):
-        def traced():
-            return dtype
-
-        return jit_function._collect_closure_scalar_vals(traced)
-
-    baseline = vals(fx.BFloat16)
-    assert baseline == vals(fx.BFloat16), "the identity must be stable"
-    assert vals(fx.Float16) != baseline
-
-    # No address, or the key would differ between processes and never hit.
-    assert not any("0x" in v for v in baseline), baseline
-
-
-def test_nested_kernel_captured_dtype_splits_manager_key(tmp_path, monkeypatch):
-    """A factory-captured dtype class must split the jit launcher manager_key.
-
-    The helper-level collector is not the production key. The serve path is
-    ``@flyc.jit`` capturing a ``KernelFunction``, then walking
-    ``_original_func`` into the kernel closure. If that walk used the rewritten
-    ``_func`` and dropped the freevar, the helper test would still pass.
-    """
+@pytest.fixture
+def frontend(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARCH", "gfx942")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "0")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
-    mod = _load_mod(
-        tmp_path,
-        "captured_dtype_kernel",
-        """
-        import flydsl.compiler as flyc
-        import flydsl.expr as fx
+    monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "0")
+    monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
+    monkeypatch.setenv("FLYDSL_DUMP_IR", "0")
+    monkeypatch.setenv("COMPILE_ONLY", "0")
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", "")
+    monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: "test-toolchain")
+    calls = []
 
-        def make_launch(dtype):
-            @flyc.kernel
-            def k(out: fx.Tensor):
-                _ = dtype
+    def compile_noop(cls, module, **kwargs):
+        calls.append(kwargs.get("config"))
+        return module
 
-            @flyc.jit
-            def launch(out: fx.Tensor):
-                k(out).launch(grid=(1, 1, 1), block=[1, 1, 1])
+    monkeypatch.setattr(jf.MlirCompiler, "compile", classmethod(compile_noop))
+    return calls
 
-            return launch
-        """,
+
+def _compile(launch, *args):
+    launch._compile_only(*args)
+    return launch._last_compiled
+
+
+def _load(path, source):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(source))
+    spec = importlib.util.spec_from_file_location("cache_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _record_launches(monkeypatch):
+    launched = []
+    monkeypatch.setattr(jf, "_build_call_state", lambda sig, args, artifact: lambda args: launched.append(artifact))
+    return launched
+
+
+@dataclass
+class Traits:
+    amount: int
+
+
+def _factory(traits):
+    @flyc.kernel
+    def body(X: fx.Pointer):
+        X[0] = X[0] + traits.amount
+
+    @flyc.jit
+    def launch(X: fx.Pointer):
+        body(X).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    return launch
+
+
+@pytest.mark.parametrize("disk_cache", [False, True])
+def test_captured_traits_retrace_and_reuse_equal_ir(frontend, monkeypatch, disk_cache):
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", str(int(disk_cache)))
+    ptr = flyc.from_c_void_p(fx.Int32, 0)
+    traits = Traits(1)
+    launch = _factory(traits)
+    first_key, first = _compile(launch, ptr)
+    traits.amount = 7
+    second_key, second = _compile(launch, ptr)
+    assert first_key != second_key
+    assert "arith.constant 1" in first.source_ir
+    assert "arith.constant 7" in second.source_ir
+    traits.amount = 1
+    assert _compile(launch, ptr) == (first_key, first)
+    assert len(frontend) == 2
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_helper_rebinding_retraces(frontend, monkeypatch, tmp_path, nested):
+    body = "return helper(x)" if not nested else "def inner(y):\n        return helper(y)\n    return inner(x)"
+    module = _load(
+        tmp_path / "helpers.py",
+        f"""
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+def helper(x):
+    return x + 1
+def replacement(x):
+    return x + 7
+@flyc.jit
+def launch(x: fx.Int32):
+    {body}
+""",
     )
-    launch_bf16 = mod.make_launch(fx.BFloat16)
-    launch_fp16 = mod.make_launch(fx.Float16)
-    assert _manager_key(launch_bf16, reset=True) != _manager_key(launch_fp16, reset=True)
+    executed = _record_launches(monkeypatch)
+    module.launch(3)
+    first = executed[-1]
+    module.helper = module.replacement
+    module.launch(3)
+    assert executed[-1] is not first
+    assert "arith.constant 7" in executed[-1].source_ir
+    module.launch(9)
+    assert len(frontend) == 2
 
-    # Same entry as _jit_function_cache_key: the rewritten launcher, not the
-    # pre-rewrite snapshot. Identity must be stable and must not embed an address.
-    vals = jit_function._collect_closure_scalar_vals(launch_bf16.func)
-    assert any("BFloat16" in v for v in vals), vals
-    assert vals == jit_function._collect_closure_scalar_vals(launch_bf16.func)
-    assert not any("0x" in v for v in vals), vals
+
+@pytest.mark.parametrize("expression", ["VALUE", "CONFIG['amount']"])
+def test_live_globals_recompile(frontend, tmp_path, expression):
+    module = _load(
+        tmp_path / "globals.py",
+        f"""
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+VALUE = 1
+CONFIG = {{'amount': 1}}
+@flyc.jit
+def launch(x: fx.Int32):
+    y = x + {expression}
+""",
+    )
+    first, _ = _compile(module.launch, 3)
+    module.VALUE = 7
+    module.CONFIG["amount"] = 7
+    second, artifact = _compile(module.launch, 3)
+    assert first != second
+    assert "arith.constant 7" in artifact.source_ir
+
+
+def test_receivers_and_mutation(frontend):
+    class Program:
+        def __init__(self, amount):
+            self.amount = amount
+
+        @flyc.jit
+        def run(self, x: fx.Int32):
+            _ = x + self.amount
+
+    a, b = Program(1), Program(7)
+    first, _ = _compile(Program.run, a, 3)
+    second, _ = _compile(Program.run, b, 3)
+    assert first != second
+    a.amount = 7
+    assert _compile(Program.run, a, 3)[0] == second
+    assert len(frontend) == 2
+
+
+def test_host_launch_configuration_is_part_of_artifact(frontend):
+    blocks = 1
+
+    @flyc.kernel
+    def kernel():
+        pass
+
+    @flyc.jit
+    def launch():
+        kernel().launch(grid=(blocks, 1, 1), block=(64, 1, 1))
+
+    first, _ = _compile(launch)
+    blocks = 2
+    second, _ = _compile(launch)
+    assert first != second
+
+
+@pytest.mark.parametrize("dtype", [fx.Float16, fx.BFloat16])
+def test_captured_dtype_is_in_ir(frontend, dtype):
+    def factory(kind):
+        @flyc.jit
+        def launch():
+            _ = kind(1.0).ir_value()
+
+        return launch
+
+    baseline, _ = _compile(factory(fx.Float32))
+    other, _ = _compile(factory(dtype))
+    assert baseline != other
+
+
+def test_resource_constant_contents_are_not_elided(frontend):
+    values = array("i", range(256))
+
+    @flyc.jit
+    def launch():
+        tensor = jf.ir.RankedTensorType.get((256,), jf.ir.IntegerType.get_signless(32))
+        data = jf.ir.DenseResourceElementsAttr.get_from_buffer(values, "weights", tensor)
+        jf.ir.Operation.create("arith.constant", results=[tensor], attributes={"value": data})
+
+    first, _ = _compile(launch)
+    values[-1] = 4096
+    second, _ = _compile(launch)
+    assert first != second
+    values[-1] = 255
+    assert _compile(launch)[0] == first
+    assert len(frontend) == 2
+
+
+class _FakeCudaStream:
+    cuda_stream = 1234
+
+
+JitArgumentRegistry.register(_FakeCudaStream)(fx.Stream)
+
+
+def test_runtime_values_stay_out_of_the_ir(frontend, tmp_path):
+    @flyc.jit
+    def stream_launch(stream: fx.Stream = fx.Stream(None)):
+        pass
+
+    # CPU AOT can use raw 0 while GPU runtime passes a stream object.
+    streams = ((), (0,), (fx.Stream(0),), (_FakeCudaStream(),))
+    assert len({_compile(stream_launch, *stream)[0] for stream in streams}) == 1
+
+    # `from __future__ import annotations` stringifies fx.Int32; it must still bind a runtime value.
+    module = _load(
+        tmp_path / "future.py",
+        """
+from __future__ import annotations
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+@flyc.jit
+def launch(n: fx.Int32):
+    _ = n + 1
+""",
+    )
+    assert _compile(module.launch, 1)[0] == _compile(module.launch, 2)[0]
+
+
+def test_constexpr_values_split_artifacts_only_through_the_ir(frontend):
+    @flyc.jit
+    def used(x: fx.Int32, value: fx.Constexpr[int]):
+        _ = x + value
+
+    @flyc.jit
+    def unused(value: fx.Constexpr[int]):
+        pass
+
+    assert _compile(used, 3, 1)[0] != _compile(used, 3, 2)[0]
+    assert _compile(unused, 1)[0] == _compile(unused, 2)[0]
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_disk_key_location_policy(frontend, monkeypatch, tmp_path, debug):
+    monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", str(int(debug)))
+    source = """
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+@flyc.jit
+def launch(x: fx.Int32):
+    y = x + 3
+"""
+    a = _load(tmp_path / "a" / "launch.py", source)
+    b = _load(tmp_path / "b" / "launch.py", "\n\n" + source)
+    first, _ = _compile(a.launch, 1)
+    second, _ = _compile(b.launch, 8)
+    assert (first == second) is not debug
+    assert len(frontend) == (2 if debug else 1)
+    assert a.launch.cache_manager.cache_dir == tmp_path / "cache" / "launch"
+
+
+def test_lowering_inputs_outside_the_ir_split_artifacts(frontend, monkeypatch):
+    monkeypatch.delenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", raising=False)
+
+    @flyc.jit
+    def launch(x: fx.Int32):
+        _ = x + 1
+
+    keys = [_compile(launch, 3)[0]]
+    with CompilationContext.compile_hints({"llvm_options": {"enable-post-misched": False}}):
+        keys.append(_compile(launch, 3)[0])
+    # Patch the class: undoing an instance patch would leave a bound method on the cached
+    # backend instance and shadow later class-level patches.
+    backend_type = type(get_backend())
+    original = backend_type.pipeline_fragments
+    monkeypatch.setattr(backend_type, "pipeline_fragments", lambda self, **kw: ["cse", *original(self, **kw)])
+    keys.append(_compile(launch, 3)[0])
+    monkeypatch.setattr(backend_type, "hash", lambda self: "updated-backend-toolchain")
+    keys.append(_compile(launch, 3)[0])
+    monkeypatch.setenv("ARCH", "gfx1250")
+    keys.append(_compile(launch, 3)[0])
+    for xnack in ("0", "1"):
+        monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", xnack)
+        keys.append(_compile(launch, 3)[0])
+    assert len(set(keys)) == len(keys) == len(frontend)
+
+    # The loaded toolchain cannot change in-process; it namespaces disk entries.
+    disk = jf._disk_cache_key(keys[0])
+    monkeypatch.setattr(jf, "_flydsl_key", lambda: "other-toolchain")
+    assert jf._disk_cache_key(keys[0]) != disk
+
+
+def test_memory_only_cache_never_fingerprints_the_toolchain(frontend, monkeypatch):
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
+    def unexpected():
+        raise AssertionError("hashing the toolchain is only needed for disk entries")
+
+    monkeypatch.setattr(jf, "_flydsl_key", unexpected)
+
+    @flyc.jit
+    def launch(x: fx.Int32):
+        _ = x + 1
+
+    first, _ = _compile(launch, 3)
+    assert _compile(launch, 3)[0] == first
+    assert len(frontend) == 1
+
+
+def test_waves_per_eu_hint_reaches_the_ir(frontend):
+    launch = _factory(Traits(1))
+    pointer = flyc.from_c_void_p(fx.Int32, 0)
+
+    def key(waves):
+        with CompilationContext.compile_hints({"waves_per_eu": waves}):
+            return _compile(launch, pointer)[0]
+
+    launch.compile_hints = {"waves_per_eu": 4}
+    persistent = _compile(launch, pointer)[0]
+    with CompilationContext.compile_hints({"waves_per_eu": 1}):
+        outer = _compile(launch, pointer)[0]
+        inner = key(2)  # The innermost thread-local overlay wins.
+        assert launch._effective_compile_hints()["waves_per_eu"] == 1
+    assert launch._effective_compile_hints()["waves_per_eu"] == 4
+    assert key("2") == inner  # Equal codegen reuses one artifact.
+    assert len({persistent, outer, inner, key((2, 2)), key((1, 2))}) == 5
+
+
+def test_run_only_traces_every_call_and_never_lowers(frontend, monkeypatch):
+    launched = _record_launches(monkeypatch)
+
+    @flyc.jit
+    def launch(x: fx.Int32, scale: fx.Constexpr[int]):
+        _ = x * scale
+
+    launch(1, 2)
+    launch(1, 3)
+    launch._mem_cache.clear()
+    launch.cache_manager.memory_cache.clear()
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")  # Run-only still reads the disk store.
+    traced = []
+    trace = launch._trace
+    monkeypatch.setattr(launch, "_trace", lambda *a, **k: traced.append(1) or trace(*a, **k))
+    for x in range(4):
+        launch(x, 2)
+    launch(5, 3)
+    launch(6, 3)
+    assert len(traced) == 6  # Run-only calls trace like ordinary calls.
+    assert len(frontend) == 2  # Only the normal runs lowered.
+    assert launched[-1] is launched[-2] is not launched[-3]
+    with pytest.raises(RuntimeError, match="RUN_ONLY=1.*no usable AOT cache"):
+        launch(7, 4)
+
+
+def test_extern_linked_artifacts_stay_off_disk(frontend, monkeypatch):
+    def initializer(module):
+        pass
+
+    @flyc.jit
+    def launch():
+        CompilationContext.get_current().post_load_processors.append(initializer)
+
+    first = _compile(launch)
+    assert _compile(launch) == first  # Reused in-process.
+    assert not list(launch.cache_manager.cache_dir.glob("*.pkl"))
+    launch._mem_cache.clear()
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
+    with pytest.raises(RuntimeError, match="never cached on disk"):
+        _compile(launch)
+
+
+_PROCESS_PROBE = r"""
+import json, sys
+from pathlib import Path
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.compiler import jit_function as jf
+
+helper = Path(__file__).parent / 'common' / 'util.py'
+helper.parent.mkdir(exist_ok=True)
+helper.write_text('def scale(x):\n    return x + ' + sys.argv[1] + '\n')
+from common.util import scale
+
+@flyc.kernel
+def kernel(X: fx.Pointer):
+    def inner(x):
+        return scale(x)
+    if fx.thread_idx.x == 0:
+        X[0] = inner(X[0])
+
+@flyc.jit
+def launch(X: fx.Pointer):
+    kernel(X).launch(grid=(1,1,1), block=(64,1,1))
+
+compiled = []
+original = jf.MlirCompiler.compile
+gpu = sys.argv[2] == 'gpu'
+def compile_spy(cls, module, **kw):
+    compiled.append(1)
+    return original(module, **kw) if gpu else module
+jf.MlirCompiler.compile = classmethod(compile_spy)
+if not gpu:
+    jf._flydsl_key = lambda: 'subprocess-toolchain'
+    launch._compile_only(flyc.from_c_void_p(fx.Int32, 0))
+    value = None
+else:
+    import torch
+    X = torch.zeros(1, device='cuda', dtype=torch.int32)
+    launch(flyc.from_c_void_p(fx.Int32, X.data_ptr()))
+    torch.cuda.synchronize()
+    value = X.item()
+print(json.dumps({'key': launch._last_compiled[0], 'compiles': len(compiled), 'value': value}))
+"""
+
+
+@pytest.mark.parametrize("gpu", [False, pytest.param(True, marks=pytest.mark.l2_device)])
+def test_shared_disk_cache_observes_cross_directory_nested_helper(tmp_path, gpu):
+    if gpu:
+        import torch
+
+        if not torch.cuda.is_available():
+            pytest.skip("requires AMDGPU")
+    script = tmp_path / "probe.py"
+    script.write_text(textwrap.dedent(_PROCESS_PROBE))
+    env = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "FLYDSL_RUNTIME_ENABLE_CACHE": "1",
+        "FLYDSL_RUNTIME_RUN_ONLY": "0",
+        "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "cache"),
+        "FLYDSL_KTRACE_ENABLE": "0",
+        "COMPILE_ONLY": "0",
+        "FLYDSL_DUMP_IR": "0",
+        "FLYDSL_COMPILE_LLVM_DIR": "",
+    }
+    if not gpu:
+        env["ARCH"] = "gfx942"  # Compile-only; a GPU run targets its own device.
+    results = []
+    for value in (1, 7, 7):
+        child = subprocess.run(
+            [sys.executable, str(script), str(value), "gpu" if gpu else "cpu"],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        assert child.returncode == 0, child.stdout + child.stderr
+        results.append(json.loads(child.stdout.splitlines()[-1]))
+    assert [r["compiles"] for r in results] == [1, 1, 0]
+    assert results[0]["key"] != results[1]["key"] == results[2]["key"]
+    if gpu:
+        assert [r["value"] for r in results] == [1, 7, 7]
+
+
+@pytest.mark.l2_device
+def test_gpu_retrace_and_explicit_compiled_snapshot(monkeypatch, tmp_path):
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires AMDGPU")
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "0")
+    monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "0")
+    monkeypatch.setenv("COMPILE_ONLY", "0")
+    traits = Traits(1)
+
+    @flyc.kernel
+    def kernel(X: fx.Pointer):
+        if fx.thread_idx.x == 0:
+            X[0] = X[0] + traits.amount
+
+    @flyc.jit
+    def launch(X: fx.Pointer):
+        kernel(X).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    X = torch.zeros(1, device="cuda", dtype=torch.int32)
+    ptr = flyc.from_c_void_p(fx.Int32, X.data_ptr())
+    launch(ptr)
+    traits.amount = 7
+    launch(ptr)
+    fixed = flyc.compile(launch, ptr)
+    traits.amount = 11
+    fixed(ptr)  # Still adds 7, without tracing.
+    flyc.compile(launch, ptr)  # New compile request observes 11.
+    torch.cuda.synchronize()
+    assert X.item() == 33
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("an unchanged IR cache hit must not lower again")
+
+    monkeypatch.setattr(jf.MlirCompiler, "compile", unexpected)
+    launch(ptr)
+    torch.cuda.synchronize()
+    assert X.item() == 44
+    monkeypatch.setattr(launch, "_trace", unexpected)
+    fixed(ptr)
+    torch.cuda.synchronize()
+    assert X.item() == 51
+
+
+def test_autotune_times_jit_candidates_through_compiled_handles(frontend, monkeypatch, tmp_path):
+    from flydsl.autotune import Autotuner, Config
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "autotune"))
+    launched = _record_launches(monkeypatch)
+    traced = []
+    trace = jf.JitFunction._trace
+    monkeypatch.setattr(jf.JitFunction, "_trace", lambda self, *a, **k: traced.append(1) or trace(self, *a, **k))
+
+    @flyc.jit
+    def launch(x: fx.Int32, scale: fx.Constexpr[int]):
+        _ = x * scale
+
+    def bench(call, warmup, rep):
+        for _ in range(warmup + rep):
+            call()
+        return 1.0
+
+    configs = [Config(scale=2), Config(scale=3)]
+    Autotuner(launch, configs, key=["x"], warmup=2, rep=3, do_bench_fn=bench).resolve_config(5)
+    assert len(traced) == len(frontend) == 2  # One trace and compile per config.
+    assert len(launched) == 10 and len({id(artifact) for artifact in launched}) == 2

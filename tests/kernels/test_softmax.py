@@ -16,6 +16,7 @@ import os
 
 import pytest
 
+import flydsl.compiler as flyc
 from kernels.norm.softmax_autotune import _RTOL
 from kernels.norm.softmax_kernel import build_softmax_module
 from tests.kernels.benchmark_common import (
@@ -77,9 +78,11 @@ def run_test(M, N, dtype_str):
         c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
 
     stream = torch.cuda.current_stream()
+    # Time a CompiledFunction: every direct @flyc.jit call retraces the launcher.
+    compiled = flyc.compile(launch_fn, a_dev, c_dev, M, stream)
 
     def kernel_launch():
-        launch_fn(a_dev, c_dev, M, stream=stream)
+        compiled(a_dev, c_dev, M, stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()

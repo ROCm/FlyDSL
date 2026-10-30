@@ -62,6 +62,7 @@ from kernels.attention.flash_attn_utils import (
 )
 from kernels.common.kernels_common import LOG2E as BIAS_LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
+from kernels.common.tensor_shim import _run_compiled
 
 
 def build_flash_attn_dualwave_swp_module(
@@ -1160,31 +1161,8 @@ def build_flash_attn_dualwave_swp_module(
         alibi_slopes, alibi_stride_b = _prep_alibi(alibi_slopes, O)
         sink = _prep_sink(sink, O)
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
-            if stream is None:
-                return launch_flash_attn_dualwave_swp(
-                    Q,
-                    K,
-                    V,
-                    O,
-                    lse_out,
-                    debug_counts,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    block_table,
-                    bias,
-                    alibi_slopes,
-                    sink,
-                    batch_size,
-                    seq_len,
-                    seq_len_kv,
-                    stride_q_n,
-                    stride_kv_n,
-                    head_dim_runtime,
-                    block_table_stride,
-                    bias_stride0,
-                    alibi_stride_b,
-                )
-            return launch_flash_attn_dualwave_swp(
+            return _run_compiled(
+                launch_flash_attn_dualwave_swp,
                 Q,
                 K,
                 V,
@@ -1206,7 +1184,7 @@ def build_flash_attn_dualwave_swp_module(
                 block_table_stride,
                 bias_stride0,
                 alibi_stride_b,
-                stream=stream,
+                fx.Stream(stream),
             )
 
     def _compile(

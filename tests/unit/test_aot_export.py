@@ -595,14 +595,14 @@ class TestExportCompile:
         def with_post_load(X: fx.Pointer, n: fx.Int32):
             _add_one_kernel(X, n).launch(grid=(1, 1, 1), block=(64, 1, 1))
 
-        original = JitFunction._trace_and_compile
+        original = JitFunction._trace
 
         def with_processor(self, *args, **kwargs):
             traced = original(self, *args, **kwargs)
             traced.post_load_processors.append(print)
             return traced
 
-        monkeypatch.setattr(JitFunction, "_trace_and_compile", with_processor)
+        monkeypatch.setattr(JitFunction, "_trace", with_processor)
         with pytest.raises(NotImplementedError, match="post-load"):
             _aot_view(with_post_load, _ptr(), 8)
 
@@ -649,9 +649,9 @@ class TestExportCompile:
         assert calls == []
 
         def unexpected(*args, **kwargs):
-            raise AssertionError("cached compile must not retrace")
+            raise AssertionError("cached IR must not lower again")
 
-        monkeypatch.setattr(jit_function.JitFunction, "_trace_and_compile", unexpected)
+        monkeypatch.setattr(jit_function.MlirCompiler, "compile", unexpected)
         again = flyc.compile(lazy_export, _ptr(), 16)
         assert calls == []
         assert again._keepalive is compiled._keepalive
@@ -1092,24 +1092,23 @@ class TestEndToEnd:
         flyc.compile(scale, _ptr(x.data_ptr()), 2.0)
         flyc.compile(scale, _ptr(y.data_ptr()), 3.0)
         calls = []
-        original = scale._build_full_cache_key
+        original = scale._trace
 
         def key(*args, **kwargs):
             calls.append(1)
             return original(*args, **kwargs)
 
         def unexpected(*args, **kwargs):
-            raise AssertionError("cached compile must not create IR contexts or rebuild call state")
+            raise AssertionError("cached IR must not lower or prepare export IR")
 
-        monkeypatch.setattr(scale, "_build_full_cache_key", key)
-        monkeypatch.setattr(jit_function, "_create_mlir_context", unexpected)
-        monkeypatch.setattr(jit_function, "_build_call_spec", unexpected)
+        monkeypatch.setattr(scale, "_trace", key)
+        monkeypatch.setattr(jit_function.MlirCompiler, "compile", unexpected)
         monkeypatch.setattr(aot, "_create_mlir_context", unexpected)
         for _ in range(3):
             x_compiled = flyc.compile(scale, _ptr(x.data_ptr()), factor=2.0)
             y_compiled = flyc.compile(scale, _ptr(y.data_ptr()), factor=3.0)
-        assert len(calls) == 6  # One existing specialization lookup per compile.
-        monkeypatch.setattr(scale, "_build_full_cache_key", unexpected)
+        assert len(calls) == 6  # Every compile request retraces before artifact lookup.
+        monkeypatch.setattr(scale, "_trace", unexpected)
         x_compiled(_ptr(x.data_ptr()), 2.0)
         y_compiled(_ptr(y.data_ptr()), 3.0)
         torch.cuda.synchronize()
@@ -1182,7 +1181,7 @@ class TestEndToEnd:
         def unexpected_compile(*_args, **_kwargs):
             raise AssertionError("export_to_c must reuse the existing compiled artifact")
 
-        monkeypatch.setattr(jit_function.JitFunction, "_trace_and_compile", unexpected_compile)
+        monkeypatch.setattr(jit_function.JitFunction, "_trace", unexpected_compile)
 
         assert compiled.export_to_c(tmp_path, "compiled_axpy", "compiled_axpy_entry") is None
         so = _link_shared(tmp_path, [tmp_path / "compiled_axpy.o"], "libcompiled_axpy.so")

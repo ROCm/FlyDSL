@@ -391,9 +391,10 @@ def test_traced_kernel_stays_disk_cacheable(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     launch()
-    assert not getattr(
-        launch, "_extern_linkage_keys", None
-    ), "tracing registered a post_load_processor, which disables the disk cache"
+    artifact = launch._last_compiled[1]
+    assert not artifact._post_load_processors
+    assert not artifact._link_libs
+    assert not artifact._uses_explicit_module
 
 
 def test_trace_buffer_is_a_trailing_kernel_argument(monkeypatch):
@@ -736,21 +737,19 @@ def test_capture_switches_off_on_off_without_recompiling_off(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     launch()
-    assert len(launch._call_state_cache) == 1
-    off_state = next(iter(launch._call_state_cache.values()))
-    assert off_state._predispatch is None
+    off = launch._last_compiled[1]
+    assert not off._ktrace_traced
 
     with ktrace.capture("toggle", blocks=(0, 0, 0)) as trace:
         launch()
-        assert len(launch._call_state_cache) == 2
-        traced_state = next(state for state in launch._call_state_cache.values() if state is not off_state)
-        assert traced_state._predispatch is not None
+        traced = launch._last_compiled[1]
+        assert traced is not off and traced._ktrace_traced
 
     assert "tick" in trace.summary()["phases"]
     trace.clear()
     launch()
-    assert len(launch._call_state_cache) == 2
-    assert off_state in launch._call_state_cache.values()
+    assert launch._last_compiled[1] is off
+    assert len(launch._mem_cache) == 2
     assert trace.read().summary() is None
 
 
@@ -768,19 +767,19 @@ def test_environment_switches_off_on_off_without_recompiling_off(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     launch()
-    off_state = next(iter(launch._call_state_cache.values()))
+    off = launch._last_compiled[1]
 
     monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "1")
     launch()
     assert "tick" in ktrace.summary()["phases"]
-    assert len(launch._call_state_cache) == 2
+    assert launch._last_compiled[1]._ktrace_traced
 
     monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "0")
     snapshot = ktrace.capture("toggle")
     snapshot.clear()
     launch()
-    assert len(launch._call_state_cache) == 2
-    assert off_state in launch._call_state_cache.values()
+    assert launch._last_compiled[1] is off
+    assert len(launch._mem_cache) == 2
     assert snapshot.read().summary() is None
 
 
