@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T00:50:00Z",
+ "updated": "2026-10-30T01:25:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40985468978,
+   "pr": 1349,
+   "commit": "47bff2129dac56912b2a16bbfbd4d84ef2efc6c1",
+   "branch": "jli/gfx1250-strict-cherrypick",
+   "event": "pull_request",
+   "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40985468978",
+   "created_at": "2026-10-30T01:22:33Z",
+   "updated_at": "2026-10-30T01:23:42Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40980998881,
    "pr": 1349,
@@ -10,13 +25,41 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40980998881",
    "created_at": "2026-10-30T00:38:58Z",
-   "updated_at": "2026-10-30T00:40:40Z",
+   "updated_at": "2026-10-30T01:23:42Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-30T01:12:16Z",
+     "completed_at": "2026-10-30T01:19:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40980998881/job/123831224966"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-30T01:10:09Z",
+     "completed_at": "2026-10-30T01:22:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40980998881/job/123831225048"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-30T01:10:09Z",
+     "completed_at": "2026-10-30T01:22:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40980998881/job/123831225111"
+    }
+   ]
   },
   {
    "run_id": 40926988002,
@@ -800,9 +843,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-29T18:22:19Z",
+     "started_at": "2026-10-30T01:12:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40768243608/job/123646155809"
     },
@@ -1809,49 +1852,6 @@
      "machine": "smci350-rck-g03-b17-12",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 40497026213,
-   "pr": null,
-   "commit": "e38779f31fe5d597b8f36ffc4521dea49de48d11",
-   "branch": "location-chain-typed-bindings",
-   "event": "pull_request",
-   "title": "[Bugfix] Show the user's source line in DSL compile errors",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40497026213",
-   "created_at": "2026-10-27T11:33:22Z",
-   "updated_at": "2026-10-27T12:25:46Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T12:01:50Z",
-     "completed_at": "2026-10-27T12:25:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40497026213/job/122176949915"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T12:01:50Z",
-     "completed_at": "2026-10-27T12:25:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40497026213/job/122176949949"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-27T12:01:50Z",
-     "completed_at": "2026-10-27T12:25:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40497026213/job/122176950013"
     }
    ]
   }
