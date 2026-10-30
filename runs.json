@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-29T23:04:42Z",
+ "updated": "2026-10-30T00:50:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40980998881,
+   "pr": 1349,
+   "commit": "3c2339428c1be2ae01bd7552667bf7862f015224",
+   "branch": "jli/gfx1250-strict-cherrypick",
+   "event": "pull_request",
+   "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40980998881",
+   "created_at": "2026-10-30T00:38:58Z",
+   "updated_at": "2026-10-30T00:40:40Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40926988002,
    "pr": 1336,
@@ -1839,21 +1854,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40497026213/job/122176950013"
     }
    ]
-  },
-  {
-   "run_id": 40495035870,
-   "pr": null,
-   "commit": "3964207571184ad204fb0a3280c41abeeadf1b42",
-   "branch": "location-chain-typed-bindings",
-   "event": "pull_request",
-   "title": "[Bugfix] Show the user's source line in DSL compile errors",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40495035870",
-   "created_at": "2026-10-27T11:17:33Z",
-   "updated_at": "2026-10-27T11:33:24Z",
-   "actor": "RElbers",
-   "jobs": []
   }
  ]
 }
