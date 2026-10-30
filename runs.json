@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T04:44:08Z",
+ "updated": "2026-10-30T04:52:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41004973509,
+   "pr": 1350,
+   "commit": "369021669cbb2fd1aa152da5198042032a4afc40",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41004973509",
+   "created_at": "2026-10-30T04:48:57Z",
+   "updated_at": "2026-10-30T04:50:17Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 41003388106,
    "pr": 1346,
@@ -1806,21 +1821,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40539991300",
    "created_at": "2026-10-27T16:20:46Z",
    "updated_at": "2026-10-27T16:20:46Z",
-   "actor": "Qubitium",
-   "jobs": []
-  },
-  {
-   "run_id": 40539152186,
-   "pr": 1332,
-   "commit": "6097da7bd423556daad45c1e4ab6aee290089d73",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40539152186",
-   "created_at": "2026-10-27T16:15:39Z",
-   "updated_at": "2026-10-28T13:45:10Z",
    "actor": "Qubitium",
    "jobs": []
   }
