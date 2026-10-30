@@ -42,6 +42,11 @@
         "file": "schedule-bank-and-gpr.patch",
         "description": "Add sched.bank / sched.vgpr / sched.sgpr / sched.agpr hints on pin 941a04e. Retargeted from the patch written against 1df311a6: keep the functional changes and drop the clang-format-only churn that does not apply here.",
         "upstream_status": "not yet submitted; adapted from jli/schedule-bank-gpr-llvm-head (LLVM 1df311a6)"
+      },
+      {
+        "file": "xnack-xcnt-replay-codegen.patch",
+        "description": "Finish the gfx1250 xnack=any codegen override on pin 941a04e: enable XNACK on/off modes, make isXNACKEnabled follow TargetID, and emit xcnt waits plus REPLAY_MODE only when XNACK is on. Split out of xnack-any-codegen-override.patch because REPLAY_MODE is inserted later by the unclaused-vmem patch on this pin. Adapted from jli/xnack-perf (LLVM 1df311a6).",
+        "upstream_status": "not yet submitted; adapted from jli/xnack-perf (LLVM 1df311a6)"
       }
     ],
     "extensions": []
