@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T06:18:01Z",
+ "updated": "2026-10-30T06:22:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41013570215,
+   "pr": 1346,
+   "commit": "95a6cb007dc6e6dbc9a5c0ae75d40f8d914f754d",
+   "branch": "xyw/mega_moe_merge",
+   "event": "pull_request",
+   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215",
+   "created_at": "2026-10-30T06:21:08Z",
+   "updated_at": "2026-10-30T06:21:24Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 41013033236,
    "pr": 1350,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236",
    "created_at": "2026-10-30T06:15:35Z",
-   "updated_at": "2026-10-30T06:16:12Z",
+   "updated_at": "2026-10-30T06:17:44Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -435,11 +450,11 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106",
    "created_at": "2026-10-30T04:31:38Z",
-   "updated_at": "2026-10-30T05:09:54Z",
+   "updated_at": "2026-10-30T06:21:10Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -472,19 +487,19 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-30T05:09:54Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T06:21:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123903672656"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-30T05:09:54Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T06:21:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123903672675"
     }
    ]
@@ -1815,49 +1830,6 @@
      "machine": "gbt350-odcdh1-b08-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 40667233058,
-   "pr": null,
-   "commit": "d36c25e47521a4da36c072aee748487a0c73992f",
-   "branch": "main",
-   "event": "push",
-   "title": "Show the user's source line in DSL compile errors (#1337)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40667233058",
-   "created_at": "2026-10-28T09:49:17Z",
-   "updated_at": "2026-10-28T10:42:16Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-28T10:39:34Z",
-     "completed_at": "2026-10-28T10:41:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40667233058/job/122767168176"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-28T10:41:07Z",
-     "completed_at": "2026-10-28T10:42:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40667233058/job/122767168274"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-28T10:39:34Z",
-     "completed_at": "2026-10-28T10:41:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40667233058/job/122767168570"
     }
    ]
   }
