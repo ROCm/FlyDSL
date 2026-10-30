@@ -34,7 +34,10 @@ if torch is None or not torch.cuda.is_available():
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
-_arch = str(get_rocm_arch())
+try:
+    _arch = str(get_rocm_arch())
+except RuntimeError as error:
+    pytest.skip(f"ROCm architecture unavailable: {error}", allow_module_level=True)
 if _arch != "gfx1250":
     pytest.skip(f"TDM multicast requires gfx1250, got {_arch}", allow_module_level=True)
 

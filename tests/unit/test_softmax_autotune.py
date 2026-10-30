@@ -6,28 +6,41 @@
 """GPU-free contracts for the Softmax autotune adopter.
 
 Candidate generation, path classification and cache-key partitioning are pure host-side
-logic, so they are tested here rather than behind an l2_device gate. The wave size is
-injected explicitly: kernels/norm/softmax_kernel.py resolves WARP_SIZE at import time, so
-an ambient value would make these assertions a property of whatever host ran them.
+logic, so they are tested here rather than behind an l2_device gate. Test-local module
+copies use a fixed wave size without probing hardware or affecting device tests.
 """
 
-import importlib
+import importlib.util
+import sys
+from pathlib import Path
 
 import pytest
 
 from flydsl.autotune import Config, do_bench
-from kernels.norm.softmax_autotune import (
-    MAX_BLOCK_THREADS,
-    _default_config,
-    _quack_threads_per_row,
-    _softmax_select_config,
-    _softmax_tuner,
-    candidate_configs,
-    is_legal,
-    tile_cols,
-    uses_fast_path,
-)
-from kernels.norm.softmax_kernel import BLOCK_THREADS, TUNING_SCHEMA
+
+# Restore the normal module cache after loading isolated copies for these L0 tests.
+with pytest.MonkeyPatch.context() as _imports:
+    _imports.setattr("kernels.common.kernels_common.get_warp_size", lambda: 64)
+    for _name in ("softmax_kernel", "softmax_autotune"):
+        _qualified = f"kernels.norm.{_name}"
+        _path = Path(__file__).resolve().parents[2] / "kernels" / "norm" / f"{_name}.py"
+        _spec = importlib.util.spec_from_file_location(_qualified, _path)
+        _module = importlib.util.module_from_spec(_spec)
+        _imports.setitem(sys.modules, _qualified, _module)
+        _spec.loader.exec_module(_module)
+
+    from kernels.norm.softmax_autotune import (
+        MAX_BLOCK_THREADS,
+        _default_config,
+        _quack_threads_per_row,
+        _softmax_select_config,
+        _softmax_tuner,
+        candidate_configs,
+        is_legal,
+        tile_cols,
+        uses_fast_path,
+    )
+    from kernels.norm.softmax_kernel import BLOCK_THREADS, TUNING_SCHEMA
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 

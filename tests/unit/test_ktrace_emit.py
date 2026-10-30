@@ -19,15 +19,16 @@ from flydsl.compiler import jit_function
 from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
 from flydsl.expr import ktrace, ktrace_common
 from flydsl.expr.rocdl import ktrace_format
-from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
-_arch = get_rocm_arch() or ""
-_skip_not_cdna = pytest.mark.skipif(
-    not _arch.startswith(("gfx942", "gfx950")),
-    reason=f"ktrace needs gfx942/gfx950 to launch, got {_arch}",
-)
+
+@pytest.fixture
+def _cdna_arch(rocm_arch):
+    """Require a launch-capable CDNA device only for the L2 tests."""
+    if not rocm_arch.startswith(("gfx942", "gfx950")):
+        pytest.skip(f"ktrace needs gfx942/gfx950 to launch, got {rocm_arch}")
+    return rocm_arch
 
 
 def _frontend_only(monkeypatch, *, enable: bool, arch: str = "gfx950", **ktrace_env):
@@ -636,8 +637,7 @@ print("NAMES=" + json.dumps(ktrace_common.name_table()))
 
 
 @pytest.mark.l2_device
-@_skip_not_cdna
-def test_name_table_survives_a_disk_cache_hit(tmp_path):
+def test_name_table_survives_a_disk_cache_hit(tmp_path, _cdna_arch):
     import json
     import subprocess
 
@@ -696,8 +696,7 @@ print("PHASES=" + ",".join(sorted((summary or {}).get("phases", {}))))
 
 
 @pytest.mark.l2_device
-@_skip_not_cdna
-def test_compile_hint_packs_the_buffer_slot_it_compiled(tmp_path):
+def test_compile_hint_packs_the_buffer_slot_it_compiled(tmp_path, _cdna_arch):
     import subprocess
 
     probe = tmp_path / "probe.py"
@@ -723,8 +722,7 @@ def test_compile_hint_packs_the_buffer_slot_it_compiled(tmp_path):
 
 
 @pytest.mark.l2_device
-@_skip_not_cdna
-def test_capture_switches_off_on_off_without_recompiling_off(monkeypatch):
+def test_capture_switches_off_on_off_without_recompiling_off(monkeypatch, _cdna_arch):
     monkeypatch.delenv("FLYDSL_KTRACE_ENABLE", raising=False)
 
     @flyc.kernel
@@ -755,8 +753,7 @@ def test_capture_switches_off_on_off_without_recompiling_off(monkeypatch):
 
 
 @pytest.mark.l2_device
-@_skip_not_cdna
-def test_environment_switches_off_on_off_without_recompiling_off(monkeypatch):
+def test_environment_switches_off_on_off_without_recompiling_off(monkeypatch, _cdna_arch):
     monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "0")
 
     @flyc.kernel

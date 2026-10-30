@@ -462,8 +462,21 @@ Transforms Python control flow to MLIR ops at the AST level:
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `rocm_agent_enumerator` system tool
-4. Default: `gfx942`
+3. `ARCH` env var (the compile-time target, also set by `pytest --flydsl-compile-arch`)
+4. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
+5. `rocminfo` system tool
+
+If neither tool identifies a GPU and no explicit override is set, detection
+raises `RuntimeError` instead of assuming `gfx942`. On hosts without accessible
+ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` (or `ARCH`) to the
+intended target (for example, `ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
+Failed detection is cached to avoid repeated slow probes.
+
+Device counting uses the default `rocm_agent_enumerator` output instead:
+`-name` can list multiple supported ISAs per GPU and overcount devices. The
+physical count may ignore `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES`; use
+HIP's `hipGetDeviceCount` when visibility matters. Counting returns zero if the
+enumerator is unavailable or reports no GPU agents.
 
 ---
 
