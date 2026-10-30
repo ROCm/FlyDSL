@@ -41,7 +41,8 @@ _VP_SEL_LO_REV = 0x01000504
 _VP_SEL_HI_REV = 0x03020706
 # High half of both source dwords: the f32 -> bf16 truncation, two at a time.
 _VP_SEL_BF16 = 0x07060302
-# Round-to-nearest bias, added before that truncation.
+# Adding 0x8000 implements round-half-up; it only diverges from
+# round-to-nearest-even when the source mantissa is exactly halfway.
 _BF16_RND = 0x8000
 _CONCAT16 = list(range(16))
 
@@ -320,23 +321,12 @@ def build_flash_attn_func_module_primary(
                     ],
                     fx.Int32,
                 ).bitcast(elem_cls)
-            pk_ty = ir.VectorType.get([2], dtype_to_elem_type(in_dtype).ir_type)
-            pairs = [
-                llvm.call_intrinsic(
-                    pk_ty,
-                    "llvm.amdgcn.cvt.pkrtz",
-                    [
-                        as_mlir_value(fx.Float32(p_vec[2 * j])),
-                        as_mlir_value(fx.Float32(p_vec[2 * j + 1])),
-                    ],
-                    [],
-                    [],
-                )
-                for j in range_constexpr(4)
-            ]
-            lo = Vec(pairs[0], (2,), elem_cls).shuffle(Vec(pairs[1], (2,), elem_cls), [0, 1, 2, 3])
-            hi = Vec(pairs[2], (2,), elem_cls).shuffle(Vec(pairs[3], (2,), elem_cls), [0, 1, 2, 3])
-            return lo.shuffle(hi, list(range(8)))
+            # Convert each element with the default round-to-nearest-even
+            # lowering and pack them into a v8f16 vector.
+            return Vec.from_elements(
+                [fx.Float16(p_vec[i]) for i in range_constexpr(8)],
+                elem_cls,
+            )
 
         def _build_p_frag(p_vec):
             own_dw = _to_half8(p_vec).bitcast(fx.Int32)
