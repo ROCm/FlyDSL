@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T11:00:02Z",
+ "updated": "2026-10-30T11:33:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -172,11 +172,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T10:43:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106906"
+     "completed_at": "2026-10-30T11:20:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106906",
+     "machine": "gbt350-odcdh1-b04-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -401,9 +404,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T06:42:37Z",
+     "started_at": "2026-10-30T11:32:01Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/123931315606"
     }
@@ -438,10 +441,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T10:49:43Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T11:16:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904128"
     },
     {
@@ -492,11 +495,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr8-docs",
    "event": "pull_request",
    "title": "[Kernel][FA] Document the gfx950 attention kernels and the 8xD head-dim protocol (8/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007232120",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T05:29:23Z",
+   "updated_at": "2026-10-30T10:58:52Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -630,11 +633,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr5-optional-inputs",
    "event": "pull_request",
    "title": "[Kernel][FA] Port gfx950 attention ALiBi, sink, paged KV, split-K and XCD swizzle to the new forward (5/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231727",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T10:32:12Z",
+   "updated_at": "2026-10-30T11:31:38Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -661,10 +664,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T09:14:39Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T10:59:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231727/job/123909347902"
     }
    ]
