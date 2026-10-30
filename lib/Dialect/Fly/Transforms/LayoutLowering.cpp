@@ -2272,8 +2272,8 @@ public:
       if (srcLayoutAttr.getShape().isLeaf()) {
         Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
         Value dstDecomposition = DecompositionOp::create(rewriter, loc, dst);
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition,
-                             pred, /*index=*/Value{});
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred,
+                             /*index=*/Value{});
         rewriter.eraseOp(op);
         return success();
       }

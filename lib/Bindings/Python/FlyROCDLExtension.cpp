@@ -309,8 +309,7 @@ struct PyCopyOpCDNA5TensorLoadType : PyConcreteType<PyCopyOpCDNA5TensorLoadType>
         },
         "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
         "cache_modifier"_a = 0, "iter_count"_a = 1, "index_bits"_a = 0, "pad_interval"_a = 0,
-        "pad_amount"_a = 0,
-        nb::kw_only(), "context"_a = nb::none(),
+        "pad_amount"_a = 0, nb::kw_only(), "context"_a = nb::none(),
         "Create a CopyOpCDNA5TensorLoadType (N-D TDM Global->LDS DMA) with the static per-dim tile "
         "shape (tensor dim order, len = rank 1-5)");
   }

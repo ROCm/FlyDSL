@@ -155,10 +155,9 @@ FailureOr<Type> tdmLoadOpType(MLIRContext *ctx, const tdm::Geometry &geometry, T
     return emitError() << "padded physical TDM tile_dim0 must span whole dwords";
   ArrayRef<int32_t> shape(geometry.descriptorShape);
 
-  Type ty = CopyOpCDNA5TensorLoadType::getChecked(emitError, ctx, shape, dataType, tensor2tdm,
-                                                  atomicBarrier, cacheModifier, /*iterCount=*/1,
-                                                  indexBits, geometry.padInterval,
-                                                  geometry.padAmount);
+  Type ty = CopyOpCDNA5TensorLoadType::getChecked(
+      emitError, ctx, shape, dataType, tensor2tdm, atomicBarrier, cacheModifier, /*iterCount=*/1,
+      indexBits, geometry.padInterval, geometry.padAmount);
   if (!ty)
     return failure();
   return ty;

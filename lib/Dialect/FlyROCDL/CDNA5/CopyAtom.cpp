@@ -565,14 +565,14 @@ struct TdmStatic {
 // Read off the atom type, once per direction: the two `emitAtomCall` overloads of a type
 // want the same config, and the direction is the only thing that varies between them.
 TdmStatic tdmConfig(CopyOpCDNA5TensorLoadType ty) {
-  return {ty.getTileShape(),    tdmElemBits(ty.getDataType()),
+  return {ty.getTileShape(),     tdmElemBits(ty.getDataType()),
           ty.getPadInterval(),   ty.getPadAmount(),
           ty.getCacheModifier(), ty.getIterCount(),
           ty.getIndexBits(),     /*isLoad=*/true};
 }
 
 TdmStatic tdmConfig(CopyOpCDNA5TensorStoreType ty) {
-  return {ty.getTileShape(),    tdmElemBits(ty.getDataType()),
+  return {ty.getTileShape(),     tdmElemBits(ty.getDataType()),
           /*padInterval=*/0,     /*padAmount=*/0,
           ty.getCacheModifier(), ty.getIterCount(),
           ty.getIndexBits(),     /*isLoad=*/false};
@@ -655,8 +655,8 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   if (cfg.indexBits) {
     auto indexMemTy = dyn_cast_or_null<fly::MemRefType>(indexTyArg);
     if (!index || !indexMemTy)
-      return mlir::emitError(loc)
-             << "cdna5 TDM: an indexed atom needs an index operand, got " << indexTyArg;
+      return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand, got "
+                                  << indexTyArg;
     if (!indexMemTy.getElemTy().isInteger(32))
       return mlir::emitError(loc) << "cdna5 TDM: row indices must be i32, got "
                                   << indexMemTy.getElemTy();
@@ -664,14 +664,14 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
     int32_t rows = tileShape.front();
     if (rows > tdm::maxIndexedRows(cfg.indexBits))
       return mlir::emitError(loc) << "cdna5 TDM: " << rows << " rows exceed the "
-                                  << tdm::maxIndexedRows(cfg.indexBits) << " that "
-                                  << cfg.indexBits << "-bit indices carry";
+                                  << tdm::maxIndexedRows(cfg.indexBits) << " that " << cfg.indexBits
+                                  << "-bit indices carry";
     // The descriptor is scalar state, so every index has to reach an SGPR. The loads
     // are uniform across the wave; readfirstlane is what tells the backend so.
     Type idxPtrTy = index.getType();
     for (int32_t i = 0; i < rows; ++i) {
-      Value slot = LLVM::GEPOp::create(builder, loc, idxPtrTy, i32Ty, index,
-                                       ArrayRef<LLVM::GEPArg>{i});
+      Value slot =
+          LLVM::GEPOp::create(builder, loc, idxPtrTy, i32Ty, index, ArrayRef<LLVM::GEPArg>{i});
       Value raw = LLVM::LoadOp::create(builder, loc, i32Ty, slot);
       rowIndex.push_back(ROCDL::ReadfirstlaneOp::create(builder, loc, i32Ty, raw));
     }
@@ -915,12 +915,12 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
       }
     }
     words.resize(8, zeroC);
-    Value dgIdx2 = vector::FromElementsOp::create(
-        builder, loc, VectorType::get({4}, i32Ty),
-        ValueRange{words[0], words[1], words[2], words[3]});
-    Value dgIdx3 = vector::FromElementsOp::create(
-        builder, loc, VectorType::get({4}, i32Ty),
-        ValueRange{words[4], words[5], words[6], words[7]});
+    Value dgIdx2 =
+        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                       ValueRange{words[0], words[1], words[2], words[3]});
+    Value dgIdx3 =
+        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                       ValueRange{words[4], words[5], words[6], words[7]});
     Value dgIdx4 = vector::FromElementsOp::create(
         builder, loc, VectorType::get({8}, i32Ty),
         ValueRange{zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC});

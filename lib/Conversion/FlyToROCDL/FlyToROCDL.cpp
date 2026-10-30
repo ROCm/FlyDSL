@@ -28,8 +28,8 @@
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
