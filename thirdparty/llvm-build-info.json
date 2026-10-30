@@ -37,6 +37,11 @@
         "file": "gfx1250-strict.patch",
         "description": "Define gfx1250-strict on this pin and hand-port the functional follow-ups: clause scope breaks, cluster-load M0=0, 64 LDS banks, unscaled f8f6f4 WMMA promotion, WMMA latencies, drop gfx1200 SWMMAC, and disable f4 WMMA, block16 cvt-scale, e5m3, and 16x16x128 FP8 WMMA on strict. Also model the VOPD3 FP64 OPY hazard and reserve ENABLE_WAVEFRONT_SIZE32 on wave32-only targets. Adapted because those commits do not apply directly.",
         "upstream_status": "adapted from 5186287a19f3, 38f92fc6402c, 47ec1193ee72, 97c6103e88df, e74db4f0738e, d3db06999955, 816b4c13bd85, 4bd5979264ba, abb5ab28610f, 6fb8776580a4, a2c07d5107f1, c0a1a2cfa399, 659323446eff, a1c90088f87a"
+      },
+      {
+        "file": "schedule-bank-and-gpr.patch",
+        "description": "Add sched.bank / sched.vgpr / sched.sgpr / sched.agpr hints on pin 941a04e. Retargeted from the patch written against 1df311a6: keep the functional changes and drop the clang-format-only churn that does not apply here.",
+        "upstream_status": "not yet submitted; adapted from jli/schedule-bank-gpr-llvm-head (LLVM 1df311a6)"
       }
     ],
     "extensions": []
