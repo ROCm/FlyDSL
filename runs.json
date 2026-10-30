@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T01:36:53Z",
+ "updated": "2026-10-30T01:52:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 40988092064,
+   "pr": 1349,
+   "commit": "b4a626ebca784ae16320b0707cefa9b2152779d3",
+   "branch": "jli/gfx1250-strict-cherrypick",
+   "event": "pull_request",
+   "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988092064",
+   "created_at": "2026-10-30T01:49:24Z",
+   "updated_at": "2026-10-30T01:50:33Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 40986644706,
    "pr": 1349,
@@ -10,11 +25,11 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict and regpressure underflow patches on pin 94\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40986644706",
    "created_at": "2026-10-30T01:34:26Z",
-   "updated_at": "2026-10-30T01:35:08Z",
+   "updated_at": "2026-10-30T01:50:09Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -1777,52 +1792,6 @@
    "updated_at": "2026-10-27T15:25:45Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 40526163272,
-   "pr": 1321,
-   "commit": "e73c8f440e49009bee672c7219c1d258bd6baa65",
-   "branch": "fix/dlpack-layout-fill-retains-tensor",
-   "event": "pull_request",
-   "title": "[Fix] Don't retain the last tensor in layout-dynamic DLPack fills",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272",
-   "created_at": "2026-10-27T14:57:24Z",
-   "updated_at": "2026-10-27T19:41:44Z",
-   "actor": "josh-schell-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T15:52:48Z",
-     "completed_at": "2026-10-27T16:51:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272/job/122298619965",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T16:13:13Z",
-     "completed_at": "2026-10-27T19:41:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272/job/122298620027"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-27T15:54:54Z",
-     "completed_at": "2026-10-27T16:21:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40526163272/job/122298620097"
-    }
-   ]
   }
  ]
 }
