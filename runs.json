@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T18:25:20Z",
+ "updated": "2026-10-30T19:37:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -590,38 +590,41 @@
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41010293254",
    "created_at": "2026-10-30T05:46:35Z",
-   "updated_at": "2026-10-30T18:11:02Z",
+   "updated_at": "2026-10-30T19:34:26Z",
    "actor": "edjson",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T18:11:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41010293254/job/124230932491"
+     "completed_at": "2026-10-30T18:41:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41010293254/job/124230932491",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T18:11:02Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T18:31:10Z",
+     "completed_at": "2026-10-30T18:53:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41010293254/job/124230932516"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T18:12:05Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T19:34:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41010293254/job/124230932550"
     }
    ]
