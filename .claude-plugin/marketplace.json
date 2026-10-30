@@ -1,0 +1,50 @@
+{
+  "name": "flydsl",
+  "owner": {
+    "name": "FlyDSL Project Contributors"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for FlyDSL, the layout-centric Python DSL for AMD GPU kernels"
+  },
+  "plugins": [
+    {
+      "name": "flydsl",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Skills for authoring, debugging, profiling and optimizing FlyDSL GPU kernels on AMD ROCm GPUs",
+      "author": {
+        "name": "FlyDSL Project Contributors"
+      },
+      "homepage": "https://github.com/ROCm/FlyDSL",
+      "repository": "https://github.com/ROCm/FlyDSL",
+      "license": "Apache-2.0",
+      "keywords": [
+        "flydsl",
+        "rocm",
+        "amd",
+        "gpu",
+        "kernel",
+        "mlir"
+      ],
+      "strict": false,
+      "skills": [
+        "./.claude/skills/add-target-atom-op",
+        "./.claude/skills/bisect-perf-regression",
+        "./.claude/skills/build-flydsl",
+        "./.claude/skills/build-rocm-image",
+        "./.claude/skills/capture-kernel-trace",
+        "./.claude/skills/debug-flydsl-kernel",
+        "./.claude/skills/flydsl-kernel-authoring",
+        "./.claude/skills/flydsl-tile-programming",
+        "./.claude/skills/gemm-optimization",
+        "./.claude/skills/isa-resource-diff",
+        "./.claude/skills/kernel-code-cleanup",
+        "./.claude/skills/kernel-trace-analysis",
+        "./.claude/skills/lds-optimization",
+        "./.claude/skills/llvm",
+        "./.claude/skills/oob-detection",
+        "./.claude/skills/prefetch-data-load"
+      ]
+    }
+  ]
+}

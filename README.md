@@ -179,6 +179,16 @@ bash scripts/build.sh -j64
     export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
     ```
 
+## Claude Code plugin
+
+The skills under [`.claude/skills/`](.claude/skills) for authoring, debugging, profiling and optimizing FlyDSL kernels are also published as a [Claude Code](https://claude.com/claude-code) plugin, so you can use them outside this checkout:
+
+```
+/plugin install flydsl --marketplace ROCm/FlyDSL
+```
+
+Or from the shell: `claude plugin marketplace add ROCm/FlyDSL && claude plugin install flydsl@flydsl`. Skills are invoked as `/flydsl:<skill>` (e.g. `/flydsl:debug-flydsl-kernel`); update with `claude plugin update flydsl@flydsl`.
+
 ## Documentation
 
 **Full documentation: [rocm.github.io/FlyDSL](https://rocm.github.io/FlyDSL)**
