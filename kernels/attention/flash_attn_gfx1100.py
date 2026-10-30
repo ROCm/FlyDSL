@@ -4,8 +4,9 @@
 """Dense multi-head Flash Attention for gfx1100 (RDNA3).
 
 Supports f16/bf16, head_dim 64/128/256, dense prefill, and dense decode
-(``seq_q <= 16``). It intentionally does not cover GQA/MQA, varlen, paged KV,
-or general cross-attention.
+(``seq_q <= 16``). Cross-attention reuses the decode path and is therefore
+limited to ``seq_q <= 16`` (including the single-token case). It intentionally
+does not cover GQA/MQA, varlen, paged KV, or general cross-attention.
 """
 
 import flydsl.compiler as flyc
@@ -17,7 +18,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
-from kernels.attention.flash_attn_gfx1100_autotune import pick_tile, tile_fits
+from kernels.attention.flash_attn_gfx1100_autotune import select_tile, tile_fits
 from kernels.attention.flash_attn_utils import daz_denormal_attr
 from kernels.common import buffer_ops
 from kernels.common.kernels_common import LOG2E, dtype_to_elem_type
@@ -67,6 +68,7 @@ def build_flash_attn_func_module_primary(
     seq_q,
     seq_kv,
     head_dim,
+    num_cu,
     causal=True,
     dtype_str="f16",
     sm_scale=None,
@@ -77,6 +79,8 @@ def build_flash_attn_func_module_primary(
     daz=False,
     unsafe_fp_math=False,
     fast_fp_math=False,
+    _override_flags=None,
+    _fixed_tile=None,
 ):
     """Build a dense f16/bf16 flash-attention launcher for gfx1100.
 
@@ -90,15 +94,62 @@ def build_flash_attn_func_module_primary(
     in_dtype = dtype_str
     if head_dim not in SUPPORTED_HEAD_DIMS:
         raise ValueError(f"head_dim must be one of {list(SUPPORTED_HEAD_DIMS)}, got {head_dim}")
-    num_waves, q_tiles, block_n, vt_rows, k_from_gmem = pick_tile(head_dim, seq_q, causal, batch * num_heads)
+    if num_cu is None:
+        raise ValueError("num_cu must be provided for gfx1100 flash attention builds")
+    if _fixed_tile is not None:
+        tile = (
+            int(_fixed_tile[0]),
+            int(_fixed_tile[1]),
+            int(_fixed_tile[2]),
+            int(_fixed_tile[3]),
+            bool(_fixed_tile[4]),
+        )
+    else:
+        def _build_forced_tile(forced_tile):
+            return build_flash_attn_func_module_primary(
+                batch,
+                num_heads,
+                seq_q,
+                seq_kv,
+                head_dim,
+                num_cu,
+                causal=causal,
+                dtype_str=dtype_str,
+                sm_scale=sm_scale,
+                layout=layout,
+                out_dtype=out_dtype,
+                waves_per_eu=waves_per_eu,
+                flat_work_group_size=flat_work_group_size,
+                daz=daz,
+                unsafe_fp_math=unsafe_fp_math,
+                fast_fp_math=fast_fp_math,
+                _override_flags=_override_flags,
+                _fixed_tile=forced_tile,
+            )
+
+        tile = select_tile(
+            batch=batch,
+            num_heads=num_heads,
+            seq_q=seq_q,
+            seq_kv=seq_kv,
+            head_dim=head_dim,
+            dtype_str=dtype_str,
+            causal=causal,
+            num_cu=int(num_cu),
+            build_kernel=_build_forced_tile,
+        )
+    if not tile_fits(head_dim, tile):
+        raise ValueError(f"tile {tile} does not fit head_dim={head_dim}")
+    num_waves, q_tiles, block_n, vt_rows, k_from_gmem = tile
     prefetch = seq_q <= WMMA_M and head_dim == 128 and batch * num_heads <= 128
-    hoist_q = head_dim <= 128 or seq_kv >= 8192
+    # Only the D=128 decode shapes benefit from prefetching; prefill kernels
+    # lose occupancy if they hoist the extra LDS traffic.
+    # ``_override_flags`` and ``_fixed_tile`` are private knobs exercised only by tests.
+    override_flags = _override_flags or {}
+    hoist_q = head_dim <= 128 and q_tiles == 1
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
-    tile = (num_waves, q_tiles, block_n, vt_rows, k_from_gmem)
-    if not tile_fits(head_dim, tile):
-        raise ValueError(f"tile {tile} does not fit head_dim={head_dim}")
 
     if in_dtype not in _ELEM_CLS:
         raise ValueError(f"dtype_str must be one of {sorted(_ELEM_CLS)}, got {dtype_str!r}")
@@ -113,7 +164,13 @@ def build_flash_attn_func_module_primary(
     elem_cls = _ELEM_CLS[in_dtype]
     out_cls = _OUT_CLS[out_dtype]
     use_perm_p = seq_q > WMMA_M and not causal and seq_q < 65536
+    # Lane permutation is a performance-only tweak; it preserves the math exactly.
     use_vector_store = head_dim <= 64 and seq_q > WMMA_M and not causal and seq_q < 65536
+    # Selecting the vectorized store path only changes how results are written, not their values.
+    if "use_perm_p" in override_flags:
+        use_perm_p = bool(override_flags["use_perm_p"])
+    if "use_vector_store" in override_flags:
+        use_vector_store = bool(override_flags["use_vector_store"])
     fm = arith.FastMathFlags.fast
 
     q_stride_b, q_stride_h, q_stride_s = _strides(layout, num_heads, seq_q, head_dim)

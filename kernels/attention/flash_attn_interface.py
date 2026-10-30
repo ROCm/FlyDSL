@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import re
+import shutil
+import subprocess
 from typing import Optional
 
 import torch
@@ -72,6 +75,58 @@ _FP8_AUTOSPLIT_FIXED_TILES = 10.4
 _FP8_AUTOSPLIT_CAUSAL_SKEW = 0.75
 _FP8_AUTOSPLIT_DENSE_MARGIN = 0.85
 _FP8_NARROW_MAX_KV_TILES = 48
+
+
+@functools.lru_cache(maxsize=None)
+def _rocminfo_cu_count(arch: str) -> Optional[int]:
+    if not arch:
+        return None
+    rocminfo = shutil.which("rocminfo")
+    if rocminfo is None:
+        return None
+    try:
+        result = subprocess.run(
+            [rocminfo],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    agents = re.split(r"Agent\s*\d+", result.stdout)
+    for agent in agents:
+        if "Device Type" not in agent or agent.find("GPU") == -1:
+            continue
+        name_match = re.search(r"^\s*Name:\s*(\S+)", agent, re.MULTILINE)
+        if not name_match:
+            continue
+        name = name_match.group(1).split(":", 1)[0]
+        if name != arch:
+            continue
+        cu_match = re.search(r"Compute Units\s*:\s*(\d+)", agent)
+        if cu_match:
+            return int(cu_match.group(1))
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _device_cu_count_cached(device_index: int) -> int:
+    props = torch.cuda.get_device_properties(device_index)
+    mp = int(getattr(props, "multi_processor_count", 0) or 0)
+    arch_name = getattr(props, "gcnArchName", "") or ""
+    arch_base = arch_name.split(":", 1)[0]
+    cu_from_rocminfo = _rocminfo_cu_count(arch_base)
+    if cu_from_rocminfo:
+        return int(cu_from_rocminfo)
+    if arch_base.startswith("gfx11") or arch_base.startswith("gfx10") or arch_base.startswith("gfx12"):
+        return mp * 2 if mp else _DENSE_LIGHT_CU_FALLBACK
+    return mp if mp else _DENSE_LIGHT_CU_FALLBACK
+
+
+def _device_cu_count(device: torch.device) -> int:
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return _device_cu_count_cached(index)
 
 
 def _fp8_auto_block_m(batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int) -> int:
@@ -207,6 +262,7 @@ def _build_dense_gfx1100(
     head_dim: int,
     causal: bool,
     dtype_str: str,
+    num_cu: int,
 ):
     """Build the dense RDNA3 gfx1100 launcher."""
     from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module
@@ -220,6 +276,7 @@ def _build_dense_gfx1100(
         causal=causal,
         dtype_str=dtype_str,
         layout="bshd",
+        num_cu=num_cu,
     )
 
 
@@ -1446,9 +1503,9 @@ def flydsl_flash_attn_func(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
+        _arch = _gpu_arch(q.device)
 
         if dtype_str == "fp8":
-            _arch = _gpu_arch(q.device)
             if not _arch.startswith("gfx950"):
                 raise ValueError(f"flydsl_flash_attn_func: fp8 requires gfx950, got '{_arch or 'unknown'}'")
             _skv_hint = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
@@ -1470,27 +1527,8 @@ def flydsl_flash_attn_func(
                 block_m=_fp8_block_m,
                 batch_interleave_group=_fp8_batch_interleave_group(B, causal, cross, int(num_kv_splits)),
             )
-        elif splitk:
-            exe = _build_splitk(
-                num_heads=H,
-                num_kv_heads=num_kv_heads,
-                head_dim=D,
-                causal=causal,
-                dtype_str=dtype_str,
-                num_kv_splits=int(num_kv_splits),
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                enable_stagger=dualwave_swp_enable_stagger,
-                return_lse=return_lse,
-                has_bias=has_bias,
-                has_alibi=has_alibi,
-                has_sink=has_sink,
-            )
         elif varlen:
             # Short varlen attention uses generic light; long/debug stays on dualwave.
-            _arch = _gpu_arch(q.device)
             _prefer_light = (
                 (not debug_lazy)
                 # The light (generic) kernel folds in neither bias nor ALiBi.
@@ -1536,94 +1574,109 @@ def flydsl_flash_attn_func(
                     has_alibi=has_alibi,
                     has_sink=has_sink,
                 )
-        else:
-            _arch = _gpu_arch(q.device)
-            if (
-                _arch.startswith("gfx1100")
-                and dtype_str in ("bf16", "f16")
-                and not debug_lazy
-            ):
-                _supported = (
-                    "supported: MHA, head_dim 64/128/256, bf16/f16, cross-attention seq_q<=16, "
-                    "no bias/alibi/sink, return_lse=False, split-K disabled"
+        elif _arch.startswith("gfx1100") and dtype_str in ("bf16", "f16"):
+            _supported = (
+                "supported: MHA, head_dim 64/128/256, bf16/f16, cross-attention seq_q<=16, "
+                "no bias/alibi/sink, return_lse=False, split-K disabled"
+            )
+
+            def _unsupported(feature: str) -> None:
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func on gfx1100: {feature} is not supported ({_supported})"
                 )
 
-                def _unsupported(feature: str) -> None:
-                    raise NotImplementedError(
-                        f"flydsl_flash_attn_func on gfx1100: {feature} is not supported ({_supported})"
-                    )
-
-                if num_kv_heads != H:
-                    if num_kv_heads == 1:
-                        _unsupported(f"MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
-                    else:
-                        _unsupported(f"GQA/MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
-                if D not in (64, 128, 256):
-                    _unsupported(f"head_dim {D}")
-                if splitk:
-                    _unsupported(f"split-K num_kv_splits={int(num_kv_splits)}")
-                if return_lse:
-                    _unsupported("return_lse")
-                if has_bias:
-                    _unsupported("attention bias")
-                if has_alibi:
-                    _unsupported("ALiBi slopes")
-                if has_sink:
-                    _unsupported("attention sink")
-                if cross and Sq > 16:
-                    _unsupported(f"cross-attention with seq_q={Sq} (>16)")
-                if out is None:
-                    out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            if num_kv_heads != H:
+                if num_kv_heads == 1:
+                    _unsupported(f"MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
                 else:
-                    expected_shape = tuple(q.shape)
-                    if tuple(out.shape) != expected_shape:
-                        raise ValueError(
-                            f"flydsl_flash_attn_func: out must be {expected_shape}, got {tuple(out.shape)}"
-                        )
-                    if not out.is_cuda or out.device != q.device:
-                        raise ValueError(
-                            f"flydsl_flash_attn_func: out must be a CUDA tensor on {q.device}, got {out.device}"
-                        )
-                    if out.dtype != q.dtype:
-                        raise ValueError(
-                            f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}"
-                        )
-                    if not out.is_contiguous():
-                        raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
-                # Guard the 32-bit ABI: each batch slice must stay below 2**31 elements.
-                def _slice_elems(tensor: torch.Tensor) -> int:
-                    elems = tensor.numel()
-                    return 0 if tensor.shape[0] == 0 else elems // tensor.shape[0]
-
-                max_slice = max(
-                    _slice_elems(q),
-                    _slice_elems(k),
-                    _slice_elems(v),
-                    _slice_elems(out),
-                )
-                if max_slice >= _FP8_MAX_FLAT_ELEMS:
+                    _unsupported(f"GQA/MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
+            if D not in (64, 128, 256):
+                _unsupported(f"head_dim {D}")
+            if splitk:
+                _unsupported(f"split-K num_kv_splits={int(num_kv_splits)}")
+            if return_lse:
+                _unsupported("return_lse")
+            if has_bias:
+                _unsupported("attention bias")
+            if has_alibi:
+                _unsupported("ALiBi slopes")
+            if has_sink:
+                _unsupported("attention sink")
+            if cross and Sq > 16:
+                _unsupported(f"cross-attention with seq_q={Sq} (>16)")
+            if out is None:
+                out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            else:
+                expected_shape = tuple(q.shape)
+                if tuple(out.shape) != expected_shape:
                     raise ValueError(
-                        "flydsl_flash_attn_func: gfx1100 per-batch slice must contain fewer than "
-                        f"{_FP8_MAX_FLAT_ELEMS} elements; got q={_slice_elems(q)}, "
-                        f"k={_slice_elems(k)}, v={_slice_elems(v)}, out={_slice_elems(out)}"
+                        f"flydsl_flash_attn_func: out must be {expected_shape}, got {tuple(out.shape)}"
                     )
-                exe = _build_dense_gfx1100(
-                    batch=B,
-                    num_heads=H,
-                    seq_q=Sq,
-                    seq_kv=Skv,
-                    head_dim=D,
-                    causal=causal,
-                    dtype_str=dtype_str,
+                if not out.is_cuda or out.device != q.device:
+                    raise ValueError(
+                        f"flydsl_flash_attn_func: out must be a CUDA tensor on {q.device}, got {out.device}"
+                    )
+                if out.dtype != q.dtype:
+                    raise ValueError(
+                        f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}"
+                    )
+                if not out.is_contiguous():
+                    raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
+            # Guard the 32-bit ABI: each batch slice must stay below 2**31 elements.
+            def _slice_elems(tensor: torch.Tensor) -> int:
+                elems = tensor.numel()
+                return 0 if tensor.shape[0] == 0 else elems // tensor.shape[0]
+
+            max_slice = max(
+                _slice_elems(q),
+                _slice_elems(k),
+                _slice_elems(v),
+                _slice_elems(out),
+            )
+            if max_slice >= _FP8_MAX_FLAT_ELEMS:
+                raise ValueError(
+                    "flydsl_flash_attn_func: gfx1100 per-batch slice must contain fewer than "
+                    f"{_FP8_MAX_FLAT_ELEMS} elements; got q={_slice_elems(q)}, "
+                    f"k={_slice_elems(k)}, v={_slice_elems(v)}, out={_slice_elems(out)}"
                 )
-                exe(
-                    q.contiguous(),
-                    k.contiguous(),
-                    v.contiguous(),
-                    out,
-                    stream=launch_stream,
-                )
-                return out
+            num_cu = _device_cu_count(q.device)
+            exe = _build_dense_gfx1100(
+                batch=B,
+                num_heads=H,
+                seq_q=Sq,
+                seq_kv=Skv,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                num_cu=num_cu,
+            )
+            exe(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                out,
+                stream=launch_stream,
+            )
+            return out
+        elif splitk:
+            exe = _build_splitk(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                num_kv_splits=int(num_kv_splits),
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                enable_stagger=dualwave_swp_enable_stagger,
+                return_lse=return_lse,
+                has_bias=has_bias,
+                has_alibi=has_alibi,
+                has_sink=has_sink,
+            )
+        else:
             can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
             if debug_lazy and not can_dualwave:
                 raise NotImplementedError("flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path")

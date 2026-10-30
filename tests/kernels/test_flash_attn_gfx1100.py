@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -43,6 +44,8 @@ if torch is None or not torch.cuda.is_available():
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 import kernels.attention.flash_attn_interface as flash_attn_interface  # noqa: E402
+from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module  # noqa: E402
+from kernels.attention.flash_attn_gfx1100_autotune import pick_tile  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 
 
@@ -181,6 +184,19 @@ def _make_inputs(
     k = _as_dtype(k, torch_dtype)
     v = _as_dtype(v, torch_dtype)
     return AttentionInput(q=q, k=k, v=v)
+
+
+def _cpu_placeholder(shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor:
+    base_shape = [1] * (len(shape) - 1) + [shape[-1]]
+    base = torch.empty(base_shape, dtype=dtype, device="cpu")
+    return base.expand(shape)
+
+
+def _factor_batch_heads(bh: int) -> tuple[int, int]:
+    for heads in (64, 32, 16, 8, 4, 2, 1):
+        if bh % heads == 0:
+            return bh // heads, heads
+    return bh, 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -673,7 +689,12 @@ def test_gfx1100_rejects_bias():
         dtype=torch.float16,
         device=device,
     )
-    bias = torch.randn(inputs.q.shape[1], inputs.k.shape[1], dtype=inputs.q.dtype, device=device)
+    bias = torch.randn(
+        inputs.q.shape[1],
+        inputs.k.shape[1],
+        dtype=inputs.q.dtype,
+        device=device,
+    )
     with pytest.raises(NotImplementedError, match="attention bias"):
         flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, bias=bias)
 
@@ -742,6 +763,204 @@ def test_gfx1100_rejects_split_k():
     )
     with pytest.raises(NotImplementedError, match="split-K"):
         flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, num_kv_splits=2)
+
+
+def test_pick_tile_respects_device_cu_count():
+    tile_96 = pick_tile(64, 16, True, 360, num_cu=96)
+    tile_84 = pick_tile(64, 16, True, 360, num_cu=84)
+    assert tile_96 != tile_84
+
+
+def test_select_tile_autotunes_when_enabled(monkeypatch):
+    import kernels.attention.flash_attn_gfx1100_autotune as autotune
+
+    original_tiles = autotune.feasible_tiles(64)[:2]
+    assert len(original_tiles) >= 2, "expected multiple feasible tiles for head_dim=64"
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setattr(autotune, "feasible_tiles", lambda head_dim: list(original_tiles))
+
+    launch_records: list[tuple[int, int, int, int, bool]] = []
+
+    def fake_build(tile):
+        def _launcher(q, k, v, out):
+            launch_records.append(tile)
+
+        return _launcher
+
+    def fake_bench(fn, warmup, rep):
+        fn()
+        # Return a monotonically decreasing value so later candidates win.
+        return 1.0 / float(len(launch_records))
+
+    monkeypatch.setattr(autotune, "do_bench", fake_bench)
+
+    chosen = autotune.select_tile(
+        batch=1,
+        num_heads=4,
+        seq_q=128,
+        seq_kv=128,
+        head_dim=64,
+        dtype_str="f16",
+        causal=False,
+        num_cu=96,
+        build_kernel=fake_build,
+    )
+
+    assert launch_records, "autotune path should invoke the builder"
+    assert len(launch_records) == len(original_tiles)
+    assert chosen == original_tiles[len(original_tiles) - 1]
+
+
+def _gfx1100_tile_samples() -> dict[tuple[int, tuple[int, int, int, int, bool]], tuple[int, bool, int]]:
+    seq_candidates = [1, 16, 32, 63, 64, 96, 128, 256, 512, 1024, 4096, 8192, 24576, 32768]
+    bh_base = [1, 4, 16, 32]
+    tiles: dict[tuple[int, tuple[int, int, int, int, bool]], tuple[int, bool, int]] = {}
+    for head_dim in (64, 128, 256):
+        for seq_q in seq_candidates:
+            for causal in (False, True):
+                bh_values = list(bh_base)
+                if seq_q <= 16:
+                    bh_values.append(384)
+                for bh in bh_values:
+                    tile = pick_tile(head_dim, seq_q, causal, bh, num_cu=96)
+                    key = (head_dim, tile)
+                    if key not in tiles:
+                        tiles[key] = (seq_q, causal, bh)
+    return tiles
+
+
+def _compile_tile_ir(head_dim: int, seq_q: int, causal: bool, bh: int) -> str:
+    batch, num_heads = _factor_batch_heads(bh)
+    seq_kv = seq_q if not causal else max(seq_q, 64)
+    launcher = build_flash_attn_func_module(
+        batch=batch,
+        num_heads=num_heads,
+        seq_q=seq_q,
+        seq_kv=seq_kv,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str="f16",
+        num_cu=96,
+    )
+    shape_q = (batch, seq_q, num_heads, head_dim)
+    shape_kv = (batch, seq_kv, num_heads, head_dim)
+    q = _cpu_placeholder(shape_q, torch.float16)
+    k = _cpu_placeholder(shape_kv, torch.float16)
+    v = _cpu_placeholder(shape_kv, torch.float16)
+    out = _cpu_placeholder(shape_q, torch.float16)
+    call_cache = getattr(launcher, "_call_state_cache", None)
+    if call_cache is not None:
+        call_cache.clear()
+    mem_cache = getattr(launcher, "_mem_cache", None)
+    if mem_cache is not None:
+        mem_cache.clear()
+    prev_last = getattr(launcher, "_last_compiled", None)
+    launcher._last_compiled = None  # type: ignore[attr-defined]
+    prev_cache_flag = os.environ.get("FLYDSL_RUNTIME_ENABLE_CACHE")
+    os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "0"
+    try:
+        launcher._compile_only(q, k, v, out)
+    finally:
+        if prev_cache_flag is None:
+            os.environ.pop("FLYDSL_RUNTIME_ENABLE_CACHE", None)
+        else:
+            os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = prev_cache_flag
+    compiled = getattr(launcher, "_last_compiled", None)
+    if compiled is None and mem_cache:
+        try:
+            compiled = next(iter(mem_cache.items()))
+        except StopIteration:
+            compiled = None
+    if compiled is None:
+        launcher._last_compiled = prev_last  # type: ignore[attr-defined]
+        raise AssertionError("compile_only should record the compiled artifact")
+    launcher._last_compiled = compiled  # type: ignore[attr-defined]
+    return compiled[1].ir
+
+
+def test_gfx1100_tiles_avoid_spills():
+    tiles = _gfx1100_tile_samples()
+    assert tiles, "expected at least one tile sample"
+    for (head_dim, tile), (seq_q, causal, bh) in tiles.items():
+        ir_text = _compile_tile_ir(head_dim, seq_q, causal, bh)
+        spills = [int(val) for val in re.findall(r"vgpr_spill_count\s*=\s*(\d+)", ir_text)]
+        scratch = [int(val) for val in re.findall(r"private_segment_fixed_size\s*=\s*(\d+)", ir_text)]
+        assert spills, f"no vgpr_spill_count metadata found for head_dim={head_dim}, tile={tile}"
+        assert scratch, f"no private_segment_fixed_size metadata found for head_dim={head_dim}, tile={tile}"
+        assert max(spills) == 0, f"VGPR spills detected for head_dim={head_dim}, tile={tile}, spills={spills}"
+        assert max(scratch) == 0, (
+            f"Private segment usage detected for head_dim={head_dim}, tile={tile}, private_segment_fixed_size={scratch}"
+        )
+
+
+def _run_flash_attn_with_override(
+    inputs: AttentionInput,
+    *,
+    causal: bool,
+    override: dict[str, bool] | None,
+) -> torch.Tensor:
+    q = inputs.q
+    device = q.device
+    dtype_str = "bf16" if q.dtype == torch.bfloat16 else "f16"
+    launcher = build_flash_attn_func_module(
+        batch=q.shape[0],
+        num_heads=q.shape[2],
+        seq_q=q.shape[1],
+        seq_kv=inputs.k.shape[1],
+        head_dim=q.shape[3],
+        causal=causal,
+        dtype_str=dtype_str,
+        num_cu=96,
+        _override_flags=override,
+    )
+    out = torch.empty_like(q, device=device)
+    launcher(q, inputs.k, inputs.v, out)
+    torch.cuda.synchronize()
+    return out
+
+
+def test_use_perm_p_switch_is_bit_exact():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=128,
+        seq_kv=128,
+        head_dim=128,
+        dtype=torch.float16,
+        device=device,
+    )
+    out_perm = _run_flash_attn_with_override(inputs, causal=False, override={"use_perm_p": True})
+    out_no_perm = _run_flash_attn_with_override(inputs, causal=False, override={"use_perm_p": False})
+    torch.testing.assert_close(out_perm, out_no_perm, rtol=0.0, atol=0.0)
+
+
+def test_use_vector_store_switch_is_bit_exact():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=128,
+        seq_kv=128,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    base_override = {"use_perm_p": True}
+    out_vector = _run_flash_attn_with_override(
+        inputs,
+        causal=False,
+        override={**base_override, "use_vector_store": True},
+    )
+    out_scalar = _run_flash_attn_with_override(
+        inputs,
+        causal=False,
+        override={**base_override, "use_vector_store": False},
+    )
+    torch.testing.assert_close(out_vector, out_scalar, rtol=0.0, atol=0.0)
 
 
 def test_dense_matrix_accuracy():

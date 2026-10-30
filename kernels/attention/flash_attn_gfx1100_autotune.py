@@ -8,20 +8,34 @@
   * ``pick_tile`` — compile-time heuristic from measured shapes. No GPU run.
   * ``feasible_tiles`` — tiles that divide the problem and fit in LDS. A search
     should stay inside this list; anything else fails to build.
+  * ``select_tile`` — drop-in replacement that benchmarks ``feasible_tiles``
+    when ``FLYDSL_AUTOTUNE`` is enabled and a builder callback is provided.
 """
+
+import os
+
+try:  # pragma: no cover - exercised in GPU tests
+    import torch
+except ImportError:  # pragma: no cover - CPU-only environment
+    torch = None
+
+from flydsl.autotune import do_bench
 
 WMMA_M = WMMA_K = 16
 WAVE_SIZE = 32
 LOAD_VEC = 8
 LDS_PAD = 8
 LDS_CAPACITY = 65536
-NUM_CU = 96
 
 # (num_waves, q_tiles, block_n, vt_rows, k_from_gmem)
 _WAVES = (1, 2, 4, 8)
 _Q_TILES = (1, 2)
 _BLOCK_N = (32, 64)
 _VT_ROWS = (4, 8)
+
+_AUTOTUNE_SENTINEL = {"1", "true", "yes", "on"}
+_TUNED_TILES: dict[tuple, tuple] = {}
+_MAX_TUNE_ELEMENTS = 32_000_000
 
 
 def tile_fits(head_dim, tile):
@@ -64,15 +78,15 @@ def feasible_tiles(head_dim):
     return tiles
 
 
-def pick_tile(head_dim, seq_q, causal, bh):
+def pick_tile(head_dim, seq_q, causal, bh, *, num_cu):
     """Return ``(num_waves, q_tiles, block_n, vt_rows, k_from_gmem)``."""
     if seq_q <= WMMA_M:
         if head_dim == 64:
-            block_n = 32 if bh >= 4 * NUM_CU else 64
+            block_n = 32 if bh >= 4 * num_cu else 64
             return 1, 1, block_n, 8, True
         return 4, 1, 32, 8, False
 
-    long_prefill = bh * ((seq_q + 127) // 128) >= 4 * NUM_CU
+    long_prefill = bh * ((seq_q + 127) // 128) >= 4 * num_cu
     if head_dim == 256:
         return 8, 1, 32, 8, False
     if not long_prefill:
@@ -95,7 +109,123 @@ def pick_tile(head_dim, seq_q, causal, bh):
     if not causal and bh <= 16:
         return 8, 1, 64, 8, False
     if not causal and seq_q >= 24576:
-        return 8, 2, 32, 8, False
+        return 8, 1, 64, 8, False
     if causal and seq_q >= 65536:
-        return 8, 2, 32, 8, False
+        return 8, 1, 64, 8, False
     return 8, 1, 64, 8, False
+
+
+def _autotune_enabled() -> bool:
+    return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in _AUTOTUNE_SENTINEL
+
+
+def _dtype_from_str(dtype_str: str):
+    if torch is None:
+        return None
+    if dtype_str == "f16":
+        return torch.float16
+    if dtype_str == "bf16":
+        return torch.bfloat16
+    return None
+
+
+def select_tile(
+    *,
+    batch: int,
+    num_heads: int,
+    seq_q: int,
+    seq_kv: int,
+    head_dim: int,
+    dtype_str: str,
+    causal: bool,
+    num_cu: int,
+    build_kernel=None,
+):
+    """Pick a tile, optionally benchmarking the feasible set when tuning is on."""
+
+    bh = batch * num_heads
+    default = pick_tile(head_dim, seq_q, causal, bh, num_cu=num_cu)
+    if (
+        not _autotune_enabled()
+        or build_kernel is None
+        or torch is None
+        or not torch.cuda.is_available()
+    ):
+        return default
+
+    total_elems = batch * num_heads * head_dim * (seq_q + seq_kv)
+    if total_elems > _MAX_TUNE_ELEMENTS:
+        return default
+
+    key = (head_dim, seq_q, seq_kv, causal, bh, dtype_str, int(num_cu))
+    cached = _TUNED_TILES.get(key)
+    if cached is not None:
+        return cached
+
+    candidates = feasible_tiles(head_dim)
+    if not candidates:
+        tile = default
+    else:
+        tile = _tune_tile(
+            batch=batch,
+            num_heads=num_heads,
+            seq_q=seq_q,
+            seq_kv=seq_kv,
+            head_dim=head_dim,
+            causal=causal,
+            dtype_str=dtype_str,
+            num_cu=num_cu,
+            candidates=candidates,
+            build_kernel=build_kernel,
+        )
+    _TUNED_TILES[key] = tile
+    return tile
+
+
+def _tune_tile(
+    *,
+    batch: int,
+    num_heads: int,
+    seq_q: int,
+    seq_kv: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    num_cu: int,
+    candidates: list[tuple[int, int, int, int, bool]],
+    build_kernel,
+):
+    dtype = _dtype_from_str(dtype_str)
+    if dtype is None:
+        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu)
+
+    device = torch.device("cuda")
+    q = torch.randn(batch, seq_q, num_heads, head_dim, dtype=dtype, device=device)
+    k = torch.randn(batch, seq_kv, num_heads, head_dim, dtype=dtype, device=device)
+    v = torch.randn(batch, seq_kv, num_heads, head_dim, dtype=dtype, device=device)
+    out = torch.empty_like(q)
+
+    best_tile = None
+    best_time = None
+    for tile in candidates:
+        try:
+            launcher = build_kernel(tile)
+        except Exception:
+            continue
+
+        def _call():
+            launcher(q, k, v, out)
+
+        try:
+            timing = do_bench(_call, warmup=2, rep=6)  # pragma: no cover - GPU timing dependent
+        except Exception:
+            continue
+
+        if best_time is None or timing < best_time:
+            best_time = timing
+            best_tile = tile
+
+    torch.cuda.synchronize()
+    if best_tile is None:
+        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu)
+    return best_tile
