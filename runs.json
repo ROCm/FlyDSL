@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T02:47:42Z",
+ "updated": "2026-10-30T03:20:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813",
    "created_at": "2026-10-30T02:42:47Z",
-   "updated_at": "2026-10-30T02:45:23Z",
+   "updated_at": "2026-10-30T03:03:11Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T03:03:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488218"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-30T03:07:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488243"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-30T03:03:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488327"
+    }
+   ]
   },
   {
    "run_id": 40993051888,
@@ -854,20 +882,20 @@
    "branch": "jli/gpu-asan",
    "event": "pull_request",
    "title": "[WIP][feat] support gpu asan feature ",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348",
    "created_at": "2026-10-29T02:30:40Z",
-   "updated_at": "2026-10-30T02:37:26Z",
+   "updated_at": "2026-10-30T03:18:53Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-30T02:37:25Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T03:18:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348/job/123852347455"
     },
     {
