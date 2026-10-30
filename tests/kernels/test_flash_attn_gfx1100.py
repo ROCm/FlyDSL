@@ -42,6 +42,7 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping gfx1100 tests.", allow_module_level=True)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+import kernels.attention.flash_attn_interface as flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 
 
@@ -570,6 +571,41 @@ def test_guard_buffer_clean():
     payload = json.loads(res.stdout or "{}")
     assert payload.get("raised") == "ValueError", payload
     assert payload["guard_clean"], payload
+
+
+def test_out_device_mismatch():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=2,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    out_cpu = torch.empty_like(inputs.q, device="cpu")
+    with pytest.raises(ValueError, match="must be a CUDA tensor"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, out=out_cpu, causal=False)
+
+
+def test_int32_slice_guard(monkeypatch: pytest.MonkeyPatch):
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=1,
+        seq_q=1,
+        seq_kv=1,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    out = torch.empty_like(inputs.q)
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", 8)
+    with pytest.raises(ValueError, match="per-batch slice must contain fewer than"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, out=out, causal=False)
 
 
 def test_dense_matrix_accuracy():

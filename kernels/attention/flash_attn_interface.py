@@ -1553,12 +1553,39 @@ def flydsl_flash_attn_func(
             ):
                 if out is None:
                     out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
-                elif out.dtype != q.dtype:
+                else:
+                    expected_shape = tuple(q.shape)
+                    if tuple(out.shape) != expected_shape:
+                        raise ValueError(
+                            f"flydsl_flash_attn_func: out must be {expected_shape}, got {tuple(out.shape)}"
+                        )
+                    if not out.is_cuda or out.device != q.device:
+                        raise ValueError(
+                            f"flydsl_flash_attn_func: out must be a CUDA tensor on {q.device}, got {out.device}"
+                        )
+                    if out.dtype != q.dtype:
+                        raise ValueError(
+                            f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}"
+                        )
+                    if not out.is_contiguous():
+                        raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
+                # Guard the 32-bit ABI: each batch slice must stay below 2**31 elements.
+                def _slice_elems(tensor: torch.Tensor) -> int:
+                    elems = tensor.numel()
+                    return 0 if tensor.shape[0] == 0 else elems // tensor.shape[0]
+
+                max_slice = max(
+                    _slice_elems(q),
+                    _slice_elems(k),
+                    _slice_elems(v),
+                    _slice_elems(out),
+                )
+                if max_slice >= _FP8_MAX_FLAT_ELEMS:
                     raise ValueError(
-                        f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}"
+                        "flydsl_flash_attn_func: gfx1100 per-batch slice must contain fewer than "
+                        f"{_FP8_MAX_FLAT_ELEMS} elements; got q={_slice_elems(q)}, "
+                        f"k={_slice_elems(k)}, v={_slice_elems(v)}, out={_slice_elems(out)}"
                     )
-                elif not out.is_contiguous():
-                    raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
                 exe = _build_dense_gfx1100(
                     batch=B,
                     num_heads=H,
