@@ -108,9 +108,9 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
             weight = fx.ptr_load(
                 lds_typed_ptr(fx.Int32(lds_weight_off) + row_byte_off, T.f32, align=4)
             )
-        p = rocdl.readfirstlane(T.i32, p.ir_value())
+        p = rocdl.readfirstlane(T.i32, p)
         if const_expr(not g2_bf16_lds):
-            weight = rocdl.readfirstlane(T.f32, weight.ir_value())
+            weight = rocdl.readfirstlane(T.f32, weight)
         t = p & fx.Int32(0x00FFFFFF)
         if const_expr(topk <= 8):
             # Preserve the established DSV4-Pro instruction sequence.
@@ -129,7 +129,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, n_block_idx, wave, lane, *, N_OUT, BM
                 align=8,
             )
         )
-        peer_base = rocdl.readfirstlane(T.i64, peer_base.ir_value())
+        peer_base = rocdl.readfirstlane(T.i64, peer_base)
         slot = dest_lid * fx.Int32(topk) + s
         row_base = slot * fx.Int32(token_nbytes)
         row_off = row_base + n_block_idx * fx.Int32(BN * out_elem_bytes)
