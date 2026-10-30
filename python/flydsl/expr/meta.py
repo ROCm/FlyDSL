@@ -54,6 +54,43 @@ def _stack():
     return s
 
 
+def _source_path_and_positions(code) -> tuple:
+    """Absolute source path and co_positions() of *code*, cached per thread while a tracing scope is open."""
+    cache = getattr(_tls, "source_position_cache", None)
+
+    # Keyed by id, since code objects from different files can compare equal.
+    entry = cache.get(id(code)) if cache is not None else None
+    if entry is not None:
+        return entry[1], entry[2]
+
+    file = inspect.getsourcefile(code) or inspect.getfile(code)
+    source_path = os.path.abspath(file)
+    positions = tuple(code.co_positions()) if hasattr(code, "co_positions") else ()
+
+    if cache is not None:
+        # code is part of cache value to keep it alive
+        cache[id(code)] = (code, source_path, positions)
+
+    return source_path, positions
+
+
+def _frame_position(frame) -> tuple:
+    """Source path, line and column of *frame*'s current instruction, as inspect.getframeinfo reports them."""
+    path, positions = _source_path_and_positions(frame.f_code)
+
+    line = None
+    col = None
+    # co_positions() has one (line, end_line, col, end_col) entry per 2-byte code unit; Python 3.10 has none.
+    if positions and frame.f_lasti >= 0:
+        line, _, col, _ = positions[frame.f_lasti // 2]
+
+    return (
+        path,
+        frame.f_lineno if line is None else line,
+        0 if col is None else col,
+    )
+
+
 @contextlib.contextmanager
 def tracing_context(func=None, **options):
     """Push a tracing frame for the duration of the ``with`` block.
@@ -65,6 +102,8 @@ def tracing_context(func=None, **options):
     -- an explicit ``None`` shadows an enclosing setting.
     """
     stack = _stack()
+    if not stack:
+        _tls.source_position_cache = {}
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
         boundary = stack[-1][0]
@@ -75,6 +114,8 @@ def tracing_context(func=None, **options):
         stack = _stack()
         if stack:
             stack.pop()
+        if not stack:
+            _tls.source_position_cache = None
 
 
 def tracing_option(key, default=None):
@@ -117,13 +158,8 @@ def capture_user_location() -> ir.Location:
             if not _is_framework_file(code.co_filename):
                 keep = len(locs) < max_depth
                 if keep or is_boundary:
-                    info = inspect.getframeinfo(frame, context=0)
-                    # ``Traceback.positions`` only exists on Python 3.11+; fall
-                    # back to ``f_lineno`` / col 0 on 3.8-3.10.
-                    pos = getattr(info, "positions", None)
-                    line = pos.lineno if pos is not None and pos.lineno is not None else frame.f_lineno
-                    col = pos.col_offset if pos is not None and pos.col_offset is not None else 0
-                    floc = file_location(info.filename, line, col, context=ctx)
+                    path, line, col = _frame_position(frame)
+                    floc = ir.Location.file(path, line, col, context=ctx)
                     if keep:
                         locs.append(floc)
                     else:
