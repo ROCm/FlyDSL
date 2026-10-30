@@ -27,6 +27,16 @@
         "file": "amdgpu-improve-unclaused-vmem-sequence.patch",
         "description": "Improve the sequence for initial unclaused VMEM on AMDGPU.",
         "upstream_status": "merged into upstream: 739eaa08d45e5f6e5d13b1dd82daf0e5dc27e344"
+      },
+      {
+        "file": "codegen-avoid-regpressure-underflow.patch",
+        "description": "Avoid register pressure limit underflow when the reserved-register weight meets or exceeds the target-provided limit.",
+        "upstream_status": "merged into upstream: 1d7d16b94c614a1ce2ce90bb19edd1e71115f999"
+      },
+      {
+        "file": "gfx1250-strict.patch",
+        "description": "Define gfx1250-strict on this pin and hand-port the functional follow-ups: clause scope breaks, cluster-load M0=0, 64 LDS banks, unscaled f8f6f4 WMMA promotion, WMMA latencies, drop gfx1200 SWMMAC, and disable f4 WMMA, block16 cvt-scale, e5m3, and 16x16x128 FP8 WMMA on strict. Also model the VOPD3 FP64 OPY hazard and reserve ENABLE_WAVEFRONT_SIZE32 on wave32-only targets. Adapted because those commits do not apply directly.",
+        "upstream_status": "adapted from 5186287a19f3, 38f92fc6402c, 47ec1193ee72, 97c6103e88df, e74db4f0738e, d3db06999955, 816b4c13bd85, 4bd5979264ba, abb5ab28610f, 6fb8776580a4, a2c07d5107f1, c0a1a2cfa399, 659323446eff, a1c90088f87a"
       }
     ],
     "extensions": []
