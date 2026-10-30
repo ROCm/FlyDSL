@@ -288,7 +288,8 @@ def run_rank(
             ok &= same
             report.append(("cp_replay", 0.0, 0.0, f"bitwise_equal={same}"))
         if rank == 0 or not ok:
-            lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={torch.equal(got['sel'], moe['sel'])}"]
+            route_check = str(torch.equal(got["sel"], moe["sel"])) if S > 1 else "checked via mid/output"
+            lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={route_check}"]
             lines += [f"   {n:9s} max_err={e:.3e} ref_max={m:.3e} {nb}" for n, e, m, nb in report]
             print("\n".join(lines), flush=True)
     op.close()
