@@ -156,6 +156,7 @@ def _make_inputs(
     head_dim: int,
     dtype: torch.dtype,
     *,
+    num_kv_heads: int | None = None,
     v_kind: Literal["random", "ones"] = "random",
     layout: Literal["bshd"] = "bshd",
     device: torch.device | None = None,
@@ -166,13 +167,16 @@ def _make_inputs(
     if device is None:
         device = torch.device("cuda")
 
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+
     torch_dtype = dtype
     q = torch.randn(batch, seq_q, num_heads, head_dim, dtype=torch.float64, device=device)
-    k = torch.randn(batch, seq_kv, num_heads, head_dim, dtype=torch.float64, device=device)
+    k = torch.randn(batch, seq_kv, num_kv_heads, head_dim, dtype=torch.float64, device=device)
     if v_kind == "ones":
-        v = torch.ones(batch, seq_kv, num_heads, head_dim, dtype=torch.float64, device=device)
+        v = torch.ones(batch, seq_kv, num_kv_heads, head_dim, dtype=torch.float64, device=device)
     else:
-        v = torch.randn(batch, seq_kv, num_heads, head_dim, dtype=torch.float64, device=device)
+        v = torch.randn(batch, seq_kv, num_kv_heads, head_dim, dtype=torch.float64, device=device)
     q = _as_dtype(q, torch_dtype)
     k = _as_dtype(k, torch_dtype)
     v = _as_dtype(v, torch_dtype)
@@ -606,6 +610,138 @@ def test_int32_slice_guard(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", 8)
     with pytest.raises(ValueError, match="per-batch slice must contain fewer than"):
         flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, out=out, causal=False)
+
+
+def test_gfx1100_rejects_gqa():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=8,
+        num_kv_heads=2,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    with pytest.raises(NotImplementedError, match="GQA/MQA"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, num_kv_heads=2)
+
+
+def test_gfx1100_rejects_cross_seq_above_16():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=96,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    with pytest.raises(NotImplementedError, match="seq_q=32"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False)
+
+
+def test_gfx1100_rejects_unsupported_head_dim():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=96,
+        dtype=torch.float16,
+        device=device,
+    )
+    with pytest.raises(NotImplementedError, match="head_dim 96"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False)
+
+
+def test_gfx1100_rejects_bias():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    bias = torch.randn(inputs.q.shape[1], inputs.k.shape[1], dtype=inputs.q.dtype, device=device)
+    with pytest.raises(NotImplementedError, match="attention bias"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, bias=bias)
+
+
+def test_gfx1100_rejects_alibi():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    alibi = torch.randn(inputs.q.shape[0], inputs.q.shape[2], dtype=torch.float32, device=device)
+    with pytest.raises(NotImplementedError, match="ALiBi"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, alibi_slopes=alibi)
+
+
+def test_gfx1100_rejects_sink():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    sink = torch.randn(inputs.q.shape[2], dtype=torch.float32, device=device)
+    with pytest.raises(NotImplementedError, match="sink"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, sink=sink)
+
+
+def test_gfx1100_rejects_return_lse():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=32,
+        seq_kv=32,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    with pytest.raises(NotImplementedError, match="return_lse"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, return_lse=True)
+
+
+def test_gfx1100_rejects_split_k():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    inputs = _make_inputs(
+        batch=1,
+        num_heads=4,
+        seq_q=512,
+        seq_kv=512,
+        head_dim=64,
+        dtype=torch.float16,
+        device=device,
+    )
+    with pytest.raises(NotImplementedError, match="split-K"):
+        flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, num_kv_splits=2)
 
 
 def test_dense_matrix_accuracy():

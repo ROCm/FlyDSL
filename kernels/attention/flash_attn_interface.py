@@ -1540,17 +1540,38 @@ def flydsl_flash_attn_func(
             _arch = _gpu_arch(q.device)
             if (
                 _arch.startswith("gfx1100")
-                and D in (64, 128, 256)
                 and dtype_str in ("bf16", "f16")
-                and num_kv_heads == H
-                and not splitk
                 and not debug_lazy
-                and not has_bias
-                and not has_alibi
-                and not has_sink
-                and not return_lse
-                and (not cross or Sq <= 16)
             ):
+                _supported = (
+                    "supported: MHA, head_dim 64/128/256, bf16/f16, cross-attention seq_q<=16, "
+                    "no bias/alibi/sink, return_lse=False, split-K disabled"
+                )
+
+                def _unsupported(feature: str) -> None:
+                    raise NotImplementedError(
+                        f"flydsl_flash_attn_func on gfx1100: {feature} is not supported ({_supported})"
+                    )
+
+                if num_kv_heads != H:
+                    if num_kv_heads == 1:
+                        _unsupported(f"MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
+                    else:
+                        _unsupported(f"GQA/MQA (num_kv_heads={num_kv_heads}, num_heads={H})")
+                if D not in (64, 128, 256):
+                    _unsupported(f"head_dim {D}")
+                if splitk:
+                    _unsupported(f"split-K num_kv_splits={int(num_kv_splits)}")
+                if return_lse:
+                    _unsupported("return_lse")
+                if has_bias:
+                    _unsupported("attention bias")
+                if has_alibi:
+                    _unsupported("ALiBi slopes")
+                if has_sink:
+                    _unsupported("attention sink")
+                if cross and Sq > 16:
+                    _unsupported(f"cross-attention with seq_q={Sq} (>16)")
                 if out is None:
                     out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
                 else:
