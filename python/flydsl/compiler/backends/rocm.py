@@ -1,11 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import functools
+import logging
+import os
+from pathlib import Path
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
+
+log = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _rocdl_has_arch_option() -> bool:
+    """Return True if rocdl-attach-target supports the ``arch`` option (newer LLVM)."""
+    try:
+        from ..._mlir import ir
+        from ..._mlir.passmanager import PassManager
+
+        with ir.Context():
+            PassManager.parse("builtin.module(rocdl-attach-target{arch=gfx942})")
+        return True
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _rocdl_has_wavesize_option() -> bool:
+    """Return True if rocdl-attach-target uses ``wavesize`` instead of ``wave64``."""
+    try:
+        from ..._mlir import ir
+        from ..._mlir.passmanager import PassManager
+
+        with ir.Context():
+            PassManager.parse("builtin.module(rocdl-attach-target{wavesize=64})")
+        return True
+    except Exception:
+        return False
+
+
+def _rocdl_wave_option(warp_size: int) -> dict:
+    """Return the wave-size option dict for rocdl-attach-target.
+
+    Newer LLVM uses ``wavesize=<int>``, older uses ``wave64=<bool>``.
+    """
+    if _rocdl_has_wavesize_option():
+        return {"wavesize": warp_size}
+    return {"wave64": "true" if warp_size == 64 else "false"}
 
 
 def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
@@ -66,6 +110,18 @@ class RocmBackend(BaseBackend):
         # routed through it.
         bin_cli_opts = []
 
+        asan_enabled = env.compile.enable_asan
+
+        if asan_enabled and os.environ.get("HSA_XNACK") != "1":
+            log.warning(
+                "FLYDSL_COMPILE_ENABLE_ASAN=1 but HSA_XNACK is not set to 1. "
+                "The compiled kernel requires xnack+ mode at runtime. "
+                "Set HSA_XNACK=1 and HSA_DISABLE_FRAGMENT_ALLOCATOR=1."
+            )
+
+        warp_size = get_warp_size(chip)
+        wave_opt = _rocdl_wave_option(warp_size)
+
         rocdl_opts = {
             "O": 2,
             "abi": 600,
@@ -78,8 +134,10 @@ class RocmBackend(BaseBackend):
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "true" if get_warp_size(chip) == 64 else "false",
+            **wave_opt,
         }
+        if asan_enabled and _rocdl_has_arch_option():
+            rocdl_opts["arch"] = f"{chip}:xnack+"
 
         ktrace_fragments = []
         if _ktrace_tracing_enabled(compile_hints):
@@ -127,6 +185,12 @@ class RocmBackend(BaseBackend):
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         return self._pipeline_parts(compile_hints=compile_hints)
 
+    def asan_link_libs(self) -> List[str]:
+        """Return device bitcode paths needed for GPU ASAN, or empty if disabled."""
+        if not env.compile.enable_asan:
+            return []
+        return _get_asan_bitcode_paths(self.target.arch)
+
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
         if compile_hints.get("maxnreg") is not None:
@@ -141,25 +205,26 @@ class RocmBackend(BaseBackend):
             )
 
         waves_per_eu = compile_hints.get("waves_per_eu")
-        if waves_per_eu is None:
-            return
+        if waves_per_eu is not None:
+            wpe_str = _normalize_waves_per_eu(waves_per_eu)
+            if wpe_str is not None:
+                with module.context:
+                    from ..._mlir import ir as _ir
 
-        wpe_str = _normalize_waves_per_eu(waves_per_eu)
-        if wpe_str is None:
-            return
+                    wpe_attr = _ir.StringAttr.get(wpe_str)
+                    for func_op in _iter_gpu_kernel_funcs(module):
+                        func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
-        with module.context:
-            from ..._mlir import ir as _ir
-
-            wpe_attr = _ir.StringAttr.get(wpe_str)
-            for func_op in _iter_gpu_kernel_funcs(module):
-                func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
+        if env.compile.enable_asan:
+            with module.context:
+                for func_op in _iter_gpu_kernel_funcs(module):
+                    _add_passthrough_flag(func_op, "sanitize_address")
 
     def gpu_module_targets(self) -> List[str]:
         # Intentionally empty: the ROCm pipeline attaches the authoritative
         # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
         # which carries the compile options (O, abi, fast/unsafe-math,
-        # wave64, link_libs). Attaching a bare target here as well made
+        # wavesize, link_libs). Attaching a bare target here as well made
         # gpu-module-to-binary serialize one object per target and select the
         # *bare* one (first object, no offloading handler) — doubling backend
         # work and silently discarding compile options and link_libs
@@ -265,3 +330,79 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
     existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
     kept = [entry for entry in existing if _entry_key(entry) != key] if existing is not None else []
     func_op.attributes["passthrough"] = ir.ArrayAttr.get([*kept, new_entry])
+
+
+def _add_passthrough_flag(func_op, name: str) -> None:
+    """Append a bare boolean LLVM attribute (e.g. ``sanitize_address``) to passthrough."""
+    from ..._mlir import ir
+
+    flag = ir.StringAttr.get(name)
+    existing = func_op.attributes.get("passthrough")
+    entries = list(existing) if existing is not None else []
+    for entry in entries:
+        try:
+            if ir.StringAttr(entry).value == name:
+                return
+        except (TypeError, ValueError):
+            pass
+    entries.append(flag)
+    func_op.attributes["passthrough"] = ir.ArrayAttr.get(entries)
+
+
+def _find_rocm_bitcode_dir() -> Path:
+    """Locate the ROCm device bitcode directory."""
+    candidates = []
+    rocm_path = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
+    if rocm_path:
+        candidates.append(Path(rocm_path) / "amdgcn" / "bitcode")
+    candidates.append(Path("/opt/rocm/amdgcn/bitcode"))
+    for p in sorted(Path("/opt").glob("rocm-*/amdgcn/bitcode"), reverse=True):
+        candidates.append(p)
+
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "asanrtl.bc").is_file():
+            return candidate
+    raise FileNotFoundError(
+        "GPU ASAN requires ROCm device bitcode (asanrtl.bc). "
+        "Set ROCM_PATH to a ROCm installation that contains amdgcn/bitcode/asanrtl.bc."
+    )
+
+
+def _get_asan_bitcode_paths(chip: str = "gfx942") -> List[str]:
+    """Return device bitcode paths needed for GPU ASAN.
+
+    Links asanrtl (ASAN runtime), ocml/ockl (math/runtime helpers), and the
+    OCLC control-variable bitcode that asanrtl references (__oclc_ISA_version,
+    __oclc_wavefrontsize64, __oclc_ABI_version).  The OCLC files are
+    arch-specific; when the exact file is missing we fall back to the
+    generic variant (e.g. ``oclc_isa_version_9-4-generic.bc``).
+    """
+    bc_dir = _find_rocm_bitcode_dir()
+    isa_ver = chip.replace("gfx", "")
+    wave64 = get_warp_size(chip) == 64
+
+    def _pick(candidates: List[str]) -> str:
+        for name in candidates:
+            if name and (bc_dir / name).is_file():
+                return name
+        raise FileNotFoundError(
+            f"GPU ASAN: none of {[c for c in candidates if c]} found in {bc_dir}. "
+            f"Check that ROCm device-libs are installed for {chip}."
+        )
+
+    isa_candidates = [f"oclc_isa_version_{isa_ver}.bc"]
+    if len(isa_ver) >= 3:
+        isa_candidates.append(f"oclc_isa_version_{isa_ver[0]}-{isa_ver[1]}-generic.bc")
+    if len(isa_ver) >= 1:
+        isa_candidates.append(f"oclc_isa_version_{isa_ver[0]}-generic.bc")
+    isa_lib = _pick(isa_candidates)
+    wave_lib = "oclc_wavefrontsize64_on.bc" if wave64 else "oclc_wavefrontsize64_off.bc"
+
+    libs = ["asanrtl.bc", "ocml.bc", "ockl.bc", isa_lib, wave_lib, "oclc_abi_version_600.bc"]
+    paths = []
+    for lib in libs:
+        p = bc_dir / lib
+        if not p.is_file():
+            raise FileNotFoundError(f"GPU ASAN device library not found: {p}")
+        paths.append(str(p))
+    return paths

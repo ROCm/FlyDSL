@@ -138,6 +138,7 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_OPT_LEVEL",
     "FLYDSL_COMPILE_BACKEND",
     "FLYDSL_COMPILE_LLVM_DIR",
+    "FLYDSL_COMPILE_ENABLE_ASAN",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
     "FLYDSL_KTRACE_ENABLE",
@@ -835,6 +836,10 @@ class MlirCompiler:
         binary_fragment = cfg.binary_fragment
         llvm_opts = cfg.llvm_opts
         external_binary = cfg.external
+
+        asan_libs = backend.asan_link_libs() if hasattr(backend, "asan_link_libs") else []
+        if asan_libs:
+            link_libs = (link_libs or []) + asan_libs
 
         if external_binary and link_libs:
             raise RuntimeError(
