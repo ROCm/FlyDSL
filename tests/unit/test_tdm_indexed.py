@@ -23,12 +23,14 @@ pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 # TDM is gfx1250-only. Everything here is decided while tracing, so building without
 # a device is enough; on any other card the kernels still have to be compiled for
 # gfx1250, which is what COMPILE_ONLY allows.
+# A rejected configuration is rejected while tracing, before anything is compiled, so
+# those cases run anywhere. A configuration that is accepted goes on to be compiled for
+# gfx1250, which needs either that card or COMPILE_ONLY -- on another card the TDM
+# instructions reach a backend that has none and it aborts rather than diagnosing.
 _arch = get_rocm_arch() or ""
-pytestmark.append(
-    pytest.mark.skipif(
-        not _arch.startswith("gfx1250") and os.environ.get("COMPILE_ONLY", "") in ("", "0"),
-        reason=f"requires gfx1250 or COMPILE_ONLY, got {_arch}",
-    )
+_needs_target = pytest.mark.skipif(
+    not _arch.startswith("gfx1250") and os.environ.get("COMPILE_ONLY", "") in ("", "0"),
+    reason=f"compiling an accepted indexed atom needs gfx1250 or COMPILE_ONLY, got {_arch}",
 )
 
 WIDTH = 128
@@ -62,11 +64,13 @@ def _build(rows, width=WIDTH, index_bits=32, tiler=None, index_dtype=torch.int32
     )
 
 
+@_needs_target
 def test_gather_builds():
     """Eight rows at 32-bit indices is the widest a single issue carries."""
     _build(rows=8)
 
 
+@_needs_target
 def test_gather_builds_16bit():
     """Halving the index width doubles the rows one issue can name."""
     _build(rows=16, index_bits=16)
@@ -97,11 +101,16 @@ def test_index_tensor_must_be_i32():
         _build(rows=8, index_dtype=torch.int16)
 
 
-def test_row_must_span_whole_dwords():
-    """A 2-element f16 row is 4 bytes; a 1-element row is 2 and cannot be encoded."""
-    _build(rows=8, width=2)
+def test_row_shorter_than_a_dword_is_rejected():
+    """A 1-element f16 row is 2 bytes, which the descriptor cannot encode."""
     with pytest.raises(Exception, match="whole multiple of 4 bytes"):
         _build(rows=8, width=1)
+
+
+@_needs_target
+def test_row_of_exactly_one_dword_builds():
+    """Two f16 elements are 4 bytes, the narrowest row there is."""
+    _build(rows=8, width=2)
 
 
 def test_partition_rejects_a_malformed_pair():
