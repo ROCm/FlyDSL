@@ -679,8 +679,11 @@ class CompositeMeta(type):
     def __getitem__(cls, params):
         fields = _normalize_inline_fields(params, cls._display)
         display_name = _inline_display_name(cls._display, params, fields)
+        # The name ends up in JIT cache keys, so it must be the same in every process and differ per layout.
+        field_keys = tuple((field.name, _field_type_signature(field.type_spec)) for field in fields)
+        digest = hashlib.sha256(repr((cls._policy.name, field_keys)).encode()).hexdigest()[:16]
         return _make_composite_class(
-            name=f"_Dsl{cls._display}_{abs(hash(_make_type_identity(cls._policy, fields)))}",
+            name=f"_Dsl{cls._display}_{digest}",
             module=__name__,
             fields=fields,
             policy=cls._policy,
