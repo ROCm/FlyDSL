@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T11:33:24Z",
+ "updated": "2026-10-30T12:33:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -242,9 +242,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T07:12:51Z",
+     "started_at": "2026-10-30T12:22:09Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017056670/job/123940792645"
     },
@@ -373,11 +373,11 @@
    "branch": "xyw/mega_moe_merge",
    "event": "pull_request",
    "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215",
    "created_at": "2026-10-30T06:21:08Z",
-   "updated_at": "2026-10-30T06:42:37Z",
+   "updated_at": "2026-10-30T11:42:32Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
@@ -395,10 +395,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T06:42:37Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T11:42:31Z",
+     "completed_at": "2026-10-30T12:05:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013570215/job/123931315544"
     },
     {
@@ -419,11 +419,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236",
    "created_at": "2026-10-30T06:15:35Z",
-   "updated_at": "2026-10-30T06:31:31Z",
+   "updated_at": "2026-10-30T12:24:37Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -450,9 +450,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T06:31:31Z",
+     "started_at": "2026-10-30T12:24:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904180"
     }
