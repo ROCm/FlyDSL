@@ -571,9 +571,9 @@ def preattn(inputs: PreattnInput, outputs: PreattnOutput, ctx: StageContext):
             def ld_qa_one(sks):
                 return ld_qa([(s_norm, k) for _, k in sks])
 
-            # FP4 amplifies a one-ULP normalized query difference into a
-            # different quantized value. Keep this small reduction precise.
-            stage_x_rmsnorm(ld_qa_one, Q_LORA, query_norm_weight, count=1, precise=indexer_quant)
+            # Index scores amplify BF16 query rounding at close top-k boundaries.
+            # Keep the query normalization precise for both index-cache formats.
+            stage_x_rmsnorm(ld_qa_one, Q_LORA, query_norm_weight, count=1, precise=with_indexer)
             gpu.barrier()
             k = tid * 4
             w0 = lds_ld(xs, k // 2)

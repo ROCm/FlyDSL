@@ -56,11 +56,13 @@ def intermediates(self):
         o=self.debug("o", (S, self.output_heads * V_DIM), bf2=True),
         a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
         scores=self.debug("scores", (S, N_EXPERTS)),
-        sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
-        prob=self.debug("prob", (S, MOE_SLOTS)),
         mid=self.debug("mid", (S, MOE_SLOTS, self.W.config.inter)),
         xq=self.debug("xqd", (S, HIDDEN), pairs=False),
     )
+    # S=1 recomputes routing in each consumer and has no route publication.
+    if S > 1:
+        result["sel"] = self.debug("sel", (S, MOE_SLOTS), torch.int32)
+        result["prob"] = self.debug("prob", (S, MOE_SLOTS))
     if self.with_indexer:
         result["index_q"] = self.debug("index_q", (S, 32, INDEX_DIM), bf2=True)
         result["index_w"] = self.debug("index_w", (S, 32))

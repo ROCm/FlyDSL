@@ -1201,8 +1201,6 @@ def attention(inputs: AttentionInput, outputs: AttentionOutput, ctx: StageContex
 
         if const_expr(GLOBAL_UV):
             # Every CTA has finished its merge producers before waiting here.
-            # Timeline columns 6/7 use the first 64 slots/cohort for 192 global
-            # projector tasks; columns0..5 remain the original merge tasks.
             if full_bid < ((total_samples + 15) // 16) * N_UV:
                 uv_task = full_bid
                 uv_first = uv_task // N_UV * 16

@@ -204,15 +204,23 @@ def run_rank(
         # MoE half vs the golden fed the kernel's own post-attention state, so a
         # 1-ulp difference in ``a`` cannot flip FP8 roundings downstream
         moe = golden_moe(W, got["a"].clone(), allreduce)
-        for name in ("scores", "prob", "xq"):
+        for name in ("scores", "xq") + (("prob",) if S > 1 else ()):
             ok &= _check(name, got[name], moe[name], report)
         # up/gate + SiLU from the kernel's own FP8 activation
         ug = golden_moe(W, got["a"].clone(), allreduce, xq=got["xq"].clone())
         ok &= _check("mid", got["mid"], ug["mid"], report)
         # down + route weighting + TP reduce + residual from the kernel's own mid
-        down = golden_moe(W, got["a"].clone(), allreduce, got["mid"].clone(), got["sel"].clone(), got["prob"].clone())
+        down = golden_moe(
+            W,
+            got["a"].clone(),
+            allreduce,
+            got["mid"].clone(),
+            got["sel"].clone() if S > 1 else None,
+            got["prob"].clone() if S > 1 else None,
+        )
         ok &= _check("x_out", got["x_out"], down["x_out"], report)
-        ok &= torch.equal(got["sel"], moe["sel"])
+        if S > 1:
+            ok &= torch.equal(got["sel"], moe["sel"])
         # fully independent golden: only comparable when a 1-ulp difference in ``a``
         # did not flip a near-tied routing decision
         if torch.equal(ref["sel"], moe["sel"]):
@@ -612,7 +620,8 @@ def test_reference_default_dtype():
         torch.set_default_dtype(original)
 
 
-def test_router_preserves_close_scores():
+@pytest.mark.parametrize("samples", [1, 2])
+def test_router_preserves_close_scores(samples):
     """A higher expert score must win even when its lead is below 256 FP32 ULPs."""
     from glm_observer import attach_observer
 
@@ -627,15 +636,25 @@ def test_router_preserves_close_scores():
     W.t["bias"][:7] = 8  # Equal scores: lower expert IDs break the exact tie.
     W.t["bias"][92] = 7
     W.t["bias"][226] = 7 + 9.5367431640625e-5
-    h = torch.ones(1, 6144, dtype=torch.bfloat16, device=dev)
+    h = torch.ones(samples, 6144, dtype=torch.bfloat16, device=dev)
     kv = torch.zeros(MAX_SEQ, KV_LORA, dtype=torch.bfloat16, device=dev)
     pe = torch.zeros(MAX_SEQ, PE_DIM, dtype=torch.bfloat16, device=dev)
-    indices = torch.zeros(1, 2048, dtype=torch.int32, device=dev)
+    indices = torch.zeros(samples, 2048, dtype=torch.int32, device=dev)
     cos, sin = rope_table(MAX_SEQ, device=dev)
-    with Glm5MonoKernel(W, 1) as op:
-        op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
+    with Glm5MonoKernel(W, samples) as op:
+        out = op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
         torch.cuda.synchronize()
-        assert op.intermediates()["sel"].tolist() == [[256, 0, 1, 2, 3, 4, 5, 6, 226]]
+        got = op.intermediates()
+        expected_ids = [[256, 0, 1, 2, 3, 4, 5, 6, 226]] * samples
+        if samples > 1:
+            assert got["sel"].tolist() == expected_ids
+        # S=1 exposes no diagnostic route stores. Verify the chosen experts
+        # through their nonzero gate/up results and weighted final output.
+        expected = golden_moe(W, got["a"].clone(), lambda value: value, xq=got["xq"].clone())
+        assert expected["sel"].tolist() == expected_ids
+        report = []
+        assert _check("mid", got["mid"], expected["mid"], report), report
+        assert _check("x_out", out, expected["x_out"], report), report
 
 
 if __name__ == "__main__":

@@ -159,8 +159,22 @@ proof that a branch is dead.
 Production GLM code has no timeline option, clock writes, stamp/mark helpers or
 timeline buffer allocation/reporting. The indexer pointer-table argument is
 named `index_params` and contains only its seven functional weight pointers.
+The single-row MoE path no longer publishes diagnostic `sel`/`prob` records;
+its consumers recompute routing. Tests check the selected experts through
+nonzero gate/up intermediates and weighted output. Grouped execution retains
+route mailboxes required by global gate/up and cohort-pair down consumers.
 Read-only mailbox observations live in `tests/kernels/glm_observer.py`; test
 fixtures attach those observers without adding device instrumentation.
+
+The launcher accepts device pointers with ATOM GLM/model-op names. Token
+metadata uses `positions`, `slot_mapping`, `sparse_kv_indptr` and `block_tables`;
+`decode_position` is the scalar decode cursor. External sparse keys (`kv_indices`)
+and the fused indexer's persistent `index_cache` are separate inputs. Weights
+use normalization/projection names; absorbed MLA W_K/W_V use `k_proj`/`v_proj`,
+and AITER MoE's `w1`/`w2` represent gate/up and down. Execution state uses
+`workspace`, `peer_buffer`, `peer_ptrs`, `step_counter`, `tp_rank` and `layer_id`.
+The host adapter binds keywords and flattens them at the device boundary shared
+by full and split launches. The public `forward` signature remains compatible.
 
 Run CPU quantization and token-limit checks with:
 

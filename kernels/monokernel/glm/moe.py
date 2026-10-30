@@ -551,12 +551,6 @@ def moe_stage1(inputs: MoeStage1Input, outputs: MoeStage1Output, ctx: StageConte
                         g0 * _rcp(1.0 + _exp(-g0)) * u0,
                         g1 * _rcp(1.0 + _exp(-g1)) * u1,
                     )
-            if (c == 0) & (tid == 0):  # routing record (debug / tests)
-                put(mb(topk_ids_name), slot, e_sel)
-                put(mb(topk_weights_name), slot, lds_ld(misc, 0))
-                if has_sh:
-                    put(mb(topk_ids_name), 0, fx.Int32(SHARED_EXPERT))
-                    put(mb(topk_weights_name), 0, fx.Float32(1.0))
             if const_expr(expert_inter > G):
                 gpu.barrier()
     elif const_expr(S > 1):
