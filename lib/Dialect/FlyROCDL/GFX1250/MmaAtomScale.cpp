@@ -116,15 +116,31 @@ static Attribute scaled32x16LayoutC(MLIRContext *ctx) {
   return FxLayout(FxShape(FxThr(16, 2), FxVal(16)), FxStride(FxThr(16, 16), FxVal(1)));
 }
 
+// gfx1250 block-scaled WMMA A/B layout (CDNA5 ISA 7.12.6.1). The scaled
+// instruction has its own register layouts, separate from plain WMMA.
+// FP4/FP6: each lane group holds 32-wide K chunks.
+//   lanes 0-15: K 0-31, 64-95; lanes 16-31: K 32-63, 96-127
+//   k = (l/16)*32 + v%32 + (v/32)*64
+// Other types (FP8) keep the shared layout for now.
+static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t k, Type elemTy) {
+  auto getContext = [&]() { return ctx; };
+  if (isa<Float4E2M1FNType, Float6E2M3FNType, Float6E3M2FNType>(elemTy)) {
+    int valsPerLane = k / 2;
+    return FxLayout(FxShape(FxThr(16, 2), FxVal(32, valsPerLane / 32)),
+                    FxStride(FxThr(1, 512), FxVal(16, 1024)));
+  }
+  return gfx1250::getThrValLayoutAB(ctx, k, elemTy);
+}
+
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutA() const {
   if (getM() == 32)
     return scaled32RowLayoutA(getContext(), getK());
-  return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());
+  return scaledLayoutAB(getContext(), getK(), getElemTyA());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutB() const {
   // B is always N=16 rows for both supported shapes.
-  return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyB());
+  return scaledLayoutAB(getContext(), getK(), getElemTyB());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutC() const {
