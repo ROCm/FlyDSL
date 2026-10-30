@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T09:26:18Z",
+ "updated": "2026-10-30T09:27:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -511,20 +511,20 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr3-config",
    "event": "pull_request",
    "title": "[Kernel][FA] Add gfx950 attention metadata, knobs and traits config (3/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T08:35:26Z",
+   "updated_at": "2026-10-30T09:25:33Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T07:36:39Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T09:25:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231912/job/123911138851"
     },
     {
@@ -723,10 +723,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T07:27:05Z",
-     "completed_at": null,
+     "completed_at": "2026-10-30T09:25:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008109"
     }
    ]
@@ -738,11 +738,11 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr4-forward",
    "event": "pull_request",
    "title": "[Kernel][FA] Add the gfx950 attention forward kernel (dual-wave and wide bodies) (4/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961",
    "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T05:28:54Z",
+   "updated_at": "2026-10-30T09:26:09Z",
    "actor": "xinyazhang",
    "jobs": [
     {
@@ -769,9 +769,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:28:54Z",
+     "started_at": "2026-10-30T09:26:08Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961/job/123909315346"
     }
