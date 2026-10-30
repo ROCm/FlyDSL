@@ -41,16 +41,6 @@ def _add_one(X: fx.Pointer, n: fx.Int32, stream: fx.Stream):
     _add_kernel(X, n, 1.0).launch(grid=((n + 63) // 64, 1, 1), block=(64, 1, 1), stream=stream)
 
 
-class _LegacyLauncher:
-    """A JitFunction from a FlyDSL release without ``preload()``."""
-
-    def __init__(self, jit_fn):
-        self._jit_fn = jit_fn
-
-    def _compile_only(self, *args):
-        return self._jit_fn._compile_only(*args)
-
-
 def _ptr(t):
     return flyc.from_c_void_p(fx.Float32, t.data_ptr())
 
@@ -67,11 +57,9 @@ def test_shims_share_one_implementation():
     assert mega_moe_tp._preload_compiled is common_shim._preload_compiled
 
 
-@pytest.mark.parametrize("legacy", [False, True], ids=["preload", "compile_only_fallback"])
-def test_preload_does_not_launch(legacy):
+def test_preload_does_not_launch():
     x = torch.zeros(256, device="cuda")
-    exe = _LegacyLauncher(_add) if legacy else _add
-    common_shim._preload_compiled(exe, _ptr(x), 256, 7.0, torch.cuda.current_stream())
+    assert common_shim._preload_compiled(_add, _ptr(x), 256, 7.0, torch.cuda.current_stream()) is None
     torch.cuda.synchronize()
     assert torch.count_nonzero(x).item() == 0
     assert "COMPILE_ONLY" not in os.environ
@@ -86,8 +74,7 @@ def test_concurrent_preloads_keep_launches_live():
         y = torch.zeros(n, device="cuda")
         shim = mega_shim if worker % 2 else common_shim
         for k in range(per_worker):
-            exe = _LegacyLauncher(_add) if k % 2 else _add
-            shim._preload_compiled(exe, _ptr(y), n, float(1000 + worker * per_worker + k), stream)
+            shim._preload_compiled(_add, _ptr(y), n, float(1000 + worker * per_worker + k), stream)
         torch.cuda.synchronize()
         return torch.count_nonzero(y).item()
 

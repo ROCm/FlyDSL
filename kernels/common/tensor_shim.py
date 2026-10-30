@@ -78,17 +78,14 @@ def _run_compiled(exe, *args):
 
 
 def _preload_compiled(exe, *args):
-    """Compile ``exe`` for ``args`` without dispatching its GPU kernels.
+    """Compile ``exe`` for ``args`` without dispatching its GPU kernels; returns ``None``.
 
-    Returns the ``CompiledFunction`` from ``JitFunction.preload()``, or ``None``
-    on FlyDSL releases that only provide ``_compile_only()``. Neither toggles the
-    process-wide ``COMPILE_ONLY`` flag, which would also suppress launches made
-    concurrently by other threads.
+    ``_compile_only`` skips execution for this call alone. Setting the
+    process-wide ``COMPILE_ONLY`` flag instead would also suppress launches made
+    concurrently by other threads. The first real launch reuses the in-memory
+    compile cache.
     """
-    preload = getattr(exe, "preload", None)
-    if preload is None:
-        preload = exe._compile_only
-    return preload(*args)
+    return exe._compile_only(*args)
 
 
 def _to_raw(v):
