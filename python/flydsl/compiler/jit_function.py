@@ -143,8 +143,13 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_KTRACE_ENABLE",
     "FLYDSL_KTRACE_BLOCKS",
     "FLYDSL_KTRACE_BUFFER_BYTES",
-    "LLVM_GFX1250_ANY_XNACK_CODEGEN",
 )
+
+# Env vars that change codegen for one arch only. They enter the cache key
+# when the resolved target arch matches, and stay out of every other arch's key.
+_TARGET_CACHE_INVALIDATING_ENV_VARS = {
+    "gfx1250": ("LLVM_GFX1250_ANY_XNACK_CODEGEN",),
+}
 
 
 _SNAPSHOT_SCALARS = (int, float, bool, str, bytes, type(None))
@@ -163,16 +168,26 @@ try:
 except Exception:
     _ENABLE_ENV_FAST_READ = False
 _CACHE_INVALIDATING_ENV_VARS_ENCODED = tuple((n, os.fsencode(n)) for n in _CACHE_INVALIDATING_ENV_VARS)
+_TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED = {
+    arch: tuple((n, os.fsencode(n)) for n in names) for arch, names in _TARGET_CACHE_INVALIDATING_ENV_VARS.items()
+}
 
 
-def _cache_invalidating_env_values() -> tuple:
+def _cache_invalidating_env_values(target=None) -> tuple:
     # Re-read on every call: users may mutate os.environ mid-process (e.g.
     # toggling FLYDSL_COMPILE_OPT_LEVEL between runs) and any caching here
     # would freeze the first observed values into every subsequent cache key.
+    # ``target`` is a GPUTarget or an arch string. Target-specific vars are
+    # appended only when that arch is the one they affect.
+    arch = getattr(target, "arch", target)
+    encoded = _CACHE_INVALIDATING_ENV_VARS_ENCODED
+    extra = _TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED.get(arch)
+    if extra:
+        encoded = encoded + extra
     if _ENABLE_ENV_FAST_READ:
         data = os.environ._data
-        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in _CACHE_INVALIDATING_ENV_VARS_ENCODED)
-    return tuple((n, os.environ.get(n, "")) for n in _CACHE_INVALIDATING_ENV_VARS)
+        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in encoded)
+    return tuple((n, os.environ.get(n, "")) for n, _b in encoded)
 
 
 def _snapshot_global_value(val, *, stable, _path=()):
@@ -1407,7 +1422,7 @@ class JitFunction:
 
         sig = self._sig
         # Re-read env vars on every call.
-        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
+        key_parts = [("_env_", _cache_invalidating_env_values(self._backend_target)), ("_target_", self._backend_target)]
         if effective_hints is None:
             effective_hints = self._effective_compile_hints()
         if effective_hints:
