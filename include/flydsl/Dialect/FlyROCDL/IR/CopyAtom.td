@@ -144,7 +144,11 @@ class FlyROCDL_CopyOpCDNA5TDM<string typeName, string typeMnemonic>
     // is atom state. With this off the atom has no `atomic_barrier_addr` field to set.
     DefaultValuedParameter<"bool", "false">:$atomicBarrier,
     DefaultValuedParameter<"int32_t", "0">:$cacheModifier,
-    DefaultValuedParameter<"int32_t", "1">:$iterCount
+    DefaultValuedParameter<"int32_t", "1">:$iterCount,
+    // Row-indexed addressing: the outer descriptor dim is driven by an explicit
+    // index list instead of a linear coordinate. Zero keeps the linear form; 16 or
+    // 32 selects the index width, which caps how many rows one issue carries.
+    DefaultValuedParameter<"int32_t", "0">:$indexBits
   );
   let genVerifyDecl = 1;
 }
@@ -158,7 +162,7 @@ def FlyROCDL_CopyOpCDNA5TensorLoad : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5TensorL
   let assemblyFormat = [{
     `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
     `,` `tensor2tdm` `=` $tensor2tdm
-    (`,` struct($atomicBarrier, $cacheModifier, $iterCount, $padInterval, $padAmount)^)? `>`
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount, $indexBits, $padInterval, $padAmount)^)? `>`
   }];
 }
 
@@ -168,7 +172,7 @@ def FlyROCDL_CopyOpCDNA5TensorStore : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5Tensor
   let assemblyFormat = [{
     `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
     `,` `tensor2tdm` `=` $tensor2tdm
-    (`,` struct($atomicBarrier, $cacheModifier, $iterCount)^)? `>`
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount, $indexBits)^)? `>`
   }];
 }
 

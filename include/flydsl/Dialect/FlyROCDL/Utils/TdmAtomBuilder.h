@@ -24,10 +24,12 @@ deriveTdmAtom<MakeTiledTdmStoreAtomOpAdaptor>(MakeTiledTdmStoreAtomOpAdaptor, td
 
 FailureOr<Type> tdmLoadOpType(MLIRContext *ctx, const tdm::Geometry &geometry, Type dataType,
                               fly::IntTupleAttr tensor2tdm, bool atomicBarrier,
-                              int32_t cacheModifier, function_ref<InFlightDiagnostic()> emitError);
+                              int32_t cacheModifier, int32_t indexBits,
+                              function_ref<InFlightDiagnostic()> emitError);
 FailureOr<Type> tdmStoreOpType(MLIRContext *ctx, const tdm::Geometry &geometry, Type dataType,
                                fly::IntTupleAttr tensor2tdm, bool atomicBarrier,
-                               int32_t cacheModifier, function_ref<InFlightDiagnostic()> emitError);
+                               int32_t cacheModifier, int32_t indexBits,
+                               function_ref<InFlightDiagnostic()> emitError);
 
 FailureOr<fly::LayoutType> tdmPartitionLayout(Type atomType, Type stensorType, Type gtensorType,
                                               int32_t numWarps,

@@ -398,6 +398,19 @@ Attribute tdmThrBitLayout(MLIRContext *ctx, ArrayRef<int32_t> tileShape, int32_t
 
 // Shared verifier. `padInterval` / `padAmount` are always zero on the store type,
 // which has no padding parameters at all.
+// Indexed addressing takes over the descriptor groups that descriptor iteration also
+// redefines, so the two cannot both be on.
+LogicalResult tdmVerifyIndexBits(function_ref<InFlightDiagnostic()> emitError, int32_t indexBits,
+                                 int32_t iterCount) {
+  if (indexBits == 0)
+    return success();
+  if (indexBits != 16 && indexBits != 32)
+    return emitError() << "TDM indexBits must be 0, 16 or 32, got " << indexBits;
+  if (iterCount != 1)
+    return emitError() << "an indexed TDM descriptor cannot iterate, got iterCount " << iterCount;
+  return success();
+}
+
 LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<int32_t> tileShape,
                         Type dataType, IntTupleAttr tensor2tdm, int32_t iterCount,
                         int32_t padInterval, int32_t padAmount) {
@@ -545,21 +558,24 @@ struct TdmStatic {
   int32_t padAmount;   // always 0 on the store path
   int32_t cacheModifier;
   int32_t iterCount; // 1 = no descriptor iteration
+  int32_t indexBits; // 0 = linear outer dim; 16/32 = row indices drive it
   bool isLoad;
 };
 
 // Read off the atom type, once per direction: the two `emitAtomCall` overloads of a type
 // want the same config, and the direction is the only thing that varies between them.
 TdmStatic tdmConfig(CopyOpCDNA5TensorLoadType ty) {
-  return {ty.getTileShape(), tdmElemBits(ty.getDataType()), ty.getPadInterval(),
-          ty.getPadAmount(), ty.getCacheModifier(),         ty.getIterCount(),
-          /*isLoad=*/true};
+  return {ty.getTileShape(),    tdmElemBits(ty.getDataType()),
+          ty.getPadInterval(),   ty.getPadAmount(),
+          ty.getCacheModifier(), ty.getIterCount(),
+          ty.getIndexBits(),     /*isLoad=*/true};
 }
 
 TdmStatic tdmConfig(CopyOpCDNA5TensorStoreType ty) {
-  return {ty.getTileShape(), tdmElemBits(ty.getDataType()), /*padInterval=*/0,
-          /*padAmount=*/0,   ty.getCacheModifier(),         ty.getIterCount(),
-          /*isLoad=*/false};
+  return {ty.getTileShape(),    tdmElemBits(ty.getDataType()),
+          /*padInterval=*/0,     /*padAmount=*/0,
+          ty.getCacheModifier(), ty.getIterCount(),
+          ty.getIndexBits(),     /*isLoad=*/false};
 }
 
 // Emits one TENSOR_LOAD_TO_LDS / TENSOR_STORE_FROM_LDS. When `pred` is non-null the
@@ -631,6 +647,9 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // operands of the `make_int_tuple` that built it. A static leaf therefore costs a
   // constant the descriptor math folds away, and a dynamic one costs exactly the
   // integer the kernel already had.
+  if (cfg.indexBits)
+    return mlir::emitError(loc) << "cdna5 TDM: indexed addressing is not lowered yet";
+
   Value glbCoord = cfg.isLoad ? src : dst;
   SmallVector<Value> coord;
   if (failed(unpackCoord(builder, loc, coordTy.getBase(), glbCoord, coord)))
@@ -955,7 +974,10 @@ LogicalResult CopyOpCDNA5TensorLoadType::verify(function_ref<InFlightDiagnostic(
                                                 ArrayRef<int32_t> tileShape, Type dataType,
                                                 IntTupleAttr tensor2tdm, bool atomicBarrier,
                                                 int32_t cacheModifier, int32_t iterCount,
-                                                int32_t padInterval, int32_t padAmount) {
+                                                int32_t indexBits, int32_t padInterval,
+                                                int32_t padAmount) {
+  if (failed(tdmVerifyIndexBits(emitError, indexBits, iterCount)))
+    return failure();
   return tdmVerify(emitError, tileShape, dataType, tensor2tdm, iterCount, padInterval, padAmount);
 }
 
@@ -1044,7 +1066,10 @@ Attribute CopyOpCDNA5TensorStoreType::getThrBitLayoutRef() const { return getThr
 LogicalResult CopyOpCDNA5TensorStoreType::verify(function_ref<InFlightDiagnostic()> emitError,
                                                  ArrayRef<int32_t> tileShape, Type dataType,
                                                  IntTupleAttr tensor2tdm, bool atomicBarrier,
-                                                 int32_t cacheModifier, int32_t iterCount) {
+                                                 int32_t cacheModifier, int32_t iterCount,
+                                                 int32_t indexBits) {
+  if (failed(tdmVerifyIndexBits(emitError, indexBits, iterCount)))
+    return failure();
   return tdmVerify(emitError, tileShape, dataType, tensor2tdm, iterCount, /*padInterval=*/0,
                    /*padAmount=*/0);
 }

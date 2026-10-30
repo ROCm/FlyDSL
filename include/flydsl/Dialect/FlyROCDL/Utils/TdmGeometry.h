@@ -40,6 +40,13 @@ constexpr int32_t kMaxIterateCount = 256;
 // with a 2D descriptor.
 constexpr int32_t kMaxIterateRank = 2;
 
+/// Indexed (row-addressed) descriptors replace the two outer descriptor groups with a
+/// list of row indices, so one issue carries only as many rows as those groups hold:
+/// sixteen 16-bit indices or eight 32-bit ones. The descriptor is limited to 2D because
+/// the groups the index list occupies are the ones that would carry dims 2..4.
+constexpr int32_t kIndexedRank = 2;
+inline int32_t maxIndexedRows(int32_t indexBits) { return indexBits == 16 ? 16 : 8; }
+
 /// One descriptor scalar — an extent or a stride.
 ///
 /// Either a compile-time constant, or a reference to a mode of the global tensor whose
