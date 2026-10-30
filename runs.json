@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-30T10:20:51Z",
+ "updated": "2026-10-30T10:38:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -581,21 +581,24 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr2-attention-common",
    "event": "pull_request",
    "title": "[Kernel][FA] Add arch-neutral attention common, abi, philox and dispatch modules (2/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T10:07:30Z",
+   "updated_at": "2026-10-30T10:36:16Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T10:07:30Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506968"
+     "completed_at": "2026-10-30T10:36:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506968",
+     "machine": "smci350-odcdh2-a08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -624,19 +627,19 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr5-optional-inputs",
    "event": "pull_request",
    "title": "[Kernel][FA] Port gfx950 attention ALiBi, sink, paged KV, split-K and XCD swizzle to the new forward (5/8)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231727",
    "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T05:29:01Z",
+   "updated_at": "2026-10-30T10:32:12Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-30T05:29:01Z",
+     "started_at": "2026-10-30T10:32:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231727/job/123909347752"
     },
