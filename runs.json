@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-30T03:28:08Z",
+ "updated": "2026-10-30T04:44:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41003388106,
+   "pr": 1346,
+   "commit": "6c0787b6a652bc73b6e097c526387038dd27402c",
+   "branch": "xyw/mega_moe_merge",
+   "event": "pull_request",
+   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106",
+   "created_at": "2026-10-30T04:31:38Z",
+   "updated_at": "2026-10-30T04:33:31Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 40993276813,
    "pr": 1349,
@@ -10,38 +25,41 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813",
    "created_at": "2026-10-30T02:42:47Z",
-   "updated_at": "2026-10-30T03:03:11Z",
+   "updated_at": "2026-10-30T04:41:44Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T03:03:11Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T03:40:35Z",
+     "completed_at": "2026-10-30T04:37:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488218"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-30T03:07:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488243"
+     "completed_at": "2026-10-30T03:45:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488243",
+     "machine": "gbt350-odcdh1-b04-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-30T03:03:11Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-30T03:31:21Z",
+     "completed_at": "2026-10-30T03:48:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488327"
     }
    ]
@@ -1803,21 +1821,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40539152186",
    "created_at": "2026-10-27T16:15:39Z",
    "updated_at": "2026-10-28T13:45:10Z",
-   "actor": "Qubitium",
-   "jobs": []
-  },
-  {
-   "run_id": 40531208358,
-   "pr": null,
-   "commit": "58c82c991de4f256b7b6e7e7cae5e12d72916528",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40531208358",
-   "created_at": "2026-10-27T15:27:46Z",
-   "updated_at": "2026-10-27T15:27:46Z",
    "actor": "Qubitium",
    "jobs": []
   }
