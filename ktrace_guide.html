@@ -1,0 +1,982 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>KTRACE: in-kernel wave tracing &#8212; FlyDSL 0.4.2</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=eba8b062" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=b2ee8c1d" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_header.css?v=037afccf" />
+    <link rel="stylesheet" type="text/css" href="_static/rocm_footer.css?v=7095035a" />
+    <link rel="stylesheet" type="text/css" href="_static/fonts.css?v=fcff5274" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link rel="stylesheet" type="text/css" href="_static/ai_ecosystem.css" />
+  
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    <script src="_static/documentation_options.js?v=b4bb93ae"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=91c4cb68"></script>
+    <script async="async" src="_static/code_word_breaks.js?v=327952c4"></script>
+    <script async="async" src="_static/renameVersionLinks.js?v=929fe5e4"></script>
+    <script async="async" src="_static/rdcMisc.js?v=01f88d96"></script>
+    <script async="async" src="_static/theme_mode_captions.js?v=15f4ec5d"></script>
+    <script async="async" src="_static/bannerLatestLink.js?v=8a66ec6d"></script>
+    <script defer="defer" src="_static/search.js?v=604f4efb"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=887ef09a"></script>
+    <script src="_static/design-tabs.js?v=f930bc37"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'ktrace_guide';</script>
+    <script async="async" src="https://download.amd.com/js/analytics/analyticsinit.js"></script>
+    <link rel="canonical" href="https://rocm.github.io/FlyDSL/ktrace_guide.html" />
+    <link rel="icon" href="https://www.amd.com/content/dam/code/images/favicon/favicon.ico"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Offline autotune configs" href="autotune_guide.html" />
+    <link rel="prev" title="Kernel tuning guide" href="kernel_tuning_guide.html" />
+    <meta name="google-site-verification" content="vo35SZt_GASsTHAEmdww7AYKPCvZyzLvOXBl8guBME4" />
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         id="search-input"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form></div>
+  </div>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="common-header" >
+        <nav class="navbar navbar-expand-xl">
+            <div class="container-fluid main-nav rocm-header">
+                <div class="header-logo">
+                    <div class="header-logo-title">
+                        
+                            <button class="navbar-toggler collapsed" id="nav-icon" data-tracking-information="mainMenuToggle" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </button>
+                        
+                        <a class="navbar-brand" href="https://www.amd.com/">
+                            <img src="_static/images/amd-header-logo.svg" alt="AMD Logo" title="AMD Logo" width="90" class="d-inline-block align-text-top hover-opacity"/>
+                        </a>
+                        <div class="vr mx-40 my-25"></div>
+                        <a class="klavika-font hover-opacity" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">ROCm&#8482; AI Ecosystem</a>
+                    </div>
+                    
+                </div>
+                <div class="icon-nav text-center d-flex ms-auto"></div>
+            </div>
+        </nav>
+        
+        <nav class="navbar navbar-expand-xl second-level-nav">
+            <div class="container-fluid main-nav">
+                <div class="navbar-nav-container collapse navbar-collapse" id="navbarSupportedContent">
+                    
+                    <div class="d-flex w-100 align-items-stretch">
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.docs.amd.com" id="navcore-sdk" role="button" aria-expanded="false" target="_blank">Core SDK</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links fw-bold" href="https://rocm.docs.amd.com/projects/ai-ecosystem" id="navai-ecosystem" role="button" aria-expanded="false" target="_blank">AI Ecosystem</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://instinct.docs.amd.com" id="navgpu-systems-and-infrastructure" role="button" aria-expanded="false" target="_blank">GPU Systems and Infrastructure</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navtoolkits" role="button" data-bs-toggle="dropdown" aria-expanded="false">Toolkits</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navtoolkits">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/datascience/en/latest/index.html" target="_blank">AMD Data Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/finance/en/latest/index.html" target="_blank">AMD Finance</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/lifescience/en/latest/index.html" target="_blank">AMD Life Science</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/llmextension/en/latest/index.html" target="_blank">AMD LLM Extension</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/simulation/en/latest/index.html" target="_blank">AMD Simulation</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                            <li class="nav-item dropdown">
+                                
+                                    <a class="nav-link top-level header-menu-links dropdown-toggle header-nav-dropdown-toggle" href="#" id="navrocm.ai" role="button" data-bs-toggle="dropdown" aria-expanded="false">ROCm.AI</a>
+                                    <ul class="dropdown-menu header-nav-dropdown-menu" aria-labelledby="navrocm.ai">
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/amd-skills/en/latest/" target="_blank">AMD Skills</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/hyperloom/en/latest/" target="_blank">Hyperloom</a></li>
+                                        
+                                            <li><a class="dropdown-item" href="https://rocm.docs.amd.com/projects/rocm-cli/en/latest/" target="_blank">ROCm CLI</a></li>
+                                        
+                                    </ul>
+                                
+                            </li>
+                            
+                        </ul>
+                        <div class="nav-group-separator"></div>
+                        <ul class="navbar-nav nav-mega mb-2 mb-lg-0">
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://rocm.blogs.amd.com/" id="navblogs" role="button" aria-expanded="false" target="_blank">Blogs</a>
+                                
+                            </li>
+                            
+                            <li class="nav-item">
+                                
+                                    <a class="nav-link top-level header-menu-links" href="https://www.amd.com/en/developer/resources/rocm-hub.html" id="navdeveloper-hub" role="button" aria-expanded="false" target="_blank">Developer Hub</a>
+                                
+                            </li>
+                            
+                        </ul>
+                    </div>
+                    
+                </div>
+            </div>
+        </nav>
+        
+    </header>
+    
+
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <div class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+
+<a class="navbar-brand logo" href="https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest">
+    <p>ROCm AI Ecosystem</p>
+</a></div>
+          
+        
+      </div>
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">FlyDSL 0.4.2</p>
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Install FlyDSL</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_stability.html">API stability</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Language</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="language/arithmetic_types.html">Arithmetic types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/composite_types.html">Composite types</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/storage_and_allocator.html">Storage and allocator</a></li>
+<li class="toctree-l1"><a class="reference internal" href="language/dsl_protocols.html">DSL protocols</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Extension</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="extension/rand.html">Random number generation</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture and compilation pipeline</a></li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel authoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_tuning_guide.html">Kernel tuning</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">In-kernel wave tracing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autotune_guide.html">Offline autotune configs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Prebuilt kernel library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing and benchmarking</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe layout algebra</a></li>
+<li class="toctree-l1"><a class="reference internal" href="extern_integration_guide.html">External bitcode integration</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">API reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api/index.html">API overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">Expression language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/extensions.html">Extension libraries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/runtime.html">Stable runtime helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Pre-built kernels</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="tutorials/basic_usage.html">Basic usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/kernel_development.html">Kernel development techniques</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">About</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="about/license.html">License</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+  
+  <div id="rtd-footer-container"></div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><label class="sidebar-toggle primary-toggle btn btn-sm" for="__primary" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-angle-right"></span>
+  </label></div>
+      
+        <div class="header-article-item">
+
+
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">KTRACE:...</li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/blob/main/docs/ktrace_guide.md?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/ROCm/FlyDSL/issues/new?title=Issue%20on%20page%20%2Fktrace_guide.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/ktrace_guide.md" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.md</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script>
+
+
+<script>
+document.write(`
+  <button class="btn btn-sm pst-navbar-icon search-button search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+  </button>
+`);
+</script>
+<button class="sidebar-toggle secondary-toggle btn btn-sm" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>KTRACE: in-kernel wave tracing</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick start</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-api">Kernel API</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#payloads">Payloads</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#captures-and-repeated-launches">Captures and repeated launches</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#graph-replay">Graph replay</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">Settings</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#limits-and-interpreting-timings">Limits and interpreting timings</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section class="tex2jax_ignore mathjax_ignore" id="ktrace-in-kernel-wave-tracing">
+<h1>KTRACE: in-kernel wave tracing<a class="headerlink" href="#ktrace-in-kernel-wave-tracing" title="Link to this heading">#</a></h1>
+<p><strong>Experimental.</strong> The API, record format, and output schema may change in a minor
+release. See <a class="reference internal" href="api_stability.html"><span class="std std-doc">API stability</span></a>.</p>
+<p>KTRACE records named phases inside kernels and exports a timeline for Perfetto.
+It currently supports <strong>gfx942 (CDNA3) and gfx950 (CDNA4)</strong>, with one traced device
+per process. Each event records one active lane’s timestamp and optional payload
+for its wave.</p>
+<section id="quick-start">
+<h2>Quick start<a class="headerlink" href="#quick-start" title="Link to this heading">#</a></h2>
+<p>Add coarse ranges to the kernel:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="kn">import</span> <span class="n">ktrace</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">gemm</span><span class="p">(</span><span class="o">...</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="s2">&quot;prologue&quot;</span><span class="p">):</span>
+        <span class="o">...</span>
+    <span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="s2">&quot;mainloop&quot;</span><span class="p">):</span>
+        <span class="o">...</span>
+    <span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="s2">&quot;epilogue&quot;</span><span class="p">):</span>
+        <span class="o">...</span>
+</pre></div>
+</div>
+<p>Enable tracing around the host launch, then open the exported
+<code class="docutils literal notranslate"><span class="pre">gemm_ktrace.pftrace.gz</span></code> at <a class="reference external" href="https://ui.perfetto.dev">ui.perfetto.dev</a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">capture</span><span class="p">(</span><span class="s2">&quot;gemm&quot;</span><span class="p">,</span> <span class="n">blocks</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span> <span class="k">as</span> <span class="n">trace</span><span class="p">:</span>
+    <span class="n">launch_gemm</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">trace</span><span class="o">.</span><span class="n">summary</span><span class="p">())</span>
+<span class="n">path</span> <span class="o">=</span> <span class="n">trace</span><span class="o">.</span><span class="n">export</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>The trace nests tracks as kernel → launch → CU (<code class="docutils literal notranslate"><span class="pre">XCD/SE/SH/CU</span></code>) → <code class="docutils literal notranslate"><span class="pre">WG(x,</span> <span class="pre">y,</span> <span class="pre">z)</span></code> →
+<code class="docutils literal notranslate"><span class="pre">WaveN</span></code>. Each wave track starts with a <code class="docutils literal notranslate"><span class="pre">Wave</span> <span class="pre">Span</span></code> slice from its first to its last
+event; <code class="docutils literal notranslate"><span class="pre">range_push</span></code> ranges nest inside it and marks appear as instants. Token ranges
+(<code class="docutils literal notranslate"><span class="pre">range_start</span></code>/<code class="docutils literal notranslate"><span class="pre">range_stop</span></code>) may overlap, so they go on <code class="docutils literal notranslate"><span class="pre">ranges</span> <span class="pre">N</span></code> child tracks. An event’s
+payload appears as its <code class="docutils literal notranslate"><span class="pre">payload</span></code> argument. A range still open at the wave’s last event
+ends there and is labelled <code class="docutils literal notranslate"><span class="pre">(unclosed)</span></code>. The block coordinates and wave index come
+from each wave’s buffer header; no annotation is needed.</p>
+<p><code class="docutils literal notranslate"><span class="pre">blocks=(x,</span> <span class="pre">y,</span> <span class="pre">z)</span></code> selects one workgroup without changing the launched grid.
+Start with one workgroup and a few phases. Each wave can record <strong>255 events per
+launch</strong>; a range consumes two. Read or clear the trace between groups of launches
+to avoid filling the buffer.</p>
+<p>The capture enables tracing for JIT specializations compiled inside it and reads
+the buffer on exit. <code class="docutils literal notranslate"><span class="pre">summary()</span></code> and <code class="docutils literal notranslate"><span class="pre">export()</span></code> use the same snapshot and return
+<code class="docutils literal notranslate"><span class="pre">None</span></code> when it contains no events. Calling them inside the capture keeps the
+records read so far. The snapshot remains available after exit. A
+<code class="docutils literal notranslate"><span class="pre">CompiledFunction</span></code> compiled before the capture runs untraced; the capture logs a
+warning when it records nothing.</p>
+<p>Tracing is disabled by default. Disabled annotations emit no trace instructions.
+The first traced and untraced calls compile separate specializations; later calls
+reuse them. Leaving a capture restores the previous compile hints. A graph retains
+the specialization used during its construction.</p>
+<p>See <a class="reference download internal" download="" href="_downloads/66e20aa81ff86fb5240118d4c379d826/07-ktrace_wave_timeline.py"><span class="xref download myst">the runnable example</span></a>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>examples/07-ktrace_wave_timeline.py<span class="w"> </span>--layers<span class="w"> </span><span class="m">3</span>
+</pre></div>
+</div>
+</section>
+<section id="kernel-api">
+<h2>Kernel API<a class="headerlink" href="#kernel-api" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Function</p></th>
+<th class="head"><p>Purpose</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">range(name,</span> <span class="pre">payload=None)</span></code></p></td>
+<td><p>Context manager for a named phase</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mark(name,</span> <span class="pre">payload=None)</span></code></p></td>
+<td><p>Point event</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">range_push(name,</span> <span class="pre">payload=None)</span></code></p></td>
+<td><p>Open a stack range</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">range_pop()</span></code></p></td>
+<td><p>Close the innermost stack range</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">range_start(name,</span> <span class="pre">payload=None)</span></code></p></td>
+<td><p>Open a range and return its <code class="docutils literal notranslate"><span class="pre">RangeToken</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">range_stop(token,</span> <span class="pre">payload=None)</span></code></p></td>
+<td><p>Close a token range</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">inactive_token(name)</span></code></p></td>
+<td><p>Inactive token for a loop-carried range</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">with</span> <span class="pre">ktrace.range(...)</span></code> when both endpoints fit in one source block.
+<code class="docutils literal notranslate"><span class="pre">range_push</span></code> and <code class="docutils literal notranslate"><span class="pre">range_pop</span></code> pair in LIFO order along the executed path. A token
+range pairs on its token. The lanes that reach a <code class="docutils literal notranslate"><span class="pre">range_stop</span></code> can hold different
+tokens, as after a loop they leave at different iterations: the stop closes the
+latest range any of them started, and records nothing if none did.</p>
+<p>A wave numbers its events in a register. An event in a lane-divergent branch
+takes the wave’s next slot. After every branch or loop that records, the lanes of
+the wave agree on the count, so later events continue past every slot it used,
+whichever lanes record them. When both branches of an <code class="docutils literal notranslate"><span class="pre">if</span></code> record, as in
+<code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">lane</span> <span class="pre">&lt;</span> <span class="pre">32:</span> <span class="pre">mark(&quot;a&quot;)</span></code> with <code class="docutils literal notranslate"><span class="pre">else:</span> <span class="pre">mark(&quot;b&quot;)</span></code>, the traced kernel runs the
+branches as two <code class="docutils literal notranslate"><span class="pre">if</span></code>s on the same condition, the then branch first, so a wave
+that runs both keeps both records. Under a wave-uniform condition, such as the
+warp role, the agreement compiles to nothing and the second <code class="docutils literal notranslate"><span class="pre">if</span></code> adds one
+uniform branch.</p>
+<p>Use tokens when the range crosses loop iterations:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">stage</span> <span class="o">=</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">inactive_token</span><span class="p">(</span><span class="s2">&quot;k_tile&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">fx</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">k_tiles</span><span class="p">,</span> <span class="mi">1</span><span class="p">):</span>
+    <span class="n">ab_full</span> <span class="o">=</span> <span class="n">ab_consumer</span><span class="o">.</span><span class="n">wait_and_advance</span><span class="p">()</span>
+    <span class="n">ktrace</span><span class="o">.</span><span class="n">range_stop</span><span class="p">(</span><span class="n">stage</span><span class="p">)</span>
+    <span class="n">stage</span> <span class="o">=</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">range_start</span><span class="p">(</span><span class="s2">&quot;k_tile&quot;</span><span class="p">)</span>
+    <span class="o">...</span>
+<span class="n">ktrace</span><span class="o">.</span><span class="n">range_stop</span><span class="p">(</span><span class="n">stage</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>This records intervals between wait boundaries. Sample iterations or use a
+single outer range when the loop would exceed the per-wave event limit.</p>
+<section id="payloads">
+<h3>Payloads<a class="headerlink" href="#payloads" title="Link to this heading">#</a></h3>
+<p>Payloads accept Python <code class="docutils literal notranslate"><span class="pre">bool</span></code>, <code class="docutils literal notranslate"><span class="pre">int</span></code>, and <code class="docutils literal notranslate"><span class="pre">float</span></code>; FlyDSL integers up to 64 bits;
+and <code class="docutils literal notranslate"><span class="pre">Float16</span></code>, <code class="docutils literal notranslate"><span class="pre">BFloat16</span></code>, <code class="docutils literal notranslate"><span class="pre">Float32</span></code>, and <code class="docutils literal notranslate"><span class="pre">Float64</span></code>. Python integers must fit in
+signed or unsigned 64 bits. Python floats use 64 bits; half-precision values are
+promoted to <code class="docutils literal notranslate"><span class="pre">float32</span></code>.</p>
+<p>Signedness and numeric values are preserved in the output. Non-finite floats are
+shown as <code class="docutils literal notranslate"><span class="pre">nan</span></code>, <code class="docutils literal notranslate"><span class="pre">inf</span></code>, or <code class="docutils literal notranslate"><span class="pre">-inf</span></code>. An omitted payload adds no argument; an explicit
+<code class="docutils literal notranslate"><span class="pre">0</span></code> remains <code class="docutils literal notranslate"><span class="pre">0</span></code>. Use wave-uniform payloads: under divergence, the first active lane supplies
+the recorded value.</p>
+</section>
+</section>
+<section id="captures-and-repeated-launches">
+<h2>Captures and repeated launches<a class="headerlink" href="#captures-and-repeated-launches" title="Link to this heading">#</a></h2>
+<p>A capture accumulates all launches until a read or clear. Repeated calls to the
+same kernel appear on separate timeline tracks.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Capture method</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">clear()</span></code></p></td>
+<td><p>Synchronize and discard device records and the saved snapshot</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">read()</span></code></p></td>
+<td><p>Synchronize, save a fresh snapshot, and reset the device buffer</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">summary()</span></code></p></td>
+<td><p>Return per-phase totals for the snapshot</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">launches()</span></code></p></td>
+<td><p>Return separate totals and metadata for each recorded launch</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">export()</span></code></p></td>
+<td><p>Write a combined gzipped Perfetto trace</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">export_launches(names=None)</span></code></p></td>
+<td><p>Write one gzipped Perfetto trace per recorded launch</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">capture</span><span class="p">(</span><span class="s2">&quot;model&quot;</span><span class="p">,</span> <span class="n">blocks</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">),</span> <span class="n">out_dir</span><span class="o">=</span><span class="s2">&quot;traces&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">trace</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">layers</span><span class="p">:</span>
+        <span class="n">launch_layer</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">launch</span> <span class="ow">in</span> <span class="n">trace</span><span class="o">.</span><span class="n">launches</span><span class="p">():</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">launch</span><span class="p">[</span><span class="s2">&quot;launch_id&quot;</span><span class="p">],</span> <span class="n">launch</span><span class="p">[</span><span class="s2">&quot;phases&quot;</span><span class="p">])</span>
+
+<span class="n">paths</span> <span class="o">=</span> <span class="n">trace</span><span class="o">.</span><span class="n">export_launches</span><span class="p">(</span><span class="n">names</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;layer_</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">layers</span><span class="p">))])</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">names</span></code> must contain one string per recorded launch, in first-timestamp order.
+For overlapping streams, inspect the launch metadata before assigning layer
+names. ROCm includes HSA queue and dispatch IDs. Launches with no recorded events
+have no per-launch output. Capture windows cannot be nested.</p>
+<p>For tracing enabled outside a capture, <code class="docutils literal notranslate"><span class="pre">ktrace.summary()</span></code> and
+<code class="docutils literal notranslate"><span class="pre">ktrace.collect(&quot;kernel&quot;,</span> <span class="pre">out_dir=None)</span></code> read and reset the device buffer. They
+share a cached snapshot until another traced launch or graph replay occurs.
+Untraced calls leave that snapshot available. Inside a capture they raise; use the
+capture’s methods.</p>
+</section>
+<section id="graph-replay">
+<h2>Graph replay<a class="headerlink" href="#graph-replay" title="Link to this heading">#</a></h2>
+<p>Enter the KTRACE context outside <code class="docutils literal notranslate"><span class="pre">torch.cuda.graph()</span></code>. Prepare the traced
+specialization before graph construction and pass an explicit stream through the
+launcher to every kernel launch:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="k">with</span> <span class="n">ktrace</span><span class="o">.</span><span class="n">capture</span><span class="p">(</span><span class="s2">&quot;gemm&quot;</span><span class="p">,</span> <span class="n">blocks</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span> <span class="k">as</span> <span class="n">trace</span><span class="p">:</span>
+    <span class="n">stream</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">Stream</span><span class="p">()</span>
+    <span class="n">stream</span><span class="o">.</span><span class="n">wait_stream</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">current_stream</span><span class="p">())</span>
+    <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span><span class="n">stream</span><span class="p">):</span>
+        <span class="n">launch_gemm</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="n">stream</span><span class="p">))</span>
+
+    <span class="n">graph</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">CUDAGraph</span><span class="p">()</span>
+    <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span><span class="n">stream</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">graph</span><span class="p">(</span><span class="n">graph</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">):</span>
+            <span class="n">launch_gemm</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="n">stream</span><span class="p">))</span>
+
+    <span class="n">trace</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">graph</span><span class="o">.</span><span class="n">replay</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">trace</span><span class="o">.</span><span class="n">summary</span><span class="p">())</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">trace</span><span class="o">.</span><span class="n">export</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>An implicit default-stream launch does not enter a graph captured on PyTorch’s
+side stream. Entering, reading, or clearing a trace inside graph construction is
+invalid because these operations synchronize the device.</p>
+<p>The graph retains its traced binary and buffer address after the context exits.
+Call <code class="docutils literal notranslate"><span class="pre">trace.read()</span></code> after a later replay to replace the saved snapshot. Read or
+clear between replay groups to stay within capacity. For multiple layers, capture
+each layer launch as a graph node; <code class="docutils literal notranslate"><span class="pre">export_launches()</span></code> also splits repeated calls
+to the same kernel. Run the example with <code class="docutils literal notranslate"><span class="pre">--layers</span> <span class="pre">3</span> <span class="pre">--graph</span></code> to try this.</p>
+</section>
+<section id="settings">
+<h2>Settings<a class="headerlink" href="#settings" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_KTRACE_ENABLE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>Enable instrumentation</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_KTRACE_BUFFER_BYTES</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">64</span> <span class="pre">MiB</span></code></p></td>
+<td><p>Device buffer size; at most 2 GiB</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_KTRACE_BLOCKS</span></code></p></td>
+<td><p>all</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">x,y,z</span></code> selects one workgroup; <code class="docutils literal notranslate"><span class="pre">xcc:N</span></code> selects one XCD</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_KTRACE_DUMP_DIR</span></code></p></td>
+<td><p>current directory</p></td>
+<td><p>Trace output directory</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>An explicit <code class="docutils literal notranslate"><span class="pre">ktrace</span></code> compile hint overrides the environment. To set a persistent
+default for a launcher:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">flyc</span><span class="o">.</span><span class="n">compile</span><span class="p">[{</span><span class="s2">&quot;ktrace&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">}](</span><span class="n">launch</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">ktrace.capture(...)</span></code> for a temporary setting. The buffer is allocated once
+per process. Keep its size consistent across compilation and execution; cached
+and deferred calls validate the compiled bound against the live allocation.</p>
+<p>If independently cached kernels have conflicting event IDs, the JIT rebuilds the
+conflicting specialization and updates its cache. <code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_RUN_ONLY=1</span></code>
+prohibits that rebuild: prepare those traced kernels together once with run-only
+mode disabled.</p>
+</section>
+<section id="limits-and-interpreting-timings">
+<h2>Limits and interpreting timings<a class="headerlink" href="#limits-and-interpreting-timings" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><strong>255 events per wave per launch.</strong> Larger buffers and filtering other blocks
+do not increase this limit. Overflow raises during collection because dropped
+range endpoints would make the timeline incomplete.</p></li>
+<li><p><strong>Finite collection window.</strong> Waves reserve 256 slots each, including a header
+slot. A wave takes its slots from one of up to 256 partitions. Consecutive waves
+of a row of workgroups take consecutive partitions, so waves that start together
+do not contend for one counter and a launch fills the partitions evenly; successive
+launches start at different partitions. The default 64 MiB buffer has 64 partitions
+of about 128 waves, 8190 waves in all, and a trace overflows when its busiest
+partition fills: one launch fits up to about 8100 waves. Use block filters
+and periodic reads for large grids or repeated launches. The overflow error names
+a buffer size that holds the recorded launches.</p></li>
+<li><p><strong>One device per process.</strong> Access from another device raises. Trace multiple
+devices in separate processes. Traced binaries cannot be exported to C.</p></li>
+<li><p><strong>Synchronized collection.</strong> Reading waits for device work and serializes with
+traced host dispatches. Coordinate graph replays with reads and clears.</p></li>
+<li><p><strong>Reference-clock timestamps.</strong> <code class="docutils literal notranslate"><span class="pre">s_memrealtime</span></code> runs at 100 MHz (10 ns per tick),
+independently of the GPU core clock. Observed resolution on gfx950 is about
+40 ns. Shorter ranges can appear as zero-duration markers.</p></li>
+<li><p><strong>Instrumentation changes timing.</strong> A wave makes one atomic when it starts, on
+its partition’s counter. An event reads the clock and issues two scalar stores,
+with no branch, no atomic and no VGPR. On MI355X an event in a loop cost about
+20 ns, and ranges around the body, the K loop and the epilogue of a 4096-wave FP16
+GEMM cost under 1%; a token range in every K-loop iteration cost about 2% and 16
+more VGPRs. Timestamp consumption can drain outstanding LDS/SMEM traffic, and
+scheduling can move independent work across a timestamp. Use coarse phases and
+compare with an untraced baseline; subtracting a constant per-event cost does not
+undo these scheduling changes. Reading a trace idles the GPU while the host
+decodes it, so time traced launches between reads rather than across them.</p></li>
+<li><p><strong>Partial launch coverage.</strong> The first and last annotations need not coincide
+with kernel entry and exit. Gaps between tracks do not measure host launch
+latency or complete kernel overlap. Use a runtime profiler for those questions.</p></li>
+</ul>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="kernel_tuning_guide.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Kernel tuning guide</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="autotune_guide.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Offline autotune configs</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+    
+        
+              
+                <div class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+  <div class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav class="bd-toc-nav page-toc">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quick-start">Quick start</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kernel-api">Kernel API</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#payloads">Payloads</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#captures-and-repeated-launches">Captures and repeated launches</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#graph-replay">Graph replay</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#settings">Settings</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#limits-and-interpreting-timings">Limits and interpreting timings</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+    
+
+          </div>
+          <footer class="bd-footer-content">
+            <p>
+  </p>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
+
+    
+<footer class="rocm-footer">
+    <div class="container-lg">
+        <section class="bottom-menu menu py-45">
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <ul>
+                        <li><a href="https://www.amd.com/en/corporate/copyright" target="_blank">Terms and Conditions</a></li>
+                        <li><a href="https://rocm.docs.amd.com/en/latest/about/license.html">ROCm Licenses and Disclaimers</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/privacy" target="_blank">Privacy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/trademarks" target="_blank">Trademarks</a></li>
+                        <li><a href="https://www.amd.com/content/dam/amd/en/documents/corporate/cr/supply-chain-transparency.pdf" target="_blank">Supply Chain Transparency</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/competition" target="_blank">Fair and Open Competition</a></li>
+                        <li><a href="https://www.amd.com/system/files/documents/amd-uk-tax-strategy.pdf" target="_blank">UK Tax Strategy</a></li>
+                        <li><a href="https://www.amd.com/en/corporate/cookies" target="_blank">Cookie Policy</a></li>
+                        <!-- OneTrust Cookies Settings button start -->
+                        <li><a href="#cookie-settings" id="ot-sdk-btn" class="ot-sdk-show-settings">Cookie Settings</a></li>
+                        <!-- OneTrust Cookies Settings button end -->
+                    </ul>
+                </div>
+            </div>
+            <div class="row d-flex align-items-center">
+                <div class="col-12 text-center">
+                    <div>
+                        <span class="copyright">© 2026 Advanced Micro Devices, Inc</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</footer>
+
+<!-- <div id="rdc-watermark-container">
+    <img id="rdc-watermark" src="_static/images/alpha-watermark.svg" alt="DRAFT watermark"/>
+</div> -->
+    
+  </body>
+</html>
