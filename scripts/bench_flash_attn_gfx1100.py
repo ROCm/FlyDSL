@@ -10,8 +10,9 @@ Key properties required by ROCm/FlyDSL#1216:
 * decode benchmarks via ``--decode-seq-q``
 * optional correctness check (max ULP against an fp64 reference)
 * JSON output for automated ingestion ``(--json)``
-* ``--compare-src`` measures two FlyDSL trees **inside the same process**
-  and alternates the kernels round by round to minimise drift
+* ``--compare-src`` measures two FlyDSL trees **inside the same process**;
+  every round times the current tree, the other tree and Triton back to back,
+  and each tree runs with its own ``kernels.*`` modules installed
 * the benchmark keeps cycling distinct Q/K/V replicas so that every round
   streams more than 2 × 96 MiB through Infinity Cache, matching the
   methodology used in the PR review
@@ -36,9 +37,6 @@ from types import ModuleType
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
-
-# Import the current worktree's implementation once up-front.
-from kernels.attention import flash_attn_interface as current_flydsl
 
 try:  # pragma: no cover - optional runtime dependency
     from flash_attn.flash_attn_interface import flash_attn_func as triton_flash_attn_func
@@ -98,18 +96,50 @@ class BenchConfig:
 # FlyDSL loader utilities
 
 
+TREE_PREFIXES = ("kernels",)
+# flash_attn_interface imports the gfx1100 kernel inside the builder, at call
+# time, so each tree keeps its own copy of these installed while it runs.
+TREE_MODULES = (
+    "kernels.attention.flash_attn_interface",
+    "kernels.attention.flash_attn_gfx1100",
+    "kernels.attention.flash_attn_gfx1100_autotune",
+)
+_active_tree: List[Optional[str]] = [None]
+
+
 class FlyDSLImplementation:
     """Wrapper around a FlyDSL flash attention implementation."""
 
-    def __init__(self, label: str, module: ModuleType):
+    def __init__(self, label: str, modules: Dict[str, ModuleType]):
+        module = modules["kernels.attention.flash_attn_interface"]
         if not hasattr(module, "flydsl_flash_attn_func"):
             raise AttributeError(f"module {module.__name__} lacks flydsl_flash_attn_func")
         self.label = label
         self.module = module
+        self.modules = modules
+        self.kernel_src = modules["kernels.attention.flash_attn_gfx1100"].__file__
         self.callable = module.flydsl_flash_attn_func
 
+    def activate(self) -> None:
+        if _active_tree[0] == self.label:
+            return
+        for name in list(sys.modules):
+            if name.startswith(TREE_PREFIXES):
+                sys.modules.pop(name, None)
+        sys.modules.update(self.modules)
+        _active_tree[0] = self.label
+
     def launch(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, causal: bool) -> None:
+        self.activate()
         self.callable(q, k, v, out=out, causal=causal)
+
+
+def current_implementation(label: str = "current") -> FlyDSLImplementation:
+    """Wrap the worktree's own implementation (the one imported at startup)."""
+    for name in TREE_MODULES:
+        importlib.import_module(name)
+    _active_tree[0] = label
+    return FlyDSLImplementation(label, _snapshot_modules(TREE_PREFIXES))
 
 
 def _snapshot_modules(prefixes: Sequence[str]) -> Dict[str, ModuleType]:
@@ -131,22 +161,24 @@ def load_flydsl_from_tree(root: Path, label: str) -> FlyDSLImplementation:
     if not root.exists():
         raise FileNotFoundError(root)
 
-    prefixes = ("kernels", "python")
-    snapshot = _snapshot_modules(prefixes)
+    snapshot = _snapshot_modules(TREE_PREFIXES)
 
     for name in list(sys.modules):
-        if any(name.startswith(p) for p in prefixes):
+        if name.startswith(TREE_PREFIXES):
             sys.modules.pop(name, None)
 
     sys.path.insert(0, str(root))
     try:
         importlib.invalidate_caches()
-        module = importlib.import_module("kernels.attention.flash_attn_interface")
-        impl = FlyDSLImplementation(label, module)
+        for name in TREE_MODULES:
+            importlib.import_module(name)
+        impl = FlyDSLImplementation(label, _snapshot_modules(TREE_PREFIXES))
     finally:
         sys.path.pop(0)
-        _restore_modules(snapshot, prefixes)
+        _restore_modules(snapshot, TREE_PREFIXES)
 
+    if not Path(impl.kernel_src).resolve().is_relative_to(root):
+        raise RuntimeError(f"{label}: gfx1100 kernel resolved to {impl.kernel_src}, outside {root}")
     return impl
 
 
@@ -297,63 +329,41 @@ def _time_callable(fn, iterations: int, warmup: int) -> float:
     return start.elapsed_time(end) / iterations
 
 
-def _measure_flydsl(
+def _flydsl_round(
     impl: FlyDSLImplementation,
     cfg: BenchConfig,
     buffers: BufferPool,
-    rounds: int,
+    round_idx: int,
     iterations: int,
     warmup: int,
-) -> Tuple[float, List[float], List[float]]:
-    per_round_tflops: List[float] = []
-    per_round_ms: List[float] = []
+) -> float:
     outputs = buffers.outputs_for(impl.label)
+    iterator = buffers.iterator(start=round_idx)
 
-    for round_idx in range(rounds):
-        iterator = buffers.iterator(start=round_idx)
+    def _call() -> None:
+        idx, q, k, v = next(iterator)
+        impl.launch(q, k, v, outputs[idx], cfg.causal)
 
-        def _call() -> None:
-            idx, q, k, v = next(iterator)
-            out = outputs[idx]
-            impl.launch(q, k, v, out, cfg.causal)
-
-        avg_ms = _time_callable(_call, iterations, warmup)
-        per_round_ms.append(avg_ms)
-        per_round_tflops.append(cfg.flop_count() / (avg_ms * 1e-3) / 1e12)
-
-    median_tflops = statistics.median(per_round_tflops)
-    return median_tflops, per_round_tflops, per_round_ms
+    return _time_callable(_call, iterations, warmup)
 
 
-def _measure_triton(
-    cfg: BenchConfig,
-    buffers: BufferPool,
-    rounds: int,
-    iterations: int,
-    warmup: int,
-) -> Tuple[float, List[float], List[float]]:
+def _triton_round(cfg: BenchConfig, buffers: BufferPool, round_idx: int, iterations: int, warmup: int) -> float:
     if triton_flash_attn_func is None:
         raise RuntimeError("flash-attn package not available; install flash-attn>=2.5")
-
-    per_round_tflops: List[float] = []
-    per_round_ms: List[float] = []
     outputs = buffers.outputs_for("triton")
+    iterator = buffers.iterator(start=round_idx)
     scale = 1.0 / math.sqrt(cfg.head_dim)
 
-    for round_idx in range(rounds):
-        iterator = buffers.iterator(start=round_idx)
+    def _call() -> None:
+        idx, q, k, v = next(iterator)
+        outputs[idx].copy_(triton_flash_attn_func(q, k, v, 0.0, scale, cfg.causal))
 
-        def _call() -> None:
-            idx, q, k, v = next(iterator)
-            out = outputs[idx]
-            out.copy_(triton_flash_attn_func(q, k, v, 0.0, scale, cfg.causal))
+    return _time_callable(_call, iterations, warmup)
 
-        avg_ms = _time_callable(_call, iterations, warmup)
-        per_round_ms.append(avg_ms)
-        per_round_tflops.append(cfg.flop_count() / (avg_ms * 1e-3) / 1e12)
 
-    median_tflops = statistics.median(per_round_tflops)
-    return median_tflops, per_round_tflops, per_round_ms
+def _summarize(cfg: BenchConfig, ms_rounds: List[float]) -> Tuple[float, List[float], List[float]]:
+    tflops = [cfg.flop_count() / (ms * 1e-3) / 1e12 for ms in ms_rounds]
+    return statistics.median(tflops), tflops, ms_rounds
 
 
 def run_benchmark(
@@ -362,6 +372,7 @@ def run_benchmark(
     iterations: int,
     warmup: int,
     check: bool,
+    current_impl: FlyDSLImplementation,
     compare_impl: Optional[FlyDSLImplementation],
     device: torch.device,
     rng: torch.Generator,
@@ -377,31 +388,38 @@ def run_benchmark(
         "dtype": cfg.dtype,
     }
 
-    current_impl = FlyDSLImplementation("current", current_flydsl)
-    cur_med, cur_rounds, cur_ms = _measure_flydsl(current_impl, cfg, buffers, rounds, iterations, warmup)
+    # One round of every implementation before the next round, so clock or
+    # thermal drift hits all of them alike.
+    cur_ms: List[float] = []
+    cmp_ms: List[float] = []
+    tri_ms: List[float] = []
+    triton_error = None if triton_flash_attn_func is not None else "flash-attn not installed"
+    for round_idx in range(rounds):
+        cur_ms.append(_flydsl_round(current_impl, cfg, buffers, round_idx, iterations, warmup))
+        if compare_impl is not None:
+            cmp_ms.append(_flydsl_round(compare_impl, cfg, buffers, round_idx, iterations, warmup))
+        if triton_error is None:
+            try:
+                tri_ms.append(_triton_round(cfg, buffers, round_idx, iterations, warmup))
+            except RuntimeError as exc:  # pragma: no cover - optional dependency
+                triton_error = str(exc)
+
+    cur_med, result["flydsl_tflops_rounds"], result["flydsl_ms_rounds"] = _summarize(cfg, cur_ms)
     result["flydsl_tflops"] = cur_med
-    result["flydsl_tflops_rounds"] = cur_rounds
-    result["flydsl_ms_rounds"] = cur_ms
+    result["flydsl_kernel_src"] = current_impl.kernel_src
 
     if compare_impl is not None:
-        cmp_med, cmp_rounds, cmp_ms = _measure_flydsl(compare_impl, cfg, buffers, rounds, iterations, warmup)
+        cmp_med, result["baseline_tflops_rounds"], result["baseline_ms_rounds"] = _summarize(cfg, cmp_ms)
         result["baseline_tflops"] = cmp_med
-        result["baseline_tflops_rounds"] = cmp_rounds
-        result["baseline_ms_rounds"] = cmp_ms
-        delta = ((cur_med - cmp_med) / cmp_med * 100.0) if cmp_med else float("nan")
-        result["delta_percent_vs_baseline"] = delta
+        result["baseline_kernel_src"] = compare_impl.kernel_src
+        result["delta_percent_vs_baseline"] = ((cur_med - cmp_med) / cmp_med * 100.0) if cmp_med else float("nan")
 
-    if triton_flash_attn_func is not None:
-        try:
-            tri_med, tri_rounds, tri_ms = _measure_triton(cfg, buffers, rounds, iterations, warmup)
-            result["triton_tflops"] = tri_med
-            result["triton_tflops_rounds"] = tri_rounds
-            result["triton_ms_rounds"] = tri_ms
-            result["ratio_vs_triton"] = (cur_med / tri_med) if tri_med else float("nan")
-        except RuntimeError as exc:  # pragma: no cover - optional dependency
-            result["triton_error"] = str(exc)
+    if triton_error is None:
+        tri_med, result["triton_tflops_rounds"], result["triton_ms_rounds"] = _summarize(cfg, tri_ms)
+        result["triton_tflops"] = tri_med
+        result["ratio_vs_triton"] = (cur_med / tri_med) if tri_med else float("nan")
     else:
-        result["triton_error"] = "flash-attn not installed"
+        result["triton_error"] = triton_error
 
     if check:
         q0 = buffers.q_list[0].to(torch.float64)
@@ -511,6 +529,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
+    current_impl = current_implementation()
     compare_impl: Optional[FlyDSLImplementation] = None
     if args.compare_src:
         compare_impl = load_flydsl_from_tree(Path(args.compare_src), label="baseline")
@@ -528,6 +547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             iterations=args.iterations,
             warmup=args.warmup,
             check=args.check,
+            current_impl=current_impl,
             compare_impl=compare_impl,
             device=device,
             rng=rng,
