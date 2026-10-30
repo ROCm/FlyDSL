@@ -104,8 +104,21 @@ def _per_1x32_mxfp8_quant(x):
     return quantized.view(shape).contiguous(), scales.contiguous()
 
 
-# Chained A8W4 accuracy gate for 61 residual layers.
-_CHAIN_TOL = 0.10
+# Chained accuracy budget, the one aiter's op_tests/multigpu_tests/bench_mega_moe.py gates its
+# N-layer residual chain with: 1 - cosine grows about linearly in the layer count and then
+# saturates, so tol = safety * slope * L / (1 + sat * L). (slope, sat) are aiter's mxfp8-wire
+# rows; the MegaMoEV2 combine wire is bf16 or fp8 with 1x32 e8m0 scales, which aiter also
+# books under mxfp8.
+_CHAIN_ACC_TOL = {
+    "a4w4": (0.0225, 0.031),
+    "a8w4": (0.00143, 0.0012),
+}
+_CHAIN_ACC_TOL_SAFETY = 1.5
+
+
+def _chain_tol(quant, n_layers):
+    slope, sat = _CHAIN_ACC_TOL[quant]
+    return _CHAIN_ACC_TOL_SAFETY * slope * n_layers / (1.0 + sat * n_layers)
 
 
 def _info(rank, msg):
@@ -1349,7 +1362,7 @@ def _run_mega_only(
                 .float()
             )
             _acc_metric = _calc_diff(out_ref, out_dev)  # 1 - cosine (fp64), end-to-end accumulated
-            _acc_floor = _CHAIN_TOL
+            _acc_floor = _chain_tol(quant, n_layers)
             _acc_label = f"cos_diff(chain x{n_layers})"
             acc_ok = _acc_metric < _acc_floor
         else:
@@ -1480,7 +1493,7 @@ def _run_mega_only(
     _active_g2_bm = int(moe._g2_active_block_m) if not stage1_only else -1
     _active_grid_mult = int(moe._active_config.stage1.grid_mult)
     if rank == 0:
-        _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
+        _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor:.3g})" if check_acc else "acc:skip"
         _perf_s = (
             f"SBM={_active_sbm} G2_BM={_active_g2_bm} "
             f"GRID={_active_grid_mult} "
