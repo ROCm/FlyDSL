@@ -11,8 +11,6 @@ does not cover GQA/MQA, varlen, paged KV, or general cross-attention.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
@@ -21,7 +19,7 @@ from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.attention.flash_attn_gfx1100_autotune import select_tile, tile_fits
 from kernels.attention.flash_attn_utils import daz_denormal_attr
 from kernels.common import buffer_ops
-from kernels.common.kernels_common import LOG2E, dtype_to_elem_type
+from kernels.common.kernels_common import LOG2E
 
 WMMA_M = WMMA_N = WMMA_K = 16
 WAVE_SIZE = 32
@@ -105,6 +103,7 @@ def build_flash_attn_func_module_primary(
             bool(_fixed_tile[4]),
         )
     else:
+
         def _build_forced_tile(forced_tile):
             return build_flash_attn_func_module_primary(
                 batch,

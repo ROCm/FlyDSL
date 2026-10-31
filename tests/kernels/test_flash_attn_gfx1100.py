@@ -21,7 +21,7 @@ import random
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Callable, Literal, NamedTuple
 
 import pytest
@@ -42,12 +42,11 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping gfx1100 tests.", allow_module_level=True)
 
-from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 import kernels.attention.flash_attn_interface as flash_attn_interface  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module  # noqa: E402
 from kernels.attention.flash_attn_gfx1100_autotune import pick_tile  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
-
 
 _ARCH = str(get_rocm_arch() or "")
 if not _ARCH.startswith("gfx110"):
@@ -274,9 +273,7 @@ def _case_decode_matrix() -> dict[str, float]:
                                     causal=case.causal,
                                 )
                                 torch.cuda.synchronize()
-                                ref = _ref_attn_fp64(
-                                    inputs.q, inputs.k, inputs.v, causal=case.causal
-                                )
+                                ref = _ref_attn_fp64(inputs.q, inputs.k, inputs.v, causal=case.causal)
                                 ulp = _ulp_err(out, ref.to(out.dtype), dtype=case.dtype)
                                 if ulp > max_ulp:
                                     max_ulp = ulp
@@ -338,9 +335,7 @@ def _case_guard_buffer() -> dict[str, object]:
         device=device,
     )
     out_start = guard_elems
-    out_view = sentinel[out_start : out_start + exposed_elems].view(
-        batch, exposed_seq_q, num_heads, head_dim
-    )
+    out_view = sentinel[out_start : out_start + exposed_elems].view(batch, exposed_seq_q, num_heads, head_dim)
 
     raised: str | None = None
     error_msg: str | None = None
@@ -421,9 +416,7 @@ def _case_dense_matrix() -> dict[str, float | dict[str, object]]:
                                 causal=causal,
                             )
                             torch.cuda.synchronize()
-                            ref = _ref_attn_fp64(
-                                inputs.q, inputs.k, inputs.v, causal=causal
-                            )
+                            ref = _ref_attn_fp64(inputs.q, inputs.k, inputs.v, causal=causal)
                             ulp = _ulp_err(out, ref.to(out.dtype), dtype=dtype)
                             if ulp > max_ulp:
                                 max_ulp = ulp

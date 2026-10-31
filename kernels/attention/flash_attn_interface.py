@@ -1609,9 +1609,7 @@ def flydsl_flash_attn_func(
             else:
                 expected_shape = tuple(q.shape)
                 if tuple(out.shape) != expected_shape:
-                    raise ValueError(
-                        f"flydsl_flash_attn_func: out must be {expected_shape}, got {tuple(out.shape)}"
-                    )
+                    raise ValueError(f"flydsl_flash_attn_func: out must be {expected_shape}, got {tuple(out.shape)}")
                 if not out.is_cuda or out.device != q.device:
                     raise ValueError(
                         f"flydsl_flash_attn_func: out must be a CUDA tensor on {q.device}, got {out.device}"
@@ -1622,6 +1620,7 @@ def flydsl_flash_attn_func(
                     )
                 if not out.is_contiguous():
                     raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
+
             # Guard the 32-bit ABI: each batch slice must stay below 2**31 elements.
             def _slice_elems(tensor: torch.Tensor) -> int:
                 elems = tensor.numel()

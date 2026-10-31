@@ -145,12 +145,7 @@ def select_tile(
 
     bh = batch * num_heads
     default = pick_tile(head_dim, seq_q, causal, bh, num_cu=num_cu)
-    if (
-        not _autotune_enabled()
-        or build_kernel is None
-        or torch is None
-        or not torch.cuda.is_available()
-    ):
+    if not _autotune_enabled() or build_kernel is None or torch is None or not torch.cuda.is_available():
         return default
 
     total_elems = batch * num_heads * head_dim * (seq_q + seq_kv)
