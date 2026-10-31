@@ -119,6 +119,39 @@ The table contains geometric means across GPUs. Ratios above one are slower. Raw
 | 8191 | 6144 | 8192 | 0.9991× | 0.9998× |
 | 8192 | 5120 | 17408 | 1.0000× | 1.0004× |
 
+
+## Unseen-shape calibration validation
+
+A separate source/shortlist-frozen test covers 18 shapes across six N/K families
+absent from every prior training and validation cohort. The independent
+reference uses broad screening, refinement and finalist selection, followed by
+15 paired rounds on both GPUs. Each shape is evaluated with hot and rotating
+weights, giving 36 cache-regime comparisons.
+
+| Selection method | Geomean latency/reference | Worst | Within 5% |
+|---|---:|---:|---:|
+| CPU auto fallback | 1.1034× | 1.4100× | 17/36 |
+| CPU matching cache hint | 1.1010× | 1.5720× | 19/36 |
+| Calibrated auto | 1.0159× | 1.1533× | 31/36 |
+| Calibrated matching hint | 1.0158× | 1.1600× | 31/36 |
+
+Calibration substantially reduces configuration misses while retaining a
+bounded search. The worst gap is 16%; it does not always find the reference's
+fastest configuration. All 164 confirmed method/GPU pairs pass full eager and
+changed-input graph checks; maximum relative RMS is 0.001669. The focused
+suites pass 661 standalone tests, 157 FlyDSL tests and 10 vLLM backend tests.
+Unsupported hybrid/grouped combinations are skipped explicitly.
+
+ISA inspection of 130 selected method/GPU instances (63 unique ELFs) confirms
+native FP8/BF8 WMMA with zero scratch usage and no VGPR spills. Eight instances
+have 23–24 scalar spills saved in VGPR lanes, visible as lane write/read
+instructions. Those are included in the measured configurations. This audit
+is broader than the completely spill-free paired port subset above.
+
+[Per-shape results, configurations and resource metadata](../../../tests/perf/data/rdna4_mxfp4_selection.json)
+include the source-model/shortlist digests and separate prediction/calibration
+results. Performance testing covers normal E4M3-foldable weights on gfx1201.
+
 ## Benchmark and deployment warmup
 
 From a checkout with the kernel package installed, benchmark reused and rotating weights:
@@ -136,4 +169,4 @@ python tests/perf/bench_rdna4_mxfp4.py --gpu 0 --m 1 2 4 8 16 \
   --output warmup.json
 ```
 
-The helper uses synthetic operands with constant E8M0 exponents, so its cache entries cover normal E4M3-foldable plans. For other scale modes, call `tune_gemm` with actual prepared weights. Repeat for each device and share the same cache directory with the serving process. Compilation and calibration costs are reported separately. Ordinary GEMM timing excludes those costs. Reported effective GB/s uses minimum logical traffic rather than hardware DRAM counters.
+The helper uses synthetic operands with varied E8M0 exponents within the normal E4M3 range, so its cache entries cover normal E4M3-foldable plans. For other scale modes, call `tune_gemm` with actual prepared weights. Repeat for each device and share the same cache directory with the serving process. Compilation and calibration costs are reported separately. Ordinary GEMM timing excludes those costs. Reported effective GB/s uses minimum logical traffic rather than hardware DRAM counters.

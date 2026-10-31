@@ -58,8 +58,10 @@ def main():
         n, k = map(int, dimensions.lower().split("x"))
         generator = torch.Generator(device=device).manual_seed(42)
         packed = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8, generator=generator)
-        scales = torch.full((n, k // 32), 127, device=device, dtype=torch.uint8)
+        # Cover varied lookup indices while retaining normal E4M3 folding.
+        scales = torch.randint(124, 136, (n, k // 32), device=device, dtype=torch.uint8, generator=generator)
         weights = prepare_weights(packed, scales)
+        assert weights.mode == "e4m3" and weights.normal_only
         for m in args.m:
             x = torch.randn(m, k, device=device, generator=generator).to(torch.float8_e4m3fn)
             xs = torch.ones(m, device=device)
