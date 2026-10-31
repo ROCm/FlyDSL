@@ -16,6 +16,8 @@ tensor, and ``copy`` takes the pair as ``[coord, index]``.
 Run with COMPILE_ONLY=1 ARCH=gfx1250 to build it without the hardware.
 """
 
+import os
+
 import torch
 
 import flydsl.compiler as flyc
@@ -60,6 +62,23 @@ if __name__ == "__main__":
     src = torch.arange(64 * N, dtype=torch.float16, device="cuda").reshape(64, N)
     dst = torch.zeros_like(src)
     # Any rows, in any order: that is the point of an index list.
-    rows = torch.tensor([3, 1, 17, 5, 40, 2, 9, 33], dtype=torch.int32, device="cuda")
+    picked = [3, 1, 17, 5, 40, 2, 9, 33]
+    rows = torch.tensor(picked, dtype=torch.int32, device="cuda")
     run(src, dst, rows)
-    print("compiled")
+    torch.cuda.synchronize()
+
+    if os.environ.get("COMPILE_ONLY", "") not in ("", "0"):
+        # The kernel was built but never ran, so dst still holds its initial value and
+        # comparing it would report a failure the build did not have.
+        print("compiled; results not checked under COMPILE_ONLY")
+        raise SystemExit(0)
+
+    # The gathered rows land in LDS in list order and the scatter puts each one back
+    # where it came from, so every picked row survives the round trip unchanged.
+    gathered_ok = torch.equal(dst[picked], src[picked])
+    untouched = torch.ones(src.shape[0], dtype=torch.bool, device="cuda")
+    untouched[picked] = False
+    untouched_ok = bool(dst[untouched].eq(0).all())
+    print(f"gathered rows match: {gathered_ok}")
+    print(f"other rows untouched: {untouched_ok}")
+    print(f"Result correct: {gathered_ok and untouched_ok}")

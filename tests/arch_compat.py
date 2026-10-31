@@ -34,6 +34,7 @@ EXAMPLE_ARCHITECTURES = {
     "05-gather_scatter.py": ("*",),
     "06-cdna5_tensor_copy.py": ("gfx1250",),
     "07-ktrace_wave_timeline.py": ("gfx942", "gfx95*"),
+    "08-cdna5_tdm_gather_scatter.py": ("gfx1250",),
     "extension/coop/01-warp_collectives.py": ("*",),
     "extension/coop/02-block_scan.py": ("*",),
 }
