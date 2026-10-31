@@ -83,7 +83,16 @@ class BenchConfig:
         raise ValueError(f"unsupported dtype {self.dtype}")
 
     def flop_count(self) -> float:
-        return 2.0 * self.batch * self.num_heads * self.seq_q * self.seq_kv * self.head_dim
+        # 4 * B * H * pairs * D (QK^T and PV); causal counts only the unmasked
+        # bottom-right pairs, matching the convention of the PR tables.
+        sq, skv = self.seq_q, self.seq_kv
+        if not self.causal:
+            pairs = sq * skv
+        elif sq <= skv:
+            pairs = sq * (skv - sq) + sq * (sq + 1) // 2
+        else:
+            pairs = skv * (skv + 1) // 2
+        return 4.0 * self.batch * self.num_heads * pairs * self.head_dim
 
     def per_case_bytes(self) -> int:
         elem_size = torch.tensor([], dtype=self.torch_dtype).element_size()
