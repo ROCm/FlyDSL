@@ -667,6 +667,7 @@ def run_benchmark(
     device: torch.device,
     rng: torch.Generator,
     triton_kind: str = "fa2",
+    extra_impls: Sequence[FlyDSLImplementation] = (),
 ) -> Dict[str, object]:
     buffers = BufferPool(cfg, device, rng)
     result: Dict[str, object] = {
@@ -683,12 +684,15 @@ def run_benchmark(
     # thermal drift hits all of them alike.
     cur_ms: List[float] = []
     cmp_ms: List[float] = []
+    extra_ms: List[List[float]] = [[] for _ in extra_impls]
     tri_ms: List[float] = []
     triton_error = _triton_unavailable(triton_kind)
     for round_idx in range(rounds):
         cur_ms.append(_flydsl_round(current_impl, cfg, buffers, round_idx, iterations, warmup))
         if compare_impl is not None:
             cmp_ms.append(_flydsl_round(compare_impl, cfg, buffers, round_idx, iterations, warmup))
+        for impl, times in zip(extra_impls, extra_ms):
+            times.append(_flydsl_round(impl, cfg, buffers, round_idx, iterations, warmup))
         if triton_error is None:
             try:
                 tri_ms.append(_triton_round(triton_kind, cfg, buffers, round_idx, iterations, warmup))
@@ -704,6 +708,22 @@ def run_benchmark(
         result["baseline_tflops"] = cmp_med
         result["baseline_kernel_src"] = compare_impl.kernel_src
         result["delta_percent_vs_baseline"] = ((cur_med - cmp_med) / cmp_med * 100.0) if cmp_med else float("nan")
+
+    extras = []
+    for impl, times in zip(extra_impls, extra_ms):
+        med, tf_rounds, ms_rounds = _summarize(cfg, times)
+        extras.append(
+            {
+                "label": impl.label,
+                "kernel_src": impl.kernel_src,
+                "tflops": med,
+                "tflops_rounds": tf_rounds,
+                "ms_rounds": ms_rounds,
+                "delta_percent": ((cur_med - med) / med * 100.0) if med else float("nan"),
+            }
+        )
+    if extras:
+        result["extra_baselines"] = extras
 
     result["triton_impl"] = triton_kind
     if triton is not None:
@@ -816,6 +836,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--check", action="store_true", help="validate against an fp64 reference")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--compare-src", type=str, default=None, help="path to another FlyDSL checkout")
+    parser.add_argument(
+        "--extra-src",
+        action="append",
+        default=[],
+        help="more FlyDSL checkouts timed in the same rounds (repeatable)",
+    )
     parser.add_argument("--triton", choices=("fa2", "flash-attn", "none"), default="fa2", help="Triton baseline")
     parser.add_argument("--no-prefill", action="store_true", help="only run the --decode-seq-q rows")
 
@@ -838,6 +864,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     compare_impl: Optional[FlyDSLImplementation] = None
     if args.compare_src:
         compare_impl = load_flydsl_from_tree(Path(args.compare_src), label="baseline")
+    extra_impls = [load_flydsl_from_tree(Path(src), label=f"extra{i}") for i, src in enumerate(args.extra_src)]
 
     configs = build_configs(args)
     device = torch.device("cuda")
@@ -857,6 +884,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             device=device,
             rng=rng,
             triton_kind=args.triton,
+            extra_impls=extra_impls,
         )
         results.append(res)
         print(f"done {cfg.as_tuple()}", file=sys.stderr, flush=True)
