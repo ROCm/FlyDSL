@@ -35,8 +35,8 @@
       },
       {
         "file": "gfx1250-strict.patch",
-        "description": "Define gfx1250-strict on this pin and hand-port the functional follow-ups: clause scope breaks, cluster-load M0=0, 64 LDS banks, unscaled f8f6f4 WMMA promotion, WMMA latencies, drop gfx1200 SWMMAC, and disable f4 WMMA, block16 cvt-scale, e5m3, and 16x16x128 FP8 WMMA on strict. Also model the VOPD3 FP64 OPY hazard and reserve ENABLE_WAVEFRONT_SIZE32 on wave32-only targets. Adapted because those commits do not apply directly.",
-        "upstream_status": "adapted from 5186287a19f3, 38f92fc6402c, 47ec1193ee72, 97c6103e88df, e74db4f0738e, d3db06999955, 816b4c13bd85, 4bd5979264ba, abb5ab28610f, 6fb8776580a4, a2c07d5107f1, c0a1a2cfa399, 659323446eff, a1c90088f87a"
+        "description": "Define gfx1250-strict on this pin and hand-port the functional follow-ups: clause scope breaks, cluster-load M0=0, 64 LDS banks, unscaled f8f6f4 WMMA promotion, WMMA latencies, drop gfx1200 SWMMAC, and disable f4 WMMA, block16 cvt-scale, e5m3, and 16x16x128 FP8 WMMA on strict. Also model the VOPD3 FP64 OPY hazard. Intentionally omits a2c07d5107 (Reserve ENABLE_WAVEFRONT_SIZE32 on gfx125x): that ABI change drops .amdhsa_wavefront_size32 on wave32-only targets and hangs MI450 MoE kernel launch in FlyDSL. Adapted because those commits do not apply directly.",
+        "upstream_status": "adapted from 5186287a19f3, 38f92fc6402c, 47ec1193ee72, 97c6103e88df, e74db4f0738e, d3db06999955, 816b4c13bd85, 4bd5979264ba, abb5ab28610f, 6fb8776580a4, c0a1a2cfa399, 659323446eff, a1c90088f87a (omitted a2c07d5107 ENABLE_WAVEFRONT_SIZE32)"
       },
       {
         "file": "schedule-bank-and-gpr.patch",

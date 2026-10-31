@@ -359,21 +359,6 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.td b/llvm/lib/Target/AMDGPU/AMDGPU.td
    FeatureGFX10Insts, FeatureGFX10_3Insts, FeatureGFX11Insts,
    FeatureGFX1250Insts, FeatureGFX1251GEMMInsts, FeatureGFX12Insts,
    FeatureGFX13Insts, FeatureGFX8Insts, FeatureGFX90AInsts,
-diff --git a/llvm/lib/Target/AMDGPU/AMDGPUAsmPrinter.cpp b/llvm/lib/Target/AMDGPU/AMDGPUAsmPrinter.cpp
---- a/llvm/lib/Target/AMDGPU/AMDGPUAsmPrinter.cpp
-+++ b/llvm/lib/Target/AMDGPU/AMDGPUAsmPrinter.cpp
-@@ -814,7 +814,10 @@ const MCExpr *AMDGPUAsmPrinter::getAmdhsaKernelCodeProperties(
-     KernelCodeProperties |=
-         amdhsa::KERNEL_CODE_PROPERTY_ENABLE_SGPR_PRIVATE_SEGMENT_SIZE;
-   }
--  if (MF.getSubtarget<GCNSubtarget>().isWave32()) {
-+  const GCNSubtarget &STM = MF.getSubtarget<GCNSubtarget>();
-+  if (STM.isWave32() &&
-+      STM.getFeatureBits().test(AMDGPU::FeatureSupportsWave32) &&
-+      STM.getFeatureBits().test(AMDGPU::FeatureSupportsWave64)) {
-     KernelCodeProperties |=
-         amdhsa::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32;
-   }
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
 --- a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
 +++ b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
@@ -445,43 +430,6 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp b/llvm/lib/Target/
  bool AMDGPULowerIntrinsicsLegacy::runOnModule(Module &M) {
    auto &TPC = getAnalysis<TargetPassConfig>();
    const AMDGPUTargetMachine &TM = TPC.getTM<AMDGPUTargetMachine>();
-diff --git a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
---- a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
-+++ b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
-@@ -2861,16 +2861,15 @@ Expected<bool> AMDGPUDisassembler::decodeKernelDescriptorDirective(
-       return createReservedKDBitsError(KERNEL_CODE_PROPERTY_RESERVED0,
-                                        amdhsa::KERNEL_CODE_PROPERTIES_OFFSET);
- 
--    // Reserved for GFX9
--    if (isGFX9() &&
--        (TwoByteBuffer & KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32)) {
--      return createReservedKDBitsError(
--          KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32,
--          amdhsa::KERNEL_CODE_PROPERTIES_OFFSET, "must be zero on gfx9");
--    }
--    if (isGFX10Plus()) {
-+    // Reserved unless both wave sizes are supported.
-+    if (STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave32) &&
-+        STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave64)) {
-       PRINT_DIRECTIVE(".amdhsa_wavefront_size32",
-                       KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32);
-+    } else if (TwoByteBuffer & KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32) {
-+      return createReservedKDBitsError(
-+          KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32,
-+          amdhsa::KERNEL_CODE_PROPERTIES_OFFSET);
-     }
- 
-     if (CodeObjectVersion >= AMDGPU::AMDHSA_COV5)
-@@ -2927,7 +2926,8 @@ Expected<bool> AMDGPUDisassembler::decodeKernelDescriptor(
-   // accurately produce .amdhsa_next_free_vgpr, and they appear in the wrong
-   // order. Workaround this by first looking up .amdhsa_wavefront_size32 here
-   // when required.
--  if (isGFX10Plus()) {
-+  if (STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave32) &&
-+      STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave64)) {
-     uint16_t KernelCodeProperties =
-         support::endian::read16(&Bytes[amdhsa::KERNEL_CODE_PROPERTIES_OFFSET],
-                                 llvm::endianness::little);
 diff --git a/llvm/lib/Target/AMDGPU/GCNProcessors.td b/llvm/lib/Target/AMDGPU/GCNProcessors.td
 --- a/llvm/lib/Target/AMDGPU/GCNProcessors.td
 +++ b/llvm/lib/Target/AMDGPU/GCNProcessors.td
@@ -565,20 +513,6 @@ diff --git a/llvm/lib/Target/AMDGPU/GCNVOPDUtils.cpp b/llvm/lib/Target/AMDGPU/GC
    if (!IsVOPD3 && ((TII.isVOP3(MIX) && !canMapVOP3PToVOPD(MIX)) ||
                     (TII.isVOP3(MIY) && !canMapVOP3PToVOPD(MIY))))
      return false;
-diff --git a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUMCKernelDescriptor.cpp b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUMCKernelDescriptor.cpp
---- a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUMCKernelDescriptor.cpp
-+++ b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUMCKernelDescriptor.cpp
-@@ -55,7 +55,9 @@ MCKernelDescriptor::getDefaultAmdhsaKernelDescriptor(const MCSubtargetInfo *STI,
-       amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_X_SHIFT,
-       amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_X, Ctx);
-   if (Version.Major >= 10) {
--    if (STI->getFeatureBits().test(FeatureWavefrontSize32))
-+    if (STI->getFeatureBits().test(FeatureWavefrontSize32) &&
-+        STI->getFeatureBits().test(FeatureSupportsWave32) &&
-+        STI->getFeatureBits().test(FeatureSupportsWave64))
-       MCKernelDescriptor::bits_set(
-           KD.kernel_code_properties, OneMCExpr,
-           amdhsa::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32_SHIFT,
 diff --git a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
 --- a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
 +++ b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
@@ -598,16 +532,6 @@ diff --git a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp b/llvm
    case GK_GFX1250: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1250;
    case GK_GFX1251: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1251;
    case GK_GFX1310: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1310;
-@@ -482,7 +484,8 @@ void AMDGPUTargetAsmStreamer::EmitAmdhsaKernelDescriptor(
-       amdhsa::KERNEL_CODE_PROPERTY_ENABLE_SGPR_PRIVATE_SEGMENT_SIZE_SHIFT,
-       amdhsa::KERNEL_CODE_PROPERTY_ENABLE_SGPR_PRIVATE_SEGMENT_SIZE,
-       ".amdhsa_user_sgpr_private_segment_size");
--  if (IVersion.Major >= 10)
-+  if (STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave32) &&
-+      STI.getFeatureBits().test(AMDGPU::FeatureSupportsWave64))
-     PrintField(KD.kernel_code_properties,
-                amdhsa::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32_SHIFT,
-                amdhsa::KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32,
 diff --git a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
 --- a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
 +++ b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
@@ -921,18 +845,3 @@ diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
          .Case("12.51", Triple::AMDGPUSubArch1251)
          .Case("13", Triple::AMDGPUSubArch13)
          .Case("13.10", Triple::AMDGPUSubArch1310)
-diff --git a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
---- a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
-+++ b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
-@@ -6219,6 +6219,11 @@ bool AMDGPUAsmParser::ParseDirectiveAMDHSAKernel() {
-       EXPR_RESOLVE_OR_ERROR(EvaluatableExpr);
-       if (ISA.Major < 10)
-         return Error(IDRange.Start, "directive requires gfx10+", IDRange);
-+      if (!(getFeatureBits().test(AMDGPU::FeatureSupportsWave32) &&
-+            getFeatureBits().test(AMDGPU::FeatureSupportsWave64))) {
-+        return Error(IDRange.Start,
-+                     "directive unsupported on " + getSTI().getCPU(), IDRange);
-+      }
-       EnableWavefrontSize32 = Val;
-       PARSE_BITS_ENTRY(KD.kernel_code_properties,
-                        KERNEL_CODE_PROPERTY_ENABLE_WAVEFRONT_SIZE32, ExprVal,
