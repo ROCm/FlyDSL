@@ -44,7 +44,7 @@ if torch is None or not torch.cuda.is_available():
 
 import kernels.attention.flash_attn_interface as flash_attn_interface  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module  # noqa: E402
+from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module, hoist_q  # noqa: E402
 from kernels.attention.flash_attn_gfx1100_autotune import pick_tile  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 
@@ -805,27 +805,69 @@ def test_select_tile_autotunes_when_enabled(monkeypatch):
     assert chosen == original_tiles[len(original_tiles) - 1]
 
 
-def _gfx1100_tile_samples() -> dict[tuple[int, tuple[int, int, int, int, bool]], tuple[int, bool, int]]:
-    seq_candidates = [1, 16, 32, 63, 64, 96, 128, 256, 512, 1024, 4096, 8192, 24576, 32768]
+class _TileKey(NamedTuple):
+    head_dim: int
+    tile: tuple[int, int, int, int, bool]
+    hoist_q: bool
+    causal: bool
+    decode: bool
+    prefetch: bool
+    kv_aligned: bool
+    multi_block: bool
+
+
+_D64_DECODE = (1, 1, 64, 8, True)
+_D256_DECODE = (4, 1, 32, 8, False)
+_D256_PREFILL = (8, 1, 32, 8, False)
+_D64_DECODE_SPILL = "the single-wave D64 decode kernel already spilled 1-6 VGPRs before the f16 RNE change"
+_D256_TAIL_SPILL = "unchanged since the head_dim 256 decode kernel was added"
+_D256_HOIST = "hoisting Q is faster than spill-free re-reads on this shape class (see hoist_q)"
+
+# Kernels allowed to spill: (max vgpr_spill_count, max private_segment_fixed_size)
+# as measured on W7900D, and why. Every other variant must be spill-free.
+_SPILL_EXCEPTIONS: dict[_TileKey, tuple[int, int, str]] = {
+    _TileKey(64, _D64_DECODE, True, True, True, False, True, False): (1, 8, _D64_DECODE_SPILL),
+    _TileKey(64, _D64_DECODE, True, False, True, False, True, True): (3, 16, _D64_DECODE_SPILL),
+    _TileKey(64, _D64_DECODE, True, False, True, False, False, True): (7, 32, _D64_DECODE_SPILL),
+    _TileKey(256, _D256_DECODE, False, False, True, False, False, True): (34, 140, _D256_TAIL_SPILL),
+    _TileKey(256, _D256_DECODE, True, False, True, False, True, True): (75, 304, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, True, True, False, True, True): (125, 488, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, False, True, False, False, True): (75, 304, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, True, True, False, False, True): (80, 324, _D256_HOIST),
+    _TileKey(256, _D256_PREFILL, True, False, False, False, True, True): (71, 288, _D256_HOIST),
+    _TileKey(256, _D256_PREFILL, True, True, False, False, True, True): (79, 320, _D256_HOIST),
+}
+
+
+def _gfx1100_tile_samples() -> dict[_TileKey, tuple[int, int, int]]:
+    """One (seq_q, seq_kv, bh) sample per distinct compiled kernel variant."""
+    prefill_seqs = [32, 63, 64, 96, 128, 256, 512, 1024, 4096, 8192, 16384, 24576, 32768]
+    decode_seq_kv = [64, 4096, 4097, 8192, 8193, 32768]
     bh_base = [1, 4, 16, 32]
-    tiles: dict[tuple[int, tuple[int, int, int, int, bool]], tuple[int, bool, int]] = {}
+    shapes = [(seq, seq, bh) for seq in prefill_seqs for bh in bh_base]
+    shapes += [(seq_q, seq_kv, bh) for seq_q in (1, 16) for seq_kv in decode_seq_kv for bh in bh_base + [384]]
+    samples: dict[_TileKey, tuple[int, int, int]] = {}
     for head_dim in (64, 128, 256):
-        for seq_q in seq_candidates:
+        for seq_q, seq_kv, bh in shapes:
             for causal in (False, True):
-                bh_values = list(bh_base)
-                if seq_q <= 16:
-                    bh_values.append(384)
-                for bh in bh_values:
-                    tile = pick_tile(head_dim, seq_q, causal, bh, num_cu=96)
-                    key = (head_dim, tile)
-                    if key not in tiles:
-                        tiles[key] = (seq_q, causal, bh)
-    return tiles
+                tile = pick_tile(head_dim, seq_q, causal, bh, num_cu=96)
+                block_n = tile[2]
+                key = _TileKey(
+                    head_dim=head_dim,
+                    tile=tile,
+                    hoist_q=hoist_q(head_dim, seq_q, seq_kv, bh),
+                    causal=causal,
+                    decode=seq_q <= 16,
+                    prefetch=seq_q <= 16 and head_dim == 128 and bh <= 128,
+                    kv_aligned=seq_kv % block_n == 0,
+                    multi_block=seq_kv > 2 * block_n,
+                )
+                samples.setdefault(key, (seq_q, seq_kv, bh))
+    return samples
 
 
-def _compile_tile_ir(head_dim: int, seq_q: int, causal: bool, bh: int) -> str:
+def _compile_tile_ir(head_dim: int, seq_q: int, seq_kv: int, causal: bool, bh: int) -> str:
     batch, num_heads = _factor_batch_heads(bh)
-    seq_kv = seq_q if not causal else max(seq_q, 64)
     launcher = build_flash_attn_func_module(
         batch=batch,
         num_heads=num_heads,
@@ -872,19 +914,30 @@ def _compile_tile_ir(head_dim: int, seq_q: int, causal: bool, bh: int) -> str:
     return compiled[1].ir
 
 
+def _spill_metadata(ir_text: str) -> tuple[int, int]:
+    spills = [int(val) for val in re.findall(r"vgpr_spill_count\s*=\s*(\d+)", ir_text)]
+    scratch = [int(val) for val in re.findall(r"private_segment_fixed_size\s*=\s*(\d+)", ir_text)]
+    assert spills, "no vgpr_spill_count metadata found"
+    assert scratch, "no private_segment_fixed_size metadata found"
+    return max(spills), max(scratch)
+
+
 def test_gfx1100_tiles_avoid_spills():
-    tiles = _gfx1100_tile_samples()
-    assert tiles, "expected at least one tile sample"
-    for (head_dim, tile), (seq_q, causal, bh) in tiles.items():
-        ir_text = _compile_tile_ir(head_dim, seq_q, causal, bh)
-        spills = [int(val) for val in re.findall(r"vgpr_spill_count\s*=\s*(\d+)", ir_text)]
-        scratch = [int(val) for val in re.findall(r"private_segment_fixed_size\s*=\s*(\d+)", ir_text)]
-        assert spills, f"no vgpr_spill_count metadata found for head_dim={head_dim}, tile={tile}"
-        assert scratch, f"no private_segment_fixed_size metadata found for head_dim={head_dim}, tile={tile}"
-        assert max(spills) == 0, f"VGPR spills detected for head_dim={head_dim}, tile={tile}, spills={spills}"
-        assert max(scratch) == 0, (
-            f"Private segment usage detected for head_dim={head_dim}, tile={tile}, private_segment_fixed_size={scratch}"
-        )
+    samples = _gfx1100_tile_samples()
+    assert samples, "expected at least one tile sample"
+    failures = []
+    for key, (seq_q, seq_kv, bh) in samples.items():
+        spills, scratch = _spill_metadata(_compile_tile_ir(key.head_dim, seq_q, seq_kv, key.causal, bh))
+        max_spills, max_scratch, _ = _SPILL_EXCEPTIONS.get(key, (0, 0, ""))
+        if spills > max_spills or scratch > max_scratch:
+            failures.append(f"{key} (seq_q={seq_q}, seq_kv={seq_kv}, bh={bh}): spills={spills}, scratch={scratch}")
+    assert not failures, "unexpected VGPR spills:\n" + "\n".join(failures)
+
+
+def test_gfx1100_spill_exceptions_are_reachable():
+    samples = _gfx1100_tile_samples()
+    stale = [key for key in _SPILL_EXCEPTIONS if key not in samples]
+    assert not stale, f"spill exceptions no longer selected by pick_tile/hoist_q: {stale}"
 
 
 def _run_flash_attn_with_override(

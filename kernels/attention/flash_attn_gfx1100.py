@@ -60,6 +60,21 @@ def _strides(layout: str, n_heads: int, seq: int, head_dim: int):
     raise ValueError(f"layout must be 'bhsd' or 'bshd', got {layout!r}")
 
 
+def hoist_q(head_dim, seq_q, seq_kv, bh):
+    """Whether the kernel keeps the Q fragments in VGPRs across the KV loop.
+
+    For head_dim 256 the hoisted Q costs 74-75 spilled VGPRs (~300 B scratch)
+    on W7900D, which only pays off on long KV loops: decode with
+    ``seq_kv >= 8192`` and prefill with ``seq_kv >= 16384`` and ``bh >= 4``.
+    Everywhere else re-reading Q per KV block is faster and spill-free.
+    """
+    if head_dim <= 128:
+        return True
+    if seq_q <= WMMA_M:
+        return seq_kv >= 8192
+    return seq_kv >= 16384 and bh >= 4
+
+
 def build_flash_attn_func_module_primary(
     batch,
     num_heads,
@@ -145,7 +160,7 @@ def build_flash_attn_func_module_primary(
     # lose occupancy if they hoist the extra LDS traffic.
     # ``_override_flags`` and ``_fixed_tile`` are private knobs exercised only by tests.
     override_flags = _override_flags or {}
-    hoist_q = head_dim <= 128
+    keep_q = hoist_q(head_dim, seq_q, seq_kv, batch * num_heads)
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
@@ -418,7 +433,7 @@ def build_flash_attn_func_module_primary(
 
         q_frags = (
             [[_q_frag(qs, kd) for kd in range_constexpr(n_d_tiles)] for qs in q_idx_safe]
-            if const_expr(hoist_q)
+            if const_expr(keep_q)
             else None
         )
 
@@ -450,7 +465,7 @@ def build_flash_attn_func_module_primary(
                     )
                 return s
 
-            if const_expr(hoist_q):
+            if const_expr(keep_q):
                 for sub in range_constexpr(n_kv_sub):
                     s_accs = [zero_acc for _ in range_constexpr(q_tiles)]
                     k_row_idx = (
