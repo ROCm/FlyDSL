@@ -93,7 +93,11 @@ def run_rank(
     model_tp=None,
     vary_expert_scales=False,
 ):
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     if cur_pos < 0 or cur_pos + S > max_seq:
         raise ValueError("positions must fit max_seq")
@@ -200,15 +204,23 @@ def run_rank(
         # MoE half vs the golden fed the kernel's own post-attention state, so a
         # 1-ulp difference in ``a`` cannot flip FP8 roundings downstream
         moe = golden_moe(W, got["a"].clone(), allreduce)
-        for name in ("scores", "prob", "xq"):
+        for name in ("scores", "xq") + (("prob",) if S > 1 else ()):
             ok &= _check(name, got[name], moe[name], report)
         # up/gate + SiLU from the kernel's own FP8 activation
         ug = golden_moe(W, got["a"].clone(), allreduce, xq=got["xq"].clone())
         ok &= _check("mid", got["mid"], ug["mid"], report)
         # down + route weighting + TP reduce + residual from the kernel's own mid
-        down = golden_moe(W, got["a"].clone(), allreduce, got["mid"].clone(), got["sel"].clone(), got["prob"].clone())
+        down = golden_moe(
+            W,
+            got["a"].clone(),
+            allreduce,
+            got["mid"].clone(),
+            got["sel"].clone() if S > 1 else None,
+            got["prob"].clone() if S > 1 else None,
+        )
         ok &= _check("x_out", got["x_out"], down["x_out"], report)
-        ok &= torch.equal(got["sel"], moe["sel"])
+        if S > 1:
+            ok &= torch.equal(got["sel"], moe["sel"])
         # fully independent golden: only comparable when a 1-ulp difference in ``a``
         # did not flip a near-tied routing decision
         if torch.equal(ref["sel"], moe["sel"]):
@@ -276,7 +288,8 @@ def run_rank(
             ok &= same
             report.append(("cp_replay", 0.0, 0.0, f"bitwise_equal={same}"))
         if rank == 0 or not ok:
-            lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={torch.equal(got['sel'], moe['sel'])}"]
+            route_check = str(torch.equal(got["sel"], moe["sel"])) if S > 1 else "checked via mid/output"
+            lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={route_check}"]
             lines += [f"   {n:9s} max_err={e:.3e} ref_max={m:.3e} {nb}" for n, e, m, nb in report]
             print("\n".join(lines), flush=True)
     op.close()
@@ -300,7 +313,11 @@ def bench_rank(
     model_tp=None,
 ):
     """HIP-graph replay of ``GLM5_LAUNCHES_PER_STEP`` layers; returns us per layer."""
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     if cur_pos < 0 or cur_pos + S > max_seq:
         raise ValueError("positions must fit max_seq")
@@ -350,24 +367,6 @@ def bench_rank(
 
     if npes > 1:
         dist.barrier()
-    if os.environ.get("MLA_MOE_TIMELINE"):
-        top = Glm5MonoKernel(
-            W,
-            S,
-            rank=rank,
-            npes=npes,
-            group=group,
-            with_indexer=with_indexer,
-            index_max_seq=max_seq,
-            indexer_cp=indexer_cp,
-            timeline=True,
-        )
-        for _ in range(3):
-            top.forward(h, pos_t, kv, pe, indices, cos, sin, x_out=x, index_cache=index_cache)
-        torch.cuda.synchronize()
-        if rank == 0:
-            print(top.timeline_report(), flush=True)
-        top.close()
     # a HIP graph of LAYERS layer launches + one step bump, like a decode step
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -622,9 +621,14 @@ def test_reference_default_dtype():
         torch.set_default_dtype(original)
 
 
-def test_router_preserves_close_scores():
+@pytest.mark.parametrize("samples", [1, 2])
+def test_router_preserves_close_scores(samples):
     """A higher expert score must win even when its lead is below 256 FP32 ULPs."""
+    from glm_observer import attach_observer
+
     from kernels.monokernel.glm import Glm5MonoKernel
+
+    attach_observer(Glm5MonoKernel)
 
     dev = torch.device("cuda", 0)
     W = make_weights(0, device=dev)
@@ -633,15 +637,25 @@ def test_router_preserves_close_scores():
     W.t["bias"][:7] = 8  # Equal scores: lower expert IDs break the exact tie.
     W.t["bias"][92] = 7
     W.t["bias"][226] = 7 + 9.5367431640625e-5
-    h = torch.ones(1, 6144, dtype=torch.bfloat16, device=dev)
+    h = torch.ones(samples, 6144, dtype=torch.bfloat16, device=dev)
     kv = torch.zeros(MAX_SEQ, KV_LORA, dtype=torch.bfloat16, device=dev)
     pe = torch.zeros(MAX_SEQ, PE_DIM, dtype=torch.bfloat16, device=dev)
-    indices = torch.zeros(1, 2048, dtype=torch.int32, device=dev)
+    indices = torch.zeros(samples, 2048, dtype=torch.int32, device=dev)
     cos, sin = rope_table(MAX_SEQ, device=dev)
-    with Glm5MonoKernel(W, 1) as op:
-        op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
+    with Glm5MonoKernel(W, samples) as op:
+        out = op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
         torch.cuda.synchronize()
-        assert op.intermediates()["sel"].tolist() == [[256, 0, 1, 2, 3, 4, 5, 6, 226]]
+        got = op.intermediates()
+        expected_ids = [[256, 0, 1, 2, 3, 4, 5, 6, 226]] * samples
+        if samples > 1:
+            assert got["sel"].tolist() == expected_ids
+        # S=1 exposes no diagnostic route stores. Verify the chosen experts
+        # through their nonzero gate/up results and weighted final output.
+        expected = golden_moe(W, got["a"].clone(), lambda value: value, xq=got["xq"].clone())
+        assert expected["sel"].tolist() == expected_ids
+        report = []
+        assert _check("mid", got["mid"], expected["mid"], report), report
+        assert _check("x_out", out, expected["x_out"], report), report
 
 
 if __name__ == "__main__":

@@ -14,12 +14,7 @@ from kernels.monokernel.config import (
     GLM5_KERNEL_SAMPLES,
     HIDDEN,
     KV_LORA,
-    MOE_SLOTS,
-    N_EXPERTS,
-    NOPE_DIM,
     PE_DIM,
-    Q_LORA,
-    V_DIM,
     AttentionWeight,
     KvCacheLayout,
     MoeMode,
@@ -31,8 +26,7 @@ from kernels.monokernel.config import (
     validate_shard,
 )
 from kernels.monokernel.glm.kernel import build_glm5_monokernel
-from kernels.monokernel.glm.layout import INDEX_DIM, cohort_eligible, layout, stage_tasks
-from kernels.monokernel.layout import TL_COLS
+from kernels.monokernel.glm.layout import INDEX_DIM, cohort_eligible, layout
 from kernels.monokernel.packing import (
     pack_bf16,
     pack_fp8,
@@ -152,7 +146,6 @@ class Glm5MonoKernel:
         launches_per_step: int = 1,
         with_indexer: bool = False,
         index_max_seq: int = 4096,
-        timeline=False,
         indexer_cp: bool = False,
         *,
         indexer_quant: bool = False,
@@ -289,23 +282,6 @@ class Glm5MonoKernel:
             and self.kv_cache_layout is KvCacheLayout.ATOM
             and rope_dtype == "fp32"
         )
-        self.stages = stage_tasks(
-            samples,
-            W.heads,
-            topk,
-            with_indexer,
-            index_max_seq,
-            self.expert_mxfp4,
-            indexer_cp=indexer_cp,
-            npes=npes,
-            inter=W.config.inter,
-            native_fp4_mfma=native_fp4_mfma,
-            indexer_quant=indexer_quant,
-            cohort_rows=self.cohort_rows,
-            uv_reuse=self.cohort_rows,
-        )
-        n_tasks = sum(n for _, n in self.stages)
-        self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         if with_indexer:
             index_tensors = dict(t, **self.packed)
             self.index_params = torch.tensor(
@@ -320,8 +296,7 @@ class Glm5MonoKernel:
                         "g_index_k",
                         "b_index_k",
                     )
-                ]
-                + [0 if self.timeline is None else self.timeline.data_ptr()],
+                ],
                 dtype=torch.int64,
                 device=dev,
             )
@@ -369,45 +344,8 @@ class Glm5MonoKernel:
                 if self.attention_weight in (AttentionWeight.BF16, AttentionWeight.FP8_PTPC)
                 else W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0]
             ),
-            timeline=timeline,
             indexer_cp=indexer_cp,
         )
-
-    def debug(self, name: str, shape, dtype=torch.float32, pairs=True, bf2=False, _tile=None) -> torch.Tensor:
-        """Values of a scratch mailbox (``(value, tag)`` pairs unless ``pairs=False``;
-        ``bf2``: each pair's value word packs two bf16 elements)."""
-        if "_tile_rows" in self.scr_layout and _tile is None:
-            tile = self.scr_layout["_tile_rows"]
-            if shape[0] != self.S:
-                raise ValueError("tiled debug expects a leading sample dimension")
-            return torch.cat(
-                [
-                    self.debug(name, (tile, *shape[1:]), dtype, pairs, bf2, _tile=part)
-                    for part in range(self.scr_layout["_tile_count"])
-                ]
-            )
-        part = 0 if _tile is None else _tile
-        off = self.scr_layout[name] + part * self.scr_layout.get("_tile_stride", 0)
-        storage = self.scratch
-        if name == "index_q" and "index_cp_q" in self.sym_layout:
-            # Debug reads the most recently published slot; production forward
-            # never reads device epochs on the host.
-            off = self.sym_layout["index_cp_q"] + part * self.sym_layout.get("_tile_stride", 0)
-            stride = self.sym_layout["index_cp_q_stride"]
-            storage = self.sym_storage
-            first_tag = storage[off + 4 : off + 8].view(torch.int32).item()
-            second_tag = storage[off + stride + 4 : off + stride + 8].view(torch.int32).item()
-            off += stride if second_tag > first_tag else 0
-        n = 1
-        for d in shape:
-            n *= d
-        if not pairs:
-            return storage[off : off + n * 4].view(dtype).view(shape)
-        if bf2:
-            words = storage[off : off + n * 4].view(torch.int32).view(n // 2, 2)[:, 0].contiguous()
-            return words.view(torch.bfloat16).float().view(shape)
-        words = storage[off : off + n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
-        return words.view(dtype).view(shape)
 
     def forward(
         self,
@@ -524,45 +462,50 @@ class Glm5MonoKernel:
         for chunk in range(chunks):
             row = chunk * self.S
             self.launch(
-                p(h) + row * HIDDEN * h.element_size(),
-                p(x_out) + row * HIDDEN * x_out.element_size(),
-                p(block_tables) if self.with_indexer and self.kv_cache_layout is KvCacheLayout.ATOM else p(cur_pos),
-                p(cur_pos if positions is None else positions) + (0 if positions is None else row * 8),
-                p(cur_pos if slot_mapping is None else slot_mapping) + (0 if slot_mapping is None else row * 8),
-                p(cur_pos if sparse_kv_indptr is None else sparse_kv_indptr)
+                hidden_states=p(h) + row * HIDDEN * h.element_size(),
+                output=p(x_out) + row * HIDDEN * x_out.element_size(),
+                decode_position=p(cur_pos),
+                positions=p(cur_pos if positions is None else positions) + (0 if positions is None else row * 8),
+                slot_mapping=p(cur_pos if slot_mapping is None else slot_mapping)
+                + (0 if slot_mapping is None else row * 8),
+                sparse_kv_indptr=p(cur_pos if sparse_kv_indptr is None else sparse_kv_indptr)
                 + (0 if sparse_kv_indptr is None else row * 4),
-                p(kv_cache),
-                p(pe_cache),
-                p(index_cache) if self.with_indexer else p(indices),
-                p(cos),
-                p(sin),
-                p(t["g_in"]),
-                p(t["g_q"]),
-                p(t["g_kv"]),
-                p(t["g_post"]),
-                p(t["w_qkv_a"]),
-                p(t.get("s_qkv_a", t["w_qkv_a"])),
-                p(t["w_q_b"]),
-                p(t.get("s_q_b", t["w_q_b"])),
-                p(t["w_uk"]),
-                p(t.get("s_uk", t["w_uk"])),
-                p(t["w_uv"]),
-                p(t.get("s_uv", t["w_uv"])),
-                p(t["w_o"]),
-                p(t.get("s_o", t["w_o"])),
-                p(t["w_r"]),
-                p(t["bias"]),
-                p(t["w_ug"]),
-                p(t["s_ug"]),
-                p(t["w_dn"]),
-                p(t["s_dn"]),
-                p(self.scratch),
-                self.sym,
-                p(self.peers),
-                (p(self.index_params) if self.with_indexer else (0 if self.timeline is None else p(self.timeline))),
-                p(self.step),
-                self.rank,
-                layer,
+                kv_cache=p(kv_cache),
+                rope_cache=p(pe_cache),
+                kv_indices=0 if self.with_indexer else p(indices),
+                rope_cos=p(cos),
+                rope_sin=p(sin),
+                input_norm_weight=p(t["g_in"]),
+                q_norm_weight=p(t["g_q"]),
+                kv_norm_weight=p(t["g_kv"]),
+                post_attn_norm_weight=p(t["g_post"]),
+                qkv_proj_weight=p(t["w_qkv_a"]),
+                qkv_proj_scale=p(t.get("s_qkv_a", t["w_qkv_a"])),
+                q_proj_weight=p(t["w_q_b"]),
+                q_proj_scale=p(t.get("s_q_b", t["w_q_b"])),
+                k_proj_weight=p(t["w_uk"]),
+                k_proj_scale=p(t.get("s_uk", t["w_uk"])),
+                v_proj_weight=p(t["w_uv"]),
+                v_proj_scale=p(t.get("s_uv", t["w_uv"])),
+                o_proj_weight=p(t["w_o"]),
+                o_proj_scale=p(t.get("s_o", t["w_o"])),
+                gate_weight=p(t["w_r"]),
+                e_score_correction_bias=p(t["bias"]),
+                w1=p(t["w_ug"]),
+                w1_scale=p(t["s_ug"]),
+                w2=p(t["w_dn"]),
+                w2_scale=p(t["s_dn"]),
+                workspace=p(self.scratch),
+                peer_buffer=self.sym,
+                peer_ptrs=p(self.peers),
+                index_params=p(self.index_params) if self.with_indexer else 0,
+                step_counter=p(self.step),
+                tp_rank=self.rank,
+                layer_id=layer,
+                block_tables=(
+                    p(block_tables) if self.with_indexer and self.kv_cache_layout is KvCacheLayout.ATOM else 0
+                ),
+                index_cache=p(index_cache) if self.with_indexer else 0,
                 stream=torch.cuda.current_stream(),
             )
             if chunk + 1 < chunks or advance:
@@ -583,54 +526,3 @@ class Glm5MonoKernel:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-
-    def timeline_report(self) -> str:
-        """Per stage, in us from launch start: [first start, median hint seen, last end]
-        and median per-task phases (hint wait, payload staging, compute, epilogue)."""
-        tl = self.timeline[:, :5].cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
-        t0 = tl[:, 0][tl[:, 0] > 0].min()
-        rows, i = [], 0
-        for name, n in self.stages:
-            st = tl[i : i + n].clone()
-            i += n
-            st = st[st[:, 0] > 0]
-            if st.numel() == 0:
-                continue
-            for c in (1, 2, 3):  # missing marks inherit the previous one
-                st[:, c] = torch.where(st[:, c] > 0, st[:, c], st[:, c - 1])
-            d = (st[:, 1:] - st[:, :-1]).median(0).values
-            rows.append(
-                f"{name:7s} x{n:4d}  [{(st[:, 0].min() - t0):6.1f} | hint {(st[:, 1].median() - t0):6.1f} | "
-                f"end {(st[:, 4].max() - t0):6.1f}]  hint {d[0]:5.1f}  stage {d[1]:5.1f}  "
-                f"compute {d[2]:5.1f}  epi {d[3]:5.1f}"
-            )
-            if name == "index_score":
-                per_sample = n // self.S
-                ready = [(st[s * per_sample : (s + 1) * per_sample, 4].max() - t0).item() for s in range(self.S)]
-                rows.append(" " * 10 + "score-ready/sample " + " ".join(f"{v:.1f}" for v in ready))
-            elif name == "index_select":
-                done = [(st[s, 4] - t0).item() for s in range(self.S)]
-                rows.append(" " * 10 + "select-done/sample " + " ".join(f"{v:.1f}" for v in done))
-        return "\n".join(rows)
-
-    def intermediates(self):
-        S, H = self.S, self.W.heads
-        result = dict(
-            q_a=self.debug("q_a", (S, Q_LORA)),
-            kv_a=self.debug("kv_a", (S, KV_LORA + PE_DIM)),
-            q_nope=self.debug("q_nope", (S, H, NOPE_DIM), bf2=True),
-            q_pe=self.debug("q_pe", (S, H, PE_DIM), bf2=True),
-            q_lat=self.debug("q_lat", (S, H, KV_LORA), bf2=True),
-            o=self.debug("o", (S, self.output_heads * V_DIM), bf2=True),
-            a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
-            scores=self.debug("scores", (S, N_EXPERTS)),
-            sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
-            prob=self.debug("prob", (S, MOE_SLOTS)),
-            mid=self.debug("mid", (S, MOE_SLOTS, self.W.config.inter)),
-            xq=self.debug("xqd", (S, HIDDEN), pairs=False),
-        )
-        if self.with_indexer:
-            result["index_q"] = self.debug("index_q", (S, 32, INDEX_DIM), bf2=True)
-            result["index_w"] = self.debug("index_w", (S, 32))
-            result["indices"] = self.debug("indices", (S, self.topk), torch.int32, pairs=False)
-        return result
