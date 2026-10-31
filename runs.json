@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-31T12:25:57Z",
+ "updated": "2026-10-31T12:43:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,24 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588",
    "created_at": "2026-10-31T07:38:21Z",
-   "updated_at": "2026-10-31T12:23:36Z",
+   "updated_at": "2026-10-31T12:42:10Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-31T12:23:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588/job/124536215142"
+     "completed_at": "2026-10-31T12:42:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588/job/124536215142",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
