@@ -9,6 +9,7 @@ cached; K tiles/unroll and masked copies adapt to the actual unseen shape.
 """
 
 import json
+import math
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .dispatch_features import (
     HYBRID_DEFAULTS,
     REGISTER_DEFAULTS,
     context_features,
+    geometry,
     legal_config,
     normalize_config,
 )
@@ -138,3 +140,111 @@ def _selected(m, n, k, mode, cache_policy):
 def choose_config(m, n, k, mode="e4m3", *, cache_policy="auto"):
     """Return an independent configuration dictionary for this shape/hint."""
     return dict(_selected(m, n, k, mode, cache_policy))
+
+
+def tuning_candidates(m, n, k, *, cache_policy="auto", limit=64):
+    """Bound a native FlyDSL calibration using nearby measured regions.
+
+    Static proposals seed the search. Nearby training regions contribute
+    alternative geometries; register divisors cover K factors and tail cliffs.
+    No measured latency for the query shape is used to build this shortlist.
+    """
+    _check(m, n, k, cache_policy)
+    selected, seen = [], set()
+
+    def add(raw):
+        cfg = dict(raw)
+        if cfg["engine"] == "hybrid":
+            cfg["tile_k"] = max(b for b in (32, 64, 128, 256) if b <= cfg["tile_k"] and k % b == 0)
+            cfg["operand_prefetch"] = min(cfg["operand_prefetch"], cfg["tile_k"] // 16 - 1)
+        cfg = normalize_config(cfg, m, k)
+        if cfg["engine"] == "register":
+            bm = 16 * cfg["waves_m"] * cfg["repeat_m"]
+            bn = 16 * cfg["waves_n"] * cfg["repeat_n"]
+            if m % bm or n % bn:
+                cfg["buffer_io"] = True
+        ident = tuple(sorted(cfg.items()))
+        if ident not in seen and legal_config(cfg, m, n, k):
+            selected.append(cfg)
+            seen.add(ident)
+
+    hints = [cache_policy] + [p for p in CACHE_POLICIES if p != cache_policy]
+    for hint in hints:
+        add(choose_config(m, n, k, cache_policy=hint))
+    bk = max(b for b in (32, 64, 128, 256) if k % b == 0)
+    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128 if m < 256 else 256
+    for wn in (1, 2):
+        add(
+            dict(
+                HYBRID_DEFAULTS,
+                tile_m=bm,
+                tile_n=32 if wn == 1 else 64,
+                tile_k=bk,
+                waves_m=min(4, bm // 16),
+                waves_n=wn,
+                operand_prefetch=min(2, bk // 16 - 1),
+            )
+        )
+    groups = k // 32
+    divisors = [d for d in range(1, 17) if groups % d == 0]
+    for hint in hints:
+        base = choose_config(m, n, k, cache_policy=hint)
+        if base["engine"] == "register":
+            for unroll in divisors:
+                add(dict(base, k_unroll=unroll))
+    for waves_n in (2, 4, 1):
+        for repeat_m in sorted({1, 2, min(4, (m + 15) // 16)}):
+            for unroll in divisors:
+                add(
+                    dict(
+                        REGISTER_DEFAULTS,
+                        waves_n=waves_n,
+                        repeat_m=repeat_m,
+                        repeat_n=1,
+                        k_unroll=unroll,
+                    )
+                )
+                if waves_n == 2 and unroll in (divisors[0], divisors[-1]):
+                    add(
+                        dict(
+                            REGISTER_DEFAULTS,
+                            waves_n=waves_n,
+                            repeat_m=repeat_m,
+                            repeat_n=1,
+                            k_unroll=unroll,
+                            table_mode="lut",
+                        )
+                    )
+    # Reserve at least half the budget for geometries selected in nearby
+    # measured regions, rather than spending it entirely on register unrolls.
+    selected = selected[: max(12, limit // 2)]
+    seen = {tuple(sorted(c.items())) for c in selected}
+    model = _model()
+    neighbors = sorted(
+        model["training"]["shapes"],
+        key=lambda s: (
+            2 * abs(math.log2(m / s[0]))
+            + abs(math.log2(n * k / (s[1] * s[2])))
+            + 0.5 * abs(math.log2(n / s[1]))
+            + 0.5 * abs(math.log2(k / s[2]))
+        ),
+    )
+    geometry_seen = set()
+    deferred = []
+    for shape in neighbors[:24]:
+        for hint in hints:
+            for index in model["leaves"][str(_region(*shape, hint))][:2]:
+                cfg = model["candidates"][index]
+                signature = (cfg["engine"], *geometry(cfg)[:5])
+                if signature in geometry_seen:
+                    deferred.append(cfg)
+                else:
+                    geometry_seen.add(signature)
+                    add(cfg)
+                if len(selected) >= limit:
+                    return selected[:limit]
+    for cfg in deferred:
+        add(cfg)
+        if len(selected) >= limit:
+            break
+    return selected[:limit]

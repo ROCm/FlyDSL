@@ -3,6 +3,8 @@
 
 """Lossless MXFP4 preparation and native FP8 dense GEMM for RDNA4."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -154,14 +156,16 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         x_scale: Contiguous FP32 tensor [M] or [M, 1].
         out: Optional contiguous output tensor [M, N].
         dtype: BF16 (default) or FP16, matching ``out`` when supplied.
-        config: Optional register/hybrid factory parameters. Otherwise use the
-            cached shape policy; selection does not benchmark the GPU.
+        config: Optional register/hybrid factory parameters. Otherwise use a
+            measured FlyDSL cache entry or the CPU shape policy. Device timing
+            requires explicit calibration or ``FLYDSL_AUTOTUNE=1``.
         cache_policy: ``auto`` balances hot and rotating weights; ``hot`` is
             for repeated reuse, ``rotating`` for weights cycled between layers.
 
     Returns:
-        ``(x.float() @ weights.dequantized().T) * x_scale`` rounded to the
-        output dtype, using FP32 accumulation without a dense weight buffer.
+        Tensor [M, N] containing the represented matrix product with per-row
+        activation scales, FP32 accumulation and output-dtype rounding. No
+        dense weight buffer is materialized.
 
     Raises:
         ValueError: For incompatible shapes, devices, formats, or strategies.
@@ -190,7 +194,12 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         out = torch.empty(m, n, device=x.device, dtype=dtype)
     if out.shape != (m, n) or out.dtype != dtype or not out.is_contiguous() or out.device != x.device:
         raise ValueError("output must be contiguous BF16/FP16 [M,N] on the activation device")
-    options = dict(config) if config else choose_config(m, n, k, weights.mode, cache_policy=cache_policy)
+    if config:
+        options = dict(config)
+    else:
+        from .tuning import resolve_config
+
+        options = resolve_config(gemm, x, weights, x_scale, out, cache_policy)
     if options.get("weight_bits", 4) != 4:
         raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
     options["fold_mode"] = weights.mode
@@ -198,12 +207,11 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
     options["output_dtype"] = "bf16" if dtype == torch.bfloat16 else "fp16"
     options["device_id"] = x.device.index
     options["separated_nibbles"] = weights.nibble_layout == "split"
-    for name in ("a_swizzle", "b_swizzle"):
-        if options.get(name) is not None:
-            options[name] = tuple(options[name])
+    if options.get("b_swizzle") is not None:
+        options["b_swizzle"] = tuple(options["b_swizzle"])
     engine = options.pop("engine", "register")
     if engine not in ("register", "hybrid"):
-        raise ValueError("engine must be register or hybrid; cooperative LDS was removed")
+        raise ValueError("engine must be register or hybrid")
     if engine == "hybrid":
         if weights.mode == "grouped":
             raise ValueError("hybrid requires losslessly folded FP8 weights")
@@ -240,3 +248,21 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
             with torch.cuda.device(x.device):
                 compiled(*args, stream)
     return out
+
+
+def tune_gemm(x, weights, x_scale, *, dtype=torch.bfloat16, cache_policy="auto"):
+    """Calibrate at most 64 legal configurations before graph capture.
+
+    Returns the selected configuration. FlyDSL persists the measured choice;
+    subsequent ordinary GEMM calls reuse it without device benchmarking.
+    Grouped-scale plans retain the conservative register fallback.
+    """
+    if x.is_cuda:
+        with torch.cuda.device(x.device):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("calibrate MXFP4 before graph capture")
+    config = choose_config(x.shape[0], weights.n, weights.k, weights.mode, cache_policy=cache_policy)
+    out = gemm(x, weights, x_scale, dtype=dtype, config=config)
+    from .tuning import resolve_config
+
+    return resolve_config(gemm, x, weights, x_scale, out, cache_policy, calibrate=True)

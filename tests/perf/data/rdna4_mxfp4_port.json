@@ -1,0 +1,2855 @@
+{
+  "hardware": "Two Radeon AI PRO R9700, gfx1201, default clocks",
+  "scope": "Explicit matched configurations; isolates source port from configuration-selection quality.",
+  "compiler": "Installed FlyDSL 0.3.4.1 with exact-source kernel overlay; compiler SDK not rebuilt",
+  "protocol": {
+    "rounds": 15,
+    "orders": "randomized paired",
+    "rotating_min_copies": 8,
+    "rotating_min_bytes": 268435456
+  },
+  "factory_ast_sha256": {
+    "register.py": "602f091cdfb60d775c0236ca9ca45ac64f74e189fdb2cd50767d5fab02757e7c",
+    "hybrid.py": "b92310278c9ed95b183e37726617ddcaee469e532733a3c7064039a7e48743bf"
+  },
+  "summary": {
+    "shapes": 8,
+    "shape_gpu_pairs": 16,
+    "cache_comparisons": 32,
+    "geomean_port_over_original": 0.9990591132522176,
+    "worst": 1.0064435555796885,
+    "all_bitwise_equal": true,
+    "all_changed_input_equal": true,
+    "all_native_fp8_bf8": true,
+    "all_zero_scratch_spills": true,
+    "equal_instruction_fingerprints": 16
+  },
+  "measurements": [
+    {
+      "shape": [
+        1,
+        5120,
+        17408
+      ],
+      "gpu": 0,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": true,
+        "k_unroll": 8,
+        "repeat_m": 2,
+        "repeat_n": 1,
+        "table_mode": "lut",
+        "waves_m": 1,
+        "waves_n": 4
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 378961920,
+      "samples_us": {
+        "original": {
+          "hot": [
+            32.76393115520477,
+            32.55830109119415,
+            32.4251557651319,
+            31.651541590690613,
+            31.485161185264587,
+            31.54653012752533,
+            32.68517553806305,
+            31.88616633415222,
+            32.138791680336,
+            31.543409824371338,
+            33.23688005146227,
+            33.19279771102102,
+            31.56178593635559,
+            31.89491629600525,
+            32.82293081283569
+          ],
+          "rotating": [
+            77.55749365862678,
+            77.57099717855453,
+            77.53413170576096,
+            77.55882292985916,
+            77.55851745605469,
+            77.5713250041008,
+            77.58913189172745,
+            77.62788981199265,
+            77.69788801670074,
+            77.54538208246231,
+            77.60538905858994,
+            77.62601226568222,
+            77.56882160902023,
+            77.6919573545456,
+            77.6972621679306
+          ]
+        },
+        "port": {
+          "hot": [
+            36.05532295563642,
+            33.260825433229144,
+            31.781163811683655,
+            32.577266818598694,
+            31.514286994934082,
+            31.740036606788635,
+            31.758537888526917,
+            32.01591968536377,
+            32.91463851928711,
+            32.331669330596924,
+            31.86141550540924,
+            32.91017413139343,
+            31.895294785499573,
+            32.91718065738678,
+            31.683537364006042
+          ],
+          "rotating": [
+            86.12779113981459,
+            77.65913754701614,
+            77.63975858688354,
+            77.57445424795151,
+            77.54382491111755,
+            77.59539037942886,
+            77.6606947183609,
+            77.54319161176682,
+            77.6638314127922,
+            77.55006849765778,
+            77.6853859424591,
+            77.68726348876953,
+            77.55444943904877,
+            77.5766372680664,
+            77.53726094961166
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "4ffaa2bf49c5a7d813c1c751e2958925fca659d4f7450e1596375ffe29ae9ac3",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 16
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 30,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 97,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "226f4c31f1e04f4171a16021e5407a8e006570c540ea00726bf33c97f8866977"
+        },
+        "port": {
+          "elf_sha256": "4ffaa2bf49c5a7d813c1c751e2958925fca659d4f7450e1596375ffe29ae9ac3",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 16
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 30,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 97,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "226f4c31f1e04f4171a16021e5407a8e006570c540ea00726bf33c97f8866977"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 32.138791680336,
+          "rotating": 77.5713250041008
+        },
+        "port": {
+          "hot": 32.01591968536377,
+          "rotating": 77.59539037942886
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9961768321536678,
+        "rotating": 1.0003102354552638
+      }
+    },
+    {
+      "shape": [
+        8,
+        34816,
+        5120
+      ],
+      "gpu": 0,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": true,
+        "k_unroll": 4,
+        "repeat_m": 1,
+        "repeat_n": 1,
+        "table_mode": "lut",
+        "waves_m": 2,
+        "waves_n": 4
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 758710272,
+      "samples_us": {
+        "original": {
+          "hot": [
+            149.0849733352661,
+            148.8874316215515,
+            148.63795042037964,
+            148.90395402908325,
+            149.34794902801514,
+            149.02095794677734,
+            148.8439440727234,
+            149.7139573097229,
+            149.13594722747803,
+            149.33245182037354,
+            149.33196306228638,
+            149.23696517944336,
+            149.304461479187,
+            149.10396337509155,
+            148.9019513130188
+          ],
+          "rotating": [
+            158.84585678577423,
+            158.33020210266113,
+            158.35145115852356,
+            157.96956419944763,
+            158.93207490444183,
+            159.07832980155945,
+            158.67456793785095,
+            158.72831642627716,
+            158.60019624233246,
+            158.68458151817322,
+            158.84584188461304,
+            158.7914526462555,
+            158.87956321239471,
+            158.47332775592804,
+            158.6620807647705
+          ]
+        },
+        "port": {
+          "hot": [
+            148.91047477722168,
+            148.85945320129395,
+            148.84943962097168,
+            148.43143224716187,
+            148.72093200683594,
+            148.95093441009521,
+            149.0389347076416,
+            148.99245500564575,
+            149.290931224823,
+            149.36496019363403,
+            149.109947681427,
+            148.95495176315308,
+            149.19296503067017,
+            149.2679476737976,
+            149.20345544815063
+          ],
+          "rotating": [
+            159.06068256923132,
+            158.25393795967102,
+            157.90270268917084,
+            157.88517892360687,
+            158.75019133090973,
+            158.57268869876862,
+            158.329576253891,
+            158.72520208358765,
+            158.5608273744583,
+            158.53393077850342,
+            158.53457152843475,
+            158.55079889297485,
+            158.64208340644836,
+            158.79583358764648,
+            158.67020189762115
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "6d8dcf9401e592a3a74cf90c0e919230cceb71864144d7876738f2f45af502b4",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 8
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 31,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 73,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "ba55799d4e17de3c5ff16d818752ee24823ee9f89f8e66c16e14f9feeff275c3"
+        },
+        "port": {
+          "elf_sha256": "6d8dcf9401e592a3a74cf90c0e919230cceb71864144d7876738f2f45af502b4",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 8
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 31,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 73,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "ba55799d4e17de3c5ff16d818752ee24823ee9f89f8e66c16e14f9feeff275c3"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 149.10396337509155,
+          "rotating": 158.68458151817322
+        },
+        "port": {
+          "hot": 148.99245500564575,
+          "rotating": 158.5608273744583
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9992521434915497,
+        "rotating": 0.9992201249640581
+      }
+    },
+    {
+      "shape": [
+        64,
+        8192,
+        4096
+      ],
+      "gpu": 0,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 64,
+        "tile_n": 64,
+        "waves_m": 2,
+        "waves_n": 2
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 16,
+      "rotation_bytes": 285736960,
+      "samples_us": {
+        "original": {
+          "hot": [
+            33.507027409293435,
+            31.079099291846866,
+            30.49694924127488,
+            30.509806814647856,
+            29.5833403413946,
+            29.754367741671476,
+            31.067904829978943,
+            30.588525533676147,
+            30.88877499103546,
+            30.648498308090936,
+            30.587304206121537,
+            30.59468666712443,
+            30.57052195072174,
+            30.810523600805375,
+            30.422185148511613
+          ],
+          "rotating": [
+            38.7340363334207,
+            39.18629139661789,
+            38.95504027605057,
+            38.657272563261145,
+            38.673002272844315,
+            38.490355014801025,
+            38.842271356021655,
+            39.230357855558395,
+            39.105042815208435,
+            39.04598206281662,
+            39.12019729614258,
+            39.13191705942154,
+            39.18801620602608,
+            39.196137338876724,
+            39.06098008155823
+          ]
+        },
+        "port": {
+          "hot": [
+            31.065764881315687,
+            31.06440305709839,
+            30.354204631987074,
+            30.667653679847717,
+            29.686221054622106,
+            29.59436449137601,
+            30.821476663861954,
+            30.835774540901184,
+            30.644026398658752,
+            30.658525228500366,
+            30.48590123653412,
+            30.765902996063232,
+            30.72707142148699,
+            30.51408983412243,
+            30.548967066265288
+          ],
+          "rotating": [
+            40.37002623081207,
+            39.19520229101181,
+            38.984574377536774,
+            38.756292313337326,
+            38.60168246661915,
+            38.4981491986443,
+            39.04473036527634,
+            39.13332521915436,
+            39.255671203136444,
+            39.08019885420799,
+            39.10691663622856,
+            39.04113546013832,
+            39.148952811956406,
+            39.132390171289444,
+            39.047855883836746
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "cf7c1de8b27f56e275d160fbd3da29977d2afee6b74fbb6f1e1f4633223571d6",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 128
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 34,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 148,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "348f6fa1f573c48604f56571aa5395de3ef9286e0fe1454474439f5ad10b5eaf"
+        },
+        "port": {
+          "elf_sha256": "cf7c1de8b27f56e275d160fbd3da29977d2afee6b74fbb6f1e1f4633223571d6",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 128
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 34,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 148,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "348f6fa1f573c48604f56571aa5395de3ef9286e0fe1454474439f5ad10b5eaf"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 30.588525533676147,
+          "rotating": 39.06098008155823
+        },
+        "port": {
+          "hot": 30.658525228500366,
+          "rotating": 39.08019885420799
+        }
+      },
+      "port_over_original": {
+        "hot": 1.0022884298475634,
+        "rotating": 1.0004920197242781
+      }
+    },
+    {
+      "shape": [
+        128,
+        17408,
+        5120
+      ],
+      "gpu": 0,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "lut",
+        "tile_k": 128,
+        "tile_m": 128,
+        "tile_n": 64,
+        "waves_m": 4,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 379355136,
+      "samples_us": {
+        "original": {
+          "hot": [
+            113.69399229685466,
+            115.78443646430969,
+            116.6294515132904,
+            123.30328424771626,
+            119.67656016349792,
+            115.20193020502727,
+            116.73694849014282,
+            117.35528707504272,
+            120.45959234237671,
+            115.48192302385966,
+            116.13485217094421,
+            115.30609925587972,
+            120.76326211293538,
+            116.12193783124287,
+            119.61781978607178
+          ],
+          "rotating": [
+            118.41065233403987,
+            117.46335029602051,
+            118.42655051838268,
+            119.85521966760808,
+            127.37757509404963,
+            126.28802386197177,
+            122.91025031696667,
+            125.99393454464999,
+            125.6171464920044,
+            121.5479699048129,
+            126.20916366577148,
+            126.64816379547119,
+            121.87614224173807,
+            125.94302134080367,
+            125.8252967487682
+          ]
+        },
+        "port": {
+          "hot": [
+            111.81855201721191,
+            116.0790224870046,
+            114.34358358383179,
+            117.91987220446269,
+            117.13404456774394,
+            121.38367692629497,
+            120.02407511075337,
+            114.23400044441223,
+            123.96996219952901,
+            116.06277028719585,
+            114.89484707514445,
+            116.31569266319275,
+            120.40325005849202,
+            114.6577497323354,
+            116.2565251191457
+          ],
+          "rotating": [
+            118.7501929023049,
+            118.00200288945979,
+            118.54928190057927,
+            121.86341935938054,
+            117.49154871160334,
+            124.09936298023571,
+            118.41380596160889,
+            124.19709292325106,
+            125.78665126453747,
+            126.82565450668335,
+            126.64348428899592,
+            120.93340266834606,
+            127.00210918079723,
+            121.02932279760188,
+            128.6325996572321
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "05f6ccac62d54be22e2c953d95ba17c0c80ada2267e11718bcf63bc45506665c",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 46,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 213,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "16adcdb26680c617e279cd2d1dfc123746c7b7cff2ce48b4384e7747f0079cd3"
+        },
+        "port": {
+          "elf_sha256": "05f6ccac62d54be22e2c953d95ba17c0c80ada2267e11718bcf63bc45506665c",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 46,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 213,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "16adcdb26680c617e279cd2d1dfc123746c7b7cff2ce48b4384e7747f0079cd3"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 116.6294515132904,
+          "rotating": 125.6171464920044
+        },
+        "port": {
+          "hot": 116.2565251191457,
+          "rotating": 121.86341935938054
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9968024680789809,
+        "rotating": 0.9701177169084734
+      }
+    },
+    {
+      "shape": [
+        512,
+        5120,
+        8704
+      ],
+      "gpu": 0,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 6,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "barrier",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 256,
+        "tile_n": 64,
+        "waves_m": 8,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 12,
+      "rotation_bytes": 284344320,
+      "samples_us": {
+        "original": {
+          "hot": [
+            206.65647089481354,
+            212.77948220570883,
+            208.4685762723287,
+            214.60781494776407,
+            217.44618813196817,
+            214.59362904230753,
+            216.3995107014974,
+            214.57195281982422,
+            213.3078177769979,
+            216.82202816009521,
+            213.50779136021933,
+            217.61037906010947,
+            216.72117710113525,
+            213.6861284573873,
+            214.78617191314697
+          ],
+          "rotating": [
+            207.5160543123881,
+            212.0686173439026,
+            217.83451239267984,
+            217.49621629714966,
+            217.49784549077353,
+            213.84865045547485,
+            215.33783276875815,
+            216.8836792310079,
+            216.46781762441,
+            214.12448088328043,
+            215.50615628560385,
+            214.62114651997885,
+            218.88538201649985,
+            213.1961186726888,
+            214.1761581103007
+          ]
+        },
+        "port": {
+          "hot": [
+            214.2061392466227,
+            210.1660966873169,
+            212.26364374160767,
+            218.2328701019287,
+            218.78536542256674,
+            214.9178385734558,
+            213.45778306325278,
+            212.0736042658488,
+            214.19950326283774,
+            217.17617909113565,
+            217.02118714650473,
+            211.46194140116373,
+            214.17613824208578,
+            213.79446983337402,
+            216.7136867841085
+          ],
+          "rotating": [
+            210.51027377446493,
+            208.90438556671143,
+            213.95613749821982,
+            209.14940039316812,
+            216.9870138168335,
+            214.96699253718057,
+            217.40285555521646,
+            216.55786037445068,
+            216.2145177523295,
+            217.62285629908243,
+            216.2903348604838,
+            218.45704317092896,
+            217.6853617032369,
+            214.91283178329468,
+            216.663658618927
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "826afa798a2c996a4021f056f92e4b4bce3e3178cc94ffffd0b6b077770f1835",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "eb23e463dd0fa7b0839219f020798c30f03895f50c61209a9beee90c7df9ca81"
+        },
+        "port": {
+          "elf_sha256": "826afa798a2c996a4021f056f92e4b4bce3e3178cc94ffffd0b6b077770f1835",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "eb23e463dd0fa7b0839219f020798c30f03895f50c61209a9beee90c7df9ca81"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 214.59362904230753,
+          "rotating": 215.33783276875815
+        },
+        "port": {
+          "hot": 214.19950326283774,
+          "rotating": 216.2903348604838
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9981633854591644,
+        "rotating": 1.0044232919012819
+      }
+    },
+    {
+      "shape": [
+        8192,
+        5120,
+        17408
+      ],
+      "gpu": 0,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 2,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 64,
+        "tile_m": 256,
+        "tile_n": 128,
+        "waves_m": 4,
+        "waves_n": 2
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 378961920,
+      "samples_us": {
+        "original": {
+          "hot": [
+            6194.601535797119,
+            6195.148944854736,
+            6213.057041168213,
+            6194.799423217773,
+            6108.74605178833,
+            6093.382835388184,
+            6108.925819396973,
+            6112.095832824707,
+            6118.313789367676,
+            6120.041370391846,
+            6136.957168579102,
+            6128.554344177246,
+            6144.670009613037,
+            6136.109352111816,
+            6140.812397003174
+          ],
+          "rotating": [
+            5993.4492111206055,
+            6207.56196975708,
+            6223.112106323242,
+            6191.391944885254,
+            6140.955924987793,
+            6123.50606918335,
+            6130.76114654541,
+            6143.346309661865,
+            6150.756359100342,
+            6181.221961975098,
+            6139.301776885986,
+            6188.527584075928,
+            6177.797317504883,
+            6195.252895355225,
+            6194.033145904541
+          ]
+        },
+        "port": {
+          "hot": [
+            6197.71671295166,
+            6197.726249694824,
+            6208.012104034424,
+            6197.854518890381,
+            6087.957859039307,
+            6098.105907440186,
+            6119.338512420654,
+            6103.60860824585,
+            6118.586540222168,
+            6129.364013671875,
+            6040.580272674561,
+            6138.28182220459,
+            6141.157150268555,
+            6142.787456512451,
+            6146.762371063232
+          ],
+          "rotating": [
+            6178.601264953613,
+            6195.601463317871,
+            6204.407215118408,
+            6201.676845550537,
+            6191.7572021484375,
+            6130.97620010376,
+            6145.306587219238,
+            6145.176410675049,
+            6162.726879119873,
+            6149.446964263916,
+            6140.636920928955,
+            6180.67741394043,
+            6172.027587890625,
+            6186.158180236816,
+            6193.522930145264
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "5f1e31771cfa9a4c648eede0e755d4d3598a20f6c6ff7eb7f41a723c5952d148",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 234,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "4ff97472f18be867fc1d90afb387907d1c1744cc906a9352def84aa718eea058"
+        },
+        "port": {
+          "elf_sha256": "5f1e31771cfa9a4c648eede0e755d4d3598a20f6c6ff7eb7f41a723c5952d148",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 234,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "4ff97472f18be867fc1d90afb387907d1c1744cc906a9352def84aa718eea058"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 6136.109352111816,
+          "rotating": 6177.797317504883
+        },
+        "port": {
+          "hot": 6138.28182220459,
+          "rotating": 6178.601264953613
+        }
+      },
+      "port_over_original": {
+        "hot": 1.0003540468345835,
+        "rotating": 1.000130134966787
+      }
+    },
+    {
+      "shape": [
+        73,
+        4099,
+        1568
+      ],
+      "gpu": 0,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": false,
+        "k_unroll": 7,
+        "repeat_m": 1,
+        "repeat_n": 2,
+        "table_mode": "lut",
+        "waves_m": 1,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 78,
+      "rotation_bytes": 268456032,
+      "samples_us": {
+        "original": {
+          "hot": [
+            14.33967019236365,
+            14.513792061224216,
+            14.417579007703205,
+            14.40862306328707,
+            14.280873266133396,
+            14.335069714522943,
+            14.200724306560698,
+            14.102282912232155,
+            14.17757466781971,
+            14.173144643956965,
+            14.099956944931385,
+            14.081235541853793,
+            14.160913891262478,
+            14.206180738848309,
+            14.156894250349565
+          ],
+          "rotating": [
+            14.771920857412038,
+            14.500024311902516,
+            14.245775010850695,
+            14.18999185589304,
+            14.209985733032227,
+            14.070804302509014,
+            14.498258248353617,
+            14.423499419818237,
+            14.465436636552512,
+            14.404580803678247,
+            14.410679156963642,
+            14.461961566892445,
+            14.493415158698362,
+            14.482530773195446,
+            14.349139993346993
+          ]
+        },
+        "port": {
+          "hot": [
+            14.481133222579956,
+            14.543044012646343,
+            14.515545479086942,
+            14.201976004100981,
+            14.426897872578014,
+            14.261271465908397,
+            14.169841311698736,
+            14.129143814707911,
+            14.192748901455902,
+            14.147283032883045,
+            14.090076088905334,
+            14.142923576887263,
+            14.160249122353488,
+            14.100888440775316,
+            14.114890779767718
+          ],
+          "rotating": [
+            14.325986764369867,
+            14.594438069226735,
+            14.405492364171563,
+            14.150732263200982,
+            14.08239389077211,
+            14.384245261167868,
+            14.287314184031256,
+            14.462415309373469,
+            14.50025254165345,
+            14.445663517356937,
+            14.519055684407553,
+            14.4346677339994,
+            14.512274000379774,
+            14.512275358890196,
+            14.441162772328086
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "c79ddad94748f022b694b5bb1269ea43398300645fea8cdff94c79a1544331bd",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 28
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 32,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              32,
+              1,
+              1
+            ],
+            ".sgpr_count": 33,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 104,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "fc44c8308993e5aa8d5ea618bb2b43661dfbf23dcd57a69e2502717ae692a00d"
+        },
+        "port": {
+          "elf_sha256": "c79ddad94748f022b694b5bb1269ea43398300645fea8cdff94c79a1544331bd",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 28
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 32,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              32,
+              1,
+              1
+            ],
+            ".sgpr_count": 33,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 104,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "fc44c8308993e5aa8d5ea618bb2b43661dfbf23dcd57a69e2502717ae692a00d"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 14.200724306560698,
+          "rotating": 14.423499419818237
+        },
+        "port": {
+          "hot": 14.169841311698736,
+          "rotating": 14.441162772328086
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9978252521353651,
+        "rotating": 1.0012246232343296
+      }
+    },
+    {
+      "shape": [
+        8191,
+        6144,
+        8192
+      ],
+      "gpu": 0,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "gpu",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 6,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "barrier",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 256,
+        "tile_n": 64,
+        "waves_m": 8,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 11,
+      "rotation_bytes": 294395904,
+      "samples_us": {
+        "original": {
+          "hot": [
+            3422.428846359253,
+            3603.4562587738037,
+            3591.69340133667,
+            3598.003625869751,
+            3597.4388122558594,
+            3599.661350250244,
+            3604.0616035461426,
+            3607.6290607452393,
+            3606.774091720581,
+            3610.0664138793945,
+            3616.5342330932617,
+            3607.2263717651367,
+            3614.926815032959,
+            3609.1091632843018,
+            3615.004301071167
+          ],
+          "rotating": [
+            3621.7249090021305,
+            3609.241485595703,
+            3604.8268404873934,
+            3607.6885570179334,
+            3613.346793434837,
+            3597.8195884011006,
+            3606.8524447354403,
+            3602.8886274857955,
+            3622.812791304155,
+            3622.027657248757,
+            3620.2385642311788,
+            3609.6853776411576,
+            3621.4204268022017,
+            3620.5257068980823,
+            3627.878709272905
+          ]
+        },
+        "port": {
+          "hot": [
+            3586.273431777954,
+            3585.0110054016113,
+            3598.538398742676,
+            3602.688789367676,
+            3601.8288135528564,
+            3602.733850479126,
+            3601.2065410614014,
+            3600.7039546966553,
+            3607.2165966033936,
+            3600.196599960327,
+            3611.321449279785,
+            3600.7814407348633,
+            3622.1067905426025,
+            3619.5967197418213,
+            3621.8369007110596
+          ],
+          "rotating": [
+            3589.4085277210584,
+            3601.72514481978,
+            3601.8742648037996,
+            3607.212413441051,
+            3613.4050542658024,
+            3620.874578302557,
+            3611.2525246360087,
+            3609.9874323064632,
+            3603.485107421875,
+            3614.3836975097656,
+            3621.50747125799,
+            3644.4750699129972,
+            3619.122245094993,
+            3625.7695284756746,
+            3629.052942449396
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "9e15aef613f8abdd295488bacb6eb6b2281285f7fa08ee5d2f1e6f91a43782d8",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 58,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "66d8a0de8c6518eff79865b6710dd27c6cbcbc99d9f6c7d62c50c268000af62b"
+        },
+        "port": {
+          "elf_sha256": "9e15aef613f8abdd295488bacb6eb6b2281285f7fa08ee5d2f1e6f91a43782d8",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 58,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "66d8a0de8c6518eff79865b6710dd27c6cbcbc99d9f6c7d62c50c268000af62b"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 3606.774091720581,
+          "rotating": 3613.346793434837
+        },
+        "port": {
+          "hot": 3601.8288135528564,
+          "rotating": 3613.4050542658024
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9986288916239371,
+        "rotating": 1.0000161237861451
+      }
+    },
+    {
+      "shape": [
+        1,
+        5120,
+        17408
+      ],
+      "gpu": 1,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": true,
+        "k_unroll": 8,
+        "repeat_m": 2,
+        "repeat_n": 1,
+        "table_mode": "lut",
+        "waves_m": 1,
+        "waves_n": 4
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 378961920,
+      "samples_us": {
+        "original": {
+          "hot": [
+            32.92038879896465,
+            32.899266481399536,
+            32.65751600265503,
+            32.04337656497955,
+            31.887251138687134,
+            31.926622986793518,
+            31.799376010894775,
+            31.865376234054565,
+            32.4591338634491,
+            33.13288876884862,
+            31.918254494667053,
+            32.66963064670563,
+            32.20525681972504,
+            32.0499986410141,
+            32.596009969711304
+          ],
+          "rotating": [
+            77.69810408353806,
+            77.58965343236923,
+            77.67996937036514,
+            77.59621739387512,
+            77.55028456449509,
+            77.54309475421906,
+            77.60778069496155,
+            77.64246314764023,
+            77.68496870994568,
+            77.76027917861938,
+            77.57370918989182,
+            77.74371653795242,
+            77.65403389930725,
+            77.57840305566788,
+            77.65496522188187
+          ]
+        },
+        "port": {
+          "hot": [
+            36.09483382281135,
+            32.96363949775696,
+            32.34200477600098,
+            32.16025531291962,
+            32.37888216972351,
+            31.778499484062195,
+            31.72137141227722,
+            31.988748908042908,
+            32.622259855270386,
+            32.31738209724426,
+            31.60499334335327,
+            31.978875398635864,
+            32.047754526138306,
+            32.997096839704014,
+            31.66874647140503
+          ],
+          "rotating": [
+            86.6652528444926,
+            77.68309116363525,
+            77.63247191905975,
+            77.58121937513351,
+            77.5534063577652,
+            77.55034110125374,
+            77.51590013504028,
+            77.524334192276,
+            77.6546448469162,
+            77.55464315414429,
+            77.52680077272304,
+            77.55371183156967,
+            77.63589918613434,
+            77.65153050422668,
+            77.50973981969497
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "4ffaa2bf49c5a7d813c1c751e2958925fca659d4f7450e1596375ffe29ae9ac3",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 16
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 30,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 97,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "226f4c31f1e04f4171a16021e5407a8e006570c540ea00726bf33c97f8866977"
+        },
+        "port": {
+          "elf_sha256": "4ffaa2bf49c5a7d813c1c751e2958925fca659d4f7450e1596375ffe29ae9ac3",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 16
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 30,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 97,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "226f4c31f1e04f4171a16021e5407a8e006570c540ea00726bf33c97f8866977"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 32.20525681972504,
+          "rotating": 77.64246314764023
+        },
+        "port": {
+          "hot": 32.16025531291962,
+          "rotating": 77.55464315414429
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9986026657990239,
+        "rotating": 0.998868917987198
+      }
+    },
+    {
+      "shape": [
+        8,
+        34816,
+        5120
+      ],
+      "gpu": 1,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": true,
+        "k_unroll": 4,
+        "repeat_m": 1,
+        "repeat_n": 1,
+        "table_mode": "lut",
+        "waves_m": 2,
+        "waves_n": 4
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 758710272,
+      "samples_us": {
+        "original": {
+          "hot": [
+            148.55883121490479,
+            147.7723240852356,
+            148.3743190765381,
+            147.61581420898438,
+            148.0248212814331,
+            148.55432510375977,
+            148.33132028579712,
+            148.48732948303223,
+            148.17932844161987,
+            148.00232648849487,
+            148.29282760620117,
+            148.48732948303223,
+            148.75582456588745,
+            147.85832166671753,
+            148.41933250427246
+          ],
+          "rotating": [
+            158.89104775020056,
+            158.46875309944153,
+            158.60871970653534,
+            157.95935690402985,
+            158.82250666618347,
+            158.7512493133545,
+            158.78187119960785,
+            158.7156057357788,
+            158.65248441696167,
+            158.7306261062622,
+            158.63999724388123,
+            158.63622725009918,
+            158.59311819076538,
+            158.84624421596527,
+            158.68937969207764
+          ]
+        },
+        "port": {
+          "hot": [
+            148.95334243774414,
+            149.0853190422058,
+            148.4593391418457,
+            148.63532781600952,
+            148.48331212997437,
+            149.16385412216187,
+            149.1863489151001,
+            149.34433698654175,
+            149.20532703399658,
+            148.55282306671143,
+            149.09634590148926,
+            149.25283193588257,
+            148.72183799743652,
+            148.8578200340271,
+            149.492347240448
+          ],
+          "rotating": [
+            158.73000025749207,
+            158.41998159885406,
+            158.4712266921997,
+            158.09248387813568,
+            158.03998708724976,
+            158.82684290409088,
+            158.6681306362152,
+            158.91309082508087,
+            158.70998799800873,
+            158.75934064388275,
+            158.66248309612274,
+            158.5756093263626,
+            158.82623195648193,
+            158.63563120365143,
+            158.53436291217804
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "6d8dcf9401e592a3a74cf90c0e919230cceb71864144d7876738f2f45af502b4",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 8
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 31,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 73,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "ba55799d4e17de3c5ff16d818752ee24823ee9f89f8e66c16e14f9feeff275c3"
+        },
+        "port": {
+          "elf_sha256": "6d8dcf9401e592a3a74cf90c0e919230cceb71864144d7876738f2f45af502b4",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 8
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 31,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 73,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "ba55799d4e17de3c5ff16d818752ee24823ee9f89f8e66c16e14f9feeff275c3"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 148.33132028579712,
+          "rotating": 158.68937969207764
+        },
+        "port": {
+          "hot": 149.0853190422058,
+          "rotating": 158.66248309612274
+        }
+      },
+      "port_over_original": {
+        "hot": 1.0050832066683957,
+        "rotating": 0.9998305079016183
+      }
+    },
+    {
+      "shape": [
+        64,
+        8192,
+        4096
+      ],
+      "gpu": 1,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 64,
+        "tile_n": 64,
+        "waves_m": 2,
+        "waves_n": 2
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 16,
+      "rotation_bytes": 285736960,
+      "samples_us": {
+        "original": {
+          "hot": [
+            30.41893243789673,
+            32.09037780761719,
+            31.273865699768066,
+            31.18661642074585,
+            30.461666129884264,
+            30.54297821862357,
+            30.124045553661528,
+            29.585463660103933,
+            30.897358059883118,
+            30.637356638908386,
+            30.678575947171165,
+            30.739409582955496,
+            30.609482526779175,
+            30.617231130599976,
+            30.696908632914226
+          ],
+          "rotating": [
+            39.18968141078949,
+            39.253585040569305,
+            39.13233056664467,
+            39.06342387199402,
+            38.85529562830925,
+            38.73177836923038,
+            38.717371575972614,
+            39.214055985212326,
+            39.24280032515526,
+            39.20264542102814,
+            39.086081087589264,
+            39.19358551502228,
+            39.163585752248764,
+            38.98223007426542,
+            39.10311311483383
+          ]
+        },
+        "port": {
+          "hot": [
+            34.1050386428833,
+            31.445994973182678,
+            31.098345915476482,
+            30.934610962867737,
+            30.63179197765532,
+            30.597266696748278,
+            29.667491004580544,
+            29.982138247716996,
+            30.817732214927673,
+            30.595478557405016,
+            30.676859617233276,
+            30.700358748435974,
+            30.54497539997101,
+            30.69500696091425,
+            30.846235156059265
+          ],
+          "rotating": [
+            40.041760964827105,
+            39.37467560172081,
+            39.305929094552994,
+            38.94119753557093,
+            38.91826421022415,
+            38.86092081665993,
+            38.61972514320822,
+            38.62972469890819,
+            39.23686221241951,
+            39.14405032992363,
+            39.23202306032181,
+            39.28076848387718,
+            39.219681173563,
+            39.06014561653137,
+            39.18999060988426
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "cf7c1de8b27f56e275d160fbd3da29977d2afee6b74fbb6f1e1f4633223571d6",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 128
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 34,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 148,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "348f6fa1f573c48604f56571aa5395de3ef9286e0fe1454474439f5ad10b5eaf"
+        },
+        "port": {
+          "elf_sha256": "cf7c1de8b27f56e275d160fbd3da29977d2afee6b74fbb6f1e1f4633223571d6",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 128
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 34,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 148,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "348f6fa1f573c48604f56571aa5395de3ef9286e0fe1454474439f5ad10b5eaf"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 30.637356638908386,
+          "rotating": 39.13233056664467
+        },
+        "port": {
+          "hot": 30.69500696091425,
+          "rotating": 39.18999060988426
+        }
+      },
+      "port_over_original": {
+        "hot": 1.0018817002617206,
+        "rotating": 1.0014734630522808
+      }
+    },
+    {
+      "shape": [
+        128,
+        17408,
+        5120
+      ],
+      "gpu": 1,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "lut",
+        "tile_k": 128,
+        "tile_m": 128,
+        "tile_n": 64,
+        "waves_m": 4,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 379355136,
+      "samples_us": {
+        "original": {
+          "hot": [
+            111.5554968516032,
+            120.94481786092122,
+            119.03645594914754,
+            115.40473500887553,
+            110.49215992291768,
+            124.03611342112224,
+            123.21651975313823,
+            121.4698354403178,
+            120.18606066703796,
+            119.89188194274902,
+            115.17180999120076,
+            119.79646484057109,
+            118.06018153826396,
+            121.03356917699178,
+            120.33271789550781
+          ],
+          "rotating": [
+            119.48641863736239,
+            123.76149134202437,
+            122.11964347145774,
+            118.88412995771928,
+            114.53225395896219,
+            128.79153490066528,
+            127.19971483403987,
+            128.06801795959473,
+            122.49193408272482,
+            125.98247528076172,
+            124.07059019262141,
+            118.87642470273104,
+            126.81972980499268,
+            126.3933615251021,
+            122.89284576069225
+          ]
+        },
+        "port": {
+          "hot": [
+            117.51517653465271,
+            118.85394652684529,
+            120.53688367207845,
+            115.61349034309387,
+            111.05966567993164,
+            109.44296916325887,
+            121.69190645217896,
+            120.11772394180298,
+            122.96793460845947,
+            120.40314078330994,
+            114.71346020698547,
+            118.52519710858662,
+            121.82192007700603,
+            121.80891036987305,
+            118.276447057724
+          ],
+          "rotating": [
+            119.80020999908447,
+            122.91012027046897,
+            120.58235298503529,
+            117.03366583043879,
+            113.50429058074951,
+            123.98468364368786,
+            124.14344549179077,
+            123.43494892120361,
+            125.74397325515747,
+            126.02698802947998,
+            127.54651308059692,
+            126.31398439407349,
+            128.25565988367254,
+            125.30151280489835,
+            126.56971541318026
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "05f6ccac62d54be22e2c953d95ba17c0c80ada2267e11718bcf63bc45506665c",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 46,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 213,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "16adcdb26680c617e279cd2d1dfc123746c7b7cff2ce48b4384e7747f0079cd3"
+        },
+        "port": {
+          "elf_sha256": "05f6ccac62d54be22e2c953d95ba17c0c80ada2267e11718bcf63bc45506665c",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 128,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              128,
+              1,
+              1
+            ],
+            ".sgpr_count": 46,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 213,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "16adcdb26680c617e279cd2d1dfc123746c7b7cff2ce48b4384e7747f0079cd3"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 119.89188194274902,
+          "rotating": 123.76149134202437
+        },
+        "port": {
+          "hot": 118.85394652684529,
+          "rotating": 124.14344549179077
+        }
+      },
+      "port_over_original": {
+        "hot": 0.991342738148031,
+        "rotating": 1.003086211596391
+      }
+    },
+    {
+      "shape": [
+        512,
+        5120,
+        8704
+      ],
+      "gpu": 1,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 6,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "barrier",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 256,
+        "tile_n": 64,
+        "waves_m": 8,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 12,
+      "rotation_bytes": 284344320,
+      "samples_us": {
+        "original": {
+          "hot": [
+            217.3175811767578,
+            222.8951652844747,
+            220.1626499493917,
+            202.058807015419,
+            200.12378692626953,
+            208.27494064966837,
+            206.24991257985434,
+            206.98076486587524,
+            207.1774204572042,
+            205.80387115478516,
+            206.42513036727905,
+            205.85137605667114,
+            206.673264503479,
+            206.32949471473694,
+            206.87763392925262
+          ],
+          "rotating": [
+            214.12420272827148,
+            216.62344535191855,
+            216.5600856145223,
+            202.69254048665366,
+            214.20003970464072,
+            213.05501461029053,
+            211.36250098546347,
+            209.79463259379068,
+            211.46166324615479,
+            211.38336261113486,
+            209.99464988708496,
+            211.8149995803833,
+            211.16580565770468,
+            209.64996019999185,
+            210.0249926249186
+          ]
+        },
+        "port": {
+          "hot": [
+            204.09446954727173,
+            221.7359940210978,
+            210.28914054234824,
+            201.0350525379181,
+            199.27377998828888,
+            210.77249447504678,
+            206.23011887073517,
+            206.73637092113495,
+            207.23764598369598,
+            206.47075772285461,
+            205.67700266838074,
+            206.0965895652771,
+            206.57159884770712,
+            208.1439197063446,
+            206.3357432683309
+          ],
+          "rotating": [
+            212.2600277264913,
+            218.60762437184653,
+            215.64672390619913,
+            203.42586835225424,
+            206.15256627400717,
+            211.17750803629556,
+            209.98581250508627,
+            212.60752280553183,
+            209.58328247070312,
+            209.36081806818643,
+            210.56167284647623,
+            211.41666173934937,
+            210.51583687464395,
+            212.2358481089274,
+            210.2224826812744
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "826afa798a2c996a4021f056f92e4b4bce3e3178cc94ffffd0b6b077770f1835",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "eb23e463dd0fa7b0839219f020798c30f03895f50c61209a9beee90c7df9ca81"
+        },
+        "port": {
+          "elf_sha256": "826afa798a2c996a4021f056f92e4b4bce3e3178cc94ffffd0b6b077770f1835",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "eb23e463dd0fa7b0839219f020798c30f03895f50c61209a9beee90c7df9ca81"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 206.673264503479,
+          "rotating": 211.38336261113486
+        },
+        "port": {
+          "hot": 206.47075772285461,
+          "rotating": 210.56167284647623
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9990201597622658,
+        "rotating": 0.9961127983086814
+      }
+    },
+    {
+      "shape": [
+        8192,
+        5120,
+        17408
+      ],
+      "gpu": 1,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "lds",
+        "cache_group_m": 2,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 2,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "groups",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 64,
+        "tile_m": 256,
+        "tile_n": 128,
+        "waves_m": 4,
+        "waves_n": 2
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 8,
+      "rotation_bytes": 378961920,
+      "samples_us": {
+        "original": {
+          "hot": [
+            6102.408885955811,
+            6107.539176940918,
+            6117.959022521973,
+            6123.824596405029,
+            6134.544849395752,
+            6133.345127105713,
+            6133.520126342773,
+            6150.875568389893,
+            6155.272960662842,
+            6154.148101806641,
+            6154.191017150879,
+            6151.268482208252,
+            6152.738571166992,
+            6156.536102294922,
+            6165.961265563965
+          ],
+          "rotating": [
+            6129.752159118652,
+            6133.306980133057,
+            6150.096893310547,
+            6150.327682495117,
+            6160.622596740723,
+            6165.957927703857,
+            6167.99783706665,
+            6166.498184204102,
+            6194.178581237793,
+            6177.9985427856445,
+            6184.233665466309,
+            6190.254211425781,
+            6195.659160614014,
+            6196.798801422119,
+            6194.664478302002
+          ]
+        },
+        "port": {
+          "hot": [
+            5907.09114074707,
+            6112.339019775391,
+            6122.481822967529,
+            6129.8418045043945,
+            6133.489608764648,
+            6133.430004119873,
+            6143.627643585205,
+            6149.294853210449,
+            6151.768207550049,
+            6155.657768249512,
+            6155.681133270264,
+            6155.043601989746,
+            6155.625820159912,
+            6158.719062805176,
+            6165.041446685791
+          ],
+          "rotating": [
+            6171.757698059082,
+            6154.212474822998,
+            6159.667491912842,
+            6164.522647857666,
+            6166.1481857299805,
+            6157.103061676025,
+            6167.293071746826,
+            6163.672924041748,
+            6182.498455047607,
+            6187.563419342041,
+            6180.148601531982,
+            6190.904140472412,
+            6196.029186248779,
+            6186.203956604004,
+            6210.354804992676
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "5f1e31771cfa9a4c648eede0e755d4d3598a20f6c6ff7eb7f41a723c5952d148",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 234,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "4ff97472f18be867fc1d90afb387907d1c1744cc906a9352def84aa718eea058"
+        },
+        "port": {
+          "elf_sha256": "5f1e31771cfa9a4c648eede0e755d4d3598a20f6c6ff7eb7f41a723c5952d148",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 42,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 234,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "4ff97472f18be867fc1d90afb387907d1c1744cc906a9352def84aa718eea058"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 6150.875568389893,
+          "rotating": 6167.99783706665
+        },
+        "port": {
+          "hot": 6149.294853210449,
+          "rotating": 6171.757698059082
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9997430097289617,
+        "rotating": 1.000609575601638
+      }
+    },
+    {
+      "shape": [
+        73,
+        4099,
+        1568
+      ],
+      "gpu": 1,
+      "config": {
+        "buffer_io": true,
+        "engine": "register",
+        "fast_epilogue": false,
+        "k_unroll": 7,
+        "repeat_m": 1,
+        "repeat_n": 2,
+        "table_mode": "lut",
+        "waves_m": 1,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 78,
+      "rotation_bytes": 268456032,
+      "samples_us": {
+        "original": {
+          "hot": [
+            14.314622413821336,
+            14.416162357773892,
+            14.361683712449185,
+            14.175460782161979,
+            14.097725803201849,
+            13.951756737448953,
+            13.859938491474498,
+            14.069587685341059,
+            13.776699250394648,
+            14.133466915650802,
+            14.000169066495674,
+            14.00880515575409,
+            14.00448517365889,
+            14.020680026574569,
+            13.918557431962755
+          ],
+          "rotating": [
+            14.597671324031644,
+            14.834826488440532,
+            14.62336890717857,
+            14.507926767028634,
+            14.401086714872267,
+            14.336242295398332,
+            14.041080094470598,
+            13.98267637290846,
+            14.17236518316459,
+            14.618354645210115,
+            14.624851042049222,
+            14.500916853249922,
+            14.48496250685124,
+            14.576360371038106,
+            14.577785448471026
+          ]
+        },
+        "port": {
+          "hot": [
+            14.205751030944114,
+            14.562792721248808,
+            14.50331405151722,
+            14.28813712541447,
+            14.111023057590831,
+            14.023017051608063,
+            13.93959874456579,
+            13.893304869186046,
+            14.1508094100065,
+            14.123542364253554,
+            14.13743717725887,
+            13.98368857123635,
+            13.94431699406017,
+            13.956816358999772,
+            14.034375548362732
+          ],
+          "rotating": [
+            14.861190712058937,
+            14.897447026353277,
+            14.837161767856347,
+            14.764682519809472,
+            14.326954159641538,
+            14.199601958619903,
+            14.10968487079327,
+            14.089684880357183,
+            14.563881094299491,
+            14.6365885720973,
+            14.600291890636129,
+            14.481202150002504,
+            14.548836949883702,
+            14.446443302339299,
+            14.563711280496712
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "c79ddad94748f022b694b5bb1269ea43398300645fea8cdff94c79a1544331bd",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 28
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 32,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              32,
+              1,
+              1
+            ],
+            ".sgpr_count": 33,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 104,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "fc44c8308993e5aa8d5ea618bb2b43661dfbf23dcd57a69e2502717ae692a00d"
+        },
+        "port": {
+          "elf_sha256": "c79ddad94748f022b694b5bb1269ea43398300645fea8cdff94c79a1544331bd",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 28
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 0,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 32,
+            ".name": "mxfp4_register_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              32,
+              1,
+              1
+            ],
+            ".sgpr_count": 33,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_register_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 104,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "fc44c8308993e5aa8d5ea618bb2b43661dfbf23dcd57a69e2502717ae692a00d"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 14.020680026574569,
+          "rotating": 14.507926767028634
+        },
+        "port": {
+          "hot": 14.111023057590831,
+          "rotating": 14.563711280496712
+        }
+      },
+      "port_over_original": {
+        "hot": 1.0064435555796885,
+        "rotating": 1.003845105807596
+      }
+    },
+    {
+      "shape": [
+        8191,
+        6144,
+        8192
+      ],
+      "gpu": 1,
+      "config": {
+        "b_swizzle": null,
+        "barrier_mode": "gpu",
+        "cache_group_m": 1,
+        "engine": "hybrid",
+        "epilogue_prefetch": false,
+        "fast_epilogue": true,
+        "fragment_lds": true,
+        "operand_prefetch": 6,
+        "operand_schedule": "none",
+        "pad": 8,
+        "schedule": "barrier",
+        "stages": 2,
+        "table_mode": "alu",
+        "tile_k": 128,
+        "tile_m": 256,
+        "tile_n": 64,
+        "waves_m": 8,
+        "waves_n": 1
+      },
+      "bitwise_equal": true,
+      "changed_input_equal": true,
+      "rotation_copies": 11,
+      "rotation_bytes": 294395904,
+      "samples_us": {
+        "original": {
+          "hot": [
+            3611.6385459899902,
+            3603.7981510162354,
+            3604.8331260681152,
+            3610.6834411621094,
+            3608.6184978485107,
+            3612.596273422241,
+            3622.2686767578125,
+            3623.0664253234863,
+            3633.756399154663,
+            3625.2589225769043,
+            3627.09641456604,
+            3625.6089210510254,
+            3631.316661834717,
+            3631.9916248321533,
+            3628.8716793060303
+          ],
+          "rotating": [
+            3520.249453457919,
+            3609.7054914994674,
+            3611.974889581854,
+            3626.677079634233,
+            3624.455191872337,
+            3621.8369223854756,
+            3629.1025335138493,
+            3624.902551824396,
+            3626.262664794922,
+            3628.8951526988635,
+            3631.422909823331,
+            3631.0084949840198,
+            3627.5794289328837,
+            3629.004738547585,
+            3628.859433260831
+          ]
+        },
+        "port": {
+          "hot": [
+            3686.19441986084,
+            3604.7182083129883,
+            3603.7609577178955,
+            3603.7209033966064,
+            3611.7160320281982,
+            3618.4937953948975,
+            3615.4887676239014,
+            3621.4540004730225,
+            3626.9989013671875,
+            3628.5789012908936,
+            3621.6089725494385,
+            3632.434129714966,
+            3628.316640853882,
+            3629.0066242218018,
+            3625.741720199585
+          ],
+          "rotating": [
+            3583.5886868563566,
+            3613.0000027743254,
+            3612.531141801314,
+            3632.0336081764913,
+            3617.866169322621,
+            3624.8408230868254,
+            3621.3496815074573,
+            3628.2952048561788,
+            3624.9826604669743,
+            3624.7641823508525,
+            3626.829667524858,
+            3628.6336725408382,
+            3624.3390170010653,
+            3628.542813387784,
+            3636.0667835582385
+          ]
+        }
+      },
+      "binaries": {
+        "original": {
+          "elf_sha256": "9e15aef613f8abdd295488bacb6eb6b2281285f7fa08ee5d2f1e6f91a43782d8",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 58,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "66d8a0de8c6518eff79865b6710dd27c6cbcbc99d9f6c7d62c50c268000af62b"
+        },
+        "port": {
+          "elf_sha256": "9e15aef613f8abdd295488bacb6eb6b2281285f7fa08ee5d2f1e6f91a43782d8",
+          "wmma": {
+            "v_wmma_f32_16x16x16_fp8_fp8": 256
+          },
+          "metadata": {
+            ".group_segment_fixed_size": 17408,
+            ".kernarg_segment_align": 8,
+            ".kernarg_segment_size": 56,
+            ".max_flat_workgroup_size": 256,
+            ".name": "mxfp4_hybrid_0",
+            ".private_segment_fixed_size": 0,
+            ".reqd_workgroup_size": [
+              256,
+              1,
+              1
+            ],
+            ".sgpr_count": 58,
+            ".sgpr_spill_count": 0,
+            ".symbol": "mxfp4_hybrid_0.kd",
+            ".uniform_work_group_size": 1,
+            ".uses_dynamic_stack": false,
+            ".vgpr_count": 202,
+            ".vgpr_spill_count": 0,
+            ".wavefront_size": 32,
+            ".workgroup_processor_mode": 1
+          },
+          "instruction_sha256": "66d8a0de8c6518eff79865b6710dd27c6cbcbc99d9f6c7d62c50c268000af62b"
+        }
+      },
+      "median_us": {
+        "original": {
+          "hot": 3623.0664253234863,
+          "rotating": 3626.677079634233
+        },
+        "port": {
+          "hot": 3621.6089725494385,
+          "rotating": 3624.8408230868254
+        }
+      },
+      "port_over_original": {
+        "hot": 0.9995977294912781,
+        "rotating": 0.9994936807145806
+      }
+    }
+  ]
+}

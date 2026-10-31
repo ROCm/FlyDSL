@@ -7,7 +7,7 @@ import builtins
 
 import pytest
 
-from kernels.gemm.rdna4_mxfp4.dispatch import _candidates, _model, _selected, choose_config
+from kernels.gemm.rdna4_mxfp4.dispatch import _candidates, _model, _selected, choose_config, tuning_candidates
 from kernels.gemm.rdna4_mxfp4.dispatch_features import legal_config
 
 pytestmark = pytest.mark.l0_backend_agnostic
@@ -92,3 +92,20 @@ def test_unknown_policy_or_mode_rejected():
         choose_config(1, 64, 256, cache_policy="unknown")
     with pytest.raises(ValueError, match="mode"):
         choose_config(1, 64, 256, "unknown")
+
+
+@pytest.mark.parametrize("shape", [(7, 6147, 2464), (40, 5120, 8704), (80, 17408, 5120), (1, 17, 32)])
+@pytest.mark.parametrize("cache_policy", ["auto", "hot", "rotating"])
+def test_calibration_shortlist_is_bounded_legal_and_contains_proposal(shape, cache_policy):
+    candidates = tuning_candidates(*shape, cache_policy=cache_policy)
+    assert 1 <= len(candidates) <= 64
+    assert len({tuple(sorted(c.items())) for c in candidates}) == len(candidates)
+    assert all(legal_config(c, *shape) for c in candidates)
+    assert choose_config(*shape, cache_policy=cache_policy) in candidates
+    assert {c["engine"] for c in candidates} == {"register", "hybrid"}
+
+
+def test_calibration_can_explore_odd_k_factors_beyond_static_tail_guard():
+    candidates = tuning_candidates(7, 6147, 2464)
+    assert any(c["engine"] == "register" and c["k_unroll"] == 7 for c in candidates)
+    assert any(c["engine"] == "register" and c["k_unroll"] == 11 for c in candidates)
