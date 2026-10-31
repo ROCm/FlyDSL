@@ -290,25 +290,38 @@ def _case_decode_matrix() -> dict[str, float]:
     return {"max_ulp": max_ulp, "worst": worst or {}}
 
 
-def _case_v_equals_one(dtype: torch.dtype) -> dict[str, float]:
-    _seed_all(20261029)
+def _case_v_equals_one(dtype: torch.dtype) -> dict[str, object]:
+    """With V = 1 every output must be exactly 1.0: prefill, decode and cross."""
     device = torch.device("cuda")
-    inputs = _make_inputs(
-        batch=2,
-        num_heads=4,
-        seq_q=16,
-        seq_kv=4096,
-        head_dim=128,
-        dtype=dtype,
-        v_kind="ones",
-        device=device,
-    )
-    out = flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=True)
-    torch.cuda.synchronize()
-    ref = _ref_attn_fp64(inputs.q, inputs.k, inputs.v, causal=True)
-    diff = (out - inputs.v[: out.shape[0], : out.shape[1]]).abs().max().item()
-    max_ulp = _ulp_err(out, ref.to(out.dtype), dtype=dtype)
-    return {"dtype": str(dtype), "max_abs_diff": diff, "max_ulp": max_ulp}
+    shapes = [(1, 2, seq, seq) for seq in (512, 1000)]
+    shapes += [(2, 4, seq_q, seq_kv) for seq_q in (1, 16) for seq_kv in (64, 4097)]
+    max_diff = 0.0
+    max_ulp = 0.0
+    worst: dict[str, object] = {}
+    for head_dim in (64, 128, 256):
+        for batch, num_heads, seq_q, seq_kv in shapes:
+            for causal in (False, True):
+                _seed_all(20261029)
+                inputs = _make_inputs(
+                    batch=batch,
+                    num_heads=num_heads,
+                    seq_q=seq_q,
+                    seq_kv=seq_kv,
+                    head_dim=head_dim,
+                    dtype=dtype,
+                    v_kind="ones",
+                    device=device,
+                )
+                out = flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=causal)
+                torch.cuda.synchronize()
+                diff = (out.float() - 1.0).abs().max().item()
+                ref = _ref_attn_fp64(inputs.q, inputs.k, inputs.v, causal=causal)
+                max_ulp = max(max_ulp, _ulp_err(out, ref.to(out.dtype), dtype=dtype))
+                if diff > max_diff or not worst:
+                    max_diff = max(max_diff, diff)
+                    worst = {"head_dim": head_dim, "batch": batch, "num_heads": num_heads, "seq_q": seq_q}
+                    worst.update({"seq_kv": seq_kv, "causal": causal, "max_abs_diff": diff})
+    return {"dtype": str(dtype), "max_abs_diff": max_diff, "max_ulp": max_ulp, "worst": worst}
 
 
 def _case_guard_buffer() -> dict[str, object]:
@@ -843,20 +856,23 @@ _D64_PREFILL = (4, 2, 64, 4, True)
 _D64_DECODE_SPILL = "the single-wave D64 decode kernel already spilled 1-6 VGPRs before the f16 RNE change"
 _D256_TAIL_SPILL = "unchanged since the head_dim 256 decode kernel was added"
 _D256_HOIST = "hoisting Q is faster than spill-free re-reads on this shape class (see hoist_q)"
-_D64_PREFILL_SPILL = "spills 2 VGPRs from seq 512 up; re-reading Q is spill-free but 1-3% slower"
+_D64_PREFILL_SPILL = "spills from seq 512 up; re-reading Q is spill-free but up to 5.6% slower"
 
 # Kernels allowed to spill: (max vgpr_spill_count, max private_segment_fixed_size)
 # as measured on W7900D, and why. Every other variant must be spill-free.
+# The counts depend on the LLVM in the FlyDSL build: where they differ, the
+# limit is the larger of LLVM e2a39f50 and 941a04e6 (D64 prefill 2 vs 30,
+# D64 decode 3 vs 6, D256 prefill 71 vs 72 VGPRs).
 _SPILL_EXCEPTIONS: dict[_TileKey, tuple[int, int, str]] = {
-    _TileKey(64, _D64_PREFILL, True, False, False, False, False, False, True, True): (2, 12, _D64_PREFILL_SPILL),
-    _TileKey(64, _D64_DECODE, True, False, True, False, False, False, True, True): (3, 16, _D64_DECODE_SPILL),
+    _TileKey(64, _D64_PREFILL, True, False, False, False, False, False, True, True): (30, 124, _D64_PREFILL_SPILL),
+    _TileKey(64, _D64_DECODE, True, False, True, False, False, False, True, True): (6, 28, _D64_DECODE_SPILL),
     _TileKey(64, _D64_DECODE, True, False, True, False, False, False, False, True): (7, 32, _D64_DECODE_SPILL),
     _TileKey(256, _D256_DECODE, False, False, True, False, False, False, False, True): (34, 140, _D256_TAIL_SPILL),
     _TileKey(256, _D256_DECODE, True, False, True, False, False, False, True, True): (75, 304, _D256_HOIST),
     _TileKey(256, _D256_DECODE, True, True, True, False, False, False, True, True): (125, 488, _D256_HOIST),
     _TileKey(256, _D256_DECODE, True, False, True, False, False, False, False, True): (75, 304, _D256_HOIST),
     _TileKey(256, _D256_DECODE, True, True, True, False, False, False, False, True): (80, 324, _D256_HOIST),
-    _TileKey(256, _D256_PREFILL, True, False, False, False, False, False, True, True): (71, 288, _D256_HOIST),
+    _TileKey(256, _D256_PREFILL, True, False, False, False, False, False, True, True): (72, 292, _D256_HOIST),
     _TileKey(256, _D256_PREFILL, True, True, False, False, True, False, True, True): (79, 320, _D256_HOIST),
 }
 
