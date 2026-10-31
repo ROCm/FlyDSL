@@ -145,7 +145,7 @@ def build_flash_attn_func_module_primary(
     # lose occupancy if they hoist the extra LDS traffic.
     # ``_override_flags`` and ``_fixed_tile`` are private knobs exercised only by tests.
     override_flags = _override_flags or {}
-    hoist_q = head_dim <= 128 and q_tiles == 1
+    hoist_q = head_dim <= 128
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
