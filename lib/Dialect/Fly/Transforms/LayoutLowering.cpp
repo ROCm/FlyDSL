@@ -2177,6 +2177,7 @@ public:
     Value src = op.getSrc();
     Value dst = op.getDst();
     Value pred = op.getPred();
+    Value index = op.getIndex();
 
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
 
@@ -2236,11 +2237,16 @@ public:
           if (isa<fly::MemRefType>(dst.getType()))
             dst = DecompositionOp::create(rewriter, loc, dst);
         }
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred, index);
         rewriter.eraseOp(op);
         return success();
       }
     }
+
+    // Indexed addressing names the rows of one issue, so it only survives the
+    // whole-tile path above. Splitting the tile would leave the index list behind.
+    if (index)
+      return rewriter.notifyMatchFailure(op, "indexed copy must lower as a single atom call");
 
     // A single atom may have different source/destination profiles (coordinate
     // bases do not coalesce like contiguous LDS addresses). Only recursive
@@ -2266,7 +2272,8 @@ public:
       if (srcLayoutAttr.getShape().isLeaf()) {
         Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
         Value dstDecomposition = DecompositionOp::create(rewriter, loc, dst);
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred);
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred,
+                             /*index=*/Value{});
         rewriter.eraseOp(op);
         return success();
       }
@@ -2274,7 +2281,8 @@ public:
       Value dstUnwrapped = GetOp::create(rewriter, loc, dst, ArrayRef<int32_t>{0});
       Value predUnwrapped =
           pred ? GetOp::create(rewriter, loc, pred, ArrayRef<int32_t>{0}) : nullptr;
-      CopyOp::create(rewriter, loc, copyAtomVal, srcUnwrapped, dstUnwrapped, predUnwrapped);
+      CopyOp::create(rewriter, loc, copyAtomVal, srcUnwrapped, dstUnwrapped, predUnwrapped,
+                     /*index=*/Value{});
       rewriter.eraseOp(op);
       return success();
     }
@@ -2308,7 +2316,8 @@ public:
       if (pred)
         predSlice = SliceOp::create(rewriter, loc, predGrouped, coord);
 
-      CopyOp::create(rewriter, loc, copyAtomVal, srcSlice, dstSlice, predSlice);
+      CopyOp::create(rewriter, loc, copyAtomVal, srcSlice, dstSlice, predSlice,
+                     /*index=*/Value{});
     }
     rewriter.eraseOp(op);
     return success();

@@ -398,6 +398,19 @@ Attribute tdmThrBitLayout(MLIRContext *ctx, ArrayRef<int32_t> tileShape, int32_t
 
 // Shared verifier. `padInterval` / `padAmount` are always zero on the store type,
 // which has no padding parameters at all.
+// Indexed addressing takes over the descriptor groups that descriptor iteration also
+// redefines, so the two cannot both be on.
+LogicalResult tdmVerifyIndexBits(function_ref<InFlightDiagnostic()> emitError, int32_t indexBits,
+                                 int32_t iterCount) {
+  if (indexBits == 0)
+    return success();
+  if (indexBits != 16 && indexBits != 32)
+    return emitError() << "TDM indexBits must be 0, 16 or 32, got " << indexBits;
+  if (iterCount != 1)
+    return emitError() << "an indexed TDM descriptor cannot iterate, got iterCount " << iterCount;
+  return success();
+}
+
 LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<int32_t> tileShape,
                         Type dataType, IntTupleAttr tensor2tdm, int32_t iterCount,
                         int32_t padInterval, int32_t padAmount) {
@@ -545,21 +558,24 @@ struct TdmStatic {
   int32_t padAmount;   // always 0 on the store path
   int32_t cacheModifier;
   int32_t iterCount; // 1 = no descriptor iteration
+  int32_t indexBits; // 0 = linear outer dim; 16/32 = row indices drive it
   bool isLoad;
 };
 
 // Read off the atom type, once per direction: the two `emitAtomCall` overloads of a type
 // want the same config, and the direction is the only thing that varies between them.
 TdmStatic tdmConfig(CopyOpCDNA5TensorLoadType ty) {
-  return {ty.getTileShape(), tdmElemBits(ty.getDataType()), ty.getPadInterval(),
-          ty.getPadAmount(), ty.getCacheModifier(),         ty.getIterCount(),
-          /*isLoad=*/true};
+  return {ty.getTileShape(),     tdmElemBits(ty.getDataType()),
+          ty.getPadInterval(),   ty.getPadAmount(),
+          ty.getCacheModifier(), ty.getIterCount(),
+          ty.getIndexBits(),     /*isLoad=*/true};
 }
 
 TdmStatic tdmConfig(CopyOpCDNA5TensorStoreType ty) {
-  return {ty.getTileShape(), tdmElemBits(ty.getDataType()), /*padInterval=*/0,
-          /*padAmount=*/0,   ty.getCacheModifier(),         ty.getIterCount(),
-          /*isLoad=*/false};
+  return {ty.getTileShape(),     tdmElemBits(ty.getDataType()),
+          /*padInterval=*/0,     /*padAmount=*/0,
+          ty.getCacheModifier(), ty.getIterCount(),
+          ty.getIndexBits(),     /*isLoad=*/false};
 }
 
 // Emits one TENSOR_LOAD_TO_LDS / TENSOR_STORE_FROM_LDS. When `pred` is non-null the
@@ -567,7 +583,8 @@ TdmStatic tdmConfig(CopyOpCDNA5TensorStoreType ty) {
 LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic &cfg,
                               const TdmSlots &slots, Type srcTyArg, Type dstTyArg, Value atomVal,
                               Value src, Value dst, Type predMemTyArg = nullptr,
-                              Value pred = nullptr) {
+                              Value pred = nullptr, Type indexTyArg = nullptr,
+                              Value index = nullptr) {
   // The direction is a property of the atom type (one type per opcode). The global
   // side is the coordinate tensor — it has no pointer, the atom holds the base — and
   // the LDS side is a shared memref.
@@ -631,6 +648,35 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // operands of the `make_int_tuple` that built it. A static leaf therefore costs a
   // constant the descriptor math folds away, and a dynamic one costs exactly the
   // integer the kernel already had.
+  // Indexed addressing: the outer descriptor dim is not walked, it is listed. The row
+  // list lives in the two descriptor groups that a linear 3D+ tile would spend on its
+  // extra dims, which is why the indexed form is 2D only.
+  SmallVector<Value> rowIndex;
+  if (cfg.indexBits) {
+    auto indexMemTy = dyn_cast_or_null<fly::MemRefType>(indexTyArg);
+    if (!index || !indexMemTy)
+      return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand, got "
+                                  << indexTyArg;
+    if (!indexMemTy.getElemTy().isInteger(32))
+      return mlir::emitError(loc) << "cdna5 TDM: row indices must be i32, got "
+                                  << indexMemTy.getElemTy();
+    // `tileShape` is outermost-first, so its leading dim is the row count.
+    int32_t rows = tileShape.front();
+    if (rows > tdm::maxIndexedRows(cfg.indexBits))
+      return mlir::emitError(loc) << "cdna5 TDM: " << rows << " rows exceed the "
+                                  << tdm::maxIndexedRows(cfg.indexBits) << " that " << cfg.indexBits
+                                  << "-bit indices carry";
+    // The descriptor is scalar state, so every index has to reach an SGPR. The loads
+    // are uniform across the wave; readfirstlane is what tells the backend so.
+    Type idxPtrTy = index.getType();
+    for (int32_t i = 0; i < rows; ++i) {
+      Value slot =
+          LLVM::GEPOp::create(builder, loc, idxPtrTy, i32Ty, index, ArrayRef<LLVM::GEPArg>{i});
+      Value raw = LLVM::LoadOp::create(builder, loc, i32Ty, slot);
+      rowIndex.push_back(ROCDL::ReadfirstlaneOp::create(builder, loc, i32Ty, raw));
+    }
+  }
+
   Value glbCoord = cfg.isLoad ? src : dst;
   SmallVector<Value> coord;
   if (failed(unpackCoord(builder, loc, coordTy.getBase(), glbCoord, coord)))
@@ -647,7 +693,9 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // folds its whole term away, so a tile that never moves along a dim costs nothing.
   Value glbAddr = LLVM::PtrToIntOp::create(builder, loc, i64Ty, slotField(slots.basePtr));
   Value elemOff = zero64;
-  for (int32_t i = 0; i < rank; ++i) {
+  // An indexed descriptor takes its rows from the list, so the tile's row coordinate
+  // must not also move the base; only the contiguous coordinate still applies.
+  for (int32_t i = cfg.indexBits ? 1 : 0; i < rank; ++i) {
     Value coordNonNegative =
         arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge, coord[i], zeroC);
     LLVM::AssumeOp::create(builder, loc, coordNonNegative);
@@ -716,6 +764,11 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // "valid tensor" (0 would be a NULL Tensor that moves nothing). The global address
   // is split from the full i64, so a tile coordinate walking past 4 GiB carries into
   // glb_hi automatically.
+  // count = 1 is "valid tensor"; bit 31 turns on indexed addressing and bit 30 selects
+  // the index width, which is why both live beside it in the same word.
+  int32_t g0Config = 1;
+  if (cfg.indexBits)
+    g0Config |= (cfg.indexBits == 32 ? 1 << 30 : 0) | (1 << 31);
   Value g0s2 = LLVM::TruncOp::create(builder, loc, i32Ty, glbAddr);
   Value glbHiRaw = LLVM::LShrOp::create(builder, loc, glbAddr,
                                         arith::ConstantIntOp::create(builder, loc, 32, 64));
@@ -727,7 +780,7 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
                            i32Const(builder, loc, /*type field [31:30]=2*/ 1 << 31));
   Value dgroup0 = vector::FromElementsOp::create(
       builder, loc, VectorType::get({4}, i32Ty),
-      ValueRange{i32Const(builder, loc, /*count=*/1), ldsAddr, g0s2, g0s3});
+      ValueRange{i32Const(builder, loc, g0Config), ldsAddr, g0s2, g0s3});
 
   // Padding describes the padded LDS tile the DMA engine fills, which only the load
   // direction has: the store type carries no padding parameters, so this always
@@ -849,6 +902,38 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // descriptor iterates, the same three slots redefined as lds_addr_increment,
   // global_addr_increment and iterate_count. That is why iteration costs the fourth dim.
   Value g2s0 = zeroC, g2s1 = zeroC, g2s2 = zeroC, g2s3 = zeroC;
+  if (cfg.indexBits) {
+    SmallVector<Value> words;
+    if (cfg.indexBits == 32) {
+      words.assign(rowIndex.begin(), rowIndex.end());
+    } else {
+      // Two 16-bit indices per word, even index low.
+      for (size_t i = 0; i < rowIndex.size(); i += 2) {
+        Value low = lo16(rowIndex[i]);
+        Value high = i + 1 < rowIndex.size() ? shl16(lo16(rowIndex[i + 1])) : zeroC;
+        words.push_back(orr(low, high));
+      }
+    }
+    words.resize(8, zeroC);
+    Value dgIdx2 =
+        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                       ValueRange{words[0], words[1], words[2], words[3]});
+    Value dgIdx3 =
+        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
+                                       ValueRange{words[4], words[5], words[6], words[7]});
+    Value dgIdx4 = vector::FromElementsOp::create(
+        builder, loc, VectorType::get({8}, i32Ty),
+        ValueRange{zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC});
+    auto idxPolicy = builder.getI32IntegerAttr(static_cast<int32_t>(cfg.cacheModifier));
+    ArrayAttr noScopes;
+    if (cfg.isLoad)
+      ROCDL::TensorLoadToLDSOp::create(builder, loc, dgroup0, dgroup1, dgIdx2, dgIdx3, dgIdx4,
+                                       idxPolicy, noScopes, noScopes, noScopes);
+    else
+      ROCDL::TensorStoreFromLDSOp::create(builder, loc, dgroup0, dgroup1, dgIdx2, dgIdx3, dgIdx4,
+                                          idxPolicy, noScopes, noScopes, noScopes);
+    return success();
+  }
   if (rank >= 3)
     g2s0 = descTensorDim(2);
   if (cfg.iterCount > 1) {
@@ -908,6 +993,22 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
 
 } // namespace
 
+LogicalResult emitTdmIndexedCall(OpBuilder &builder, Location loc, Type copyAtomTy, Type srcTy,
+                                 Type dstTy, Type indexTy, Value atomVal, Value src, Value dst,
+                                 Value index) {
+  Type opTy = cast<fly::CopyAtomType>(copyAtomTy).getCopyOp();
+  if (auto ld = dyn_cast<CopyOpCDNA5TensorLoadType>(opTy))
+    return emitTdmAtomCall(builder, loc, tdmConfig(ld), tdmSlots(kLoadSlots, ld.getAtomicBarrier()),
+                           srcTy, dstTy, atomVal, src, dst, /*predMemTyArg=*/nullptr,
+                           /*pred=*/nullptr, indexTy, index);
+  if (auto st = dyn_cast<CopyOpCDNA5TensorStoreType>(opTy))
+    return emitTdmAtomCall(builder, loc, tdmConfig(st),
+                           tdmSlots(kStoreSlots, st.getAtomicBarrier()), srcTy, dstTy, atomVal, src,
+                           dst, /*predMemTyArg=*/nullptr, /*pred=*/nullptr, indexTy, index);
+  return mlir::emitError(loc) << "an index operand is only supported on a CDNA5 TDM atom, got "
+                              << opTy;
+}
+
 //===----------------------------------------------------------------------===//
 // CopyOpCDNA5TensorLoadType — TENSOR_LOAD_TO_LDS (global -> LDS)
 //===----------------------------------------------------------------------===//
@@ -955,7 +1056,10 @@ LogicalResult CopyOpCDNA5TensorLoadType::verify(function_ref<InFlightDiagnostic(
                                                 ArrayRef<int32_t> tileShape, Type dataType,
                                                 IntTupleAttr tensor2tdm, bool atomicBarrier,
                                                 int32_t cacheModifier, int32_t iterCount,
-                                                int32_t padInterval, int32_t padAmount) {
+                                                int32_t indexBits, int32_t padInterval,
+                                                int32_t padAmount) {
+  if (failed(tdmVerifyIndexBits(emitError, indexBits, iterCount)))
+    return failure();
   return tdmVerify(emitError, tileShape, dataType, tensor2tdm, iterCount, padInterval, padAmount);
 }
 
@@ -1044,7 +1148,10 @@ Attribute CopyOpCDNA5TensorStoreType::getThrBitLayoutRef() const { return getThr
 LogicalResult CopyOpCDNA5TensorStoreType::verify(function_ref<InFlightDiagnostic()> emitError,
                                                  ArrayRef<int32_t> tileShape, Type dataType,
                                                  IntTupleAttr tensor2tdm, bool atomicBarrier,
-                                                 int32_t cacheModifier, int32_t iterCount) {
+                                                 int32_t cacheModifier, int32_t iterCount,
+                                                 int32_t indexBits) {
+  if (failed(tdmVerifyIndexBits(emitError, indexBits, iterCount)))
+    return failure();
   return tdmVerify(emitError, tileShape, dataType, tensor2tdm, iterCount, /*padInterval=*/0,
                    /*padAmount=*/0);
 }

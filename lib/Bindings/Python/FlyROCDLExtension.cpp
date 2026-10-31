@@ -297,19 +297,19 @@ struct PyCopyOpCDNA5TensorLoadType : PyConcreteType<PyCopyOpCDNA5TensorLoadType>
     c.def_static(
         "get",
         [](std::vector<int32_t> tileShape, PyType &dataType, PyType &tensor2tdm, bool atomicBarrier,
-           int32_t cacheModifier, int32_t iterCount, int32_t padInterval, int32_t padAmount,
-           DefaultingPyMlirContext context) {
+           int32_t cacheModifier, int32_t iterCount, int32_t indexBits, int32_t padInterval,
+           int32_t padAmount, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpCDNA5TensorLoadType(
               context->getRef(),
               wrap(CopyOpCDNA5TensorLoadType::get(
                   ctx, tileShape, unwrap(dataType),
                   ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(), atomicBarrier,
-                  cacheModifier, iterCount, padInterval, padAmount)));
+                  cacheModifier, iterCount, indexBits, padInterval, padAmount)));
         },
         "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
-        "cache_modifier"_a = 0, "iter_count"_a = 1, "pad_interval"_a = 0, "pad_amount"_a = 0,
-        nb::kw_only(), "context"_a = nb::none(),
+        "cache_modifier"_a = 0, "iter_count"_a = 1, "index_bits"_a = 0, "pad_interval"_a = 0,
+        "pad_amount"_a = 0, nb::kw_only(), "context"_a = nb::none(),
         "Create a CopyOpCDNA5TensorLoadType (N-D TDM Global->LDS DMA) with the static per-dim tile "
         "shape (tensor dim order, len = rank 1-5)");
   }
@@ -322,16 +322,18 @@ struct PyCopyOpCDNA5TensorStoreType : PyConcreteType<PyCopyOpCDNA5TensorStoreTyp
     c.def_static(
         "get",
         [](std::vector<int32_t> tileShape, PyType &dataType, PyType &tensor2tdm, bool atomicBarrier,
-           int32_t cacheModifier, int32_t iterCount, DefaultingPyMlirContext context) {
+           int32_t cacheModifier, int32_t iterCount, int32_t indexBits,
+           DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpCDNA5TensorStoreType(
               context->getRef(), wrap(CopyOpCDNA5TensorStoreType::get(
                                      ctx, tileShape, unwrap(dataType),
                                      ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(),
-                                     atomicBarrier, cacheModifier, iterCount)));
+                                     atomicBarrier, cacheModifier, iterCount, indexBits)));
         },
         "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
-        "cache_modifier"_a = 0, "iter_count"_a = 1, nb::kw_only(), "context"_a = nb::none(),
+        "cache_modifier"_a = 0, "iter_count"_a = 1, "index_bits"_a = 0, nb::kw_only(),
+        "context"_a = nb::none(),
         "Create a CopyOpCDNA5TensorStoreType (N-D TDM LDS->Global DMA). Same parameters as "
         "the load minus the padding: the store instruction has no de-padding, it drains LDS "
         "with the packed tile stride");

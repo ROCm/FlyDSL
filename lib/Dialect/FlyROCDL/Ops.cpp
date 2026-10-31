@@ -73,9 +73,9 @@ LogicalResult inferTdmAtomTypes(MLIRContext *context, std::optional<Location> lo
 
   FailureOr<Type> copyOp =
       isLoad ? tdmLoadOpType(context, *geometry, dataType, *tensor2tdm, adaptor.getAtomicBarrier(),
-                             adaptor.getCacheModifier(), emitError)
+                             adaptor.getCacheModifier(), adaptor.getIndexBits(), emitError)
              : tdmStoreOpType(context, *geometry, dataType, *tensor2tdm, adaptor.getAtomicBarrier(),
-                              adaptor.getCacheModifier(), emitError);
+                              adaptor.getCacheModifier(), adaptor.getIndexBits(), emitError);
   if (failed(copyOp))
     return failure();
 
