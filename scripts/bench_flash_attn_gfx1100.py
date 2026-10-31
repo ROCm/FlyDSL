@@ -28,8 +28,9 @@ Triton baselines (``--triton``):
 * ``flash-attn``: ``flash_attn.flash_attn_func`` from flash-attn 2.8.3 on its
   Triton AMD backend (export ``FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE``).
 
-The PR numbers were taken with Triton 3.7.1 (ROCm 7.14 nightly) and torch
-2.13.0a0 on a W7900D; every JSON row records the Triton version it ran.
+The first PR tables used Triton 3.6.0; the re-measurement used Triton 3.7.1
+(ROCm 7.14 nightly) and torch 2.13.0a0 on a W7900D. Every JSON row records the
+Triton version it ran.
 """
 
 from __future__ import annotations
