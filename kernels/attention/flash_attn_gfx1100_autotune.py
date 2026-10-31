@@ -78,21 +78,57 @@ def feasible_tiles(head_dim):
     return tiles
 
 
-def pick_tile(head_dim, seq_q, causal, bh, *, num_cu):
+def _long_prefill(seq_q, bh, num_cu):
+    return bh * ((seq_q + 127) // 128) >= 4 * num_cu
+
+
+def _few_q_blocks(seq_q, bh, num_cu):
+    """True when 64-row Q blocks give at most two workgroups per CU."""
+    return bh * ((seq_q + 63) // 64) <= 2 * num_cu
+
+
+def prefill_schedule(head_dim, seq_q, causal, bh, *, num_cu):
+    """Return ``(prefetch, reverse_q)`` for a ``seq_q > 16`` prefill kernel.
+
+    Causal Q blocks get longer KV loops towards the end of the sequence, so
+    launching them first shortens the tail (+0.5% to +17% on W7900D across
+    D 64/128/256). At D 64/128 with ``seq_q > 8192`` and ``bh > 16`` the
+    reversed order turned slow or bimodal from run to run instead (D128 H32
+    S16384 +60%, D128 H56 S16384 and D64 H32 S16384 +11-23% in some runs),
+    so those shapes keep the forward order. Prefetching the next KV block
+    only pays off when few workgroups leave each SIMD with a couple of waves
+    to hide its latency.
+    """
+    if not causal:
+        return False, False
+    prefetch = head_dim != 256 and not _long_prefill(seq_q, bh, num_cu) and _few_q_blocks(seq_q, bh, num_cu)
+    reverse_q = head_dim == 256 or seq_q <= 8192 or bh <= 16
+    return prefetch, reverse_q
+
+
+def pick_tile(head_dim, seq_q, causal, bh, *, num_cu, dtype_str=None):
     """Return ``(num_waves, q_tiles, block_n, vt_rows, k_from_gmem)``."""
     if seq_q <= WMMA_M:
         if head_dim == 64:
-            block_n = 32 if bh >= 4 * num_cu else 64
-            return 1, 1, block_n, 8, True
+            if bh >= 4 * num_cu:
+                return 1, 1, 32, 8, True
+            if bh == 1 and not causal and dtype_str == "f16":
+                # The only variant where the single-wave kernel stays fast
+                # (2-5% ahead); everywhere else it spills and runs 1.1-5x slower.
+                return 1, 1, 64, 8, True
+            return 4, 1, 64, 8, False
         return 4, 1, 32, 8, False
 
-    long_prefill = bh * ((seq_q + 127) // 128) >= 4 * num_cu
     if head_dim == 256:
         return 8, 1, 32, 8, False
-    if not long_prefill:
+    if not _long_prefill(seq_q, bh, num_cu):
+        if _few_q_blocks(seq_q, bh, num_cu):
+            # Too few workgroups to fill the GPU, so every wave is bound by its
+            # own KV loop: one 16-row tile per wave, K staged through LDS.
+            return (4, 1, 32, 8, False) if head_dim == 128 else (4, 1, 64, 8, False)
         if head_dim == 64:
-            return (4, 1, 64, 4, True) if causal else (4, 2, 64, 4, True)
-        return 4, 1, 64, 8, True
+            return (4, 1, 64, 8, False) if causal else (4, 2, 64, 4, True)
+        return (8, 1, 64, 8, False) if causal else (4, 1, 64, 8, True)
     if head_dim == 64:
         if causal and seq_q < 32768:
             return 4, 2, 64, 4, False
@@ -144,7 +180,7 @@ def select_tile(
     """Pick a tile, optionally benchmarking the feasible set when tuning is on."""
 
     bh = batch * num_heads
-    default = pick_tile(head_dim, seq_q, causal, bh, num_cu=num_cu)
+    default = pick_tile(head_dim, seq_q, causal, bh, num_cu=num_cu, dtype_str=dtype_str)
     if not _autotune_enabled() or build_kernel is None or torch is None or not torch.cuda.is_available():
         return default
 
@@ -192,7 +228,7 @@ def _tune_tile(
 ):
     dtype = _dtype_from_str(dtype_str)
     if dtype is None:
-        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu)
+        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu, dtype_str=dtype_str)
 
     device = torch.device("cuda")
     q = torch.randn(batch, seq_q, num_heads, head_dim, dtype=dtype, device=device)
@@ -222,5 +258,5 @@ def _tune_tile(
 
     torch.cuda.synchronize()
     if best_tile is None:
-        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu)
+        return pick_tile(head_dim, seq_q, causal, batch * num_heads, num_cu=num_cu, dtype_str=dtype_str)
     return best_tile

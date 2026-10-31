@@ -16,7 +16,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
-from kernels.attention.flash_attn_gfx1100_autotune import select_tile, tile_fits
+from kernels.attention.flash_attn_gfx1100_autotune import prefill_schedule, select_tile, tile_fits
 from kernels.attention.flash_attn_utils import daz_denormal_attr
 from kernels.common import buffer_ops
 from kernels.common.kernels_common import LOG2E
@@ -73,6 +73,25 @@ def hoist_q(head_dim, seq_q, seq_kv, bh):
     if seq_q <= WMMA_M:
         return seq_kv >= 8192
     return seq_kv >= 16384 and bh >= 4
+
+
+def kernel_schedule(head_dim, seq_q, seq_kv, causal, bh, num_cu):
+    """Return ``(prefetch, keep_q, reverse_q, static_bounds)`` for one kernel.
+
+    ``prefetch`` loads the next KV block into VGPRs while the current one is
+    consumed. Decode only gains from it at D=128 with ``bh <= 128``; prefill
+    only for the few-workgroup causal shapes picked in ``prefill_schedule``.
+    ``reverse_q`` launches the last (longest) causal Q blocks first.
+    ``static_bounds`` gives causal decode compile-time KV-loop bounds. At
+    D=128 runtime bounds serialize the LDS reads of the main loop (+27-49%
+    when static, +1-3% at D=64); at D=256 the static loop spills more and is
+    2-19% slower.
+    """
+    keep_q = hoist_q(head_dim, seq_q, seq_kv, bh)
+    if seq_q <= WMMA_M:
+        return head_dim == 128 and bh <= 128, keep_q, False, causal and head_dim != 256
+    prefetch, reverse_q = prefill_schedule(head_dim, seq_q, causal, bh, num_cu=num_cu)
+    return prefetch, keep_q, reverse_q, False
 
 
 def build_flash_attn_func_module_primary(
@@ -155,12 +174,19 @@ def build_flash_attn_func_module_primary(
     if not tile_fits(head_dim, tile):
         raise ValueError(f"tile {tile} does not fit head_dim={head_dim}")
     num_waves, q_tiles, block_n, vt_rows, k_from_gmem = tile
-    prefetch = seq_q <= WMMA_M and head_dim == 128 and batch * num_heads <= 128
-    # Only the D=128 decode shapes benefit from prefetching; prefill kernels
-    # lose occupancy if they hoist the extra LDS traffic.
+    prefetch, keep_q, reverse_q, static_bounds = kernel_schedule(
+        head_dim, seq_q, seq_kv, causal, batch * num_heads, int(num_cu)
+    )
     # ``_override_flags`` and ``_fixed_tile`` are private knobs exercised only by tests.
     override_flags = _override_flags or {}
-    keep_q = hoist_q(head_dim, seq_q, seq_kv, batch * num_heads)
+    if "prefetch" in override_flags:
+        prefetch = bool(override_flags["prefetch"])
+    if "keep_q" in override_flags:
+        keep_q = bool(override_flags["keep_q"])
+    if "reverse_q" in override_flags:
+        reverse_q = bool(override_flags["reverse_q"]) and causal
+    if "static_bounds" in override_flags:
+        static_bounds = bool(override_flags["static_bounds"]) and causal
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
@@ -227,6 +253,8 @@ def build_flash_attn_func_module_primary(
     def flash_attn_func_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, Out: fx.Tensor):
         tid = fx.thread_idx.x
         pid_m = fx.Int32(fx.block_idx.x)
+        if const_expr(reverse_q):
+            pid_m = fx.Int32(n_q_blocks - 1) - pid_m
         head = fx.Int32(fx.block_idx.y)
         bat = fx.Int32(fx.block_idx.z)
 
@@ -534,7 +562,12 @@ def build_flash_attn_func_module_primary(
                         )
             return m_new, l_new, o_run
 
-        if const_expr(causal):
+        if const_expr(static_bounds and n_q_blocks == 1):
+            kv_end_c = min(seq_kv, seq_q + causal_delta)
+            n_visit_c = max(0, (kv_end_c + block_n - 1) // block_n)
+            n_visit = fx.Int32(n_visit_c)
+            n_full = fx.Int32(min(seq_kv // block_n, max(0, (causal_delta + 1) // block_n), n_visit_c))
+        elif const_expr(causal):
             q_lo = pid_m * block_m
             q_hi = fx.min(fx.Int32(seq_q - 1), q_lo + (block_m - 1))
             kv_end = fx.min(fx.Int32(seq_kv), q_hi + fx.Int32(causal_delta + 1))

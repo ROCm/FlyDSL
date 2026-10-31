@@ -44,7 +44,7 @@ if torch is None or not torch.cuda.is_available():
 
 import kernels.attention.flash_attn_interface as flash_attn_interface  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module, hoist_q  # noqa: E402
+from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module, kernel_schedule  # noqa: E402
 from kernels.attention.flash_attn_gfx1100_autotune import pick_tile  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 
@@ -764,6 +764,24 @@ def test_pick_tile_respects_device_cu_count():
     assert tile_96 != tile_84
 
 
+@pytest.mark.parametrize(
+    "head_dim,seq,bh,reverse",
+    [
+        (64, 35280, 14, True),
+        (64, 8192, 128, True),
+        (128, 8192, 32, True),
+        (128, 16384, 16, True),
+        (256, 16384, 32, True),
+        (64, 16384, 32, False),
+        (128, 16384, 32, False),
+        (128, 16384, 56, False),
+    ],
+)
+def test_reverse_q_only_on_stable_causal_shapes(head_dim, seq, bh, reverse):
+    assert kernel_schedule(head_dim, seq, seq, True, bh, 96)[2] is reverse
+    assert kernel_schedule(head_dim, seq, seq, False, bh, 96)[2] is False
+
+
 def test_select_tile_autotunes_when_enabled(monkeypatch):
     import kernels.attention.flash_attn_gfx1100_autotune as autotune
 
@@ -812,6 +830,8 @@ class _TileKey(NamedTuple):
     causal: bool
     decode: bool
     prefetch: bool
+    reverse_q: bool
+    static_bounds: bool
     kv_aligned: bool
     multi_block: bool
 
@@ -819,23 +839,25 @@ class _TileKey(NamedTuple):
 _D64_DECODE = (1, 1, 64, 8, True)
 _D256_DECODE = (4, 1, 32, 8, False)
 _D256_PREFILL = (8, 1, 32, 8, False)
+_D64_PREFILL = (4, 2, 64, 4, True)
 _D64_DECODE_SPILL = "the single-wave D64 decode kernel already spilled 1-6 VGPRs before the f16 RNE change"
 _D256_TAIL_SPILL = "unchanged since the head_dim 256 decode kernel was added"
 _D256_HOIST = "hoisting Q is faster than spill-free re-reads on this shape class (see hoist_q)"
+_D64_PREFILL_SPILL = "spills 2 VGPRs from seq 512 up; re-reading Q is spill-free but 1-3% slower"
 
 # Kernels allowed to spill: (max vgpr_spill_count, max private_segment_fixed_size)
 # as measured on W7900D, and why. Every other variant must be spill-free.
 _SPILL_EXCEPTIONS: dict[_TileKey, tuple[int, int, str]] = {
-    _TileKey(64, _D64_DECODE, True, True, True, False, True, False): (1, 8, _D64_DECODE_SPILL),
-    _TileKey(64, _D64_DECODE, True, False, True, False, True, True): (3, 16, _D64_DECODE_SPILL),
-    _TileKey(64, _D64_DECODE, True, False, True, False, False, True): (7, 32, _D64_DECODE_SPILL),
-    _TileKey(256, _D256_DECODE, False, False, True, False, False, True): (34, 140, _D256_TAIL_SPILL),
-    _TileKey(256, _D256_DECODE, True, False, True, False, True, True): (75, 304, _D256_HOIST),
-    _TileKey(256, _D256_DECODE, True, True, True, False, True, True): (125, 488, _D256_HOIST),
-    _TileKey(256, _D256_DECODE, True, False, True, False, False, True): (75, 304, _D256_HOIST),
-    _TileKey(256, _D256_DECODE, True, True, True, False, False, True): (80, 324, _D256_HOIST),
-    _TileKey(256, _D256_PREFILL, True, False, False, False, True, True): (71, 288, _D256_HOIST),
-    _TileKey(256, _D256_PREFILL, True, True, False, False, True, True): (79, 320, _D256_HOIST),
+    _TileKey(64, _D64_PREFILL, True, False, False, False, False, False, True, True): (2, 12, _D64_PREFILL_SPILL),
+    _TileKey(64, _D64_DECODE, True, False, True, False, False, False, True, True): (3, 16, _D64_DECODE_SPILL),
+    _TileKey(64, _D64_DECODE, True, False, True, False, False, False, False, True): (7, 32, _D64_DECODE_SPILL),
+    _TileKey(256, _D256_DECODE, False, False, True, False, False, False, False, True): (34, 140, _D256_TAIL_SPILL),
+    _TileKey(256, _D256_DECODE, True, False, True, False, False, False, True, True): (75, 304, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, True, True, False, False, False, True, True): (125, 488, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, False, True, False, False, False, False, True): (75, 304, _D256_HOIST),
+    _TileKey(256, _D256_DECODE, True, True, True, False, False, False, False, True): (80, 324, _D256_HOIST),
+    _TileKey(256, _D256_PREFILL, True, False, False, False, False, False, True, True): (71, 288, _D256_HOIST),
+    _TileKey(256, _D256_PREFILL, True, True, False, False, True, False, True, True): (79, 320, _D256_HOIST),
 }
 
 
@@ -850,15 +872,18 @@ def _gfx1100_tile_samples() -> dict[_TileKey, tuple[int, int, int]]:
     for head_dim in (64, 128, 256):
         for seq_q, seq_kv, bh in shapes:
             for causal in (False, True):
-                tile = pick_tile(head_dim, seq_q, causal, bh, num_cu=96)
+                tile = pick_tile(head_dim, seq_q, causal, bh, num_cu=96, dtype_str="f16")
                 block_n = tile[2]
+                prefetch, keep_q, reverse_q, static_bounds = kernel_schedule(head_dim, seq_q, seq_kv, causal, bh, 96)
                 key = _TileKey(
                     head_dim=head_dim,
                     tile=tile,
-                    hoist_q=hoist_q(head_dim, seq_q, seq_kv, bh),
+                    hoist_q=keep_q,
                     causal=causal,
                     decode=seq_q <= 16,
-                    prefetch=seq_q <= 16 and head_dim == 128 and bh <= 128,
+                    prefetch=prefetch,
+                    reverse_q=reverse_q,
+                    static_bounds=static_bounds,
                     kv_aligned=seq_kv % block_n == 0,
                     multi_block=seq_kv > 2 * block_n,
                 )
@@ -1007,6 +1032,30 @@ def test_use_vector_store_switch_is_bit_exact():
         override={**base_override, "use_vector_store": False},
     )
     torch.testing.assert_close(out_vector, out_scalar, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["f16", "bf16"])
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
+@pytest.mark.parametrize("batch,num_heads,seq", [(1, 1, 1000), (2, 8, 1024)])
+def test_small_grid_prefill_matches_reference(dtype, head_dim, causal, batch, num_heads, seq):
+    """Few-workgroup prefill tiles (K in LDS, reversed causal order, prefetch)."""
+    device = torch.device("cuda")
+    bh = batch * num_heads
+    num_cu = flash_attn_interface._device_cu_count(device)
+    tile = pick_tile(head_dim, seq, causal, bh, num_cu=num_cu, dtype_str="bf16" if dtype == torch.bfloat16 else "f16")
+    prefetch, _, reverse_q, _ = kernel_schedule(head_dim, seq, seq, causal, bh, num_cu)
+    if bh == 1 or causal:
+        assert not tile[4], f"expected K staged in LDS, got tile {tile}"
+    assert reverse_q == causal
+    assert prefetch == (causal and bh == 1)
+    _seed_all(20261031)
+    inputs = _make_inputs(batch, num_heads, seq, seq, head_dim, dtype, device=device)
+    out = flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=causal)
+    torch.cuda.synchronize()
+    ref = _ref_attn_fp64(inputs.q, inputs.k, inputs.v, causal=causal)
+    ulp = _ulp_err(out, ref.to(out.dtype), dtype=dtype)
+    assert ulp <= 1.0, f"tile={tile} prefetch={prefetch} reverse_q={reverse_q}: {ulp:.3f} ulp"
 
 
 def test_dense_matrix_accuracy():
