@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-31T09:23:23Z",
+ "updated": "2026-10-31T09:24:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/gfx1250-strict-cherrypick",
    "event": "pull_request",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588",
    "created_at": "2026-10-31T07:38:21Z",
-   "updated_at": "2026-10-31T08:57:55Z",
+   "updated_at": "2026-10-31T09:21:49Z",
    "actor": "jli-melchior",
    "jobs": [
     {
