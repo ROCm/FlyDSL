@@ -1,0 +1,96 @@
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.td b/llvm/lib/Target/AMDGPU/AMDGPU.td
+--- a/llvm/lib/Target/AMDGPU/AMDGPU.td
++++ b/llvm/lib/Target/AMDGPU/AMDGPU.td
+@@ -2360,10 +2360,11 @@ def FeatureISAVersion12_50_Common : FeatureSet<
+    FeatureLdsAtomicAddF64,
+    FeatureSetPrioIncWgInst,
+    FeatureSWakeupBarrier,
+    Feature45BitNumRecordsBufferResource,
+    FeatureXNACK,
++   FeatureXNACKOnOffModes,
+    FeatureClusters,
+    FeatureD16Writes32BitVgpr,
+    FeatureMcastLoadInsts,
+    FeatureAsyncLoadToLDSInsts,
+    FeatureAsyncStoreFromLDSInsts,
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp b/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp
+--- a/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUHWEvents.cpp
+@@ -122,7 +122,7 @@ static HWEvents getEventsForImpl(const MachineInstr &Inst,
+     assert(Inst.mayLoadOrStore());
+     HWEvents E = HWEvents::NONE;
+     if (TII.mayAccessVMEMThroughFlat(Inst)) {
+-      if (ST.hasWaitXcnt())
++      if (ST.hasWaitXcnt() && ST.isXNACKEnabled())
+         E |= HWEvents::VMEM_GROUP;
+       E |= getSimplifiedVMEMEventsFor(Inst, TII);
+     }
+@@ -146,7 +146,7 @@ static HWEvents getEventsForImpl(const MachineInstr &Inst,
+     // followed "S_WAITCNT vmcnt(0)" is needed after to ensure the writeback has
+     // completed.
+     HWEvents E = getSimplifiedVMEMEventsFor(Inst, TII);
+-    if (ST.hasWaitXcnt())
++    if (ST.hasWaitXcnt() && ST.isXNACKEnabled())
+       E |= HWEvents::VMEM_GROUP;
+     if (ST.vmemWriteNeedsExpWaitcnt() &&
+         (Inst.mayStore() || SIInstrInfo::isAtomicRet(Inst)))
+@@ -156,7 +156,7 @@ static HWEvents getEventsForImpl(const MachineInstr &Inst,
+   }
+ 
+   if (TII.isSMRD(Inst)) {
+-    if (ST.hasWaitXcnt())
++    if (ST.hasWaitXcnt() && ST.isXNACKEnabled())
+       return HWEvents::SMEM_GROUP | HWEvents::SMEM_ACCESS;
+     return HWEvents::SMEM_ACCESS;
+   }
+diff --git a/llvm/lib/Target/AMDGPU/GCNSubtarget.h b/llvm/lib/Target/AMDGPU/GCNSubtarget.h
+--- a/llvm/lib/Target/AMDGPU/GCNSubtarget.h
++++ b/llvm/lib/Target/AMDGPU/GCNSubtarget.h
+@@ -347,7 +347,7 @@ public:
+   }
+ 
+   bool isXNACKEnabled() const {
+-    return enableXNACK() || TargetID.isXnackOnOrAny();
++    return TargetID.isXnackOnOrAny();
+   }
+ 
+   bool hasRelaxedBufferOOBMode() const { return BufferOOBRelaxed; }
+diff --git a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+--- a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+@@ -2523,7 +2523,7 @@ bool SIInsertWaitcnts::generateWaitcntInstBefore(
+                                                 MI);
+         }
+ 
+-        if (ST.hasWaitXcnt() && Op.isDef())
++        if (ST.hasWaitXcnt() && ST.isXNACKEnabled() && Op.isDef())
+           ScoreBrackets.determineWaitForPhysReg(AMDGPU::X_CNT, Reg, Wait, MI);
+       }
+     }
+@@ -2740,7 +2740,7 @@ void SIInsertWaitcnts::updateEventWaitcntAfter(MachineInstr &Inst,
+ 
+   // Set XCNT to zero in the bracket for instructions that implicitly drain
+   // XCNT.
+-  if (ST.hasWaitXcnt() && SIInstrInfo::isXcntDrain(Inst))
++  if (ST.hasWaitXcnt() && ST.isXNACKEnabled() && SIInstrInfo::isXcntDrain(Inst))
+     ScoreBrackets->applyWaitcnt(AMDGPU::X_CNT, 0);
+ }
+ 
+@@ -3559,7 +3559,7 @@ bool SIInsertWaitcnts::run() {
+         }
+       }
+ 
+-      if (ST.hasWaitXcnt())
++      if (ST.hasWaitXcnt() && ST.isXNACKEnabled())
+         Modified |= removeRedundantSoftXcnts(*MBB);
+       Modified |= insertWaitcntInBlock(MF, *MBB, *Brackets);
+       BI.Dirty = false;
+@@ -3708,7 +3708,7 @@ bool SIInsertWaitcnts::run() {
+   if (MFI->isEntryFunction()) {
+     MachineBasicBlock::iterator InsertPt = EntryBB.begin();
+ 
+-    if (ST.hasWaitXcnt()) {
++    if (ST.hasWaitXcnt() && ST.isXNACKEnabled()) {
+       // Set REPLAY_MODE (bit 25) in MODE register to enable multi-group XNACK
+       // replay. This aligns hardware behavior with the compiler's s_wait_xcnt
+       // insertion logic, which assumes multi-group mode by default.

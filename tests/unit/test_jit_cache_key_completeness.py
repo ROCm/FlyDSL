@@ -40,6 +40,30 @@ def test_env_var_drift_changes_cache_key(monkeypatch):
     assert k1 != k2, "cache key must change when whitelisted env var changes"
 
 
+def test_xnack_codegen_env_is_gfx1250_only(monkeypatch):
+    """LLVM_GFX1250_ANY_XNACK_CODEGEN changes codegen only for gfx1250.
+
+    It must split that arch's cache key and leave every other arch's key alone.
+    """
+    from flydsl.compiler.backends import GPUTarget
+
+    @flyc.jit
+    def k(A: fx.Tensor):
+        pass
+
+    A = torch.zeros(8, dtype=torch.float32)
+    k._ensure_sig()
+
+    def key_for(arch, mode):
+        warp = 32 if arch.startswith("gfx12") else 64
+        k._backend_target = GPUTarget(backend="rocm", arch=arch, warp_size=warp)
+        monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", mode)
+        return _key(k, A)
+
+    assert key_for("gfx942", "0") == key_for("gfx942", "1")
+    assert key_for("gfx1250", "0") != key_for("gfx1250", "1")
+
+
 def test_globals_drift_default_raises(tmp_path, monkeypatch):
     """mutating a referenced global must raise."""
     src = tmp_path / "drift_default.py"

@@ -1,0 +1,847 @@
+diff --git a/clang/include/clang/Basic/BuiltinsAMDGPU.td b/clang/include/clang/Basic/BuiltinsAMDGPU.td
+--- a/clang/include/clang/Basic/BuiltinsAMDGPU.td
++++ b/clang/include/clang/Basic/BuiltinsAMDGPU.td
+@@ -1061,21 +1061,21 @@ def __builtin_amdgcn_cvt_pk_fp8_f16 : AMDGPUBuiltin<"short(_ExtVector<2, _Float1
+ def __builtin_amdgcn_cvt_pk_bf8_f16 : AMDGPUBuiltin<"short(_ExtVector<2, _Float16>)", [Const], "gfx1250-insts">;
+ def __builtin_amdgcn_cvt_sr_fp8_f16 : AMDGPUBuiltin<"int(_Float16, int, unsigned int, _Constant int)", [Const], "gfx1250-insts">;
+ def __builtin_amdgcn_cvt_sr_bf8_f16 : AMDGPUBuiltin<"int(_Float16, int, unsigned int, _Constant int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f16_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_bf16_fp8 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f16_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_bf16_bf8 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f16_fp4 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_bf16_fp4 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f32_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f32_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk8_f32_fp4 : AMDGPUBuiltin<"_ExtVector<8, float>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_f16_fp6 : AMDGPUBuiltin<"_ExtVector<16, _Float16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_bf16_fp6 : AMDGPUBuiltin<"_ExtVector<16, __bf16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_f16_bf6 : AMDGPUBuiltin<"_ExtVector<16, _Float16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_bf16_bf6 : AMDGPUBuiltin<"_ExtVector<16, __bf16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_f32_fp6 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
+-def __builtin_amdgcn_cvt_scale_pk16_f32_bf6 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "gfx1250-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f16_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_bf16_fp8 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f16_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_bf16_bf8 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f16_fp4 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_bf16_fp4 : AMDGPUBuiltin<"_ExtVector<8, __bf16>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f32_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f32_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<2, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk8_f32_fp4 : AMDGPUBuiltin<"_ExtVector<8, float>(unsigned int, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_f16_fp6 : AMDGPUBuiltin<"_ExtVector<16, _Float16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_bf16_fp6 : AMDGPUBuiltin<"_ExtVector<16, __bf16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_f16_bf6 : AMDGPUBuiltin<"_ExtVector<16, _Float16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_bf16_bf6 : AMDGPUBuiltin<"_ExtVector<16, __bf16>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_f32_fp6 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
++def __builtin_amdgcn_cvt_scale_pk16_f32_bf6 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<3, unsigned int>, unsigned int, _Constant unsigned int)", [Const], "block16-cvt-scale-insts">;
+ def __builtin_amdgcn_cvt_scalef32_pk8_fp8_bf16 : AMDGPUBuiltin<"_ExtVector<2, unsigned int>(_ExtVector<8, __bf16>, float)", [Const], "gfx1250-insts">;
+ def __builtin_amdgcn_cvt_scalef32_pk8_bf8_bf16 : AMDGPUBuiltin<"_ExtVector<2, unsigned int>(_ExtVector<8, __bf16>, float)", [Const], "gfx1250-insts">;
+ def __builtin_amdgcn_cvt_scalef32_pk8_fp8_f16 : AMDGPUBuiltin<"_ExtVector<2, unsigned int>(_ExtVector<8, _Float16>, float)", [Const], "gfx1250-insts">;
+@@ -1183,19 +1183,19 @@ def __builtin_amdgcn_wmma_i32_16x16x64_iu8 : AMDGPUBuiltin<"_ExtVector<8, int>(_
+   let Documentation = [DocWMMA_i32_16x16x64_iu8_GFX1250];
+   let ArgNames = ["a_sign", "a", "b_sign", "b", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f16_16x16x128_fp8_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f16_16x16x128_fp8_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f16_16x16x128_fp8_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f16_16x16x128_fp8_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f16_16x16x128_bf8_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f16_16x16x128_bf8_fp8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f16_16x16x128_bf8_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f16_16x16x128_bf8_bf8 : AMDGPUBuiltin<"_ExtVector<8, _Float16>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, _Float16>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+@@ -1203,19 +1203,19 @@ def __builtin_amdgcn_wmma_f32_16x16x128_f8f6f4 : AMDGPUBuiltin<"_ExtVector<8, fl
+   let Documentation = [DocWMMA_f8f6f4_GFX1250];
+   let ArgNames = ["matrix_a_fmt", "a", "matrix_b_fmt", "b", "c_mod", "c"];
+ }
+-def __builtin_amdgcn_wmma_f32_16x16x128_fp8_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f32_16x16x128_fp8_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f32_16x16x128_fp8_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f32_16x16x128_fp8_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f32_16x16x128_bf8_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f32_16x16x128_bf8_fp8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f32_16x16x128_bf8_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f32_16x16x128_bf8_bf8 : AMDGPUBuiltin<"_ExtVector<8, float>(_ExtVector<16, int>, _ExtVector<16, int>, _Constant short, _ExtVector<8, float>, _Constant bool, _Constant bool)", [Const], "wmma-16x16x128fp8-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_fp8_16x16x128_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+@@ -1235,15 +1235,15 @@ def __builtin_amdgcn_wmma_f16_16x16x32_f16 : AMDGPUBuiltin<"_ExtVector<8, _Float
+   let Documentation = [DocWMMA_half_16x16x32_GFX1250];
+   let ArgNames = ["a_neg", "a", "b_neg", "b", "c_mod", "c", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>)", [Const], "wmma-f4-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_f4_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c"];
+ }
+-def __builtin_amdgcn_wmma_scale_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>, _Constant int, _Constant int, int, _Constant int, _Constant int, int, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_scale_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>, _Constant int, _Constant int, int, _Constant int, _Constant int, int, _Constant bool, _Constant bool)", [Const], "wmma-f4-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_scale_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_scale", "matrix_a_scale_fmt", "matrix_a_scale_exp", "matrix_b_scale", "matrix_b_scale_fmt", "matrix_b_scale_exp", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+-def __builtin_amdgcn_wmma_scale16_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>, _Constant int, _Constant int, long int, _Constant int, _Constant int, long int, _Constant bool, _Constant bool)", [Const], "gfx1250-insts,wavefrontsize32"> {
++def __builtin_amdgcn_wmma_scale16_f32_32x16x128_f4 : AMDGPUBuiltin<"_ExtVector<16, float>(_ExtVector<16, int>, _ExtVector<8, int>, _Constant short, _ExtVector<16, float>, _Constant int, _Constant int, long int, _Constant int, _Constant int, long int, _Constant bool, _Constant bool)", [Const], "wmma-f4-insts,wavefrontsize32"> {
+   let Documentation = [DocWMMA_scale16_GFX1250];
+   let ArgNames = ["a", "b", "c_mod", "c", "matrix_a_scale", "matrix_a_scale_fmt", "matrix_a_scale_exp", "matrix_b_scale", "matrix_b_scale_fmt", "matrix_b_scale_exp", "matrix_a_reuse", "matrix_b_reuse"];
+ }
+diff --git a/llvm/include/llvm/BinaryFormat/ELF.h b/llvm/include/llvm/BinaryFormat/ELF.h
+--- a/llvm/include/llvm/BinaryFormat/ELF.h
++++ b/llvm/include/llvm/BinaryFormat/ELF.h
+@@ -842,7 +842,8 @@ enum {
+   X(0x5e, EF_AMDGPU_MACH_AMDGCN_GFX1171, "gfx1171")                            \
+   X(0x5f, EF_AMDGPU_MACH_AMDGCN_GFX9_4_GENERIC, "gfx9-4-generic")              \
+   X(0x62, EF_AMDGPU_MACH_AMDGCN_GFX11_7_GENERIC, "gfx11-7-generic")            \
+-  X(0x63, EF_AMDGPU_MACH_AMDGCN_GFX13_GENERIC, "gfx13-generic")
++  X(0x63, EF_AMDGPU_MACH_AMDGCN_GFX13_GENERIC, "gfx13-generic")            \
++  X(0xeb, EF_AMDGPU_MACH_AMDGCN_GFX1250_STRICT, "gfx1250-strict")
+ 
+ enum : unsigned {
+   // clang-format off
+@@ -875,7 +876,7 @@ enum : unsigned {
+ 
+   // First/last AMDGCN-based processors.
+   EF_AMDGPU_MACH_AMDGCN_FIRST = EF_AMDGPU_MACH_AMDGCN_GFX600,
+-  EF_AMDGPU_MACH_AMDGCN_LAST = EF_AMDGPU_MACH_AMDGCN_GFX13_GENERIC,
++  EF_AMDGPU_MACH_AMDGCN_LAST = EF_AMDGPU_MACH_AMDGCN_GFX1250_STRICT,
+ 
+   // Indicates if the "xnack" target feature is enabled for all code contained
+   // in the object.
+diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+--- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
++++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+@@ -685,6 +685,7 @@ class AMDGPUCvtScaleF32SRIntrinsic<LLVMType DstTy, LLVMType Src0Ty, string name>
+   [DstTy], [Src0Ty, llvm_i32_ty, llvm_float_ty]
+ >, ClangBuiltin<"__builtin_amdgcn_"#name>;
+ 
++let TargetFeatures = "block16-cvt-scale-insts" in {
+ def int_amdgcn_cvt_scale_pk8_f16_fp8   : AMDGPUCvtScaleIntrinsic<llvm_v8f16_ty,   llvm_v2i32_ty, "cvt_scale_pk8_f16_fp8">;
+ def int_amdgcn_cvt_scale_pk8_bf16_fp8  : AMDGPUCvtScaleIntrinsic<llvm_v8bf16_ty,  llvm_v2i32_ty, "cvt_scale_pk8_bf16_fp8">;
+ def int_amdgcn_cvt_scale_pk8_f16_bf8   : AMDGPUCvtScaleIntrinsic<llvm_v8f16_ty,   llvm_v2i32_ty, "cvt_scale_pk8_f16_bf8">;
+@@ -700,6 +701,7 @@ def int_amdgcn_cvt_scale_pk16_f16_fp6  : AMDGPUCvtScaleIntrinsic<llvm_v16f16_ty,
+ def int_amdgcn_cvt_scale_pk16_bf16_fp6 : AMDGPUCvtScaleIntrinsic<llvm_v16bf16_ty, llvm_v3i32_ty, "cvt_scale_pk16_bf16_fp6">;
+ def int_amdgcn_cvt_scale_pk16_f32_fp6  : AMDGPUCvtScaleIntrinsic<llvm_v16f32_ty,  llvm_v3i32_ty, "cvt_scale_pk16_f32_fp6">;
+ def int_amdgcn_cvt_scale_pk16_f32_bf6  : AMDGPUCvtScaleIntrinsic<llvm_v16f32_ty,  llvm_v3i32_ty, "cvt_scale_pk16_f32_bf6">;
++}
+ 
+ class AMDGPUCvtScaleF32ToFP6BF6Intrinsic<LLVMType DstTy, LLVMType Src0Ty, LLVMType Src1Ty, string name> : PureIntrinsic<
+   [DstTy], [Src0Ty, Src1Ty, llvm_float_ty]
+@@ -4219,6 +4221,7 @@ def int_amdgcn_wmma_f16_16x16x64_fp8_fp8  : AMDGPUWmmaIntrinsicModsC<llvm_anyint
+ def int_amdgcn_wmma_f16_16x16x64_fp8_bf8  : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f16_16x16x64_bf8_fp8  : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f16_16x16x64_bf8_bf8  : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
++let TargetFeatures = "wmma-16x16x128fp8-insts" in {
+ def int_amdgcn_wmma_f16_16x16x128_fp8_fp8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f16_16x16x128_fp8_bf8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f16_16x16x128_bf8_fp8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+@@ -4227,14 +4230,17 @@ def int_amdgcn_wmma_f32_16x16x128_fp8_fp8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint
+ def int_amdgcn_wmma_f32_16x16x128_fp8_bf8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f32_16x16x128_bf8_fp8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_f32_16x16x128_bf8_bf8 : AMDGPUWmmaIntrinsicModsC<llvm_anyint_ty, llvm_anyfloat_ty>;
++}
+ def int_amdgcn_wmma_i32_16x16x64_iu8      : AMDGPUWmmaIntrinsicModsABClamp<llvm_anyint_ty, llvm_anyint_ty>;
+ def int_amdgcn_wmma_f32_16x16x128_f8f6f4  : AMDGPUWmmaIntrinsicModsC_MatrixFMT;
+ def int_amdgcn_wmma_scale_f32_16x16x128_f8f6f4   : AMDGPUWmmaScaleIntrinsicModsC<llvm_i32_ty>;
+ def int_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4 : AMDGPUWmmaScaleIntrinsicModsC<llvm_i64_ty>;
++let TargetFeatures = "wmma-f4-insts" in {
+ def int_amdgcn_wmma_f32_32x16x128_f4       : AMDGPUWmmaIntrinsicF4ModsC<llvm_anyint_ty, llvm_anyint_ty, llvm_anyfloat_ty>;
+ def int_amdgcn_wmma_scale_f32_32x16x128_f4 : AMDGPUWmmaScaleF4IntrinsicModsC<llvm_i32_ty>;
+ def int_amdgcn_wmma_scale16_f32_32x16x128_f4 : AMDGPUWmmaScaleF4IntrinsicModsC<llvm_i64_ty>;
+ }
++}
+ 
+ class AMDGPUSWmmacIntrinsicABIdx<LLVMType A, LLVMType B, LLVMType CD, LLVMType Index> :
+   Intrinsic<
+diff --git a/llvm/include/llvm/TargetParser/Triple.h b/llvm/include/llvm/TargetParser/Triple.h
+--- a/llvm/include/llvm/TargetParser/Triple.h
++++ b/llvm/include/llvm/TargetParser/Triple.h
+@@ -268,6 +268,7 @@ public:
+     AMDGPUSubArch1201,
+ 
+     AMDGPUSubArch12_5,
++    AMDGPUSubArch1250_STRICT,
+     AMDGPUSubArch1250,
+     AMDGPUSubArch1251,
+ 
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.td b/llvm/lib/Target/AMDGPU/AMDGPU.td
+--- a/llvm/lib/Target/AMDGPU/AMDGPU.td
++++ b/llvm/lib/Target/AMDGPU/AMDGPU.td
+@@ -405,6 +405,7 @@ class SubtargetFeatureLDSBankCount <int Value> : SubtargetFeature <
+ 
+ def FeatureLDSBankCount16 : SubtargetFeatureLDSBankCount<16>;
+ def FeatureLDSBankCount32 : SubtargetFeatureLDSBankCount<32>;
++def FeatureLDSBankCount64 : SubtargetFeatureLDSBankCount<64>;
+ 
+ class SubtargetFeatureInstCacheLineSize <int Value> : SubtargetFeature <
+   "instcachelinesize"#Value,
+@@ -907,6 +908,18 @@ defm FP8E5M3Insts : AMDGPUSubtargetFeature<"fp8e5m3-insts",
+   "Has fp8 e5m3 format support"
+ >;
+ 
++defm WMMAF4Insts : AMDGPUSubtargetFeature<"wmma-f4-insts",
++  "Has WMMA F4 instructions"
++>;
++
++defm WMMA16x16x128FP8Insts : AMDGPUSubtargetFeature<"wmma-16x16x128fp8-insts",
++  "Has 16x16x128 FP8/BF8 WMMA instructions"
++>;
++
++defm Block16ConversionScaleInsts : AMDGPUSubtargetFeature<"block16-cvt-scale-insts",
++  "Has block16 conversion scale instructions"
++>;
++
+ defm CvtFP8VOP1Bug : AMDGPUSubtargetFeature<"cvt-fp8-vop1-bug",
+   "FP8/BF8 VOP1 form of conversion to F32 is unreliable",
+   /*GenPredicate=*/1,
+@@ -1222,6 +1235,13 @@ defm WMMACoexecutionHazards : AMDGPUSubtargetFeature<"wmma-coexecution-hazards",
+   /*GenPredicate=*/0
+ >;
+ 
++// In a VOPD3 whose OPX is a 64-bit operation, an OPY VGPR source operand reads
++// back the wrong value if it is the last VGPR the wave owns.
++defm VOPD3F64OPYSrcHazard : AMDGPUSubtargetFeature<"vopd3-f64-opy-src-hazard",
++  "VOPD3 with a 64-bit OPX has a hazard on an OPY source in the last VGPR",
++  /*GenPredicate=*/0
++>;
++
+ defm SALUFloatInsts : AMDGPUSubtargetFeature<"salu-float",
+   "Has SALU floating point instructions"
+ >;
+@@ -1543,6 +1563,11 @@ def FeatureUseAddPC64Inst : SubtargetFeature<"use-add-pc64-inst",
+   "Use s_add_pc_i64 instruction."
+ >;
+ 
++defm GFX1250_STRICT : AMDGPUSubtargetFeature<"gfx1250-strict",
++  "gfx1250 strict mode",
++  /*GenPredicate=*/0
++>;
++
+ defm VOP3PX2IncrementsVaVdstTwice : AMDGPUSubtargetFeature<"vop3px2-increments-va-vdst-twice",
+   "VOP3PX2 encoded instructions increment the VaVdst counter twice", GenPredicate=false
+ >;
+@@ -2284,7 +2309,7 @@ def FeatureISAVersion12_50_Common : FeatureSet<
+    FeatureCuMode,
+    Feature1024AddressableVGPRs,
+    Feature64BitLiterals,
+-   FeatureLDSBankCount32,
++   FeatureLDSBankCount64,
+    FeatureDLInsts,
+    FeatureFmacF64Inst,
+    FeaturePackedFP32SingleSGPROps,
+@@ -2308,7 +2333,6 @@ def FeatureISAVersion12_50_Common : FeatureSet<
+    FeatureOCPFP8ConversionInsts,
+    FeatureFP8F16ConversionInsts,
+    FeatureF16FP8ConversionInsts,
+-   FeatureFP8E5M3Insts,
+    FeaturePackedTID,
+    FeatureVcmpxPermlaneHazard,
+    FeatureSALUFloatInsts,
+@@ -2369,9 +2393,41 @@ def FeatureISAVersion12_50_Common : FeatureSet<
+    FeatureVMulU64Inst,
+ ]>;
+ 
++// gfx1250-strict matches gfx1250 except for FeatureGFX1250_STRICT. gfx1200
++// SWMMAC opcodes are not supported on gfx12.5 (a1c90088f87a).
++def FeatureISAVersion12_50_STRICT : FeatureSet<
++  !listconcat(FeatureISAVersion12_50_Common.Features,
++  [FeatureVOPD3F64OPYSrcHazard,
++   FeatureGFX1250_STRICT,
++   FeatureAddressableLocalMemorySize327680,
++   FeatureVOP3PX2IncrementsVaVdstTwice,
++   FeatureSetregVGPRMSBFixup,
++   FeatureCubeInsts,
++   FeatureLerpInst,
++   FeatureSadInsts,
++   FeatureQsadInsts,
++   FeatureMsadInsts,
++   FeatureMqsadPkInsts,
++   FeatureMqsadInsts,
++   FeatureCvtNormInsts,
++   FeatureCvtPkNormVOP2Insts,
++   FeatureCvtPkNormVOP3Insts,
++   FeatureSWMMACGfx1250Insts,
++   FeatureTransCoexecutionHazard,
++   FeatureWMMACoexecutionHazards,
++   FeatureDataCacheLineSize128,
++   FeatureRequiresInitialUnclausedVmem,
++   FeatureNeedsTDMDrain,
++   ])>;
++
+ def FeatureISAVersion12_50 : FeatureSet<
+   !listconcat(FeatureISAVersion12_50_Common.Features,
+-  [FeatureAddressableLocalMemorySize327680,
++  [FeatureVOPD3F64OPYSrcHazard,
++   FeatureWMMAF4Insts,
++   FeatureWMMA16x16x128FP8Insts,
++   FeatureBlock16ConversionScaleInsts,
++   FeatureFP8E5M3Insts,
++   FeatureAddressableLocalMemorySize327680,
+    FeatureVOP3PX2IncrementsVaVdstTwice,
+    FeatureSetregVGPRMSBFixup,
+    FeatureCubeInsts,
+@@ -2384,7 +2440,6 @@ def FeatureISAVersion12_50 : FeatureSet<
+    FeatureCvtNormInsts,
+    FeatureCvtPkNormVOP2Insts,
+    FeatureCvtPkNormVOP3Insts,
+-   FeatureSWMMACGfx1200Insts,
+    FeatureSWMMACGfx1250Insts,
+    FeatureTransCoexecutionHazard,
+    FeatureWMMACoexecutionHazards,
+@@ -2395,7 +2450,12 @@ def FeatureISAVersion12_50 : FeatureSet<
+ 
+ def FeatureISAVersion12_51 : FeatureSet<
+   !listconcat(FeatureISAVersion12_50_Common.Features,
+-  [FeatureAddressableLocalMemorySize327680,
++  [FeatureVOPD3F64OPYSrcHazard,
++   FeatureWMMAF4Insts,
++   FeatureWMMA16x16x128FP8Insts,
++   FeatureBlock16ConversionScaleInsts,
++   FeatureFP8E5M3Insts,
++   FeatureAddressableLocalMemorySize327680,
+    FeatureFullRate64Ops,
+    FeatureVOP3PX2IncrementsVaVdstTwice,
+    FeatureDPALU_DPP,
+@@ -2413,7 +2473,6 @@ def FeatureISAVersion12_51 : FeatureSet<
+    FeatureCvtNormInsts,
+    FeatureCvtPkNormVOP2Insts,
+    FeatureCvtPkNormVOP3Insts,
+-   FeatureSWMMACGfx1200Insts,
+    FeatureSWMMACGfx1250Insts,
+    FeatureUseAddPC64Inst,
+    FeatureTransCoexecutionHazard,
+@@ -2429,7 +2488,10 @@ def FeatureISAVersion12_Generic: FeatureSet<
+ 
+ def FeatureISAVersion12_5_Generic: FeatureSet<
+   !listconcat(FeatureISAVersion12_50_Common.Features,
+-  [FeatureAddressableLocalMemorySize327680,
++  [FeatureVOPD3F64OPYSrcHazard,
++   FeatureBlock16ConversionScaleInsts,
++   FeatureFP8E5M3Insts,
++   FeatureAddressableLocalMemorySize327680,
+    FeatureSetregVGPRMSBFixup,
+    FeatureRequiresCOV6,
+    FeatureSupportsXNACK,
+@@ -2509,6 +2571,7 @@ def FeatureISAVersion13 : FeatureSet<
+    FeatureCvtNormInsts,
+    FeatureCvtPkNormVOP2Insts,
+    FeatureCvtPkNormVOP3Insts,
++   FeatureBlock16ConversionScaleInsts,
+    FeatureSmemPrefetchInsts,
+    FeatureAsyncLoadToLDSInsts,
+ ]>;
+@@ -3106,7 +3169,8 @@ def AMDGPUFrontendVisibleFeatures {
+   FeatureDot9Insts, FeatureExtendedImageInsts, FeatureF16BF16ToFP6BF6ConversionScaleInsts,
+   FeatureF32ToF16BF16ConversionSRInsts, FeatureF32ToFP6BF6ConversionScaleInsts, FeatureFP4ConversionScaleInsts,
+   FeatureFP6BF6ConversionScaleInsts, FeatureFP8ConversionInsts, FeatureFP8ConversionScaleInsts,
+-  FeatureFP8E5M3Insts, FeatureFP8Insts, FeatureFlatGlobalInsts,
++  FeatureBlock16ConversionScaleInsts, FeatureFP8E5M3Insts, FeatureFP8Insts,
++  FeatureFlatGlobalInsts, FeatureWMMA16x16x128FP8Insts, FeatureWMMAF4Insts,
+   FeatureGFX10Insts, FeatureGFX10_3Insts, FeatureGFX11Insts,
+   FeatureGFX1250Insts, FeatureGFX1251GEMMInsts, FeatureGFX12Insts,
+   FeatureGFX13Insts, FeatureGFX8Insts, FeatureGFX90AInsts,
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
+--- a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
+@@ -14,6 +14,8 @@
+ #include "AMDGPU.h"
+ #include "AMDGPUTargetMachine.h"
+ #include "GCNSubtarget.h"
++#include "SIDefines.h"
++#include "llvm/ADT/SmallVector.h"
+ #include "llvm/IR/IRBuilder.h"
+ #include "llvm/IR/IntrinsicInst.h"
+ #include "llvm/IR/IntrinsicsAMDGPU.h"
+@@ -39,6 +41,7 @@ public:
+ private:
+   bool visitBarrier(IntrinsicInst &I);
+   bool visitPtrSBufferLoad(IntrinsicInst &I);
++  bool visitUnscaledWMMA(IntrinsicInst &I);
+ };
+ 
+ class AMDGPULowerIntrinsicsLegacy : public ModulePass {
+@@ -81,6 +84,10 @@ bool AMDGPULowerIntrinsicsImpl::run() {
+       forEachCall(
+           F, [&](IntrinsicInst *II) { Changed |= visitPtrSBufferLoad(*II); });
+       break;
++    case Intrinsic::amdgcn_wmma_f32_16x16x128_f8f6f4:
++      forEachCall(
++          F, [&](IntrinsicInst *II) { Changed |= visitUnscaledWMMA(*II); });
++      break;
+     }
+   }
+ 
+@@ -217,6 +224,39 @@ PreservedAnalyses AMDGPULowerIntrinsicsPass::run(Module &M,
+   return PreservedAnalyses::none();
+ }
+ 
++bool AMDGPULowerIntrinsicsImpl::visitUnscaledWMMA(IntrinsicInst &I) {
++  assert(I.getIntrinsicID() == Intrinsic::amdgcn_wmma_f32_16x16x128_f8f6f4);
++
++  const GCNSubtarget &ST = TM.getSubtarget<GCNSubtarget>(*I.getFunction());
++  if (!ST.hasGFX1250_STRICT())
++    return false;
++
++  IRBuilder<> B(&I);
++
++  // Convert unscaled WMMA into a scaled version with scale factors 0.
++  // Zero is the exponent that hardware treats as 1.0.
++  SmallVector<Value *, 14> Args(I.args());
++  Args.push_back(B.getInt32(0)); // matrix_a_scale
++  Args.push_back(
++      B.getInt32(AMDGPU::WMMA::MATRIX_SCALE_FMT_E8)); // matrix_a_scale_fmt
++  Args.push_back(B.getInt32(0)); // matrix a scale exponential
++  Args.push_back(B.getInt32(0)); // matrix_b_scale
++  Args.push_back(
++      B.getInt32(AMDGPU::WMMA::MATRIX_SCALE_FMT_E8)); // matrix_b_scale_fmt
++  Args.push_back(B.getInt32(0)); // matrix b scale exponential
++  Args.push_back(B.getInt1(0));  // matrix_a_reuse
++  Args.push_back(B.getInt1(0));  // matrix_b_reuse
++
++  CallInst *NewI = B.CreateIntrinsicWithoutFolding(
++      I.getType(), Intrinsic::amdgcn_wmma_scale_f32_16x16x128_f8f6f4, Args);
++  I.replaceAllUsesWith(NewI);
++  NewI->copyMetadata(I);
++  NewI->takeName(&I);
++  I.eraseFromParent();
++
++  return true;
++}
++
+ bool AMDGPULowerIntrinsicsLegacy::runOnModule(Module &M) {
+   auto &TPC = getAnalysis<TargetPassConfig>();
+   const AMDGPUTargetMachine &TM = TPC.getTM<AMDGPUTargetMachine>();
+diff --git a/llvm/lib/Target/AMDGPU/GCNProcessors.td b/llvm/lib/Target/AMDGPU/GCNProcessors.td
+--- a/llvm/lib/Target/AMDGPU/GCNProcessors.td
++++ b/llvm/lib/Target/AMDGPU/GCNProcessors.td
+@@ -368,6 +368,11 @@ def GFX12_GENERIC : AMDGPUProcessorModel<"gfx12-generic", GFX12SpeedModel,
+   let CoveredGPUs = [GFX1200, GFX1201];
+ }
+ 
++def GFX1250_STRICT : AMDGPUProcessorModel<"gfx1250-strict", GFX1250SpeedModel,
++  FeatureISAVersion12_50_STRICT.Features, [12, 5, 0]> {
++  let ArchFeatures = [FEATURE_FAST_FMA_F32, FEATURE_FAST_DENORMAL_F32, FEATURE_WAVE32, FEATURE_XNACK, FEATURE_SRAMECC];
++}
++
+ def GFX1250 : AMDGPUProcessorModel<"gfx1250", GFX1250SpeedModel,
+   FeatureISAVersion12_50.Features, [12, 5, 0]> {
+   let ArchFeatures = [FEATURE_FAST_FMA_F32, FEATURE_FAST_DENORMAL_F32, FEATURE_WAVE32, FEATURE_XNACK, FEATURE_SRAMECC];
+diff --git a/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp b/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
+--- a/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
++++ b/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
+@@ -83,6 +83,7 @@ static AMDGPUSubtarget::Generation computeDefaultGeneration(const Triple &TT) {
+     return AMDGPUSubtarget::GFX11;
+   case Triple::AMDGPUSubArch12:
+   case Triple::AMDGPUSubArch12_5:
++  case Triple::AMDGPUSubArch1250_STRICT:
+     return AMDGPUSubtarget::GFX12;
+   case Triple::AMDGPUSubArch13:
+     return AMDGPUSubtarget::GFX13;
+diff --git a/llvm/lib/Target/AMDGPU/GCNVOPDUtils.cpp b/llvm/lib/Target/AMDGPU/GCNVOPDUtils.cpp
+--- a/llvm/lib/Target/AMDGPU/GCNVOPDUtils.cpp
++++ b/llvm/lib/Target/AMDGPU/GCNVOPDUtils.cpp
+@@ -95,6 +95,44 @@ static bool canMapVOP3PToVOPD(const MachineInstr &MI) {
+          getNamedOp(MI, AMDGPU::OpName::src2).getReg();
+ }
+ 
++// In a VOPD3 whose OPX is a 64-bit operation, an OPY VGPR source operand reads
++// back the wrong value if it is the last VGPR the wave owns.
++// A wave always owns a whole number of VGPR allocation granules, so only a
++// register just below a granule boundary can be the last one. The wave also
++// owns at least as many VGPRs as this function uses, so a source which has a
++// register above it in use here cannot be the last one either.
++static bool isVOPD3F64OPYSrcHazard(const SIInstrInfo &TII,
++                                   const MachineInstr &MIX,
++                                   const MachineInstr &MIY) {
++  const MachineFunction &MF = *MIX.getMF();
++  const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
++  if (!ST.hasVOPD3F64OPYSrcHazard())
++    return false;
++
++  int VDstIdx =
++      AMDGPU::getNamedOperandIdx(MIX.getOpcode(), AMDGPU::OpName::vdst);
++  assert(VDstIdx != -1 && "VOPD3 OPX component must have a vdst");
++  if (TII.getOpSize(MIX, VDstIdx) != 8)
++    return false;
++
++  unsigned Granule = AMDGPU::IsaInfo::getVGPRAllocGranule(
++      ST, /*DynamicVGPRBlockSize=*/0, ST.isWave32());
++  const SIRegisterInfo *TRI = ST.getRegisterInfo();
++  unsigned NumVGPRs = TRI->getNumUsedPhysRegs(
++      MF.getRegInfo(), AMDGPU::VGPR_32RegClass, /*IncludeCalls=*/false);
++  for (AMDGPU::OpName Name :
++       {AMDGPU::OpName::src0, AMDGPU::OpName::src1, AMDGPU::OpName::src2}) {
++    const MachineOperand *Src = TII.getNamedOperand(MIY, Name);
++    if (!Src || !Src->isReg() ||
++        !AMDGPU::VGPR_32RegClass.contains(Src->getReg()))
++      continue;
++    unsigned Idx = TRI->getHWRegIndex(Src->getReg());
++    if ((Idx + 1) % Granule == 0 && Idx + 1 >= NumVGPRs)
++      return true;
++  }
++  return false;
++}
++
+ bool llvm::checkVOPDRegConstraints(const SIInstrInfo &TII,
+                                    const MachineInstr &MIX,
+                                    const MachineInstr &MIY, bool IsVOPD3,
+@@ -106,6 +144,8 @@ bool llvm::checkVOPDRegConstraints(const SIInstrInfo &TII,
+ 
+   if (IsVOPD3 && !ST.hasVOPD3())
+     return false;
++  if (IsVOPD3 && isVOPD3F64OPYSrcHazard(TII, MIX, MIY))
++    return false;
+   if (!IsVOPD3 && ((TII.isVOP3(MIX) && !canMapVOP3PToVOPD(MIX)) ||
+                    (TII.isVOP3(MIY) && !canMapVOP3PToVOPD(MIY))))
+     return false;
+diff --git a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
+--- a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
++++ b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
+@@ -132,6 +132,7 @@ StringRef AMDGPUTargetStreamer::getArchNameFromElfMach(unsigned ElfMach) {
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1172: AK = GK_GFX1172; break;
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1200: AK = GK_GFX1200; break;
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1201: AK = GK_GFX1201; break;
++  case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1250_STRICT: AK = GK_GFX1250_STRICT; break;
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1250: AK = GK_GFX1250; break;
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1251: AK = GK_GFX1251; break;
+   case ELF::EF_AMDGPU_MACH_AMDGCN_GFX1310: AK = GK_GFX1310; break;
+@@ -227,6 +228,7 @@ unsigned AMDGPUTargetStreamer::getElfMach(StringRef GPU) {
+   case GK_GFX1172: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1172;
+   case GK_GFX1200: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1200;
+   case GK_GFX1201: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1201;
++  case GK_GFX1250_STRICT: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1250_STRICT;
+   case GK_GFX1250: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1250;
+   case GK_GFX1251: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1251;
+   case GK_GFX1310: return ELF::EF_AMDGPU_MACH_AMDGCN_GFX1310;
+diff --git a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
+--- a/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
++++ b/llvm/lib/Target/AMDGPU/SIISelLowering.cpp
+@@ -11721,12 +11721,31 @@ SITargetLowering::lowerStructBufferAtomicIntrin(SDValue Op, SelectionDAG &DAG,
+                                  M->getMemOperand());
+ }
+ 
++static void initializeM0ToZeroForClusterLoad(SDValue Op, SelectionDAG &DAG,
++                                             SDLoc DL) {
++  SDNode *N = Op.getNode();
++  SDValue Zero = DAG.getConstant(0, DL, MVT::i32);
++  unsigned NumOperands = N->getNumOperands();
++  if (N->getOperand(NumOperands - 1) == Zero)
++    return;
++  SmallVector<SDValue, 7> Ops(N->ops());
++  Ops[NumOperands - 1] = Zero; // M0 = 0
++  DAG.UpdateNodeOperands(N, Ops);
++}
++
+ SDValue SITargetLowering::LowerINTRINSIC_W_CHAIN(SDValue Op,
+                                                  SelectionDAG &DAG) const {
+   unsigned IntrID = Op.getConstantOperandVal(1);
+   SDLoc DL(Op);
+ 
+   switch (IntrID) {
++  case Intrinsic::amdgcn_cluster_load_b32:
++  case Intrinsic::amdgcn_cluster_load_b64:
++  case Intrinsic::amdgcn_cluster_load_b128: {
++    if (Subtarget->hasGFX1250_STRICT())
++      initializeM0ToZeroForClusterLoad(Op, DAG, DL);
++    return SDValue();
++  }
+   case Intrinsic::amdgcn_ds_ordered_add:
+   case Intrinsic::amdgcn_ds_ordered_swap: {
+     MemSDNode *M = cast<MemSDNode>(Op);
+@@ -12516,6 +12535,14 @@ SDValue SITargetLowering::LowerINTRINSIC_VOID(SDValue Op,
+   unsigned IntrinsicID = Op.getConstantOperandVal(1);
+ 
+   switch (IntrinsicID) {
++  case Intrinsic::amdgcn_cluster_load_async_to_lds_b8:
++  case Intrinsic::amdgcn_cluster_load_async_to_lds_b32:
++  case Intrinsic::amdgcn_cluster_load_async_to_lds_b64:
++  case Intrinsic::amdgcn_cluster_load_async_to_lds_b128: {
++    if (Subtarget->hasGFX1250_STRICT())
++      initializeM0ToZeroForClusterLoad(Op, DAG, DL);
++    return SDValue();
++  }
+   case Intrinsic::amdgcn_exp_compr: {
+     SDValue Src0 = Op.getOperand(4);
+     SDValue Src1 = Op.getOperand(5);
+diff --git a/llvm/lib/Target/AMDGPU/SIInsertHardClauses.cpp b/llvm/lib/Target/AMDGPU/SIInsertHardClauses.cpp
+--- a/llvm/lib/Target/AMDGPU/SIInsertHardClauses.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInsertHardClauses.cpp
+@@ -190,6 +190,23 @@ public:
+     return true;
+   }
+ 
++  // \return if scopes are different on gfx1250 and disallowed to be claused.
++  bool isIncompatibleScope(const MachineInstr &MI1, const MachineInstr &MI2,
++                           const SIInstrInfo *SII) const {
++    assert(ST->getGeneration() == AMDGPUSubtarget::GFX12 &&
++           ST->hasGFX1250Insts());
++    int CPol1 = 0, CPol2 = 0;
++    if (const MachineOperand *Op =
++            SII->getNamedOperand(MI1, AMDGPU::OpName::cpol)) {
++      CPol1 = Op->getImm() & AMDGPU::CPol::SCOPE;
++    }
++    if (const MachineOperand *Op =
++            SII->getNamedOperand(MI2, AMDGPU::OpName::cpol)) {
++      CPol2 = Op->getImm() & AMDGPU::CPol::SCOPE;
++    }
++    return CPol1 != CPol2;
++  }
++
+   bool run(MachineFunction &MF) {
+     ST = &MF.getSubtarget<GCNSubtarget>();
+     if (!ST->hasHardClauses())
+@@ -250,7 +267,9 @@ public:
+               // We also lie about the Offset and OffsetIsScalable parameters,
+               // as they aren't used in the SIInstrInfo implementation.
+               !SII->shouldClusterMemOps(CI.BaseOps, 0, false, BaseOps, 0, false,
+-                                        2, 2)))) {
++                                        2, 2))) ||
++            (CI.Length && ST->hasGFX1250_STRICT() &&
++             isIncompatibleScope(MI, *CI.Last, SII))) {
+           // Finish the current clause.
+           Changed |= emitClause(CI, SII);
+           CI = ClauseInfo();
+diff --git a/llvm/lib/Target/AMDGPU/SISchedule.td b/llvm/lib/Target/AMDGPU/SISchedule.td
+--- a/llvm/lib/Target/AMDGPU/SISchedule.td
++++ b/llvm/lib/Target/AMDGPU/SISchedule.td
+@@ -498,6 +498,8 @@ def : HWWriteRes<WriteSALUDummy, [HWSALU],  2>;
+ 
+ }  // End SchedModel = GFX12SpeedModel
+ 
++def PredIsGFX1250Strict : FeatureSchedPredicate<FeatureGFX1250_STRICT>;
++
+ // Check whether the two matrix inputs of an f8f6f4 wmma instruction are not
+ // both interpreted as f4. On gfx1250 an f8f6f4 wmma runs in 4 cycles when both
+ // inputs are f4, and in 8 cycles when any input is f6 or f8.
+@@ -507,9 +509,26 @@ def PredIsNotBothF4_WMMA_SCALE : SchedPredicate<[{
+   TII->getNamedOperand(*MI, AMDGPU::OpName::matrix_b_fmt)->getImm() != AMDGPU::WMMA::MATRIX_FMT_FP4
+ }]>;
+ 
++// gfx1250-strict: 16 cycles if any input is f8, otherwise 8.
++def PredIsAnyF8_WMMA_SCALE : SchedPredicate<[{
++  TII->getNamedOperand(*MI, AMDGPU::OpName::matrix_a_fmt)->getImm() <= AMDGPU::WMMA::MATRIX_FMT_BF8 ||
++  TII->getNamedOperand(*MI, AMDGPU::OpName::matrix_b_fmt)->getImm() <= AMDGPU::WMMA::MATRIX_FMT_BF8
++}]>;
++
++def WriteWMMAScaleStrict_16X16X128_F8F6F4 : SchedWriteVariant<[
++    SchedVar<PredIsAnyF8_WMMA_SCALE, [WriteXDL4PassWMMA]>,
++    SchedVar<NoSchedPred,            [WriteXDL2PassWMMA]>
++]>;
++
+ def WriteWMMAScale_16X16X128_F8F6F4 : SchedWriteVariant<[
++    SchedVar<PredIsGFX1250Strict,        [WriteWMMAScaleStrict_16X16X128_F8F6F4]>,
+     SchedVar<PredIsNotBothF4_WMMA_SCALE, [WriteXDL2PassWMMA]>,
+-    SchedVar<NoSchedPred, [WriteXDL1PassWMMA]>
++    SchedVar<NoSchedPred,                [WriteXDL1PassWMMA]>
++]>;
++
++def WriteWMMA_16X16X64_FP8BF8 : SchedWriteVariant<[
++    SchedVar<PredIsGFX1250Strict, [WriteXDL2PassWMMA]>,
++    SchedVar<NoSchedPred,         [WriteXDL1PassWMMA]>
+ ]>;
+ 
+ // Check whether matrix_a_fmt and matrix_a_fmt are both MATRIX_FMT_FP4.
+@@ -576,9 +595,10 @@ def : HWWriteRes<WriteDoubleAdd,         [HWVALU, HWRC],   37>;
+ def : HWWriteRes<WriteDoubleCvt,         [HWVALU, HWRC],   37>;
+ def : HWWriteRes<WriteTrans64,           [HWVALU, HWTransVALU, HWRC], 38>;
+ 
+-// gfx1250 WMMA/XDL latencies. 16x16x64 FP8/BF8 run in 4 cycles; 16x16x128
+-// FP8/BF8 and F16/BF16 run in 8 cycles; IU8/IU4 run in 16 cycles.
+-def : InstRW<[WriteXDL1PassWMMA], (instregex "^V_[S]*WMMA[C]*_.*_16X16X64_(FP8|BF8)_(FP8|BF8)_w32")>;
++// gfx1250 WMMA/XDL latencies. 16x16x64 FP8/BF8 run in 4 cycles (8 on
++// gfx1250-strict); 16x16x128 FP8/BF8 and F16/BF16 run in 8 cycles; IU8/IU4 run
++// in 16 cycles.
++def : InstRW<[WriteWMMA_16X16X64_FP8BF8], (instregex "^V_[S]*WMMA[C]*_.*_16X16X64_(FP8|BF8)_(FP8|BF8)_w32")>;
+ def : InstRW<[WriteXDL2PassWMMA], (instregex "^V_[S]*WMMA[C]*_.*_(BF16|F16)_w32")>;
+ def : InstRW<[WriteXDL2PassWMMA], (instregex "^V_[S]*WMMA[C]*_.*_16X16X128_(FP8|BF8)_(FP8|BF8)_w32")>;
+ def : InstRW<[WriteXDL4PassWMMA], (instregex "^V_[S]*WMMA[C]*_.*_(IU8|IU4)_w32")>;
+diff --git a/llvm/lib/Target/AMDGPU/VOP3Instructions.td b/llvm/lib/Target/AMDGPU/VOP3Instructions.td
+--- a/llvm/lib/Target/AMDGPU/VOP3Instructions.td
++++ b/llvm/lib/Target/AMDGPU/VOP3Instructions.td
+@@ -1857,14 +1857,18 @@ let SubtargetPredicate = isGFX1250Plus in {
+                                                           VOP3_CVT_SR_F8_F16_True16_Profile, VOP3_CVT_SR_F8_F16_Fake16_Profile>;
+     }
+ 
++    let SubtargetPredicate = HasBlock16ConversionScaleInsts in {
+     let Constraints = "@earlyclobber $vdst" in {
+       let WaveSizePredicate = isWave32 in {
+         defm V_CVT_SCALE_PK8_F16_FP8   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f16_fp8",   VOP_V8F16_V2I32_I32,   int_amdgcn_cvt_scale_pk8_f16_fp8>;
+         defm V_CVT_SCALE_PK8_BF16_FP8  : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_bf16_fp8",  VOP_V8BF16_V2I32_I32,  int_amdgcn_cvt_scale_pk8_bf16_fp8>;
+         defm V_CVT_SCALE_PK8_F16_BF8   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f16_bf8",   VOP_V8F16_V2I32_I32,   int_amdgcn_cvt_scale_pk8_f16_bf8>;
+         defm V_CVT_SCALE_PK8_BF16_BF8  : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_bf16_bf8",  VOP_V8BF16_V2I32_I32,  int_amdgcn_cvt_scale_pk8_bf16_bf8>;
++        defm V_CVT_SCALE_PK8_F16_FP4   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f16_fp4",   VOP_V8F16_I32_I32,     int_amdgcn_cvt_scale_pk8_f16_fp4>;
++        defm V_CVT_SCALE_PK8_BF16_FP4  : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_bf16_fp4",  VOP_V8BF16_I32_I32,    int_amdgcn_cvt_scale_pk8_bf16_fp4>;
+         defm V_CVT_SCALE_PK8_F32_FP8   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f32_fp8",   VOP_V8F32_V2I32_I32,   int_amdgcn_cvt_scale_pk8_f32_fp8>;
+         defm V_CVT_SCALE_PK8_F32_BF8   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f32_bf8",   VOP_V8F32_V2I32_I32,   int_amdgcn_cvt_scale_pk8_f32_bf8>;
++        defm V_CVT_SCALE_PK8_F32_FP4   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f32_fp4",   VOP_V8F32_I32_I32,     int_amdgcn_cvt_scale_pk8_f32_fp4>;
+       }
+       defm V_CVT_SCALE_PK16_F16_FP6  : VOP3CvtScaleSelInst<"v_cvt_scale_pk16_f16_fp6",  VOP_V16F16_V3I32_I32,  int_amdgcn_cvt_scale_pk16_f16_fp6>;
+       defm V_CVT_SCALE_PK16_BF16_FP6 : VOP3CvtScaleSelInst<"v_cvt_scale_pk16_bf16_fp6", VOP_V16BF16_V3I32_I32, int_amdgcn_cvt_scale_pk16_bf16_fp6>;
+@@ -1873,12 +1877,7 @@ let SubtargetPredicate = isGFX1250Plus in {
+       defm V_CVT_SCALE_PK16_F32_FP6  : VOP3CvtScaleSelInst<"v_cvt_scale_pk16_f32_fp6",  VOP_V16F32_V3I32_I32,  int_amdgcn_cvt_scale_pk16_f32_fp6>;
+       defm V_CVT_SCALE_PK16_F32_BF6  : VOP3CvtScaleSelInst<"v_cvt_scale_pk16_f32_bf6",  VOP_V16F32_V3I32_I32,  int_amdgcn_cvt_scale_pk16_f32_bf6>;
+     } // End Constraints = "@earlyclobber $vdst"
+-
+-    let WaveSizePredicate = isWave32 in {
+-      defm V_CVT_SCALE_PK8_F16_FP4   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f16_fp4",   VOP_V8F16_I32_I32,     int_amdgcn_cvt_scale_pk8_f16_fp4>;
+-      defm V_CVT_SCALE_PK8_BF16_FP4  : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_bf16_fp4",  VOP_V8BF16_I32_I32,    int_amdgcn_cvt_scale_pk8_bf16_fp4>;
+-      defm V_CVT_SCALE_PK8_F32_FP4   : VOP3CvtScaleSelInst<"v_cvt_scale_pk8_f32_fp4",   VOP_V8F32_I32_I32,     int_amdgcn_cvt_scale_pk8_f32_fp4>;
+-    }
++    } // End SubtargetPredicate = HasBlock16ConversionScaleInsts
+   } // End ReadsModeReg = 0
+ 
+   let Constraints = "@earlyclobber $vdst" in {
+@@ -2419,6 +2418,7 @@ defm V_PERM_PK16_B8_U4               : VOP3Only_Real_Base_gfx1250_gfx13<0x243, 0
+ defm V_LSHL_ADD_U64                  : VOP3Only_Realtriple_gfx1250_DPP8_gfx13<0x252>;
+ defm V_ASHR_PK_I8_I32                : VOP3Only_Realtriple_t16_and_fake16_gfx1250_gfx13<0x290, 0x290>;
+ defm V_ASHR_PK_U8_I32                : VOP3Only_Realtriple_t16_and_fake16_gfx1250_gfx13<0x291, 0x291>;
++let SubtargetPredicate = HasBlock16ConversionScaleInsts in {
+ defm V_CVT_SCALE_PK8_F16_FP4         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x29f, 0x2bd>;
+ defm V_CVT_SCALE_PK8_BF16_FP4        : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a0, 0x2ba>;
+ defm V_CVT_SCALE_PK8_F32_FP4         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a1, 0x2c0>;
+@@ -2428,6 +2428,7 @@ defm V_CVT_SCALE_PK8_F32_FP8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a
+ defm V_CVT_SCALE_PK8_F16_BF8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ab, 0x2bc>;
+ defm V_CVT_SCALE_PK8_BF16_BF8        : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ac, 0x2b9>;
+ defm V_CVT_SCALE_PK8_F32_BF8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ad, 0x2bf>;
++}
+ defm V_CVT_SCALEF32_PK8_FP4_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2b0, 0x2a0>;
+ defm V_CVT_SCALEF32_PK8_FP4_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2b3, 0x29f>;
+ defm V_CVT_SCALEF32_PK8_FP8_BF16     : VOP3Only_Real_Base_gfx1250_gfx13<0x2b4, 0x2a1>;
+@@ -2437,12 +2438,14 @@ defm V_CVT_SCALEF32_PK8_FP8_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c3, 0
+ defm V_CVT_SCALEF32_PK8_FP8_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c4, 0x2a2>;
+ defm V_CVT_SCALEF32_PK8_BF8_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c5, 0x29d>;
+ defm V_CVT_SCALEF32_PK8_BF8_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c6, 0x29c>;
++let SubtargetPredicate = HasBlock16ConversionScaleInsts in {
+ defm V_CVT_SCALE_PK16_F16_FP6        : VOP3Only_ScaleSel_Real_gfx1250<0x2c7>;
+ defm V_CVT_SCALE_PK16_BF16_FP6       : VOP3Only_ScaleSel_Real_gfx1250<0x2c8>;
+ defm V_CVT_SCALE_PK16_F32_FP6        : VOP3Only_ScaleSel_Real_gfx1250<0x2c9>;
+ defm V_CVT_SCALE_PK16_F16_BF6        : VOP3Only_ScaleSel_Real_gfx1250<0x2ca>;
+ defm V_CVT_SCALE_PK16_BF16_BF6       : VOP3Only_ScaleSel_Real_gfx1250<0x2cb>;
+ defm V_CVT_SCALE_PK16_F32_BF6        : VOP3Only_ScaleSel_Real_gfx1250<0x2cc>;
++}
+ defm V_CVT_SCALEF32_PK16_FP6_F32     : VOP3Only_Real_Base_gfx1250<0x2cd>;
+ defm V_CVT_SCALEF32_PK16_BF6_F32     : VOP3Only_Real_Base_gfx1250<0x2ce>;
+ defm V_CVT_SCALEF32_PK16_FP6_F16     : VOP3Only_Real_Base_gfx1250<0x2cf>;
+diff --git a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+--- a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
++++ b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+@@ -2119,6 +2119,13 @@ let WaveSizePredicate = isWave32 in {
+       defm V_WMMA_I32_16X16X64_IU8_w32      : WMMAInstGFX12<"v_wmma_i32_16x16x64_iu8",      I32_IU8X64_WMMA_w32, "_w32">;
+       defm V_WMMA_F32_16X16X32_F16_w32      : WMMAInstGFX12<"v_wmma_f32_16x16x32_f16",      F32_F16X32_WMMA_w32, "_w32">;
+       defm V_WMMA_F16_16X16X32_F16_w32      : WMMAInstGFX12<"v_wmma_f16_16x16x32_f16",      F16_F16X32_WMMA_w32, "_w32">;
++
++      defm V_WMMA_F32_16X16X128_F8F6F4         : WMMAInst_SrcFormats_mc<"v_wmma_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4">;
++      defm V_WMMA_SCALE_F32_16X16X128_F8F6F4   : WMMAInst_SrcFormats_mc<"v_wmma_scale_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4_SCALE">;
++      defm V_WMMA_SCALE16_F32_16X16X128_F8F6F4 : WMMAInst_SrcFormats_mc<"v_wmma_scale16_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4_SCALE16">;
++    } // End SubtargetPredicate = isGFX125xOnly
++
++    let SubtargetPredicate = HasWMMA16x16x128FP8Insts in {
+       defm V_WMMA_F16_16X16X128_FP8_FP8_w32 : WMMAInstGFX12<"v_wmma_f16_16x16x128_fp8_fp8", F16_FP8BF8X128_WMMA_w32, "_w32">;
+       defm V_WMMA_F16_16X16X128_FP8_BF8_w32 : WMMAInstGFX12<"v_wmma_f16_16x16x128_fp8_bf8", F16_FP8BF8X128_WMMA_w32, "_w32">;
+       defm V_WMMA_F16_16X16X128_BF8_FP8_w32 : WMMAInstGFX12<"v_wmma_f16_16x16x128_bf8_fp8", F16_FP8BF8X128_WMMA_w32, "_w32">;
+@@ -2127,15 +2134,13 @@ let WaveSizePredicate = isWave32 in {
+       defm V_WMMA_F32_16X16X128_FP8_BF8_w32 : WMMAInstGFX12<"v_wmma_f32_16x16x128_fp8_bf8", F32_FP8BF8X128_WMMA_w32, "_w32">;
+       defm V_WMMA_F32_16X16X128_BF8_FP8_w32 : WMMAInstGFX12<"v_wmma_f32_16x16x128_bf8_fp8", F32_FP8BF8X128_WMMA_w32, "_w32">;
+       defm V_WMMA_F32_16X16X128_BF8_BF8_w32 : WMMAInstGFX12<"v_wmma_f32_16x16x128_bf8_bf8", F32_FP8BF8X128_WMMA_w32, "_w32">;
+-      defm V_WMMA_F32_32X16X128_F4_w32      : WMMAInstGFX12<"v_wmma_f32_32x16x128_f4",      F32_32X16X128_F4_WMMA_w32, "_w32">;
+-
+-      defm V_WMMA_F32_16X16X128_F8F6F4         : WMMAInst_SrcFormats_mc<"v_wmma_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4">;
+-      defm V_WMMA_SCALE_F32_16X16X128_F8F6F4   : WMMAInst_SrcFormats_mc<"v_wmma_scale_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4_SCALE">;
+-      defm V_WMMA_SCALE16_F32_16X16X128_F8F6F4 : WMMAInst_SrcFormats_mc<"v_wmma_scale16_f32_16x16x128_f8f6f4", "F32_16X16X128_F8F6F4_SCALE16">;
++    }
+ 
++    let SubtargetPredicate = HasWMMAF4Insts in {
++      defm V_WMMA_F32_32X16X128_F4_w32         : WMMAInstGFX12<"v_wmma_f32_32x16x128_f4",         F32_32X16X128_F4_WMMA_w32, "_w32">;
+       defm V_WMMA_SCALE_F32_32X16X128_F4_w32   : WMMAInstGFX12<"v_wmma_scale_f32_32x16x128_f4",   F32_32X16X128_F4_SCALE_w32, "_w32">;
+       defm V_WMMA_SCALE16_F32_32X16X128_F4_w32 : WMMAInstGFX12<"v_wmma_scale16_f32_32x16x128_f4", F32_32X16X128_F4_SCALE16_w32, "_w32">;
+-    } // End SubtargetPredicate = isGFX125xOnly
++    }
+ 
+     let SubtargetPredicate = HasSWMMACGfx1250Insts in {
+       defm V_SWMMAC_F32_16X16X64_BF16_w32     : SWMMACInstGFX12<"v_swmmac_f32_16x16x64_bf16",     F32_BF16X64_SWMMAC_w32, "_w32">;
+@@ -2315,6 +2320,9 @@ let SubtargetPredicate = isGFX125xOnly in {
+   defm : WMMAPat<"V_WMMA_I32_16X16X64_IU8_w32",         int_amdgcn_wmma_i32_16x16x64_iu8,         I32_IU8X64_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F32_16X16X32_F16_w32",         int_amdgcn_wmma_f32_16x16x32_f16,         F32_F16X32_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F16_16X16X32_F16_w32",         int_amdgcn_wmma_f16_16x16x32_f16,         F16_F16X32_WMMA_w32>;
++} // End SubtargetPredicate = isGFX125xOnly
++
++let SubtargetPredicate = HasWMMA16x16x128FP8Insts in {
+   defm : WMMAPat<"V_WMMA_F16_16X16X128_FP8_FP8_w32",    int_amdgcn_wmma_f16_16x16x128_fp8_fp8,    F16_FP8BF8X128_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F16_16X16X128_FP8_BF8_w32",    int_amdgcn_wmma_f16_16x16x128_fp8_bf8,    F16_FP8BF8X128_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F16_16X16X128_BF8_FP8_w32",    int_amdgcn_wmma_f16_16x16x128_bf8_fp8,    F16_FP8BF8X128_WMMA_w32>;
+@@ -2323,9 +2331,15 @@ let SubtargetPredicate = isGFX125xOnly in {
+   defm : WMMAPat<"V_WMMA_F32_16X16X128_FP8_BF8_w32",    int_amdgcn_wmma_f32_16x16x128_fp8_bf8,    F32_FP8BF8X128_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F32_16X16X128_BF8_FP8_w32",    int_amdgcn_wmma_f32_16x16x128_bf8_fp8,    F32_FP8BF8X128_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_F32_16X16X128_BF8_BF8_w32",    int_amdgcn_wmma_f32_16x16x128_bf8_bf8,    F32_FP8BF8X128_WMMA_w32>;
++}
++
++let SubtargetPredicate = HasWMMAF4Insts in {
+   defm : WMMAPat<"V_WMMA_F32_32X16X128_F4_w32",         int_amdgcn_wmma_f32_32x16x128_f4,         F32_32X16X128_F4_WMMA_w32>;
+   defm : WMMAPat<"V_WMMA_SCALE_F32_32X16X128_F4_w32",   int_amdgcn_wmma_scale_f32_32x16x128_f4,   F32_32X16X128_F4_SCALE_w32>;
+   defm : WMMAPat<"V_WMMA_SCALE16_F32_32X16X128_F4_w32", int_amdgcn_wmma_scale16_f32_32x16x128_f4, F32_32X16X128_F4_SCALE16_w32>;
++}
++
++let SubtargetPredicate = isGFX125xOnly in {
+ 
+   foreach I = ["f8_f8", "f8_f6", "f8_f4", "f6_f8", "f6_f6", "f6_f4", "f4_f8", "f4_f6", "f4_f4"] in {
+     defm : WMMAPat<"V_WMMA_F32_16X16X128_F8F6F4_" # I # "_w32",         int_amdgcn_wmma_f32_16x16x128_f8f6f4,         !cast<VOP3PWMMA_Profile>("F32_16X16X128_F8F6F4_" # I # "_w32")>;
+@@ -2633,6 +2647,7 @@ defm V_WMMA_F16_16X16X64_FP8_BF8_w32  : VOP3P_Real_WMMA_gfx1250 <0x06f, F16_FP8B
+ defm V_WMMA_F16_16X16X64_BF8_FP8_w32  : VOP3P_Real_WMMA_gfx1250 <0x070, F16_FP8BF8X64_WMMA_w32>;
+ defm V_WMMA_F16_16X16X64_BF8_BF8_w32  : VOP3P_Real_WMMA_gfx1250 <0x071, F16_FP8BF8X64_WMMA_w32>;
+ defm V_WMMA_I32_16X16X64_IU8_w32      : VOP3P_Real_WMMA_gfx1250 <0x072, I32_IU8X64_WMMA_w32>;
++let SubtargetPredicate = HasWMMA16x16x128FP8Insts in {
+ defm V_WMMA_F32_16X16X128_FP8_FP8_w32 : VOP3P_Real_WMMA_gfx1250 <0x080, F32_FP8BF8X128_WMMA_w32>;
+ defm V_WMMA_F32_16X16X128_FP8_BF8_w32 : VOP3P_Real_WMMA_gfx1250 <0x081, F32_FP8BF8X128_WMMA_w32>;
+ defm V_WMMA_F32_16X16X128_BF8_FP8_w32 : VOP3P_Real_WMMA_gfx1250 <0x082, F32_FP8BF8X128_WMMA_w32>;
+@@ -2641,16 +2656,19 @@ defm V_WMMA_F16_16X16X128_FP8_FP8_w32 : VOP3P_Real_WMMA_gfx1250 <0x084, F16_FP8B
+ defm V_WMMA_F16_16X16X128_FP8_BF8_w32 : VOP3P_Real_WMMA_gfx1250 <0x085, F16_FP8BF8X128_WMMA_w32>;
+ defm V_WMMA_F16_16X16X128_BF8_FP8_w32 : VOP3P_Real_WMMA_gfx1250 <0x086, F16_FP8BF8X128_WMMA_w32>;
+ defm V_WMMA_F16_16X16X128_BF8_BF8_w32 : VOP3P_Real_WMMA_gfx1250 <0x087, F16_FP8BF8X128_WMMA_w32>;
+-defm V_WMMA_F32_32X16X128_F4_w32      : VOP3P_Real_WMMA_gfx1250 <0x088, F32_32X16X128_F4_WMMA_w32>;
++}
+ 
+ let WaveSizePredicate = isWave32, SubtargetPredicate = isGFX1250Plus, DecoderNamespace = "GFX1250" in {
+ defm V_WMMA_F32_16X16X128_F8F6F4         : VOP3P_Real_WMMA_SrcFormats <"gfx1250", 0x033, "F32_16X16X128_F8F6F4">;
+ defm V_WMMA_SCALE_F32_16X16X128_F8F6F4   : VOP3PX2_Real_ScaledWMMA_SrcFormats <"gfx1250", 0x033, 0x35, "F32_16X16X128_F8F6F4_SCALE">;
+ defm V_WMMA_SCALE16_F32_16X16X128_F8F6F4 : VOP3PX2_Real_ScaledWMMA_SrcFormats <"gfx1250", 0x033, 0x3a, "F32_16X16X128_F8F6F4_SCALE16">;
++} // End WaveSizePredicate = isWave32, SubtargetPredicate = isGFX1250Plus, DecoderNamespace = "GFX1250"
+ 
++let WaveSizePredicate = isWave32, SubtargetPredicate = HasWMMAF4Insts, DecoderNamespace = "GFX1250" in {
++defm V_WMMA_F32_32X16X128_F4_w32         : VOP3P_Real_WMMA_gfx1250 <0x088, F32_32X16X128_F4_WMMA_w32>;
+ defm V_WMMA_SCALE_F32_32X16X128_F4_w32   : VOP3PX2_Real_ScaledWMMA_F4 <"gfx1250", 0x088, 0x35, F32_32X16X128_F4_SCALE_w32>;
+ defm V_WMMA_SCALE16_F32_32X16X128_F4_w32 : VOP3PX2_Real_ScaledWMMA_F4 <"gfx1250", 0x088, 0x3a, F32_32X16X128_F4_SCALE16_w32>;
+-} // End WaveSizePredicate = isWave32, SubtargetPredicate = isGFX1250Plus, DecoderNamespace = "GFX1250"
++}
+ 
+ let SubtargetPredicate = HasSWMMACGfx1250Insts in {
+   defm V_SWMMAC_F32_16X16X64_F16_w32      : VOP3P_Real_WMMA_gfx1250 <0x065, F32_F16X64_SWMMAC_w32>;
+diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
+--- a/llvm/lib/TargetParser/Triple.cpp
++++ b/llvm/lib/TargetParser/Triple.cpp
+@@ -840,6 +840,7 @@ Triple::SubArchType Triple::parseSubArch(StringRef SubArchName) {
+         .Case("12.01", Triple::AMDGPUSubArch1201)
+         .Case("12.5", Triple::AMDGPUSubArch12_5)
+         .Case("12.50", Triple::AMDGPUSubArch1250)
++        .Case("12.50s", Triple::AMDGPUSubArch1250_STRICT)
+         .Case("12.51", Triple::AMDGPUSubArch1251)
+         .Case("13", Triple::AMDGPUSubArch13)
+         .Case("13.10", Triple::AMDGPUSubArch1310)
