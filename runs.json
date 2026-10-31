@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-31T05:48:33Z",
+ "updated": "2026-10-31T05:53:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41174093188,
+   "pr": 1350,
+   "commit": "9e227ae9969f3972d051a9fd4b5e0836136c90e6",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41174093188",
+   "created_at": "2026-10-31T05:49:14Z",
+   "updated_at": "2026-10-31T05:51:06Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 41066545711,
    "pr": 1355,
@@ -2005,21 +2020,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40806778348/job/123852349151"
     }
    ]
-  },
-  {
-   "run_id": 40805519058,
-   "pr": 1340,
-   "commit": "85069c5b5be216e254392212f41930aae5b538b5",
-   "branch": "jli/gpu-asan",
-   "event": "pull_request",
-   "title": "[WIP][feat] support gpu asan feature ",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40805519058",
-   "created_at": "2026-10-29T02:17:59Z",
-   "updated_at": "2026-10-29T02:31:28Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
