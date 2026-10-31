@@ -1,5 +1,22 @@
 # Pre-built kernel library guide
 
+## RDNA4 MXFP4 × FP8 dense GEMM
+
+`flydsl.kernels.gemm.rdna4_mxfp4` exposes `prepare_weights`, `gemm`,
+`choose_config`, and `rank_configurations`. Source lives under
+`kernels/gemm/rdna4_mxfp4/`. It targets ROCm gfx1200/gfx1201; measured performance
+currently covers gfx1201. Packed OCP MXFP4 weights remain compressed and feed
+native FP8 WMMA with FP32 accumulation and BF16/FP16 output.
+
+Preparation losslessly folds block scales into FP8/BF8 operands when possible,
+with exact grouped scaling for wider spans. The two strategies are register
+GEMM and a hybrid with A in registers and B staged in LDS. A cached CPU shape
+policy selects configurations and adapts K divisors and masked copies. The
+`cache_policy` hint is `auto`, `hot`, or `rotating` (model-layer cycling).
+
+See [the kernel API and configuration guide](../kernels/gemm/rdna4_mxfp4/README.md)
+for formats, limits, usage, and validation commands.
+
 This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
 ## Quick reference

@@ -398,6 +398,10 @@ else:
         "flydsl._mlir": str(EMBEDDED__MLIR_REL),
     }
 
+# Keep kernel sources under kernels/ while exposing a stable installed API.
+all_packages = sorted(set(all_packages + ["flydsl.kernels.gemm.rdna4_mxfp4"]))
+package_dir["flydsl.kernels.gemm.rdna4_mxfp4"] = "kernels/gemm/rdna4_mxfp4"
+
 _version = _read_version()
 
 setup(
@@ -417,6 +421,7 @@ setup(
     # IMPORTANT: we must include versioned shared libraries (e.g. *.so.22.0git),
     # otherwise the wheel will miss required runtime deps and be unusable.
     package_data={
+        "flydsl.kernels.gemm.rdna4_mxfp4": ["dispatch_model.json", "README.md"],
         "flydsl._mlir": [
             "_mlir_libs/_*.so",
             "_mlir_libs/libFlyPythonCAPI.so.*",
