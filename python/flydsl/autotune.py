@@ -490,21 +490,21 @@ class Autotuner:
         if jit_function is None or not isinstance(self.fn, jit_function.JitFunction):
             return lambda: self._run_with_hints(compiler_opts, args, kwargs)
 
-        from .compiler import compile as flyc_compile
         from .compiler.kernel_function import CompilationContext
 
-        bound = self._signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        call_args = tuple(bound.arguments.values())
         compiled = None
 
         def run():
             nonlocal compiled
             if compiled is not None:
-                compiled(*call_args)
+                # Bind per launch: a pre_hook may have replaced a keyword argument.
+                bound = self._signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                compiled(*bound.arguments.values())
                 return
             with CompilationContext.compile_hints(compiler_opts):
-                compiled = flyc_compile(self.fn, *args, **kwargs)  # Compiles and launches once.
+                # Not flyc.compile, which returns an argument-free function uncompiled.
+                compiled = jit_function._compile_impl(self.fn, *args, **kwargs)  # Compiles and launches once.
 
         return run
 

@@ -734,3 +734,53 @@ def test_autotune_times_jit_candidates_through_compiled_handles(frontend, monkey
     Autotuner(launch, configs, key=["x"], warmup=2, rep=3, do_bench_fn=bench).resolve_config(5)
     assert len(traced) == len(frontend) == 2  # One trace and compile per config.
     assert len(launched) == 10 and len({id(artifact) for artifact in launched}) == 2
+
+
+def test_autotune_compiles_argument_free_jit_candidates_under_their_hints(frontend, monkeypatch, tmp_path):
+    from flydsl.autotune import Autotuner, Config
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "autotune"))
+    launched = _record_launches(monkeypatch)
+    hints = []
+    trace = jf.JitFunction._trace
+    monkeypatch.setattr(
+        jf.JitFunction,
+        "_trace",
+        lambda self, *a, **k: hints.append(CompilationContext.get_compile_hints().get("waves_per_eu"))
+        or trace(self, *a, **k),
+    )
+
+    @flyc.jit
+    def launch():
+        pass
+
+    def bench(call, warmup, rep):
+        for _ in range(warmup + rep):
+            call()
+        return 1.0
+
+    configs = [Config(waves_per_eu=1), Config(waves_per_eu=2)]
+    Autotuner(launch, configs, key=[], warmup=2, rep=3, do_bench_fn=bench).resolve_config()
+    assert hints == [1, 2]  # One trace per config, under that config's hints.
+    assert len(launched) == 10
+
+
+def test_autotune_launches_jit_candidates_with_arguments_set_by_pre_hooks(frontend, monkeypatch, tmp_path):
+    from flydsl.autotune import Autotuner, Config
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "autotune"))
+    launched = []
+    monkeypatch.setattr(jf, "_build_call_state", lambda sig, args, artifact: lambda args: launched.append(args[0]))
+
+    @flyc.jit
+    def launch(x: fx.Int32, scale: fx.Constexpr[int]):
+        _ = x * scale
+
+    def bench(call, warmup, rep):
+        for _ in range(warmup + rep):
+            call()
+        return 1.0
+
+    configs = [Config(scale=2, pre_hook=lambda kwargs: kwargs.update(x=7))]
+    Autotuner(launch, configs, key=["x"], warmup=2, rep=3, do_bench_fn=bench).resolve_config(x=5)
+    assert launched == [7] * 5
