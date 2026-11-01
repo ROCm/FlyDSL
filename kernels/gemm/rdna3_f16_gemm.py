@@ -36,7 +36,6 @@ from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import cvt_sr_f32_to_bf16
-from kernels.common.tensor_shim import _run_compiled
 
 WMMA_M = 16
 WMMA_N = 16
@@ -566,6 +565,6 @@ def create_wmma_gemm_module(
         )
 
     def launch(arg_c, arg_a, arg_bt, stream, sr_seed=0):
-        return _run_compiled(launch_gemm, arg_c, arg_a, arg_bt, stream, sr_seed)
+        return launch_gemm(arg_c, arg_a, arg_bt, stream, sr_seed)
 
     return launch, BLOCK_M, BLOCK_N, BLOCK_K
