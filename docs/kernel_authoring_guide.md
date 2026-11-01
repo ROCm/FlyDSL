@@ -647,9 +647,14 @@ that file is missing or lists other files, the libraries are hashed at run time
 with a warning. Change libraries only by rebuilding: a library replaced by hand
 under its old name keeps the old digest.
 
-External libraries and Python post-load initializers are not represented by
-MLIR, so artifacts using either are reused only in-process and never written
-to disk. Rebuilding a linked library in place requires a new process.
+Artifacts using external libraries or Python post-load initializers are reused
+only in-process and never written to disk. Post-load callbacks are absent from
+MLIR, so the in-process key also includes their ordered identities. Python bound
+methods use the receiver and function identities. Different callbacks get separate
+loaded modules; the same callbacks reuse a module and run only once per module.
+Provide a new callback object when its initialization configuration changes:
+mutating the same callback's captured state does not reinitialize a cached module.
+Rebuilding a linked library in place requires a new process.
 Ktrace buffer configuration enters the key. Event IDs are assigned at compilation
 from this process's name table and stay out of the key; a cached artifact whose
 IDs conflict with a live binary is rebuilt.

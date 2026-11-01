@@ -462,8 +462,8 @@ def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
-def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend) -> str:
-    """Identify the complete lowering input within this process.
+def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, post_load_processors=()) -> str:
+    """Identify the lowering input and loaded-module initialization within this process.
 
     ``asm`` is the prepared module text, omitting source locations when DWARF
     is disabled. Lowering retains locations for diagnostics. Do not elide
@@ -480,6 +480,17 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend) -> str:
         "llvm_options": cfg.llvm_opts,
         "env": _cache_invalidating_env_values(),
     }
+    if post_load_processors:
+        # An artifact owns the initialized module, not just the binary. Callbacks
+        # are absent from IR, so different ordered callback lists need separate
+        # artifacts. Bound-method wrappers are recreated on attribute access;
+        # identify them by receiver and function instead. The cached artifact
+        # retains these objects, preventing identity reuse while it is live.
+        # Artifacts with callbacks never reach the cross-process disk cache.
+        config["post_load_processors"] = [
+            (id(proc.__self__), id(proc.__func__)) if inspect.ismethod(proc) else (id(proc),)
+            for proc in post_load_processors
+        ]
     key = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode())
     key.update(asm.encode())
     return key.hexdigest()
@@ -1127,9 +1138,9 @@ class JitFunction:
                 compile_hints=effective_hints,
                 link_libs=traced.link_libs,
             )
-            cache_key = _artifact_cache_key(asm, config, backend)
-            # Link libraries and Python post-load initializers live outside the IR:
-            # reuse such artifacts only in-process, never from disk.
+            cache_key = _artifact_cache_key(asm, config, backend, post_load_processors=traced.post_load_processors)
+            # Extern artifacts are process-local. The key also distinguishes
+            # Python callbacks so each initialization owns its loaded module.
             dumping = env.debug.dump_ir or env.debug.dump_asm
             manager = None if traced.extern_linked or dumping else self.cache_manager
             compiled_func = self._mem_cache.get(cache_key)

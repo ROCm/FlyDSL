@@ -2,6 +2,7 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 """IR-addressed artifact reuse across traces, processes and configurations."""
 
+import ctypes
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 import textwrap
 from array import array
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -388,6 +390,196 @@ def test_extern_linked_artifacts_stay_off_disk(frontend, monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
     with pytest.raises(RuntimeError, match="never cached on disk"):
         _compile(launch)
+
+
+@pytest.mark.parametrize("disk_cache", [False, True])
+@pytest.mark.parametrize("callback_kind", ["function", "bound_method", "callable_object"])
+def test_post_load_callback_identity_selects_separate_artifacts(
+    frontend, monkeypatch, tmp_path, disk_cache, callback_kind
+):
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", str(int(disk_cache)))
+
+    class Initializer:
+        def __call__(self, module):
+            pass
+
+    def make_initializer():
+        def initialize(module):
+            pass
+
+        return initialize
+
+    owners = (Initializer(), Initializer())
+    callbacks = (make_initializer(), make_initializer()) if callback_kind == "function" else owners
+
+    @flyc.jit
+    def launch(variant: fx.Constexpr[int]):
+        callback = callbacks[variant]
+        if callback_kind == "bound_method":
+            callback = callback.__call__  # A fresh bound-method object on every trace.
+        CompilationContext.get_current().post_load_processors.append(callback)
+
+    first = _compile(launch, 0)
+    second = _compile(launch, 1)
+    assert first[1].source_ir == second[1].source_ir
+    assert first[0] != second[0]
+    assert first[1] is not second[1]
+    assert _compile(launch, 0) == first
+    assert _compile(launch, 1) == second
+    assert len(frontend) == 2
+    assert not list((tmp_path / "cache").rglob("*.pkl"))
+
+
+def test_post_load_callback_order_and_removal_select_separate_artifacts(frontend):
+    def first(module):
+        pass
+
+    def second(module):
+        pass
+
+    callbacks = [first, second]
+
+    @flyc.jit
+    def launch():
+        CompilationContext.get_current().post_load_processors.extend(callbacks)
+
+    initial = _compile(launch)
+    callbacks.reverse()
+    reversed_order = _compile(launch)
+    callbacks[:] = [first]
+    single = _compile(launch)
+    callbacks.clear()
+    empty = _compile(launch)
+    assert len({key for key, _ in (initial, reversed_order, single, empty)}) == 4
+    assert len({artifact.source_ir for _, artifact in (initial, reversed_order, single)}) == 1
+    callbacks[:] = [first, second]
+    assert _compile(launch) == initial
+    assert len(frontend) == 4
+
+
+@pytest.mark.l2_device
+@pytest.mark.parametrize("disk_cache", [False, True])
+@pytest.mark.parametrize("first_variant", [0, 1])
+def test_gpu_post_load_callbacks_keep_distinct_module_state(monkeypatch, tmp_path, disk_cache, first_variant):
+    import torch
+
+    from flydsl.compiler.extern_link import link_extern
+    from flydsl.expr.extern import ffi
+
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires a ROCm GPU")
+    rocm_path = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
+    clang = rocm_path / "llvm" / "bin" / "clang"
+    if not clang.is_file():
+        pytest.skip("requires ROCm clang for device bitcode")
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", str(int(disk_cache)))
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "0")
+    monkeypatch.setenv("FLYDSL_KTRACE_ENABLE", "0")
+    monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
+    monkeypatch.setenv("FLYDSL_DUMP_IR", "0")
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", "")
+    monkeypatch.setenv("COMPILE_ONLY", "0")
+    source = tmp_path / "initializer_state.hip"
+    source.write_text(
+        'extern "C" {\n'
+        '__attribute__((device, visibility("default"))) int initializer_state = 0;\n'
+        "__attribute__((device)) int read_initializer_state(void) { return initializer_state; }\n"
+        "}\n"
+    )
+    bitcode = tmp_path / "initializer_state.bc"
+    subprocess.run(
+        [
+            str(clang),
+            "-x",
+            "hip",
+            f"--offload-arch={get_backend().target.arch}",
+            "--cuda-device-only",
+            "-fgpu-rdc",
+            "-nogpuinc",
+            "-nogpulib",
+            "-O2",
+            "-emit-llvm",
+            "-c",
+            str(source),
+            "-o",
+            str(bitcode),
+        ],
+        check=True,
+        timeout=60,
+    )
+    hip = ctypes.CDLL(str(rocm_path / "lib" / "libamdhip64.so"))
+    hip.hipModuleGetGlobal.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    hip.hipModuleGetGlobal.restype = ctypes.c_int
+    hip.hipMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    hip.hipMemcpy.restype = ctypes.c_int
+    initialized = []
+
+    def make_initializer(amount):
+        def initialize(module):
+            ptr, size = ctypes.c_void_p(), ctypes.c_size_t()
+            assert (
+                hip.hipModuleGetGlobal(
+                    ctypes.byref(ptr), ctypes.byref(size), ctypes.c_void_p(module), b"initializer_state"
+                )
+                == 0
+            )
+            assert size.value == ctypes.sizeof(ctypes.c_int32)
+            value = ctypes.c_int32(amount)
+            assert hip.hipMemcpy(ptr, ctypes.byref(value), size.value, 1) == 0  # hipMemcpyHostToDevice
+            initialized.append((module, amount))
+
+        return initialize
+
+    initializers = (make_initializer(1), make_initializer(7))
+
+    @flyc.kernel
+    def read_state(X: fx.Pointer, variant: fx.Constexpr[int]):
+        read = link_extern(
+            ffi("read_initializer_state", [], "int32"),
+            bitcode_path=str(bitcode),
+            module_init_fn=initializers[variant],
+        )
+        if fx.thread_idx.x == 0:
+            X[0] = fx.Int32(read())
+
+    @flyc.jit
+    def launch(X: fx.Pointer, variant: fx.Constexpr[int]):
+        read_state(X, variant).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    out = torch.zeros(1, device="cuda", dtype=torch.int32)
+    ptr = flyc.from_c_void_p(fx.Int32, out.data_ptr())
+    amounts = (1, 7)
+    artifacts = {}
+    for variant in (first_variant, 1 - first_variant) * 2:
+        launch(ptr, variant)
+        torch.cuda.synchronize()
+        assert out.item() == amounts[variant]
+        artifact = launch._last_compiled[1]
+        assert artifacts.setdefault(variant, artifact) is artifact
+    assert artifacts[0] is not artifacts[1]
+    assert artifacts[0].source_ir == artifacts[1].source_ir
+
+    handles = [flyc.compile(launch, ptr, variant) for variant in (0, 1)]
+    assert all(handle._keepalive is artifacts[variant] for variant, handle in enumerate(handles))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a compiled handle must preserve its module without retracing")
+
+    monkeypatch.setattr(launch, "_trace", unexpected)
+    for variant in (1, 0, 1, 0):
+        handles[variant](ptr)
+        torch.cuda.synchronize()
+        assert out.item() == amounts[variant]
+    assert [amount for _, amount in initialized] == [amounts[first_variant], amounts[1 - first_variant]]
+    assert len({module for module, _ in initialized}) == 2  # Once per independently loaded module.
+    assert len(launch._mem_cache) == 2
+    assert not list((tmp_path / "cache").rglob("*.pkl"))
 
 
 _PROCESS_PROBE = r"""
