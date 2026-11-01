@@ -1,6 +1,6 @@
 # RDNA4 MXFP4 × FP8 GEMM
 
-Dense OCP MXFP4 weights and static FP8 E4M3 activations on ROCm gfx1200/gfx1201.
+Dense OCP MXFP4 weights and prequantized FP8 E4M3 activations on ROCm gfx1200/gfx1201.
 The kernels use FlyDSL layouts, tiled copies and WMMA atoms. Weights stay
 compressed; conversion to exact FP8 operands happens inside GEMM, followed by
 native FP8 WMMA and FP32 accumulation. Hardware FP4 instructions are unnecessary.
@@ -73,8 +73,16 @@ Calibration uses FlyDSL's native `Autotuner` with at most 64 legal register/hybr
 configurations. It checks sampled outputs against independent FP64 MXFP4
 decoding before timing each candidate. Hot and rotating-weight graph timings
 match the requested cache objective; `auto` minimizes their geometric mean.
-Compilation, temporary weight copies and timing occur during calibration.
-They do not occur on a normal cache miss, which uses the CPU fallback.
+Calibration compiles and validates its candidate configurations, makes temporary
+weight copies and measures device timings. A normal configuration-cache miss
+uses the CPU fallback without candidate search, temporary weight pools or
+device timing. It can still JIT-compile the selected executable on first use.
+
+The kernels specialize on the exact M/N/K shape. The measured configuration
+cache and FlyDSL's executable cache serve different purposes: calibrating
+decode batches does not warm arbitrary prefill shapes. Warm anticipated shapes
+before latency-sensitive serving. An inference-time compiler warning indicates
+that executable warmup has not covered that shape; it does not imply autotuning.
 
 Measured choices persist in `FLYDSL_AUTOTUNE_CACHE_DIR` (default
 `~/.flydsl/autotune`) and are keyed by source, shape, dtype, layout, scale mode,
