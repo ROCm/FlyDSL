@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-01T11:21:37Z",
+ "updated": "2026-11-01T12:19:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
    "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116",
    "created_at": "2026-11-01T11:18:53Z",
-   "updated_at": "2026-11-01T11:19:42Z",
+   "updated_at": "2026-11-01T12:17:02Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-01T11:34:22Z",
+     "completed_at": "2026-11-01T11:43:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836031977"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-01T11:34:56Z",
+     "completed_at": "2026-11-01T12:02:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836031982"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-01T11:50:05Z",
+     "completed_at": "2026-11-01T12:05:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836032051"
+    }
+   ]
   },
   {
    "run_id": 41300861970,
