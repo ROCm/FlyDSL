@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-11-01T01:34:56Z",
+ "updated": "2026-11-01T02:54:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 41257373081,
+   "run_id": 41266884417,
    "pr": 1352,
+   "commit": "9e5efb149fe0d8f3de2950c14e53c2aaa66e3913",
+   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41266884417",
+   "created_at": "2026-11-01T02:51:51Z",
+   "updated_at": "2026-11-01T02:51:51Z",
+   "actor": "edjson",
+   "jobs": []
+  },
+  {
+   "run_id": 41257373081,
+   "pr": null,
    "commit": "bbbc5040017e51d676badaf5cdc463e764264bc3",
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
@@ -1977,52 +1992,6 @@
    "updated_at": "2026-10-29T04:46:34Z",
    "actor": "ppppqp",
    "jobs": []
-  },
-  {
-   "run_id": 40818895010,
-   "pr": null,
-   "commit": "d45adb16c3925eec77c6d96bf37ec41703cf397b",
-   "branch": "xyw/mega_moe_merge",
-   "event": "pull_request",
-   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010",
-   "created_at": "2026-10-29T04:38:38Z",
-   "updated_at": "2026-10-29T07:14:49Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T05:28:22Z",
-     "completed_at": "2026-10-29T06:24:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010/job/123271908581",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T05:10:20Z",
-     "completed_at": "2026-10-29T05:41:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010/job/123271908583"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T06:02:32Z",
-     "completed_at": "2026-10-29T07:14:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010/job/123271908619"
-    }
-   ]
   }
  ]
 }
