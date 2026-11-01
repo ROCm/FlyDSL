@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-11-01T09:22:34Z",
+ "updated": "2026-11-01T11:15:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41300861970,
+   "pr": 1338,
+   "commit": "d4edc2d01c6d1e378f852d56a6bad1a7b82ff981",
+   "branch": "pr/fix-jit-ir-cache-key",
+   "event": "pull_request",
+   "title": "[JIT] Key compiled artifacts by the traced MLIR",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41300861970",
+   "created_at": "2026-11-01T11:12:31Z",
+   "updated_at": "2026-11-01T11:13:31Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 41296199970,
+   "pr": 1338,
+   "commit": "d2aca0ca0defd178440578c2f221bca3f2900a49",
+   "branch": "pr/fix-jit-ir-cache-key",
+   "event": "pull_request",
+   "title": "[JIT] Key compiled artifacts by the traced MLIR",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970",
+   "created_at": "2026-11-01T10:09:10Z",
+   "updated_at": "2026-11-01T11:13:14Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-01T10:24:43Z",
+     "completed_at": "2026-11-01T10:43:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888727"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-01T10:24:50Z",
+     "completed_at": "2026-11-01T11:13:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888775"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-01T10:24:53Z",
+     "completed_at": "2026-11-01T11:05:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888789"
+    }
+   ]
+  },
   {
    "run_id": 41266884417,
    "pr": 1352,
@@ -1960,36 +2018,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40821294719",
    "created_at": "2026-10-29T05:04:43Z",
    "updated_at": "2026-10-29T05:04:43Z",
-   "actor": "ppppqp",
-   "jobs": []
-  },
-  {
-   "run_id": 40820985053,
-   "pr": null,
-   "commit": "f0be54146a6f7d2a5c5de274b55cd69eee0cc77b",
-   "branch": "feat/coop-exchange-layout",
-   "event": "pull_request",
-   "title": "[Feat] Support warp exchange with layout",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40820985053",
-   "created_at": "2026-10-29T05:01:28Z",
-   "updated_at": "2026-10-29T05:01:28Z",
-   "actor": "ppppqp",
-   "jobs": []
-  },
-  {
-   "run_id": 40819623515,
-   "pr": null,
-   "commit": "2e73f27fda74d7ac23e3190bdc92b192dd253a6a",
-   "branch": "feat/coop-exchange-layout",
-   "event": "pull_request",
-   "title": "[Feat] Support warp exchange with layout",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40819623515",
-   "created_at": "2026-10-29T04:46:34Z",
-   "updated_at": "2026-10-29T04:46:34Z",
    "actor": "ppppqp",
    "jobs": []
   }
