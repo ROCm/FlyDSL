@@ -49,6 +49,12 @@ repeated use of one weight; `rotating` targets cycling through model layers.
 `rank_configurations` exposes the selected region and its priority order.
 Its priorities are not latency predictions or a guarantee of optimality.
 
+Rotating-weight prefill selection also accounts for workgroup availability
+in skinny projections and wasted rows in large M tiles. Skinny N32–128
+projections use register tiles until a small hybrid tile provides enough
+workgroups. Larger projections reduce the M tile when excessive rounding
+wastes computation. These corrections retain the register and hybrid strategies.
+
 The exported policy was fitted on 198 shapes (126 original search shapes plus
 72 development shapes), with separate hot/rotating measurements. On a subsequent
 36-shape test across nine unseen N/K families, its geometric-mean latency ratio
@@ -78,11 +84,33 @@ weight copies and measures device timings. A normal configuration-cache miss
 uses the CPU fallback without candidate search, temporary weight pools or
 device timing. It can still JIT-compile the selected executable on first use.
 
-The kernels specialize on the exact M/N/K shape. The measured configuration
-cache and FlyDSL's executable cache serve different purposes: calibrating
-decode batches does not warm arbitrary prefill shapes. Warm anticipated shapes
-before latency-sensitive serving. An inference-time compiler warning indicates
-that executable warmup has not covered that shape; it does not imply autotuning.
+Prefill executables share a runtime M dimension through FlyDSL dynamic tensor
+layouts. Aligned and partial M tiles have separate epilogues; batches
+1/2/4/8/16 keep their specialized decode paths. Executable identity includes
+N/K, configuration, folding mode, dtype and device. Reusing a configuration
+across different row counts therefore reuses its compiled executable.
+
+Compile the required configuration space before serving:
+
+```python
+from flydsl.kernels.gemm.rdna4_mxfp4 import get_warmup_keys, compile_gemm
+
+keys = get_warmup_keys(
+    weights.n, weights.k, max_m=2048,
+    mode=weights.mode, normal_only=weights.normal_only,
+    nibble_layout=weights.nibble_layout, dtype=torch.bfloat16,
+    device_id=weights.packed.device.index, cache_policy="rotating",
+)
+for key in keys:
+    compile_gemm(key)
+```
+
+This enumerates distinct heuristic and persisted measured configuration keys.
+Compilation uses meta tensors and FlyDSL's compile-only mode, with no real
+tensor allocation or dummy GPU launches. Run it during single-threaded startup
+before inference and graph capture. First use can load the compiled artifact.
+Different N/K, dtypes, scale plans or configurations require corresponding
+warmup keys. Configuration calibration remains a separate optional operation.
 
 Measured choices persist in `FLYDSL_AUTOTUNE_CACHE_DIR` (default
 `~/.flydsl/autotune`) and are keyed by source, shape, dtype, layout, scale mode,
@@ -110,7 +138,32 @@ python -m pytest tests/unit/test_rdna4_mxfp4_tuning.py
 python -m pytest tests/kernels/test_rdna4_mxfp4.py
 ```
 
-## Port performance validation
+## Runtime-M and prefill dispatch validation
+
+The rotating-weight prefill policy was frozen before testing 50 new cases:
+30 actual model projections at M=293/613/997/1549/1973 and 20 varied skinny
+projections at M=173/701/1477/1933. Compared with the preceding implementation,
+geometric mean GEMM time ratios are 0.8275 and 0.4189. Weighting the real
+projections by their frequency in the model gives forward-GEMM ratios of
+0.9960/0.8657/0.9985/0.9517/1.0032. Every measured candidate has zero relative RMS against
+the preceding selected output. One skinny crossover remains 27.2% above its
+measured shortlist best; the heuristic does not guarantee the fastest tile.
+
+Eighteen decode cases (M=1/8/16 across six projection families) retain identical
+instruction fingerprints, with geometric mean time ratio 1.0014 and worst
+ratio 1.0069. Six M=8192 cases have mean ratio 0.9499 and worst 1.0025. All 24
+final ISA samples use native FP8 WMMA with zero scratch or register spills.
+Seven randomized paired rounds use GPU events and graph replay, rotating
+weight copies and a cache flush outside the timed interval. These checks use
+normal E4M3-foldable weights on gfx1201 with the installed 0.3.4.1 compiler.
+
+[Raw measurements, configurations, source hashes and ISA metadata](../../../tests/perf/data/rdna4_mxfp4_ttft.json)
+also record the limitations and the exact prototype versus final source hashes.
+Public API tests separately confirm compile-only warmup allocates no GPU
+memory, arbitrary runtime row counts execute without compilation, and changed
+inputs and guarded output tails remain correct under graph replay.
+
+## Historical port performance validation
 
 The source port was compared with the preceding native implementation on two Radeon AI PRO R9700 GPUs at default clocks, using identical explicit configurations. Eight shapes, both GPUs, hot/rotating weights and 15 randomized paired rounds give 32 latency comparisons. Port/reference latency is 0.9991× geometrically; the worst is 1.0064×. Every pair is bitwise equal, reads changed inputs on graph replay, and has the same decoded instruction fingerprint. All executed kernels use native FP8/BF8 WMMA with zero scratch or register spills. This isolates the source port from the quality of default configuration selection.
 

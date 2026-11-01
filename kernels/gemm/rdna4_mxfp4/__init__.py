@@ -9,10 +9,25 @@ The tensor API loads on first use.
 
 from .dispatch import choose_config, rank_configurations
 
-__all__ = ["PreparedMXFP4", "prepare_weights", "gemm", "tune_gemm", "choose_config", "rank_configurations"]
+__all__ = [
+    "PreparedMXFP4",
+    "prepare_weights",
+    "gemm",
+    "tune_gemm",
+    "choose_config",
+    "rank_configurations",
+    "get_warmup_keys",
+    "compile_gemm",
+]
 
 
 def __getattr__(name):
+    if name in ("get_warmup_keys", "compile_gemm"):
+        from . import warmup
+
+        value = getattr(warmup, name)
+        globals()[name] = value
+        return value
     if name in ("PreparedMXFP4", "prepare_weights", "gemm", "tune_gemm"):
         from . import api
 

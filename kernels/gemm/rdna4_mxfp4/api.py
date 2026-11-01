@@ -147,6 +147,84 @@ def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
 _executables = {}
 
 
+def specialization_key(
+    m,
+    n,
+    k,
+    *,
+    mode="e4m3",
+    normal_only=False,
+    nibble_layout="split",
+    dtype=torch.bfloat16,
+    device_id=0,
+    config=None,
+    cache_policy="auto",
+):
+    """Return the exact executable identity used by runtime and startup warmup."""
+    options = dict(config) if config else choose_config(m, n, k, mode, cache_policy=cache_policy)
+    if options.get("weight_bits", 4) != 4:
+        raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
+    options.update(
+        fold_mode=mode,
+        normal_only=normal_only,
+        output_dtype="bf16" if dtype == torch.bfloat16 else "fp16",
+        device_id=device_id,
+        separated_nibbles=nibble_layout == "split",
+    )
+    if options.get("b_swizzle") is not None:
+        options["b_swizzle"] = tuple(options["b_swizzle"])
+    engine = options.pop("engine", "register")
+    if engine not in ("register", "hybrid"):
+        raise ValueError("engine must be register or hybrid")
+    if engine == "hybrid" and mode == "grouped":
+        raise ValueError("hybrid requires losslessly folded FP8 weights")
+    kernel_m = m if m in (1, 2, 4, 8, 16) else 0
+    if kernel_m == 0:
+        bm = (
+            options.get("tile_m", 256)
+            if engine == "hybrid"
+            else 16 * options.get("waves_m", 1) * options.get("repeat_m", 1)
+        )
+        options["aligned_m"] = m % bm == 0
+        if engine == "register":
+            bn = 16 * options.get("waves_n", 2) * options.get("repeat_n", 2)
+            if not options["aligned_m"] or n % bn:
+                options["buffer_io"] = True
+    return engine, kernel_m, n, k, tuple(sorted(options.items()))
+
+
+def _m_alignment(engine, options):
+    if not options.get("aligned_m", False):
+        return 1
+    bm = (
+        options.get("tile_m", 256)
+        if engine == "hybrid"
+        else 16 * options.get("waves_m", 1) * options.get("repeat_m", 1)
+    )
+    return bm & -bm
+
+
+def _arguments(x, packed, scales, x_scale, out, base_exponents, table, kernel_m, alignment=1):
+    m = x.shape[0]
+    packed_words = packed.view(torch.int32)
+    args = [
+        flyc.from_torch_tensor(t, use_32bit_stride=True)
+        for t in (
+            x.view(torch.int32),
+            packed_words,
+            scales,
+            x_scale.view(m),
+            out,
+            base_exponents if base_exponents is not None else packed_words,
+            table if table is not None else packed_words,
+        )
+    ]
+    if kernel_m == 0:
+        for index in (0, 3, 4):
+            args[index].mark_shape_dynamic(0, divisibility=alignment)
+    return args
+
+
 def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy="auto"):
     """Multiply FP8 activations by prepared MXFP4 weights on the current stream.
 
@@ -202,42 +280,35 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         options = resolve_config(gemm, x, weights, x_scale, out, cache_policy)
     if options.get("weight_bits", 4) != 4:
         raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
-    options["fold_mode"] = weights.mode
-    options["normal_only"] = weights.normal_only
-    options["output_dtype"] = "bf16" if dtype == torch.bfloat16 else "fp16"
-    options["device_id"] = x.device.index
-    options["separated_nibbles"] = weights.nibble_layout == "split"
-    if options.get("b_swizzle") is not None:
-        options["b_swizzle"] = tuple(options["b_swizzle"])
-    engine = options.pop("engine", "register")
-    if engine not in ("register", "hybrid"):
-        raise ValueError("engine must be register or hybrid")
-    if engine == "hybrid":
-        if weights.mode == "grouped":
-            raise ValueError("hybrid requires losslessly folded FP8 weights")
-        factory = build_hybrid
-    else:
-        factory = build_register
-    launcher = factory(m, n, k, **options)
-    # Zero-copy word views expose the packed storage through typed tensors.
-    # The kernels reconstruct logical FP8/MXFP4 views with FlyDSL layouts.
-    packed_words = weights.packed.view(torch.int32)
-    args = [
-        flyc.from_torch_tensor(t, use_32bit_stride=True)
-        for t in (
-            x.view(torch.int32),
-            packed_words,
-            weights.scales,
-            x_scale.view(m),
-            out,
-            weights.base_exponents if weights.base_exponents is not None else packed_words,
-            weights.table if weights.table is not None else packed_words,
-        )
-    ]
+    key = specialization_key(
+        m,
+        n,
+        k,
+        mode=weights.mode,
+        normal_only=weights.normal_only,
+        nibble_layout=weights.nibble_layout,
+        dtype=dtype,
+        device_id=x.device.index,
+        config=options,
+    )
+    engine, kernel_m, _, _, parameters = key
+    options = dict(parameters)
+    factory = build_hybrid if engine == "hybrid" else build_register
+    args = _arguments(
+        x,
+        weights.packed,
+        weights.scales,
+        x_scale,
+        out,
+        weights.base_exponents,
+        weights.table,
+        kernel_m,
+        _m_alignment(engine, options),
+    )
     stream = fx.Stream(torch.cuda.current_stream(x.device).cuda_stream)
-    key = (launcher, x.device.index)
     compiled = _executables.get(key)
     if compiled is None:
+        launcher = factory(kernel_m, n, k, **options)
         with torch.cuda.device(x.device):
             compiled = flyc.compile(launcher, *args, stream)
         _executables[key] = compiled

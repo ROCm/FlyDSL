@@ -126,6 +126,49 @@ def test_tail_stores_preserve_output_storage_guards(strategy):
     assert bool((storage[-64:] == 127).all())
 
 
+@pytest.mark.parametrize("mode", ["e4m3", "e5m2", "grouped"])
+def test_compile_only_warmup_serves_unseen_rows_with_guarded_stores(mode, tmp_path, monkeypatch):
+    """Startup warms compile classes, then arbitrary rows need no new compiler."""
+    from kernels.gemm.rdna4_mxfp4 import compile_gemm, get_warmup_keys
+
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "kernels"))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "tuning"))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
+    _, packed, _, scales = make_case((73, 93, 672), seed=301)
+    prepared = prepare_weights(packed, scales, mode=mode)
+    keys = get_warmup_keys(
+        prepared.n,
+        prepared.k,
+        256,
+        mode=prepared.mode,
+        normal_only=prepared.normal_only,
+        device_id=packed.device.index,
+        cache_policy="rotating",
+    )
+    allocated = torch.cuda.memory_allocated()
+    for key in keys:
+        compile_gemm(key)
+    assert torch.cuda.memory_allocated() == allocated
+
+    # A missing specialization now raises, rather than compiling on demand.
+    monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
+    for rows in (73, 91, 128, 192):
+        x, _, xs, _ = make_case((rows, 93, 672), seed=301 + rows)
+        storage = torch.full((rows * 93 + 128,), 127.0, device="cuda", dtype=torch.bfloat16)
+        out = storage[64:-64].view(rows, 93)
+        gemm(x, prepared, xs, out=out, cache_policy="rotating")
+        check(out, reference(x, packed, xs, scales))
+        assert bool((storage[:64] == 127).all())
+        assert bool((storage[-64:] == 127).all())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        gemm(x, prepared, xs, out=out, cache_policy="rotating")
+    x.view(torch.uint8).bitwise_xor_(128)
+    graph.replay()
+    torch.cuda.synchronize()
+    check(out, reference(x, packed, xs, scales))
+
+
 def test_bf16_epilogue_preserves_subnormal_output():
     k = 17408
     x = torch.full((16, k), 448.0, device="cuda").to(torch.float8_e4m3fn)
@@ -161,6 +204,10 @@ def test_input_device_owns_compilation_and_execution():
 
 
 def test_native_calibration_persists_and_replays_changed_inputs(tmp_path, monkeypatch):
+    from kernels.gemm.rdna4_mxfp4 import get_warmup_keys
+    from kernels.gemm.rdna4_mxfp4.api import specialization_key
+    from kernels.gemm.rdna4_mxfp4.tuning import cached_configurations
+
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
     x, packed, xs, scales = make_case((7, 80, 224))
@@ -168,6 +215,41 @@ def test_native_calibration_persists_and_replays_changed_inputs(tmp_path, monkey
     check(gemm(x, prepared, xs, cache_policy="hot"), reference(x, packed, xs, scales))
     assert not list(tmp_path.iterdir())
     choice = tune_gemm(x, prepared, xs[:, None], cache_policy="hot")
+    cached = cached_configurations(
+        prepared.n,
+        prepared.k,
+        7,
+        mode=prepared.mode,
+        normal_only=prepared.normal_only,
+        nibble_layout=prepared.nibble_layout,
+        dtype=torch.bfloat16,
+        device_id=x.device.index,
+        cache_policy="hot",
+    )
+    assert (7, choice) in cached
+    keys = get_warmup_keys(
+        prepared.n,
+        prepared.k,
+        7,
+        mode=prepared.mode,
+        normal_only=prepared.normal_only,
+        dtype=torch.bfloat16,
+        device_id=x.device.index,
+        cache_policy="hot",
+    )
+    assert (
+        specialization_key(
+            7,
+            prepared.n,
+            prepared.k,
+            mode=prepared.mode,
+            normal_only=prepared.normal_only,
+            dtype=torch.bfloat16,
+            device_id=x.device.index,
+            config=choice,
+        )
+        in keys
+    )
     cache = tmp_path / "rdna4_mxfp4_choice_d0.json"
     assert cache.exists() and json.loads(cache.read_text())
     timestamp = cache.stat().st_mtime_ns

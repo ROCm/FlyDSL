@@ -69,11 +69,37 @@ def _adapt(config, m, n, k):
     return cfg
 
 
+def _prefill_config(config, m, n, k, cache_policy):
+    if cache_policy != "rotating" or m < 128:
+        return None
+    # Skinny projections need enough independent workgroups before B reuse
+    # justifies a larger M tile.
+    if 32 <= n <= 128 and k >= 1024:
+        if math.ceil(m / 64) * math.ceil(n / 32) < 72:
+            return _adapt(dict(REGISTER_DEFAULTS, waves_n=2, repeat_m=1, repeat_n=1, k_unroll=4), m, n, k)
+        return _adapt(dict(HYBRID_DEFAULTS, tile_m=64, tile_n=32, tile_k=128, waves_m=2, waves_n=1), m, n, k)
+    if config["engine"] != "hybrid" or config["tile_m"] < 256:
+        return None
+    bm = config["tile_m"]
+    padded = math.ceil(m / bm) * bm
+    smaller = math.ceil(m / 128) * 128
+    if (m < 1024 or bm >= 512) and padded - m > m / 8 and smaller < padded:
+        return _adapt(
+            dict(HYBRID_DEFAULTS, tile_m=128, tile_n=64, tile_k=64 if m < 1024 else 128, waves_m=4, waves_n=1), m, n, k
+        )
+    return None
+
+
 def _candidates(m, n, k, cache_policy="auto"):
     model = _model()
     seen = set()
     for index in model["leaves"][str(_region(m, n, k, cache_policy))]:
         cfg = _adapt(model["candidates"][index], m, n, k)
+        if not seen:
+            corrected = _prefill_config(cfg, m, n, k, cache_policy)
+            if corrected is not None and legal_config(corrected, m, n, k):
+                seen.add(tuple(sorted(corrected.items())))
+                yield corrected
         ident = tuple(sorted(cfg.items()))
         if ident not in seen and legal_config(cfg, m, n, k):
             seen.add(ident)

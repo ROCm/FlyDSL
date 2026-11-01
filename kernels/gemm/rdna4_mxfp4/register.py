@@ -45,11 +45,14 @@ def build_register(
     weight_bits=4,
     fast_epilogue=True,
     device_id=0,
+    aligned_m=False,
 ):
     assert fold_mode in ("grouped", "e4m3", "e5m2")
     assert isinstance(k_unroll, int) and 1 <= k_unroll <= 16
     assert weight_bits in (4, 8) and (weight_bits == 4 or fold_mode != "grouped")
-    assert k % 32 == 0 and m > 0 and n > 0
+    assert k % 32 == 0 and m >= 0 and n > 0
+    dynamic_m = m == 0
+    static_m = m
     folded = fold_mode != "grouped"
     out_type = fx.BFloat16 if output_dtype == "bf16" else fx.Float16
     b_dtype = fx.Float8E5M2 if fold_mode == "e5m2" else fx.Float8E4M3FN
@@ -72,6 +75,10 @@ def build_register(
         Ref: fx.Tensor,
         LUT: fx.Tensor,
     ):
+        if const_expr(dynamic_m):
+            m = fx.Int32(fx.get_scalar(Y.shape[0]))
+        else:
+            m = static_m
         tid = fx.Int32(fx.thread_idx.x)
         pid = fx.Int32(fx.block_idx.x)
         pm, pn = pid // grid_n, pid % grid_n
@@ -113,7 +120,7 @@ def build_register(
         gX = global_tensor(
             XScale,
             fx.Float32,
-            fx.make_layout((m, n), (0 if m == 1 else 1, 0)),
+            fx.make_layout((m, n), (0 if static_m == 1 else 1, 0)),
             m * 4,
             buffer_io,
         )
@@ -237,7 +244,7 @@ def build_register(
         copy_out = fx.make_copy_atom(copy_op(out_type.width), out_type)
         thr_copy_c = fx.make_tiled_copy_C(copy_out, tiled_mma).get_slice(tid)
         pC = thr_copy_c.partition_S(tC)
-        if const_expr(fast_epilogue and m % bm == 0 and n % bn == 0):
+        if const_expr(fast_epilogue and (aligned_m or not dynamic_m and static_m % bm == 0) and n % bn == 0):
             fx.copy(copy_out, thr_copy_c.retile(frag_out), pC)
         else:
             coords = fx.flat_divide(
@@ -250,7 +257,7 @@ def build_register(
                 row, column = pcoords[q].unpack()
                 if const_expr(fast_epilogue and n % bn == 0):
                     pred[q] = fx.Int32(row) < m
-                elif const_expr(fast_epilogue and m % bm == 0):
+                elif const_expr(fast_epilogue and (aligned_m or not dynamic_m and static_m % bm == 0)):
                     pred[q] = fx.Int32(column) < n
                 else:
                     pred[q] = fx.elem_less(pcoords[q], (m, n))
@@ -267,8 +274,13 @@ def build_register(
         LUT: fx.Tensor,
         stream: fx.Stream,
     ):
+        if const_expr(dynamic_m):
+            rows = fx.Int32(fx.get_scalar(Y.shape[0]))
+            launch_grid_m = (rows + bm - 1) // bm
+        else:
+            launch_grid_m = grid_m
         mxfp4_register(A, W, S, XScale, Y, Ref, LUT).launch(
-            grid=(grid_m * grid_n + 0 * device_id, 1, 1),
+            grid=(launch_grid_m * grid_n + 0 * device_id, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
         )

@@ -19,10 +19,11 @@ import torch
 from flydsl.autotune import Autotuner, Config
 
 from .dispatch import choose_config, tuning_candidates
-from .dispatch_features import normalize_config
+from .dispatch_features import legal_config, normalize_config
 
 _choices = {}
 _lock = threading.RLock()
+_KEY_FIELDS = ("m", "n", "k", "mode", "normal", "layout", "output_dtype", "device", "schema", "policy")
 
 
 @lru_cache(maxsize=1)
@@ -33,9 +34,47 @@ def _schema():
         root / "dispatch_features.py",
         root / "dispatch_model.json",
         root / "tuning.py",
+        root / "api.py",
     ]
     files += [root / (name + ".py") for name in ("register", "hybrid", "folding", "layouts")]
     return hashlib.sha256(b"".join(path.read_bytes() for path in files)).hexdigest()
+
+
+def cached_configurations(n, k, max_m, *, mode, normal_only, nibble_layout, dtype, device_id, cache_policy):
+    """Read kernel-owned native tuning entries without launching or tuning."""
+    name = "rdna4_mxfp4_choice_d" + str(device_id)
+    directory = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", "~/.flydsl/autotune")).expanduser()
+    if not (directory / (name + ".json")).is_file():
+        return []
+
+    def metadata_only():
+        pass
+
+    metadata_only.__name__ = name
+    tuner = Autotuner(metadata_only, configs=(), key=(), warmup=0, rep=0)
+    expected = dict(
+        n=n,
+        k=k,
+        mode=mode,
+        normal=normal_only,
+        layout=nibble_layout,
+        output_dtype=str(dtype),
+        device=device_id,
+        schema=_schema(),
+        policy=cache_policy,
+    )
+    rows = []
+    for key, value in tuner.cache.items():
+        fields = dict(zip(_KEY_FIELDS, key))
+        if not all(fields.get(field) == str(expected_value) for field, expected_value in expected.items()):
+            continue
+        m = int(fields["m"])
+        if not 1 <= m <= max_m:
+            continue
+        config = normalize_config(value.kwargs["config"], m, k)
+        if legal_config(config, m, n, k):
+            rows.append((m, config))
+    return rows
 
 
 @contextmanager
@@ -250,18 +289,7 @@ def resolve_config(gemm, x, weights, scales, out, cache_policy, *, calibrate=Fal
                     configs=lambda *args, **kwargs: [
                         Config(config=c) for c in tuning_candidates(m, n, k, cache_policy=cache_policy)
                     ],
-                    key=[
-                        "m",
-                        "n",
-                        "k",
-                        "mode",
-                        "normal",
-                        "layout",
-                        "output_dtype",
-                        "device",
-                        "schema",
-                        "policy",
-                    ],
+                    key=_KEY_FIELDS,
                     warmup=0,
                     rep=5,
                     do_bench_fn=context.benchmark,

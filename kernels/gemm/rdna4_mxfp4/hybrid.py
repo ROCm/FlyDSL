@@ -56,6 +56,7 @@ def build_hybrid(
     weight_bits=4,
     fast_epilogue=True,
     device_id=0,
+    aligned_m=False,
 ):
     assert fold_mode in ("e4m3", "e5m2") and weight_bits in (4, 8)
     assert tile_m % (waves_m * 16) == 0 and tile_n % (waves_n * 16) == 0
@@ -70,8 +71,12 @@ def build_hybrid(
     threads = waves_m * waves_n * 32
     npad, groups = (n + 15) // 16 * 16, k // 32
     nt, nsteps, nblocks = npad // 16, tile_k // 16, k // tile_k
+    dynamic_m = m == 0
+    static_m = m
     grid_m, grid_n = (m + tile_m - 1) // tile_m, (n + tile_n - 1) // tile_n
-    cache_group_m = min(cache_group_m, grid_m)
+    static_grid_m = grid_m
+    if not dynamic_m:
+        cache_group_m = min(cache_group_m, grid_m)
     slots = tile_n // 16 * nsteps * 32
     wslots = max(s for s in (1, 2, 4) if slots % (threads * s) == 0)
     if weight_bits == 8:
@@ -106,6 +111,12 @@ def build_hybrid(
         Ref: fx.Tensor,
         LUT: fx.Tensor,
     ):
+        if const_expr(dynamic_m):
+            m = fx.Int32(fx.get_scalar(Y.shape[0]))
+            grid_m = (m + tile_m - 1) // tile_m
+        else:
+            m = static_m
+            grid_m = static_grid_m
         tid = fx.Int32(fx.thread_idx.x)
         pid = fx.Int32(fx.block_idx.x)
         if const_expr(cache_group_m == 1):
@@ -114,7 +125,7 @@ def build_hybrid(
             group_size = cache_group_m * grid_n
             first_m = pid // group_size * cache_group_m
             group_m = fx.Int32(cache_group_m)
-            if const_expr(grid_m % cache_group_m):
+            if const_expr(dynamic_m or static_grid_m % cache_group_m):
                 remaining_m = fx.Int32(grid_m) - first_m
                 group_m = (remaining_m < group_m).select(remaining_m, group_m)
             pm = first_m + pid % group_size % group_m
@@ -336,7 +347,7 @@ def build_hybrid(
         out_atom = fx.make_copy_atom(fx.rocdl.BufferCopy(out_type.width), out_type)
         out_plan = fx.make_tiled_copy_C(out_atom, mma).get_slice(tid)
         pC = out_plan.partition_S(tC)
-        if const_expr(fast_epilogue and m % tile_m == 0 and n % tile_n == 0):
+        if const_expr(fast_epilogue and (aligned_m or not dynamic_m and static_m % tile_m == 0) and n % tile_n == 0):
             fx.copy(out_atom, out_plan.retile(frag_out), pC)
         else:
             coordC = fx.flat_divide(identity_tensor((m, n)), fx.make_tile(tile_m, tile_n))[None, None, pm, pn]
@@ -357,8 +368,13 @@ def build_hybrid(
         LUT: fx.Tensor,
         stream: fx.Stream,
     ):
+        if const_expr(dynamic_m):
+            rows = fx.Int32(fx.get_scalar(Y.shape[0]))
+            launch_grid_m = (rows + tile_m - 1) // tile_m
+        else:
+            launch_grid_m = static_grid_m
         mxfp4_hybrid(A, W, S, XScale, Y, Ref, LUT).launch(
-            grid=(grid_m * grid_n + 0 * device_id, 1, 1),
+            grid=(launch_grid_m * grid_n + 0 * device_id, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
         )
