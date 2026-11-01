@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-01T00:34:15Z",
+ "updated": "2026-11-01T00:47:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41257373081,
+   "pr": 1352,
+   "commit": "bbbc5040017e51d676badaf5cdc463e764264bc3",
+   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41257373081",
+   "created_at": "2026-11-01T00:35:01Z",
+   "updated_at": "2026-11-01T00:35:01Z",
+   "actor": "edjson",
+   "jobs": []
+  },
   {
    "run_id": 41181396588,
    "pr": 1349,
@@ -692,7 +707,7 @@
   },
   {
    "run_id": 41010293254,
-   "pr": 1352,
+   "pr": null,
    "commit": "1f7de7884981f2d608832a5703259672b3a9119c",
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
@@ -2008,21 +2023,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40818895010/job/123271908619"
     }
    ]
-  },
-  {
-   "run_id": 40817634446,
-   "pr": null,
-   "commit": "0efbca73194e867a4c25ec86adae33e149f9c6d5",
-   "branch": "xyw/mega_moe_merge",
-   "event": "pull_request",
-   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40817634446",
-   "created_at": "2026-10-29T04:25:08Z",
-   "updated_at": "2026-10-29T04:26:41Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": []
   }
  ]
 }
