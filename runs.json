@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-11-02T15:55:34Z",
+ "updated": "2026-11-02T16:59:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41478166582,
+   "pr": 1361,
+   "commit": "11774a6182dbcfe80b8c9af202fd1d4217d9dfe5",
+   "branch": "faster-trace-locations",
+   "event": "pull_request",
+   "title": "[DSL] Speed up tracing by caching op source positions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582",
+   "created_at": "2026-11-02T16:06:17Z",
+   "updated_at": "2026-11-02T16:07:39Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41476043974,
    "pr": 1361,
    "commit": "ad1f2aa8d1bcad6452d4c0d3d605c3bdee5a9059",
    "branch": "faster-trace-locations",
    "event": "pull_request",
-   "title": "[DSL] Capture op locations in linear time and print the traced module once.",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "[DSL] Speed up tracing by caching op source positions",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41476043974",
    "created_at": "2026-11-02T15:53:33Z",
-   "updated_at": "2026-11-02T15:53:48Z",
+   "updated_at": "2026-11-02T16:06:19Z",
    "actor": "RElbers",
    "jobs": []
   },
@@ -24,7 +39,7 @@
    "commit": "1b65d47125a138f95f927ee322703636aad848b0",
    "branch": "faster-trace-locations",
    "event": "pull_request",
-   "title": "[DSL] Capture op locations in linear time and print the traced module once.",
+   "title": "[DSL] Speed up tracing by caching op source positions",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41474707458",
@@ -160,13 +175,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Refactor] Organize GLM mono-kernel stages and shared tools (#1348)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145",
    "created_at": "2026-11-02T09:42:24Z",
-   "updated_at": "2026-11-02T09:44:28Z",
+   "updated_at": "2026-11-02T16:46:48Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T16:28:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145/job/125400575314"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T16:26:34Z",
+     "completed_at": "2026-11-02T16:46:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145/job/125400575389"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T16:26:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145/job/125400575488"
+    }
+   ]
   },
   {
    "run_id": 41416520863,
@@ -1838,49 +1881,6 @@
    "updated_at": "2026-10-30T02:43:38Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 40988515296,
-   "pr": null,
-   "commit": "9347817159fc068124a5bcea234e29bfc26e591f",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988515296",
-   "created_at": "2026-10-30T01:53:50Z",
-   "updated_at": "2026-10-30T02:41:48Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T02:27:10Z",
-     "completed_at": "2026-10-30T02:40:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988515296/job/123855583039"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T02:27:10Z",
-     "completed_at": "2026-10-30T02:40:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988515296/job/123855583069"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T02:27:10Z",
-     "completed_at": "2026-10-30T02:40:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988515296/job/123855583121"
-    }
-   ]
   }
  ]
 }
