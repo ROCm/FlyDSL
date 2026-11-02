@@ -93,9 +93,8 @@ def run_rank(
     model_tp=None,
     vary_expert_scales=False,
 ):
-    from tests.kernels.glm_observer import attach_observer
-
     from kernels.monokernel.glm import Glm5MonoKernel
+    from tests.kernels.glm_observer import attach_observer
 
     attach_observer(Glm5MonoKernel)
 
@@ -313,9 +312,8 @@ def bench_rank(
     model_tp=None,
 ):
     """HIP-graph replay of ``GLM5_LAUNCHES_PER_STEP`` layers; returns us per layer."""
-    from tests.kernels.glm_observer import attach_observer
-
     from kernels.monokernel.glm import Glm5MonoKernel
+    from tests.kernels.glm_observer import attach_observer
 
     attach_observer(Glm5MonoKernel)
 
@@ -624,9 +622,8 @@ def test_reference_default_dtype():
 @pytest.mark.parametrize("samples", [1, 2])
 def test_router_preserves_close_scores(samples):
     """A higher expert score must win even when its lead is below 256 FP32 ULPs."""
-    from tests.kernels.glm_observer import attach_observer
-
     from kernels.monokernel.glm import Glm5MonoKernel
+    from tests.kernels.glm_observer import attach_observer
 
     attach_observer(Glm5MonoKernel)
 
