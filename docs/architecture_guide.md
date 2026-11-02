@@ -301,6 +301,23 @@ This export path reuses the same GPU binary as the compiled specialization; it
 does not retrace the Python launcher. Backend-specific implementation hooks and
 the `_AOTCompiledFunction` helper remain internal APIs.
 
+### 3.5 Observing launches
+
+`flyc.observe_launches()` records the JIT cache identity of every `@flyc.jit`
+launch the current thread makes inside the block: one
+`LaunchRecord(function, manager_key, cache_key)` per launch, cached or not.
+`flyc.compile()` is a launch; a `@flyc.jit` call inlined into another's trace
+is not. With `stop=True` a launch returns `None` as soon as its identity is
+known, before anything is traced, compiled, read from the cache or run, so host
+code can be run to list the specializations it needs, e.g. to build or check an
+AOT cache:
+
+```python
+with flyc.observe_launches(stop=True) as launches:
+    serve_one_batch()  # host code that calls @flyc.jit launchers
+needed = {(r.manager_key, r.cache_key) for r in launches}
+```
+
 ---
 
 ## 4. Key abstractions

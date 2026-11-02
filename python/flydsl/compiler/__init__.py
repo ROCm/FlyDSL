@@ -3,12 +3,13 @@
 
 from .backends import BaseBackend, GPUTarget, compile_backend_name, get_backend, register_backend
 from .jit_argument import JitArgumentRegistry, from_c_void_p, from_dlpack, from_torch_tensor
-from .jit_function import CompiledFunction, compile, jit
+from .jit_function import CompiledFunction, LaunchRecord, compile, jit, observe_launches
 from .kernel_function import kernel
 
 __all__ = [
     "BaseBackend",
     "CompiledFunction",
+    "LaunchRecord",
     "compile_backend_name",
     "get_backend",
     "GPUTarget",
@@ -22,4 +23,5 @@ __all__ = [
     "jit",
     "kernel",
     "compile",
+    "observe_launches",
 ]

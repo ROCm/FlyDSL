@@ -1597,6 +1597,14 @@ class JitFunction:
             effective_hints=effective_hints,
         )
 
+        observers = getattr(_launch_observers, "stack", ())
+        if observers:
+            record = LaunchRecord(self.func.__name__, self.manager_key, self._cache_key_to_str(cache_key))
+            for records, _ in observers:
+                records.append(record)
+            if any(stop for _, stop in observers):
+                return None
+
         args_tuple = tuple(bound.arguments.values())
 
         if return_compiled:
@@ -1828,6 +1836,44 @@ def _ensure_ktrace_buffer_arg(jit_args: list, *, allocate: bool = True) -> bool:
         address = ctypes.c_void_p(get_ktrace_backend().ensure_buffer().device_ptr)
     jit_args.append(PointerJitArg(Int8, address))
     return True
+
+
+_launch_observers = threading.local()
+
+
+@dataclass(frozen=True)
+class LaunchRecord:
+    """The JIT cache identity of one ``@flyc.jit`` launch, as :func:`observe_launches` records it.
+
+    ``manager_key`` names the function's cache directory (``None`` while the disk cache is
+    disabled) and ``cache_key`` the specialization within it, as the cache looks it up. Both are
+    opaque; equal records name the same compiled artifact.
+    """
+
+    function: str
+    manager_key: Optional[str]
+    cache_key: str
+
+
+@contextmanager
+def observe_launches(*, stop: bool = False):
+    """Record the cache identity of every ``@flyc.jit`` launch this thread makes in the block.
+
+    Yields a list that receives one :class:`LaunchRecord` per launch, cached or not, in order.
+    ``flyc.compile()`` is a launch; a ``@flyc.jit`` call made while another is being traced is
+    inlined into it and is not.
+
+    With ``stop=True`` a launch returns ``None`` as soon as its identity is known: nothing is
+    traced, compiled, read from the cache or run. Host code run that way lists the
+    specializations it needs, e.g. to build or check an AOT cache.
+    """
+    records: List[LaunchRecord] = []
+    prev = getattr(_launch_observers, "stack", ())
+    _launch_observers.stack = (*prev, (records, stop))
+    try:
+        yield records
+    finally:
+        _launch_observers.stack = prev
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
