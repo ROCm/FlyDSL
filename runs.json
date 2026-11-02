@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T20:12:51Z",
+ "updated": "2026-11-02T20:27:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -75,10 +75,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T20:00:21Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T20:13:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804827"
     },
     {
@@ -251,10 +251,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-02T18:15:02Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-02T20:10:58Z",
+     "completed_at": "2026-11-02T20:17:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484574"
     },
     {
@@ -305,20 +305,20 @@
    "branch": "stable-struct-names",
    "event": "pull_request",
    "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424",
    "created_at": "2026-11-02T12:52:39Z",
-   "updated_at": "2026-11-02T18:27:41Z",
+   "updated_at": "2026-11-02T20:24:31Z",
    "actor": "RElbers",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T17:56:14Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T20:24:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597277"
     },
     {
