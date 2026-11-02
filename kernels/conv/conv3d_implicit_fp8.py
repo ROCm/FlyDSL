@@ -21,7 +21,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.rocdl.universal import make_buffer_ptr
 from flydsl.expr.typing import Vector as Vec
 from kernels.gemm.fp8_gemm_8wave import TiledMmaDriver
@@ -42,14 +42,15 @@ def _normalize_3(v):
     return tuple(v)
 
 
-def _global_ptr_from_addr(addr_i64, elem_ty, ref_tensor):
+def _global_ptr_from_addr(addr_i64, elem_ty, ref_tensor, *, alignment=None):
     """Reinterpret a raw i64 byte address as a global pointer to ``elem_ty``.
 
-    Alignment is inherited from ``ref_tensor``'s iterator so the resulting
-    ``!llvm.ptr`` keeps the tensor's guarantees.
+    Buffer rebasing inherits the tensor alignment. Direct accesses specify
+    the alignment their element offset guarantees.
     """
-    alignment = fx.PointerType(fx.get_iter(ref_tensor).type).alignment
-    ptr_ty = fx.PointerType.get(elem_ty=elem_ty, address_space=1, alignment=alignment)
+    if alignment is None:
+        alignment = fx.get_iter(ref_tensor).alignment
+    ptr_ty = fx.PointerType.get(elem_ty=elem_ty, address_space=fx.AddressSpace.Global, alignment=alignment)
     return fx.inttoptr(ptr_ty, addr_i64)
 
 
@@ -158,8 +159,8 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
 
         # v16i8 is not a legal backend vector width, so move 16B chunks as dwordx4.
         def lds_store_i32x4(elem_offset, value_i32x4):
-            ptr = (fx.recast_iter(u8, lds.ptr) + fx.Int32(elem_offset)).llvm_ptr
-            llvm.StoreOp(value_i32x4, ptr, alignment=16)
+            ptr = fx.recast_iter(fx.PointerType.get(u8.ir_type, fx.AddressSpace.Shared, 16), lds.ptr + elem_offset)
+            fx.generic_store(ptr, value_i32x4)
 
         def lds_load_scalar(elem_offset):
             u8p = fx.recast_iter(u8, lds.ptr)
@@ -172,21 +173,21 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
             sv = (lin % TR_VPL) * TR_VEC
             cc = c0 + rc
             ss = s0 + sv
-            valid = (cc < fx.Index(c)) & (ss < fx.Index(s))
+            valid = (cc < fx.Int64(c)) & (ss < fx.Int64(s))
             if const_expr(TR_BIG):
                 # Clamp OOB coords to 0 so the raw load never dereferences past the tensor.
-                cc_s = fx.Index(arith.select(valid, fx.Int64(cc), fx.Int64(0)))
-                ss_s = fx.Index(arith.select(valid, fx.Int64(ss), fx.Int64(0)))
+                cc_s = valid.select(fx.Int64(cc), fx.Int64(0))
+                ss_s = valid.select(fx.Int64(ss), fx.Int64(0))
                 addr = in_base_addr + (fx.Int64(nb) * fx.Int64(c) + fx.Int64(cc_s)) * fx.Int64(s) + fx.Int64(ss_s)
-                ptr = _global_ptr_from_addr(addr, u8.ir_type, inp).llvm_ptr
-                v = llvm.LoadOp(fx.Vector.make_type(4, fx.Int32), ptr, alignment=16).result
+                ptr = _global_ptr_from_addr(addr, u8.ir_type, inp, alignment=16)
+                v = fx.generic_load(ptr, dtype=fx.Int32x4)
             else:
                 # u8 elements, so the copy-atom offset is the byte offset directly.
                 g = fx.Int32(in_base + cc * s + ss)
-                safe = arith.select(valid, g, fx.Int32(0))
+                safe = valid.select(g, fx.Int32(0))
                 fx.copy(tr_atom, fx.slice(in_div, (None, safe)), tr_reg)
                 v = fx.memref_load_vec(tr_reg).bitcast(fx.Int32)  # v16u8 -> v4i32
-            lds_store_i32x4(rc * TR_LDS_S + sv, v.ir_value() if hasattr(v, "ir_value") else v)
+            lds_store_i32x4(rc * TR_LDS_S + sv, v)
 
         llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
 
@@ -197,15 +198,15 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
             cv = (lin % TR_VPL) * TR_VEC
             ss = s0 + rs
             cc = c0 + cv
-            valid = (ss < fx.Index(s)) & (cc < fx.Index(c))
+            valid = (ss < fx.Int64(s)) & (cc < fx.Int64(c))
             if valid:
                 scalars = [lds_load_scalar((cv + j) * TR_LDS_S + rs) for j in range_constexpr(TR_VEC)]
                 packed_u8 = fx.Vector.from_elements(scalars, dtype=u8)
                 if const_expr(TR_BIG):
                     packed = packed_u8.bitcast(fx.Int32)  # v16u8 -> v4i32
                     addr = out_base_addr + (fx.Int64(nb) * fx.Int64(s) + fx.Int64(ss)) * fx.Int64(c) + fx.Int64(cc)
-                    ptr = _global_ptr_from_addr(addr, u8.ir_type, out).llvm_ptr
-                    llvm.StoreOp(packed.ir_value() if hasattr(packed, "ir_value") else packed, ptr, alignment=16)
+                    ptr = _global_ptr_from_addr(addr, u8.ir_type, out, alignment=16)
+                    fx.generic_store(ptr, packed)
                 else:
                     byte_off = out_base + ss * c + cc
                     fx.memref_store_vec(packed_u8, tr_reg)
@@ -348,15 +349,15 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         if const_expr(WGM > 1):
             # Grouped-M L2-swizzle: visit WGM consecutive m-tiles across all n-tiles
             # before advancing, keeping the weight tile hot in L2. Mirrors the bf16 kernel.
-            pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
-            blocks_per_group = fx.Index(WGM * grid_n)
+            pid = fx.Int64(fx.block_idx.x) + fx.Int64(fx.block_idx.y) * fx.Int64(grid_m)
+            blocks_per_group = fx.Int64(WGM * grid_n)
             group_id = pid // blocks_per_group
-            first_m = group_id * fx.Index(WGM)
-            group_rows = fx.Index(grid_m) - first_m
-            group_rows = fx.Index(arith.select(group_rows < fx.Index(WGM), group_rows, fx.Index(WGM)))
+            first_m = group_id * fx.Int64(WGM)
+            group_rows = fx.Int64(grid_m) - first_m
+            group_rows = (group_rows < fx.Int64(WGM)).select(group_rows, fx.Int64(WGM))
             local = pid % blocks_per_group
-            block_m = fx.Index(first_m + (local % group_rows))
-            block_n = fx.Index(local // group_rows)
+            block_m = fx.Int64(first_m + (local % group_rows))
+            block_n = fx.Int64(local // group_rows)
         else:
             block_m = fx.block_idx.x
             block_n = fx.block_idx.y
@@ -368,9 +369,9 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         if const_expr(BIG_IN):
             nbase = m_offset // dhw
             ot_base0 = (m_offset % dhw) // hw_o
-            base_t = ot_base0 - fx.Index(pt)
-            base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
-            x_base_byte = ((nbase * fx.Index(d) + base_t) * fx.Index(h)) * fx.Index(width) * fx.Index(c)
+            base_t = ot_base0 - fx.Int64(pt)
+            base_t = (base_t < fx.Int64(0)).select(fx.Int64(0), base_t)
+            x_base_byte = ((nbase * fx.Int64(d) + base_t) * fx.Int64(h)) * fx.Int64(width) * fx.Int64(c)
             x_addr = fx.Int64(fx.ptrtoint(fx.get_iter(x))) + fx.Int64(x_base_byte)
             x_div = fx.logical_divide(
                 _make_fp8_buffer_tensor_from_addr(x_addr, f8_ir_t, x_buf),
@@ -378,7 +379,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             )
 
         def in_range(v, hi):
-            return (v >= fx.Index(0)) & (v < fx.Index(hi))
+            return (v >= fx.Int64(0)) & (v < fx.Int64(hi))
 
         # ---- im2col address for a (M-row, K-col) chunk of 16 contiguous channels ----
         # k_col is 16-aligned and c % 16 == 0, so the 16 elements at k_col are consecutive
@@ -387,7 +388,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         # The output-spatial decomposition of m_row is loop-invariant across the K loop
         # but costs 4 div/mods, so it is precomputed once per (half, step) and reused.
         def _spatial_of_row(m_row):
-            row_valid = m_row < fx.Index(npq)
+            row_valid = m_row < fx.Int64(npq)
             if const_expr(temporal_only_fast):
                 out_t = (m_row // hw_o) % d
                 return (row_valid, out_t, m_row)
@@ -407,7 +408,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             # tap), so gate on k_iter and mask those to the OOB sentinel.
             k_in_range = True
             if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
-                k_in_range = k_col < fx.Index(crs)
+                k_in_range = k_col < fx.Int64(crs)
             if const_expr(temporal_only_fast):
                 row_valid, out_t, m_row = spatial
                 kt_i = k_col // c
@@ -445,7 +446,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                 else:
                     g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
             g_elem_i = fx.Int32(g_elem)
-            return arith.select(valid, g_elem_i, fx.Int32(OOB_SENTINEL_ELEM))
+            return valid.select(g_elem_i, fx.Int32(OOB_SENTINEL_ELEM))
 
         # ---- conv A G2S: deposit im2col chunks into the GEMM half-block LDS layout ----
         # The physical LDS byte this lane owns equals the plain flatten of its logical
@@ -461,7 +462,7 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         # Loop-invariant per (half, step): LDS byte offset and m_row's spatial decomposition.
         # Computed once here so the SSA values dominate every conv_a_g2s call.
         def _conv_a_g2s_pre(half):
-            m_half_base = m_offset + fx.Index(half * LDS_BLOCK_M)
+            m_half_base = m_offset + fx.Int64(half * LDS_BLOCK_M)
             steps = []
             for step in range_constexpr(N_LDS_STEPS_A):
                 row_g = lane_id // 8 + wave_id * 8 + step * (N_WAVES * 8)
@@ -478,12 +479,12 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
         _a_g2s_pre = [_conv_a_g2s_pre(0), _conv_a_g2s_pre(1)]
 
         def conv_a_g2s(lds_dst, half, k_iter):
-            k_base = fx.Index(k_iter * BLOCK_K)
+            k_base = fx.Int64(k_iter * BLOCK_K)
             for step_off, cc, m_row, spatial in _a_g2s_pre[half]:
                 if const_expr(STRIP_IM2COL):
                     k_col = k_base + cc
                     lin = m_row * crs + k_col
-                    safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(OOB_SENTINEL_ELEM)))
+                    safe = fx.Int32((m_row < fx.Int64(npq)).select(lin, fx.Int64(OOB_SENTINEL_ELEM)))
                 else:
                     safe = im2col_safe_elem_pre(spatial, k_base + cc, k_iter)
                 base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
@@ -615,26 +616,25 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
             y_elem_base = fx.Int64(fx.ptrtoint(fx.get_iter(y)))
 
         def _big_store(off_elem, value):
-            addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
-            ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y).llvm_ptr
-            v = value.ir_value() if hasattr(value, "ir_value") else value
-            llvm.StoreOp(v, ptr, alignment=2)
+            addr = y_elem_base + fx.Int64(off_elem) * 2
+            ptr = _global_ptr_from_addr(addr, fx.BFloat16.ir_type, y, alignment=2)
+            fx.generic_store(ptr, value)
 
         def store_cfrag(c_frag, base_row, base_col):
             for ti in range_constexpr(N_TILES_A):
                 for tj in range_constexpr(N_TILES_B):
-                    col = base_col + fx.Index(tj * 16) + lane_id % 16
-                    col_valid = col < fx.Index(k)
+                    col = base_col + fx.Int64(tj * 16) + lane_id % 16
+                    col_valid = col < fx.Int64(k)
                     if const_expr(has_bias):
-                        col_i = fx.Int32(arith.select(col_valid, col, fx.Index(0)))
+                        col_i = fx.Int32(col_valid.select(col, fx.Int64(0)))
                         fx.copy(bias_atom, fx.slice(bias_div, (None, col_i)), bias_reg)
-                        bias_val = fx.Float32(fx.memref_load_vec(bias_reg)[0])
+                        bias_val = fx.memref_load_vec(bias_reg)[0]
                     vec_f32 = Vec(c_frag[mfma.idx(ti, tj)])
-                    row_base = base_row + fx.Index(ti * 16) + (lane_id // 16) * 4
+                    row_base = base_row + fx.Int64(ti * 16) + (lane_id // 16) * 4
 
                     if const_expr(_vec_store):
                         off0 = col * dhw + row_base
-                        row_ok = col_valid & (row_base + fx.Index(3) < fx.Index(npq))
+                        row_ok = col_valid & (row_base + fx.Int64(3) < fx.Int64(npq))
                         if row_ok:
                             vals = []
                             for i in range_constexpr(4):
@@ -646,11 +646,11 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                         continue
 
                     for i in range_constexpr(4):
-                        row = row_base + fx.Index(i)
+                        row = row_base + fx.Int64(i)
                         out = vec_f32[i]
                         if const_expr(has_bias):
                             out = out + bias_val
-                        valid = col_valid & (row < fx.Index(npq))
+                        valid = col_valid & (row < fx.Int64(npq))
                         if const_expr(n == 1):
                             off_ncdhw = col * dhw + row
                         else:
@@ -663,19 +663,19 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
                         else:
                             # Route masked-off lanes one element past the end; the
                             # descriptor's num_records bound drops them in hardware.
-                            off_i = fx.Int32(arith.select(valid, off_ncdhw, fx.Index(npq * k)))
-                            fx.memref_store_vec(Vec.filled(1, out.to(fx.BFloat16), fx.BFloat16), y_reg_1)
+                            off_i = fx.Int32(valid.select(off_ncdhw, fx.Int64(npq * k)))
+                            fx.memref_store_vec(fx.full(1, out.to(fx.BFloat16), fx.BFloat16), y_reg_1)
                             fx.copy(y_atom_1, y_reg_1, fx.slice(y_div, (None, off_i)))
 
         wave_m_offset = wave_m * (N_TILES_A * 16)
         wave_n_offset = wave_n * (N_TILES_B * 16)
-        base_row = m_offset + fx.Index(wave_m_offset)
-        base_col = block_n * BLOCK_N + fx.Index(wave_n_offset)
+        base_row = m_offset + fx.Int64(wave_m_offset)
+        base_col = block_n * BLOCK_N + fx.Int64(wave_n_offset)
 
         store_cfrag(c00_frag, base_row, base_col)
-        store_cfrag(c01_frag, base_row, base_col + fx.Index(LDS_BLOCK_N))
-        store_cfrag(c10_frag, base_row + fx.Index(LDS_BLOCK_M), base_col)
-        store_cfrag(c11_frag, base_row + fx.Index(LDS_BLOCK_M), base_col + fx.Index(LDS_BLOCK_N))
+        store_cfrag(c01_frag, base_row, base_col + fx.Int64(LDS_BLOCK_N))
+        store_cfrag(c10_frag, base_row + fx.Int64(LDS_BLOCK_M), base_col)
+        store_cfrag(c11_frag, base_row + fx.Int64(LDS_BLOCK_M), base_col + fx.Int64(LDS_BLOCK_N))
 
     @flyc.jit
     def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):

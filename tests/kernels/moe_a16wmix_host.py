@@ -29,6 +29,7 @@ import torch
 from kernels.common.tensor_shim import _run_compiled
 from kernels.moe.moe_2stage_a16wmix.gemm1 import compile_gemm1_a16w4_port, gemm1_a16w4_grid
 from kernels.moe.moe_2stage_a16wmix.gemm2 import compile_gemm2_a16w4_port, gemm2_a16w4_grid
+from kernels.moe.moe_2stage_a16wmix.utils import a16wmix_resolve_arch
 
 __all__ = [
     "compile_gemm1_a16w4_port",
@@ -45,6 +46,17 @@ __all__ = [
     "resolve_a16wmix_gemm1_config",
     "resolve_a16wmix_gemm2_config",
 ]
+
+
+def _kernel_w_dtype(w_dtype):
+    """Translate this repo's weight-dtype spelling to the kernel's.
+
+    The kernel modules came from aiter, which spells the MX-FP4 weight dtype "fp4";
+    FlyDSL's tests and this host layer say "mxfp4". "int4" and "bf16" are spelled the
+    same on both sides. Keeping the translation here lets the kernel files stay
+    byte-identical to aiter's, which is what makes the next sync cheap.
+    """
+    return "fp4" if w_dtype == "mxfp4" else w_dtype
 
 
 @functools.cache
@@ -76,9 +88,10 @@ def _get_compiled_gemm1_a16w4(
         b_cache_mod=b_cache_mod,
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
-        w_dtype=w_dtype,
+        w_dtype=_kernel_w_dtype(w_dtype),
         w_layout=w_layout,
         k_wave=k_wave,
+        rocm_arch=a16wmix_resolve_arch(),
     )
 
 
@@ -106,8 +119,9 @@ def _get_compiled_gemm2_a16w4(
         b_cache_mod=b_cache_mod,
         xcd_swizzle=xcd_swizzle,
         waves_per_eu=waves_per_eu,
-        w_dtype=w_dtype,
+        w_dtype=_kernel_w_dtype(w_dtype),
         persist=persist,
+        rocm_arch=a16wmix_resolve_arch(),
     )
 
 
@@ -311,14 +325,21 @@ def a16wi4_recommend_block_m(tokens, experts, topk, *, base_block_m=32):
 
 
 def a16wi4_scale_to_kernel_layout(scale_ng):
-    """Re-layout a logical int4 scale ``[E, N, G]`` into the ``(E, N, G//2, 2)``
-    bf16-pair layout the kernel expects (dword = n*(G//2) + group//2, even/odd group ->
-    lo/hi bf16). ``G`` must be even; input is already N-major.
+    """Re-layout a logical int4 scale ``[E, N, G]`` into the ``(E, G//2, N, 2)``
+    bf16-pair layout the kernel expects.
+
+    The kernel reads dword ``e*(G//2*N) + (group//2)*N + n`` and picks the low bf16 for
+    an even group, the high one for an odd group -- so the pair axis is innermost and N
+    is the next-fastest, which puts 16 consecutive N-lanes on one 64 B line. This is
+    aiter's layout (``aiter/ops/shuffle.py::shuffle_scale_for_int4``); it replaced the
+    older N-major ``(E, N, G//2, 2)`` when the kernel modules were synced from aiter.
+    ``G`` must be even.
     """
     E, N, G = scale_ng.shape
     assert G % 2 == 0, f"num_groups must be even for bf16-pair packing, got {G}"
-    s = scale_ng.to(torch.bfloat16).contiguous().view(E, N, G // 2, 2).contiguous()
-    return s
+    s = scale_ng.to(torch.bfloat16).contiguous().view(E, N, G // 2, 2)
+    # [E, N, G//2, 2] -> [E, G//2, N, 2]; s[e, g, n, p] is group 2*g+p at position n.
+    return s.permute(0, 2, 1, 3).contiguous()
 
 
 def flydsl_a16w4_gemm1(
@@ -357,8 +378,9 @@ def flydsl_a16w4_gemm1(
     """a16w4/a16wi4/a16w16 fused stage1: gate+up GEMM + SiLU -> bf16 intermediate.
 
     ``w_dtype="mxfp4"`` (default): W1 mxfp4, ``w1_scale_u8`` = shuffled e8m0. ``"int4"``:
-    W1 packed signed int4 (same preshuffle as mxfp4), ``w1_scale_u8`` groupwise bf16 in
-    the ``(E, N_OUT, G//2, 2)`` layout (see :func:`a16wi4_scale_to_kernel_layout`).
+    W1 packed signed int4 (int8 preshuffle, then kpack=8 nibble packing),
+    ``w1_scale_u8`` groupwise bf16 in the ``(E, G//2, N_OUT, 2)`` layout
+    (see :func:`a16wi4_scale_to_kernel_layout`).
     ``"bf16"``: RAW bf16 W1 preshuffled ``shuffle_weight (16,16)``; ``w1_scale_u8`` unused.
 
     ``w_layout="standard"`` (default) consumes the N-major GGUU preshuffle. ``"guinterleave"``

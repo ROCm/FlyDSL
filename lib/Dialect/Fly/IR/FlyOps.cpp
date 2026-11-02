@@ -1479,6 +1479,16 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(GetCopyAtomOp) {
+  inferredReturnTypes.assign({cast<TiledCopyType>(operands[0].getType()).getCopyAtom()});
+  return success();
+}
+
+FLY_INFER_RETURN_TYPES(GetMmaAtomOp) {
+  inferredReturnTypes.assign({cast<TiledMmaType>(operands[0].getType()).getMmaAtom()});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
   Type srcTy = operands[1].getType();
@@ -1926,6 +1936,16 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   }
   return success();
 }
+
+static LogicalResult verifyMmaOperandGroups(Operation *op, ValueRange a, ValueRange b) {
+  if (a.empty() || b.empty())
+    return op->emitOpError("A and B operand groups must each contain at least one tensor");
+  return success();
+}
+
+LogicalResult MmaAtomCall::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
+LogicalResult MmaAtomCallSSA::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
 
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {

@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import TYPE_CHECKING, List, Tuple
+
+if TYPE_CHECKING:
+    from .ktrace import KtraceBackend
 
 
 @dataclass(frozen=True)
@@ -16,7 +21,23 @@ class GPUTarget:
 
     backend: str  # e.g. "rocm"
     arch: str  # e.g. "gfx942", "gfx950"
-    warp_size: int  # 64 for CDNA, 32 for RDNA
+    warp_size: int  # Target wave size (gfx9 CDNA: 64; gfx10/11/12, including CDNA5: 32)
+
+
+@dataclass(frozen=True)
+class AOTRuntimeConfig:
+    """Deployment contract between the generic exporter and a backend.
+
+    The archive implements FlyDSL's target-neutral AOT module ABI. It is
+    embedded into every exported object. ``runtime_libraries`` names the
+    libraries needed at link time, not their eventual ELF SONAMEs; the linker
+    selects those when building the deployed executable or shared library.
+    ``linker_flags`` does not include installation-specific search paths.
+    """
+
+    archive_basename: str
+    runtime_libraries: Tuple[str, ...]
+    linker_flags: Tuple[str, ...]
 
 
 class BaseBackend(metaclass=ABCMeta):
@@ -27,7 +48,7 @@ class BaseBackend(metaclass=ABCMeta):
     * MLIR pass-pipeline fragments for lowering Fly IR to device binary,
     * gpu.module target attributes,
     * native-library patterns for toolchain fingerprinting (cache key),
-    * runtime shared-library basenames for the JIT ExecutionEngine.
+    * runtime artifacts for JIT and AOT export.
     """
 
     def __init__(self, target: GPUTarget) -> None:
@@ -70,13 +91,17 @@ class BaseBackend(metaclass=ABCMeta):
         """Ordered list of MLIR PassManager.parse fragments.
 
         ``compile_hints`` carries per-kernel knobs such as ``waves_per_eu``
-        and ``maxnreg`` (from ``CompilationContext.get_compile_hints()``).
+        (from ``CompilationContext.get_compile_hints()``).
         """
         ...
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Optionally materialize backend-specific hints before the pipeline."""
         return None
+
+    @classmethod
+    def ktrace_backend(cls) -> KtraceBackend:
+        raise NotImplementedError(f"ktrace is not supported by {cls.__name__}")
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         """Split the pipeline for external device binary code generation.
@@ -113,3 +138,17 @@ class BaseBackend(metaclass=ABCMeta):
     def jit_runtime_lib_basenames(self) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""
         ...
+
+    @classmethod
+    def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        """Backend runtime contract for self-contained AOT host objects."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def aot_object_index(cls, arch: str) -> int:
+        """Index of the compiled object selected for ``arch``.
+
+        Backends that emit a fat ``gpu.binary`` can override this method to
+        map the requested architecture to their target-list ordering.
+        """
+        return 0

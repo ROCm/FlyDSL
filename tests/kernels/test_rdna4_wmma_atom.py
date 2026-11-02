@@ -45,7 +45,7 @@ WAVE_SIZE = 32
 M = N = K = 16
 
 
-def _compile_single_wmma(elem_cls):
+def _compile_single_wmma(elem_cls_a, elem_cls_b):
     """One wave, one atom: C[16,16] = A[16,16] @ B[16,16].T."""
     f32 = fx.Float32
 
@@ -57,7 +57,7 @@ def _compile_single_wmma(elem_cls):
         bB = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(B)), fx.make_layout((N, K), (K, 1)))
         bC = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(C)), fx.make_layout((M, N), (N, 1)))
 
-        mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(M, N, K, elem_cls, f32))
+        mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(M, N, K, elem_cls_a, f32, elem_ty_b=elem_cls_b))
         tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((1, 1, 1), (0, 0, 0)))
         thr_mma = tiled_mma.thr_slice(tid)
 
@@ -65,14 +65,15 @@ def _compile_single_wmma(elem_cls):
         frag_B = thr_mma.make_fragment_B(bB)
         frag_C = thr_mma.make_fragment_C(bC)
 
-        copy_ab = fx.make_copy_atom(fx.rocdl.BufferCopy(elem_cls.width), elem_cls)
+        copy_a = fx.make_copy_atom(fx.rocdl.BufferCopy(elem_cls_a.width), elem_cls_a)
+        copy_b = fx.make_copy_atom(fx.rocdl.BufferCopy(elem_cls_b.width), elem_cls_b)
         copy_c = fx.make_copy_atom(fx.rocdl.BufferCopy(f32.width), f32)
-        thr_copy_A = fx.make_tiled_copy_A(copy_ab, tiled_mma).get_slice(tid)
-        thr_copy_B = fx.make_tiled_copy_B(copy_ab, tiled_mma).get_slice(tid)
+        thr_copy_A = fx.make_tiled_copy_A(copy_a, tiled_mma).get_slice(tid)
+        thr_copy_B = fx.make_tiled_copy_B(copy_b, tiled_mma).get_slice(tid)
         thr_copy_C = fx.make_tiled_copy_C(copy_c, tiled_mma).get_slice(tid)
 
-        fx.copy(copy_ab, thr_copy_A.partition_S(bA), thr_copy_A.retile(frag_A))
-        fx.copy(copy_ab, thr_copy_B.partition_S(bB), thr_copy_B.retile(frag_B))
+        fx.copy(copy_a, thr_copy_A.partition_S(bA), thr_copy_A.retile(frag_A))
+        fx.copy(copy_b, thr_copy_B.partition_S(bB), thr_copy_B.retile(frag_B))
 
         frag_C.fill(0)
         fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
@@ -86,25 +87,29 @@ def _compile_single_wmma(elem_cls):
 
 
 @pytest.mark.parametrize(
-    "elem_cls, torch_dtype",
+    "elem_cls_a, elem_cls_b, torch_dtype_a, torch_dtype_b",
     [
-        (fx.BFloat16, torch.bfloat16),
-        (fx.Float16, torch.float16),
+        (fx.BFloat16, fx.BFloat16, torch.bfloat16, torch.bfloat16),
+        (fx.Float16, fx.Float16, torch.float16, torch.float16),
+        (fx.Float8E4M3FN, fx.Float8E4M3FN, torch.float8_e4m3fn, torch.float8_e4m3fn),
+        (fx.Float8E4M3FN, fx.Float8E5M2, torch.float8_e4m3fn, torch.float8_e5m2),
+        (fx.Float8E5M2, fx.Float8E4M3FN, torch.float8_e5m2, torch.float8_e4m3fn),
+        (fx.Float8E5M2, fx.Float8E5M2, torch.float8_e5m2, torch.float8_e5m2),
     ],
-    ids=["bf16", "f16"],
+    ids=["bf16", "f16", "fp8_fp8", "fp8_bf8", "bf8_fp8", "bf8_bf8"],
 )
-def test_single_wmma_atom(elem_cls, torch_dtype):
+def test_single_wmma_atom(elem_cls_a, elem_cls_b, torch_dtype_a, torch_dtype_b):
     """A single gfx120x.wmma atom call must match A @ B.T exactly for integers.
 
     Integer-valued inputs keep the result exactly representable, so any
     mismatch is a fragment-layout bug rather than rounding.
     """
     torch.manual_seed(0)
-    a = (torch.randn(M, K, device="cuda") * 4).round().to(torch_dtype)
-    b = (torch.randn(N, K, device="cuda") * 4).round().to(torch_dtype)
+    a = (torch.randn(M, K, device="cuda") * 4).round().to(torch_dtype_a)
+    b = (torch.randn(N, K, device="cuda") * 4).round().to(torch_dtype_b)
     c = torch.zeros(M, N, dtype=torch.float32, device="cuda")
 
-    launch = _compile_single_wmma(elem_cls)
+    launch = _compile_single_wmma(elem_cls_a, elem_cls_b)
     launch(a, b, c, stream=torch.cuda.current_stream())
     torch.cuda.synchronize()
 

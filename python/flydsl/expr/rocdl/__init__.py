@@ -23,6 +23,7 @@ from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
+from .utils import require_lds_dma_support
 
 __all__ = [
     # Targets
@@ -57,11 +58,16 @@ __all__ = [
     "make_buffer_ptr",
     "make_buffer_tensor",
     "get_buffer_rsrc",
+    "s_buffer_load",
     # Operations
     "sched_mfma",
     "sched_vmem",
     "sched_dsrd",
     "sched_dswr",
+    "sched_bank",
+    "sched_vgpr",
+    "sched_sgpr",
+    "sched_agpr",
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -103,6 +109,10 @@ mask_dswr = 0x200
 
 _ods_sched_barrier = globals().get("sched_barrier")
 _ods_sched_group_barrier = globals().get("sched_group_barrier")
+_ods_sched_bank = globals().get("sched_bank")
+_ods_sched_vgpr = globals().get("sched_vgpr")
+_ods_sched_sgpr = globals().get("sched_sgpr")
+_ods_sched_agpr = globals().get("sched_agpr")
 
 _SCHED_MASK_INT_TO_KW = {
     0x000: "none",
@@ -166,6 +176,58 @@ def sched_dsrd(cnt):
 @dsl_loc_tracing
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
+
+
+@dsl_loc_tracing
+def sched_bank(value, bank, soft=False, **kw):
+    """VGPR bank scheduling hint (gfx1250).
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the requested 256-register bank (0-3).
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    """
+    val_ir = _to_ir(value)
+    return _ods_sched_bank(res=val_ir.type, value=val_ir, bank=bank, soft=soft or None, **kw)
+
+
+@dsl_loc_tracing
+def sched_vgpr(value, regnum, soft=False, **kw):
+    """VGPR exact-register scheduling hint.
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the specified VGPR number (0-1023).
+    For wide values (64/128/256-bit), *regnum* is the starting register.
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    """
+    val_ir = _to_ir(value)
+    return _ods_sched_vgpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
+
+
+@dsl_loc_tracing
+def sched_sgpr(value, regnum, soft=False, **kw):
+    """SGPR exact-register scheduling hint.
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the specified SGPR number (0-105).
+    For wide values (64/128/256-bit), *regnum* is the starting register.
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    """
+    val_ir = _to_ir(value)
+    return _ods_sched_sgpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
+
+
+@dsl_loc_tracing
+def sched_agpr(value, regnum, soft=False, **kw):
+    """AGPR exact-register scheduling hint (gfx90a/gfx940).
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the specified AGPR number (0-255).
+    For wide values (64/128/256-bit), *regnum* is the starting register.
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    Only valid on targets with MAI instructions.
+    """
+    val_ir = _to_ir(value)
+    return _ods_sched_agpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
 
 
 def _unwrap_mfma_operand(v):
@@ -582,8 +644,8 @@ def disable_xdl_arb_stall():
     from .. import arith as _arith
     from ..typing import T
 
-    # hwreg encoding: ID=26(SCHED_MODE), Offset=4, Size=1 -> 282
-    imm_val = _arith.unwrap(_arith.constant(282, type=T.i32))
+    # hwreg encoding: ID=26(SCHED_MODE), Offset=2, Size=1 -> 154.
+    imm_val = _arith.unwrap(_arith.constant(154, type=T.i32))
     val_val = _arith.unwrap(_arith.constant(1, type=T.i32))
 
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
@@ -601,8 +663,8 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
     Args:
         result_type: Vector result type, e.g. ``VectorType.get([8], f16)``.
-        lds_memref:  LDS memref value (address-space 3), typically from
-                     ``SmemPtr.get()`` or ``get_op_result_or_value(...)``.
+        lds_memref:  LDS memref value (address-space 3), typically a
+                     ``fx.SharedAllocator()`` sub-buffer's ``.view(...)``.
         elem_offset: Per-lane linearized element offset into the memref
                      (ArithValue / ir.Value of index type / Python int).
         elem_bytes:  Element size in bytes (Python int, e.g. 2 for f16).
@@ -812,6 +874,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=N
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
+    require_lds_dma_support("raw_ptr_buffer_load_lds")
     if aux is not None and not isinstance(aux, _ir.Attribute):
         if isinstance(aux, int):
             aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)

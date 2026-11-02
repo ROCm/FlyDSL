@@ -49,3 +49,26 @@ func.func @test_wmma_iu4_signed_clamp(
   fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
   return
 }
+
+// -----
+
+// bf16 WMMA with modC and reuse controls: verifies that modC / reuseA /
+// reuseB are forwarded to the emitted rocdl.wmma op on the bf16 path.
+
+// CHECK-LABEL: @test_wmma_bf16_modc_reuse
+func.func @test_wmma_bf16_modc_reuse(
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1, reuseA = true, reuseB = true>>) {
+  %lay_ab = fly.static : !fly.layout<16:1>
+  %lay_cd = fly.static : !fly.layout<8:1>
+  %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
+  %a = fly.memref.alloca(%lay_ab) : (!fly.layout<16:1>) -> !fly.memref<bf16, register, 16:1>
+  %b = fly.memref.alloca(%lay_ab) : (!fly.layout<16:1>) -> !fly.memref<bf16, register, 16:1>
+  %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
+
+  // CHECK: rocdl.wmma.f32.16x16x32.bf16
+  // CHECK-SAME: modC = neg
+  // CHECK-SAME: reuseA = true
+  // CHECK-SAME: reuseB = true
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1, reuseA = true, reuseB = true>>, !fly.memref<f32, register, 8:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<f32, register, 8:1>) -> ()
+  return
+}

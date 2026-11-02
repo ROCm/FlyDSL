@@ -327,6 +327,13 @@ def test_grouped_moe_token_sweep(token_num):
     _check_accuracy(_grouped_moe(**args), ref)
 
 
+def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
+    # model_dim is stage 1's K; with tile_k=256, K=640 used to drop its last 128 columns.
+    args, _ = _build_case(8, 640, 256, 64, 2)
+    with pytest.raises(ValueError, match="multiple of tile_k"):
+        _grouped_moe(**args)
+
+
 def test_grouped_moe_stability():
     args, _ = _build_case(8, 512, 256, 128, 2, seed=1)
     first = _grouped_moe(**args).clone()

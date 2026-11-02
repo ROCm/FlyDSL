@@ -2,6 +2,7 @@ get_property(_backend_opt_libs GLOBAL PROPERTY FLYDSL_BACKEND_FLYOPT_LINK_LIBS)
 
 set(LIBS
   MLIRFlyDialect
+  MLIRFlyKtraceDialect
   ${_backend_opt_libs}
   MLIRRegisterAllExtensions
 

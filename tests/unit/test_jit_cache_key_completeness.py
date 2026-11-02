@@ -40,6 +40,30 @@ def test_env_var_drift_changes_cache_key(monkeypatch):
     assert k1 != k2, "cache key must change when whitelisted env var changes"
 
 
+def test_xnack_codegen_env_is_gfx1250_only(monkeypatch):
+    """LLVM_GFX1250_ANY_XNACK_CODEGEN changes codegen only for gfx1250.
+
+    It must split that arch's cache key and leave every other arch's key alone.
+    """
+    from flydsl.compiler.backends import GPUTarget
+
+    @flyc.jit
+    def k(A: fx.Tensor):
+        pass
+
+    A = torch.zeros(8, dtype=torch.float32)
+    k._ensure_sig()
+
+    def key_for(arch, mode):
+        warp = 32 if arch.startswith("gfx12") else 64
+        k._backend_target = GPUTarget(backend="rocm", arch=arch, warp_size=warp)
+        monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", mode)
+        return _key(k, A)
+
+    assert key_for("gfx942", "0") == key_for("gfx942", "1")
+    assert key_for("gfx1250", "0") != key_for("gfx1250", "1")
+
+
 def test_globals_drift_default_raises(tmp_path, monkeypatch):
     """mutating a referenced global must raise."""
     src = tmp_path / "drift_default.py"
@@ -423,3 +447,66 @@ def test_enum_closures_reach_the_cache_key():
 
     # No address, or the key would differ between processes and never hit.
     assert not any("0x" in v for v in baseline), baseline
+
+
+def test_captured_dtype_class_reaches_the_cache_key():
+    """A captured dtype class must change the cache key.
+
+    fp16 and bf16 can share the same captured scalars. The class is not a
+    scalar or a function object, so it has to be recorded on the type branch.
+    """
+
+    def vals(dtype):
+        def traced():
+            return dtype
+
+        return jit_function._collect_closure_scalar_vals(traced)
+
+    baseline = vals(fx.BFloat16)
+    assert baseline == vals(fx.BFloat16), "the identity must be stable"
+    assert vals(fx.Float16) != baseline
+
+    # No address, or the key would differ between processes and never hit.
+    assert not any("0x" in v for v in baseline), baseline
+
+
+def test_nested_kernel_captured_dtype_splits_manager_key(tmp_path, monkeypatch):
+    """A factory-captured dtype class must split the jit launcher manager_key.
+
+    The helper-level collector is not the production key. The serve path is
+    ``@flyc.jit`` capturing a ``KernelFunction``, then walking
+    ``_original_func`` into the kernel closure. If that walk used the rewritten
+    ``_func`` and dropped the freevar, the helper test would still pass.
+    """
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    mod = _load_mod(
+        tmp_path,
+        "captured_dtype_kernel",
+        """
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
+
+        def make_launch(dtype):
+            @flyc.kernel
+            def k(out: fx.Tensor):
+                _ = dtype
+
+            @flyc.jit
+            def launch(out: fx.Tensor):
+                k(out).launch(grid=(1, 1, 1), block=[1, 1, 1])
+
+            return launch
+        """,
+    )
+    launch_bf16 = mod.make_launch(fx.BFloat16)
+    launch_fp16 = mod.make_launch(fx.Float16)
+    assert _manager_key(launch_bf16, reset=True) != _manager_key(launch_fp16, reset=True)
+
+    # Same entry as _jit_function_cache_key: the rewritten launcher, not the
+    # pre-rewrite snapshot. Identity must be stable and must not embed an address.
+    vals = jit_function._collect_closure_scalar_vals(launch_bf16.func)
+    assert any("BFloat16" in v for v in vals), vals
+    assert vals == jit_function._collect_closure_scalar_vals(launch_bf16.func)
+    assert not any("0x" in v for v in vals), vals

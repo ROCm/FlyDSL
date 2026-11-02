@@ -13,8 +13,6 @@ the hand-written reference asm (num_records bound on Q/K/V/O, tile count rounded
 up to even, and a kv padding-mask on the non-causal path).
 """
 
-import math as host_math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
@@ -60,7 +58,9 @@ from kernels.attention.flash_attn_utils import (
     _v_vec32_to_pair,
     _waitcnt_vm_n,
     bias_addressing_error,
+    daz_denormal_attr,
 )
+from kernels.common.kernels_common import LOG2E as BIAS_LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
 
 
@@ -126,7 +126,6 @@ def build_flash_attn_dualwave_swp_module(
     HAS_BIAS = bool(has_bias)
     HAS_ALIBI = bool(has_alibi)
     HAS_SINK = bool(has_sink)
-    BIAS_LOG2E = host_math.log2(host_math.e)
 
     traits = _make_dualwave_swp_traits(
         num_heads,
@@ -232,7 +231,11 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
+        if const_expr(traits.CAUSAL and not traits.VARLEN):
+            ctx.init_causal_lpt_order()
         ctx.init_sequence_lengths()
+        if const_expr(traits.CAUSAL and traits.VARLEN):
+            ctx.init_varlen_causal_lpt_order()
         ctx.init_descriptors()
         ctx.init_workspace()
         ctx.init_atoms_and_lds_ptrs()
@@ -270,7 +273,7 @@ def build_flash_attn_dualwave_swp_module(
             _BIAS_READ_BATCH = min(4, _BIAS_GROUPS)
             _bias_frag_ty = Vec.make_type(_BIAS_VEC, ctx.elem_dtype)
             _bias_frag_align = _BIAS_VEC * traits.BF16_BYTES
-            _bias_log2e = Vec.filled(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
+            _bias_log2e = fx.full(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
             _bias_lds_base_idx = fx.Index(fx.ptrtoint(ctx.lds.bias.ptr))
             _bias_gran_bytes = traits.DMA_BYTES
             _bias_gran_elems = traits.DMA_BYTES // traits.BF16_BYTES
@@ -295,10 +298,10 @@ def build_flash_attn_dualwave_swp_module(
             _alibi_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(AlibiSlopes), fx.make_layout(1, 1))
             _alibi_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
             _alibi_frag = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-            _alibi_idx_i32 = fx.Int32(ctx.batch_idx) * fx.Int32(alibi_stride_b) + fx.Int32(ctx.q_head_idx)
+            _alibi_idx_i32 = fx.Int32(ctx.batch_idx) * alibi_stride_b + fx.Int32(ctx.q_head_idx)
             fx.copy(_alibi_atom, fx.slice(_alibi_div, (None, _alibi_idx_i32)), _alibi_frag)
 
-            _alibi_neg_slope = Vec(_alibi_frag.load(), (1,), fx.Float32)[0] * fx.Float32(-BIAS_LOG2E)
+            _alibi_neg_slope = _alibi_frag.load()[0] * fx.Float32(-BIAS_LOG2E)
 
         # ---------------- Attention sink ----------------
         # Split-K folds the sink in the combine pass instead, so skip the load here.
@@ -311,7 +314,7 @@ def build_flash_attn_dualwave_swp_module(
 
                 fx.copy(_sink_atom, fx.slice(_sink_div, (None, fx.Int32(ctx.q_head_idx))), _sink_frag)
 
-                return Vec(_sink_frag.load(), (1,), fx.Float32)[0] * fx.Float32(BIAS_LOG2E)
+                return _sink_frag.load()[0] * fx.Float32(BIAS_LOG2E)
 
         _BIAS_VMCNT = ctx.NUM_DMA_K + ctx.NUM_DMA_V
         _BIAS_VMCNT_NO_K = ctx.NUM_DMA_V
@@ -359,7 +362,7 @@ def build_flash_attn_dualwave_swp_module(
                 for gb in range_constexpr(0, _BIAS_GROUPS, _BIAS_READ_BATCH):
                     raw = [_read_bias_frag(h, gb + k, buf) for k in range_constexpr(_BIAS_READ_BATCH)]
                     for k in range_constexpr(_BIAS_READ_BATCH):
-                        bv = Vec(Vec(raw[k], (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
+                        bv = Vec(raw[k], (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32)
                         r0 = (gb + k) * _BIAS_VEC
                         acc = Vec.from_elements([out[r0 + e] for e in range_constexpr(_BIAS_VEC)], fx.Float32)
                         fused = bv * _bias_log2e + acc
@@ -969,7 +972,6 @@ def build_flash_attn_dualwave_swp_module(
 
         passthrough_entries = (
             [
-                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
                 ["no-nans-fp-math", "true"],
                 ["unsafe-fp-math", "true"],
             ]
@@ -1001,6 +1003,7 @@ def build_flash_attn_dualwave_swp_module(
                 "rocdl.waves_per_eu": traits.WAVES_PER_EU,
                 "rocdl.flat_work_group_size": f"{traits.BLOCK_SIZE},{traits.BLOCK_SIZE}",
                 "passthrough": passthrough_entries,
+                "llvm.denormal_fpenv": (daz_denormal_attr() if const_expr(traits.DAZ) else None),
             },
         ).launch(
             grid=(traits.NUM_HEADS_Q, num_q_blocks, grid_z),
@@ -1008,9 +1011,11 @@ def build_flash_attn_dualwave_swp_module(
             stream=stream,
         )
         if const_expr(traits.SPLITK):
-            combine_rows = bs_idx * traits.NUM_HEADS_Q * sl_idx
+            # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
+            combine_rows = traits.NUM_HEADS_Q * sl_idx
+            combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
             flash_attn_splitk_combine_kernel(O, DebugCounts, LSE, Sink, batch_size, seq_len, stride_q_n).launch(
-                grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
+                grid=(combine_blocks, bs_idx, 1),
                 block=(COMBINE_BLOCK, 1, 1),
                 stream=stream,
             )

@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""FP8xFP8 preshuffle GEMM kernels for gfx1250."""
+"""FP8xFP8 GEMM for gfx1250 with preshuffled or row-major [N, K] B."""
 
 import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
-from flydsl.expr.rocdl import cluster, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
+from flydsl.runtime.device import check_smem_capacity
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import check_smem_capacity
 from kernels.common.gfx1250_cluster import compute_mcast_masks
+from kernels.common.kernels_common import format_kernel_name
 
 from .gemm_common_gfx1250 import (
     make_lds_copy_ops,
@@ -45,13 +46,31 @@ def launch_gemm_a8w8(
     num_buffers: Constexpr[int],
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
-    is_bsc: Constexpr[bool],
+    is_mxscale: Constexpr[bool],
+    block_size: Constexpr[int],
+    split_k: Constexpr[int] = 1,
+    a_preshuffle: Constexpr[bool] = False,
+    b_preshuffle: Constexpr[bool] = True,
 ):
+    # The 128-wide row-major B path exhibits intermittent numerical failures.
+    # Keep it unavailable until its correctness issue has been resolved.
+    if not b_preshuffle and tile_k < 256:
+        raise ValueError("[FlyDSL gfx1250] row-major FP8 B requires tile_k >= 256")
+    mx32 = is_mxscale and block_size == 32
+    mx128 = is_mxscale and block_size == 128
+    A_PAIR = 2 if a_preshuffle else 1
+    if a_preshuffle and tile_m % 2 != 0:
+        raise ValueError(f"[FlyDSL gfx1250] a_preshuffle needs an even tile_m, got {tile_m}")
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
-    WAVE = 32
+    WAVE = fx.num_warp_threads()
     K_WS = tile_k // WMMA_K
+    # Pair updates as q = -A0*B0-C; C = A1*B1-q. The exact sum is unchanged,
+    # while alternating signs reduces long-K cancellation rounding bias.
+    balanced_accum = mx32 and K_WS % 2 == 0
+    B_NBLOCK = 16 if b_preshuffle else 1
+    B_PAD = 0 if b_preshuffle else 16
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
     wmma_m_rep = warp_tile_m // WMMA_M
@@ -61,10 +80,14 @@ def launch_gemm_a8w8(
     block = num_waves * WAVE
 
     LDS_PAD_A = 16
-    A_LDS_ROW = tile_k + LDS_PAD_A
-    B_LDS_ROW = tile_k * 16
-    STAGE_A = ((tile_m * A_LDS_ROW + 15) // 16) * 16
-    STAGE_B = (((tile_n // 16) * B_LDS_ROW + 15) // 16) * 16
+    A_LDS_ROWS = tile_m // A_PAIR
+    A_TDM_ROW = A_PAIR * tile_k
+    A_LDS_ROW = A_TDM_ROW + LDS_PAD_A
+    B_INNER = tile_k * B_NBLOCK
+    B_OUTER = tile_n // B_NBLOCK
+    B_LDS_ROW = B_INNER + B_PAD
+    STAGE_A = ((A_LDS_ROWS * A_LDS_ROW + 15) // 16) * 16
+    STAGE_B = ((B_OUTER * B_LDS_ROW + 15) // 16) * 16
     ALIGNED_N = tile_n % 128 == 0 or 128 % tile_n == 0
     _period = math.lcm(tile_n, 128)
     N_BLOCKS = (
@@ -72,20 +95,31 @@ def launch_gemm_a8w8(
         if ALIGNED_N
         else max((bn + tile_n - 1) // 128 - bn // 128 + 1 for bn in range(0, _period, tile_n))
     )
-    STAGE_SA = ((K_WS * tile_m + 15) // 16) * 16  # LDS [K_WS][tile_m], M contiguous
-    STAGE_SB = ((N_BLOCKS * K_WS + 15) // 16) * 16  # LDS [N_BLOCKS][K_WS], K contiguous
+    SC_WORDS = tile_k // 4  # mx32: i32 scale words per 32-row super per K-tile
+    SA_SHAPE = (max(1, tile_m // 32), tile_k) if mx32 else (K_WS, tile_m)
+    SB_SHAPE = (tile_n // 32, tile_k) if mx32 else (N_BLOCKS, K_WS)
+    STAGE_SA = ((SA_SHAPE[0] * SA_SHAPE[1] + 15) // 16) * 16
+    STAGE_SB = ((SB_SHAPE[0] * SB_SHAPE[1] + 15) // 16) * 16
     SA_OFF = STAGE_A + STAGE_B
     SB_OFF = SA_OFF + STAGE_SA
     AB_PITCH = ((STAGE_A + STAGE_B + 1023) // 1024) * 1024
-    BSC_PITCH = ((SB_OFF + STAGE_SB + 1023) // 1024) * 1024
-    PITCH = BSC_PITCH if is_bsc else AB_PITCH
+    SCALE_PITCH = ((SB_OFF + STAGE_SB + 1023) // 1024) * 1024
+    PITCH = SCALE_PITCH if is_mxscale else AB_PITCH
     out_cls = fx.Float16 if out_is_f16 else fx.BFloat16
-    C_STORE_B = (tile_m * tile_n * 2 + 127) // 128 * 128
+    C_PAD = 8 if tile_n >= 128 else 0
+    C_LDS_ROW = tile_n + C_PAD
+    C_STORE_B = (tile_m * C_LDS_ROW * 2 + 127) // 128 * 128
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
     use_quadrant = (wmma_m_rep % 2 == 0) and (wmma_n_rep % 2 == 0) and (n_acc >= 8)
+    scale_tag = "mx32" if mx32 else ("mx128" if mx128 else "ptpc")
+    kernel_name = format_kernel_name(
+        f"gemm_a8w8_{scale_tag}_t{tile_m}x{tile_n}x{tile_k}"
+        f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
+        f"_cm{cluster_m}_cn{cluster_n}" + ("_apre" if a_preshuffle else "") + ("_brow" if not b_preshuffle else "")
+    )
 
-    @flyc.kernel(known_block_size=[block, 1, 1])
+    @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
     def kernel_gemm_a8w8(
         arg_c: fx.Pointer,
         arg_a: fx.Pointer,
@@ -99,14 +133,15 @@ def launch_gemm_a8w8(
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
     ):
-        K_TILES = i32_k // tile_k
+        K_TILES = i32_k // (tile_k * split_k)
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
         ldc64 = fx.Int64(i32_ldc)
 
-        tid = fx.Int32(fx.thread_idx.x)
-        bid_x, bid_y, _ = fx.block_idx
-        wave = rocdl.readfirstlane(T.i32, tid // WAVE)
+        tid = fx.thread_idx.x
+        bid_x, bid_y, bid_z = fx.block_idx
+        kt_base_i32 = fx.Int32(bid_z) * fx.Int32(K_TILES) if split_k > 1 else None
+        wave = fx.Int32(rocdl.readfirstlane(T.i32, tid // WAVE))
         lane = tid % WAVE
         lane16 = lane % 16
         kgrp = lane // 16
@@ -121,11 +156,17 @@ def launch_gemm_a8w8(
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
-        mn_oob = i32_m - blk_m  # valid M rows (A / scale_a / C)
-        nb_oob = None
-        stride_ask64 = None
-        if const_expr(is_bsc):
-            nb_oob = (i32_n // 128 - blk_n // 128) if not ALIGNED_N else None
+        mn_oob = i32_m - blk_m  # valid M rows (A / C, and mx128's per-row A-scale)
+        a_oob = (mn_oob + 1) >> 1 if const_expr(a_preshuffle) else mn_oob
+        b_block_stride = k64 * B_NBLOCK
+        nb_oob = stride_ask64 = sa_oob = None
+        if const_expr(mx32):
+            sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M super-rows (scale-A)
+        elif const_expr(mx128):
+            # Ceil, like sa_oob above: nb_oob is now the scale view's extent, so a floor
+            # drops the trailing partial 128-block. N=200/tile_n=192/blk_n=192 floors to a
+            # zero-row view and the last N tile's B scales come back zero-filled.
+            nb_oob = ((i32_n + 127) // 128 - blk_n // 128) if not ALIGNED_N else None
             stride_ask64 = fx.Int64(i32_stride_ascale_k)
 
         arena = fx.SharedAllocator(static=False)
@@ -145,113 +186,143 @@ def launch_gemm_a8w8(
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
 
         lds_load_b128, _ = make_lds_copy_ops(128)
+        lds_load_b32 = make_lds_copy_ops(32)[0] if const_expr(mx32) else None
 
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
-        gC_base = fx.recast_iter(fx.PointerType.get(out_cls.ir_type, arg_c.address_space), arg_c)
+        gC_base = fx.recast_iter(out_cls, arg_c)
         a_off0 = blk_m64 * lda64
-        b_off0 = blk_n64 // 16 * (k64 * 16)
+        b_off0 = blk_n64 // B_NBLOCK * b_block_stride
 
         W_A, W_B = 0, 1
-        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
-        atomA = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(
-                gA,
-                [mn_oob, None],
-                strides=[lda64, None],
-                num_warps=1,
-                pad_interval=tile_k,
-                pad_amount=LDS_PAD_A,
-                early_timeout=True,
-            ),
-            "workgroup_mask",
-            a_mask,
-        )
-        gB = _gv(gB_base, b_off0, (tile_n // 16, tile_k * 16), (tile_k * 16, 1))
-        atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[k64 * 16, None], num_warps=1, early_timeout=True),
-            "workgroup_mask",
-            b_mask,
-        )
-        W_SA = W_SB = gSA = atomSA = gSB = atomSB = None
-        if const_expr(is_bsc):
+        WARP1 = fx.make_layout(1, 1)  # every TDM here is issued by one wave
 
-            def _tdm1(gt, outer, inner, o_stride, mask=0):  # single-warp 2-D atom, both dims clamped
-                atom = fx.rocdl.make_tdm_atom(
-                    gt,
-                    [outer, inner],
-                    strides=[o_stride, None],
-                    num_warps=1,
-                    early_timeout=True,
-                )
-                return fx.atom_set_value(atom, "workgroup_mask", mask)
+        def _tiled(op, gt, box, tile, mask, num_warps=1):
+            atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(op, gt, box, tile, num_warps=num_warps)
+            return fx.atom_set_value(atom, "workgroup_mask", mask), coord
 
+        # The base pointer already carries this block's M/N offset, so the coordinate keeps
+        # only the K rest and the view must span every K tile the rest index can reach --
+        # with split_k that is the whole K, not one split's worth. Row slack in the LDS box
+        # replaces pad_interval/pad_amount; OOB comes from the view extent + boundary_check.
+        A_TILE = (A_LDS_ROWS, A_TDM_ROW)
+        gA = _gv(gA_base, a_off0, (a_oob, i32_k * A_PAIR), (lda64 * A_PAIR, 1))
+        atomA, coordA = _tiled(fx.rocdl.TensorLoad(), gA, fx.make_layout(A_TILE, (A_LDS_ROW, 1)), A_TILE, a_mask)
+        blkA = fx.zipped_divide(coordA, A_TILE)[None, (0, None)]
+
+        B_TILE = (B_OUTER, B_INNER)
+        gB = _gv(gB_base, b_off0, (B_OUTER, i32_k * B_NBLOCK), (b_block_stride, 1))
+        atomB, coordB = _tiled(fx.rocdl.TensorLoad(), gB, fx.make_layout(B_TILE, (B_LDS_ROW, 1)), B_TILE, b_mask)
+        blkB = fx.zipped_divide(coordB, B_TILE)[None, (0, None)]
+        W_SA = W_SB = atomSA = atomSB = blkSA = blkSB = None
+        if const_expr(is_mxscale):
             W_SA, W_SB = 2 % num_waves, 3 % num_waves
-            sa_off0 = blk_m64
-            sb_off0 = blk_n64 // 128 * (k64 // 128)
-            gSA = _gv(arg_scale_a, sa_off0, (K_WS, tile_m), (tile_m, 1))
-            atomSA = _tdm1(gSA, None, mn_oob, stride_ask64, a_mask)
-            gSB = _gv(arg_scale_b, sb_off0, (N_BLOCKS, K_WS), (K_WS, 1))
-            atomSB = _tdm1(gSB, nb_oob, None, k64 // 128, b_mask)
+            if const_expr(mx32):  # a K-tile is tile_k contiguous bytes of each super-row
+                sa_off0 = blk_m64 // 32 * k64
+                sb_off0 = blk_n64 // 32 * k64
+                gSA = _gv(arg_scale_a, sa_off0, (sa_oob, i32_k), (k64, 1))
+                atomSA, coordSA = _tiled(
+                    fx.rocdl.TensorLoad(), gSA, fx.make_layout(SA_SHAPE, (SA_SHAPE[1], 1)), SA_SHAPE, a_mask
+                )
+                blkSA = fx.zipped_divide(coordSA, SA_SHAPE)[None, (0, None)]
+                gSB = _gv(arg_scale_b, sb_off0, (SB_SHAPE[0], i32_k), (k64, 1))
+                atomSB, coordSB = _tiled(
+                    fx.rocdl.TensorLoad(), gSB, fx.make_layout(SB_SHAPE, (SB_SHAPE[1], 1)), SB_SHAPE, b_mask
+                )
+                blkSB = fx.zipped_divide(coordSB, SB_SHAPE)[None, (0, None)]
+            else:
+                # mx128 A-scale advances along the OUTER dim (K super-rows), so the rest it
+                # keeps is mode 0 and the view spans every K super-row, not just one split's.
+                sa_off0 = blk_m64
+                sb_off0 = blk_n64 // 128 * (k64 // 128)
+                gSA = _gv(arg_scale_a, sa_off0, (i32_k // WMMA_K, mn_oob), (stride_ask64, 1))
+                atomSA, coordSA = _tiled(
+                    fx.rocdl.TensorLoad(), gSA, fx.make_layout(SA_SHAPE, (SA_SHAPE[1], 1)), SA_SHAPE, a_mask
+                )
+                blkSA = fx.zipped_divide(coordSA, SA_SHAPE)[None, (None, 0)]
+                # nb_oob is None when N is aligned (the old atom read that as NO_CLAMP);
+                # a view needs a real extent, and the tile's own row count is the one
+                # that leaves zipped_divide a single N block.
+                sb_rows = N_BLOCKS if const_expr(ALIGNED_N) else nb_oob
+                gSB = _gv(arg_scale_b, sb_off0, (sb_rows, i32_k // 128), (k64 // 128, 1))
+                atomSB, coordSB = _tiled(
+                    fx.rocdl.TensorLoad(), gSB, fx.make_layout(SB_SHAPE, (SB_SHAPE[1], 1)), SB_SHAPE, b_mask
+                )
+                blkSB = fx.zipped_divide(coordSB, SB_SHAPE)[None, (0, None)]
 
-        def _wcopy(w, atom, gt, lv, imm_offset):
+        def _tcopy(w, atom, blk, ptr, tile, lds_row, kti):
+            """One wave's tiled copy; the coordinate rest is the i32 K-tile number."""
+            box = _lv(ptr, (tile, 1), ((lds_row, 1), tile[0] * lds_row))
+            ts, tg = fx.rocdl.cdna5.tdm_partition(atom, 0, WARP1, box, blk)
             if wave == w:
-                fx.copy(atom, gt, lv, imm_offset=imm_offset)
+                fx.copy(atom, tg[None, kti], ts[None, 0])
 
         def issue(s, kt):
             pa = _buf_ptr(s)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), fx.Int64(kt) * tile_k)
-            _wcopy(
-                W_B,
-                atomB,
-                gB,
-                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, tile_k * 16), (B_LDS_ROW, 1)),
-                fx.Int64(kt) * (tile_k * 16),
-            )
-            if const_expr(is_bsc):
-                _wcopy(
-                    W_SA,
-                    atomSA,
-                    gSA,
-                    _lv(fx.add_offset(pa, SA_OFF), (K_WS, tile_m), (tile_m, 1)),
-                    fx.Int64(kt * K_WS) * stride_ask64,
-                )
-                _wcopy(
-                    W_SB,
-                    atomSB,
-                    gSB,
-                    _lv(fx.add_offset(pa, SB_OFF), (N_BLOCKS, K_WS), (K_WS, 1)),
-                    fx.Int64(kt) * K_WS,
-                )
+            kti = fx.Int32(kt) if kt_base_i32 is None else fx.Int32(kt) + kt_base_i32
+            _tcopy(W_A, atomA, blkA, pa, A_TILE, A_LDS_ROW, kti)
+            _tcopy(W_B, atomB, blkB, fx.add_offset(pa, STAGE_A), B_TILE, B_LDS_ROW, kti)
+            if const_expr(is_mxscale):
+                _tcopy(W_SA, atomSA, blkSA, fx.add_offset(pa, SA_OFF), SA_SHAPE, SA_SHAPE[1], kti)
+                _tcopy(W_SB, atomSB, blkSB, fx.add_offset(pa, SB_OFF), SB_SHAPE, SB_SHAPE[1], kti)
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
 
+        a_pair_base = (
+            fx.Int64((wave_m * (warp_tile_m // 2) + (lane16 >> 1)) * A_LDS_ROW + (lane16 & 1) * WMMA_K + kgrp * 16)
+            if const_expr(a_preshuffle)
+            else None
+        )
+
         def load_a(buf, wm, ks):
-            row = wmb + wm * 16 + lane16
-            b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [Vec(lds_load_b128(buf, b0 + 32 * j)) for j in range_constexpr(4)]
+            if const_expr(a_preshuffle):
+                b0 = a_pair_base
+                off0 = wm * ((WMMA_M // 2) * A_LDS_ROW) + ks * (2 * WMMA_K)
+            else:
+                row = wmb + wm * 16 + lane16
+                b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
+                off0 = 0
+            v = [lds_load_b128(buf, b0 + (off0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
-            return v01.shuffle(v23, list(range(16)))
+            packed = v01.shuffle(v23, list(range(16)))
+            if const_expr(balanced_accum and ks % 2 == 0):
+                packed = packed ^ fx.full(16, -2139062144, fx.Int32)  # 0x80808080: negate each FP8 byte
+            return packed
 
         def load_b(buf, wn, ks):
-            nbl = wnb // 16 + wn
-            b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
-            v = [Vec(lds_load_b128(buf, b0 + 512 * j)) for j in range_constexpr(4)]
+            if const_expr(b_preshuffle):
+                nbl = wnb // 16 + wn
+                b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
+                v = [lds_load_b128(buf, b0 + 512 * j) for j in range_constexpr(4)]
+            else:
+                n = wnb + wn * 16 + lane16
+                b0 = fx.Int64(STAGE_A + n * B_LDS_ROW + ks * WMMA_K + kgrp * 16)
+                v = [lds_load_b128(buf, b0 + 32 * j) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
 
         def _bcast_byte(byte):
-            return byte.to(fx.Int32) * fx.Int32(0x01010101)
+            w = byte.to(fx.Int32)
+            return fx.Int32(rocdl.perm_b32(w, w, 0))
 
-        def load_sa(pbuf, wm, ks):
+        def load_sa(buf, pbuf, wm, ks):
             row = wmb + wm * 16 + lane16
-            byte = fx.Uint8(fx.ptr_load(pbuf + (SA_OFF + (ks * tile_m + row))))
-            return _bcast_byte(byte)
+            if const_expr(not mx32):
+                byte = fx.Uint8(fx.ptr_load(pbuf + (SA_OFF + (ks * tile_m + row))))
+                return _bcast_byte(byte)
+            if const_expr(tile_m < 32):
+                row = row + blk_m % 32  # sub-super tile: its rows sit mid-super-row
+            word = (row // 32) * SC_WORDS + ks * 32 + (row % 32)
+            return lds_load_b32(buf, SA_OFF + word * 4)[0]
 
-        def load_sb(pbuf, wn, ks):
+        def load_sb(buf, pbuf, wn, ks):
+            if const_expr(mx32):
+                col = wnb + wn * 16 + lane16
+                word = (col // 32) * SC_WORDS + ks * 32 + (col % 32)
+                return lds_load_b32(buf, SB_OFF + word * 4)[0]
             if const_expr(ALIGNED_N):
                 n_block = (wnb + wn * 16) // 128  # local offset alone folds to a constant here
             else:
@@ -260,15 +331,23 @@ def launch_gemm_a8w8(
             return _bcast_byte(byte)
 
         wmma_atom = None
-        if const_expr(is_bsc):
+        if const_expr(is_mxscale):
             wmma_atom = fx.make_mma_atom(
-                fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float8E4M3FN, fx.Float32)
+                fx.rocdl.WMMAScale(
+                    WMMA_M,
+                    WMMA_N,
+                    WMMA_K,
+                    fx.Float8E4M3FN,
+                    fx.Float8E4M3FN,
+                    fx.Float32,
+                    mod_c=1 if balanced_accum else 0,
+                )
             )
         else:
             wmma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float32))
         c_frags = [fx.make_rmem_tensor(8, fx.Float32) for _ in range_constexpr(n_acc)]
         for cf in c_frags:
-            cf.store(Vec.filled(8, 0.0, fx.Float32))
+            cf.store(fx.full(8, 0.0, fx.Float32))
 
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
@@ -276,7 +355,7 @@ def launch_gemm_a8w8(
             return t
 
         def _mma(idx, wt, act, sa_k, sb_k):
-            if const_expr(is_bsc):
+            if const_expr(is_mxscale):
                 fx.gemm(wmma_atom, c_frags[idx], wt, act, c_frags[idx], scale_a=sb_k, scale_b=sa_k)
             else:
                 fx.gemm(wmma_atom, c_frags[idx], wt, act, c_frags[idx])
@@ -296,17 +375,17 @@ def launch_gemm_a8w8(
                         idx,
                         wt[wn],
                         act[i],
-                        sa_k[wm] if const_expr(is_bsc) else None,
-                        sb_k[wn] if const_expr(is_bsc) else None,
+                        sa_k[wm] if const_expr(is_mxscale) else None,
+                        sb_k[wn] if const_expr(is_mxscale) else None,
                     )
 
-        _BS_DS = wmma_n_rep * 4 + wmma_n_rep + wmma_m_rep if is_bsc else wmma_n_rep * DS_B
+        _BS_DS = wmma_n_rep * 4 + wmma_n_rep + wmma_m_rep if is_mxscale else wmma_n_rep * DS_B
 
         def _load_state(buf, pbuf, ks):
             wt = [_rmem(16, load_b(buf, wn, ks)) for wn in range_constexpr(wmma_n_rep)]
-            if const_expr(is_bsc):
-                sb_k = [load_sb(pbuf, wn, ks) for wn in range_constexpr(wmma_n_rep)]
-                sa_k = [load_sa(pbuf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
+            if const_expr(is_mxscale):
+                sb_k = [load_sb(buf, pbuf, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                sa_k = [load_sa(buf, pbuf, wm, ks) for wm in range_constexpr(wmma_m_rep)]
                 return wt, sb_k, sa_k
             return wt, None, None
 
@@ -345,6 +424,7 @@ def launch_gemm_a8w8(
             rocdl.sched_barrier(0)
 
         HALF_M, HALF_N = wmma_m_rep // 2, wmma_n_rep // 2
+        _NXT_DS = HALF_N * DS_B + (wmma_n_rep + wmma_m_rep if is_mxscale else 0)
 
         def _emit_block(wm0, wn0, a_frags, b_frags, sa_k, sb_k):
             for i in range_constexpr(len(a_frags)):
@@ -355,32 +435,32 @@ def launch_gemm_a8w8(
                         wm * wmma_n_rep + wn,
                         b_frags[j],
                         a_frags[i],
-                        sa_k[wm] if const_expr(is_bsc) else None,
-                        sb_k[wn] if const_expr(is_bsc) else None,
+                        sa_k[wm] if const_expr(is_mxscale) else None,
+                        sb_k[wn] if const_expr(is_mxscale) else None,
                     )
 
         def _load_b_half(buf, wn0, ks):
             return [_rmem(16, load_b(buf, wn0 + wn, ks)) for wn in range_constexpr(HALF_N)]
 
-        def _load_scales(pbuf, ks):
-            if const_expr(is_bsc):
+        def _load_scales(buf, pbuf, ks):
+            if const_expr(is_mxscale):
                 return (
-                    [load_sb(pbuf, wn, ks) for wn in range_constexpr(wmma_n_rep)],
-                    [load_sa(pbuf, wm, ks) for wm in range_constexpr(wmma_m_rep)],
+                    [load_sb(buf, pbuf, wn, ks) for wn in range_constexpr(wmma_n_rep)],
+                    [load_sa(buf, pbuf, wm, ks) for wm in range_constexpr(wmma_m_rep)],
                 )
             return None, None
 
-        QUAD_PREFETCH_EARLY = (not is_bsc) and K_WS >= 2
+        QUAD_PREFETCH_EARLY = (not is_mxscale) and K_WS >= 2
 
         def compute_ktile_quad(buf, pbuf, prefetch_kt):
             b_left = _load_b_half(buf, 0, 0)
-            sb_k, sa_k = _load_scales(pbuf, 0)
+            sb_k, sa_k = _load_scales(buf, pbuf, 0)
             for ks in range_constexpr(K_WS):
                 nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
                 pf = ks == 0 and prefetch_kt is not None
                 a_top = [_rmem(16, load_a(buf, wm, ks)) for wm in range_constexpr(HALF_M)]
 
-                if const_expr(is_bsc):
+                if const_expr(is_mxscale):
                     rocdl.s_wait_dscnt(DS_A * HALF_M + 2 * DS_B * HALF_N)
                 rocdl.sched_barrier(0)
                 _emit_block(0, 0, a_top, b_left, sa_k, sb_k)
@@ -390,7 +470,7 @@ def launch_gemm_a8w8(
                     rocdl.sched_barrier(0)
                 a_bot = [_rmem(16, load_a(buf, HALF_M + wm, ks)) for wm in range_constexpr(HALF_M)]
                 b_right = _load_b_half(buf, HALF_N, ks)
-                if const_expr(is_bsc):
+                if const_expr(is_mxscale):
                     rocdl.s_wait_dscnt(DS_A * HALF_M + DS_B * HALF_N)
                 _emit_block(HALF_M, 0, a_bot, b_left, sa_k, sb_k)
                 if const_expr(pf and not QUAD_PREFETCH_EARLY):
@@ -399,12 +479,12 @@ def launch_gemm_a8w8(
                     rocdl.sched_barrier(0)
                 if const_expr(nxt_ks is not None):
                     nxt_b_left = _load_b_half(buf, 0, nxt_ks)
-                    nxt_sb_k, nxt_sa_k = _load_scales(pbuf, nxt_ks)
-                if const_expr(is_bsc):
+                    nxt_sb_k, nxt_sa_k = _load_scales(buf, pbuf, nxt_ks)
+                if const_expr(is_mxscale):
                     rocdl.s_wait_dscnt(DS_B * HALF_N if const_expr(nxt_ks is None) else _BS_DS)
                 _emit_block(0, HALF_N, a_top, b_right, sa_k, sb_k)
-                if const_expr(is_bsc):
-                    rocdl.s_wait_dscnt(0)
+                if const_expr(is_mxscale):
+                    rocdl.s_wait_dscnt(0 if const_expr(nxt_ks is None) else _NXT_DS)
                 _emit_block(HALF_M, HALF_N, a_bot, b_right, sa_k, sb_k)
                 rocdl.sched_barrier(0)
                 if const_expr(nxt_ks is not None):
@@ -417,18 +497,12 @@ def launch_gemm_a8w8(
                 compute_ktile_row(buf, pbuf, prefetch_kt)
 
         def issue_ptpc_scale_loads():
-            gSA_base = fx.recast_iter(
-                fx.PointerType.get(fx.Float32.ir_type, arg_scale_a.address_space),
-                arg_scale_a,
-            )
-            gSB_base = fx.recast_iter(
-                fx.PointerType.get(fx.Float32.ir_type, arg_scale_b.address_space),
-                arg_scale_b,
-            )
+            gSA_base = fx.recast_iter(fx.Float32, arg_scale_a)
+            gSB_base = fx.recast_iter(fx.Float32, arg_scale_b)
             sa_view = fx.Tensor(fx.make_view(gSA_base, fx.make_layout(i32_m, 1)))
             sb_view = fx.Tensor(fx.make_view(gSB_base, fx.make_layout(i32_n, 1)))
-            sa_buf = fx.rocdl.make_buffer_tensor(sa_view, max_size=False, num_records_bytes=i32_m * fx.Int32(4))
-            sb_buf = fx.rocdl.make_buffer_tensor(sb_view, max_size=False, num_records_bytes=i32_n * fx.Int32(4))
+            sa_buf = fx.rocdl.make_buffer_tensor(sa_view, max_size=False, num_records_bytes=i32_m * 4)
+            sb_buf = fx.rocdl.make_buffer_tensor(sb_view, max_size=False, num_records_bytes=i32_n * 4)
             sa_lay, sb_lay = (fx.make_layout(1, 1), fx.make_layout(4, 1))
             sa_tiles = fx.logical_divide(sa_buf, sa_lay)
             sb_tiles = fx.logical_divide(sb_buf, sb_lay)
@@ -437,7 +511,7 @@ def launch_gemm_a8w8(
 
             def _issue(atom, tiles, lay, tile_idx):
                 r = fx.make_rmem_tensor(lay, fx.Float32)
-                fx.copy_atom_call(atom, fx.slice(tiles, (None, tile_idx)), r)
+                fx.copy(atom, fx.slice(tiles, (None, tile_idx)), r)
                 return r
 
             sa_r = [
@@ -484,38 +558,39 @@ def launch_gemm_a8w8(
             pbuf = _buf_ptr(s)
             buf = _bidx(pbuf)
             pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
-            if const_expr(not is_bsc and j == num_buffers - 2):
+            if const_expr(not is_mxscale and j == num_buffers - 2):
                 scale_regs = issue_ptpc_scale_loads()
             compute_ktile(buf, pbuf, None)
 
         accs = None
-        if const_expr(is_bsc):
+        if const_expr(is_mxscale):
             accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
-        if const_expr(not is_bsc):
+        if const_expr(not is_mxscale):
             accs = epilogue_apply_ptpc_scale(scale_regs)
         for wm in range_constexpr(wmma_m_rep):
             row_rel = wmb + wm * 16 + lane16
             for wn in range_constexpr(wmma_n_rep):
                 col_rel = wnb + wn * 16 + kgrp * 8
                 h = accs[wm * wmma_n_rep + wn].to(out_cls)
-                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
+                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * C_LDS_ROW + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
         c_off_rt = blk_m64 * ldc64 + blk_n64
-        gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
-        atomC = fx.rocdl.make_tdm_atom(
-            gtC,
-            [mn_oob, None],
-            strides=[ldc64, None],
-            num_warps=num_waves,
-            early_timeout=False,
+        if const_expr(split_k > 1):
+            c_off_rt = c_off_rt + fx.Int64(bid_z) * fx.Int64(i32_m) * ldc64
+        # A store cannot drain a padded LDS tile, so the tile is the PADDED width and the
+        # view's inner extent the real one -- boundary_check then drops the pad columns,
+        # which is exactly what the old tensor_extents clamp did.
+        C_TILE = (tile_m, C_LDS_ROW)
+        gtC = _gv(gC_base, c_off_rt, (mn_oob, tile_n), (ldc64, 1))
+        atomC, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorStore(), gtC, fx.make_layout(C_TILE, (C_LDS_ROW, 1)), C_TILE, num_warps=num_waves
         )
-        fx.copy(
-            atomC,
-            _lv(fx.recast_iter(out_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)),
-            gtC,
-        )
-        tdm_ops.tensor_wait(0)
+        blkC = fx.zipped_divide(coordC, C_TILE)[None, (0, None)]
+        sC = _lv(fx.recast_iter(out_cls, base_ptr), (C_TILE, 1), ((C_LDS_ROW, 1), tile_m * C_LDS_ROW))
+        tCs, tCg = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC, blkC)
+        fx.copy(atomC, tCs[None, 0], tCg[None, 0])
+        rocdl.s_wait_tensorcnt(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
@@ -535,7 +610,7 @@ def launch_gemm_a8w8(
         i32_lda,
         i32_ldc,
         value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None},
-    ).launch(grid=(gx, gy, 1), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
+    ).launch(grid=(gx, gy, split_k), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
 launch_gemm_a8w8.compile_hints["llvm_options"] = {

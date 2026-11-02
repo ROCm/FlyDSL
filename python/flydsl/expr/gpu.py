@@ -28,6 +28,7 @@ from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
     CompositeKind,
+    Empty,
     Storage,
     _effective_field_defs,
     _is_constexpr_type,
@@ -226,21 +227,16 @@ class SharedAllocator(Arena):
         - struct  → recurse into each field; each field emits its own `make_ptr`
                     and therefore lowers to its own LDS global.
         - union   → ONE `make_ptr` shared by all variants (size=max, align=max).
-                    Each variant is wrapped as a re-typed view over the same
-                    ptr.
+                    Variants are reached from that base pointer at offset 0.
         - leaf    → single `make_ptr`.
         """
 
+        if type_spec is Empty:
+            return Storage[Empty](None)
         if is_composite_type(type_spec) and type_spec.__dsl_composite_kind__ == CompositeKind.Sum:
             nbytes = dsl_size_of(type_spec)
             align = dsl_align_of(type_spec)
-            shared_ptr = self._allocate_static_shared(nbytes, align)
-            prebuilt = {}
-            for name, variant_ty in _effective_field_defs(type_spec):
-                if _is_constexpr_type(variant_ty):
-                    continue
-                prebuilt[name] = Storage[variant_ty](shared_ptr)
-            return Storage[type_spec](shared_ptr, prebuilt=prebuilt)
+            return Storage[type_spec](self._allocate_static_shared(nbytes, align))
         elif is_struct_type(type_spec):
             prebuilt = {}
             for name, field_ty in _effective_field_defs(type_spec):

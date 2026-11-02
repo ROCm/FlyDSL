@@ -1,6 +1,6 @@
 # Pre-built kernel library guide
 
-This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
+This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, attention, and convolution — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
 ## Quick reference
 
@@ -8,10 +8,11 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 |---|---|---|---|---|
 | **LayerNorm** | `build_layernorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Two-pass vectorized normalization |
 | **RMSNorm** | `build_rmsnorm_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16; optional fp32 weight | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **Convolution** | `flydsl_conv_implicit(x, weight, ...)` | Layout API (`@flyc.kernel`) | bf16 (gfx950) | Implicit GEMM, 1D/2D/3D, heuristic tile pick or opt-in autotune, runtime resolution |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -34,29 +35,28 @@ executor = build_layernorm_module(N=8192, dtype_str="bf16")
 | Constant | Value | Description |
 |---|---|---|
 | `BLOCK_THREADS` | 256 | Threads per block |
-| `WARP_SIZE` | 64 | AMD wavefront size |
+| `WARP_SIZE` | 64 on CDNA, 32 on RDNA | Wavefront size, resolved from the target arch |
 | `VEC_WIDTH` | 8 | Vector load/store width |
-| `VEC_ALIGN` | 16 | Alignment for vector ops (bytes) |
 | `EPS` | 1e-5 | Numerical stability epsilon |
-| `USE_NONTEMPORAL` | True | Non-temporal stores for output |
 
 **Algorithm:**
 - **Two-pass normalization**: Pass 1 computes mean and variance, Pass 2 applies affine transform
-- **Fast path**: When `N == BLOCK_THREADS * VEC_WIDTH * 4` (for example, N=8192), uses fully register-resident computation with no scalar tail
-- **Generic path**: Handles arbitrary N with vector body + scalar tail
+- **Vectorized path**: When the element type is 16-bit and `N % VEC_WIDTH == 0`, the row is covered by `N / VEC_WIDTH` vector tiles with no scalar tail
+- **Scalar path**: FP32, or any `N` not divisible by `VEC_WIDTH`, falls back to a fully scalar two-pass implementation
 - **bf16 handling**: Software round-to-nearest-even (RNE) pack on gfx942; hardware `cvt_pk_bf16_f32` on gfx950+
 - **Warp reduction**: XOR-shuffle-based intra-wave reduction (shifts: 32, 16, 8, 4, 2, 1), then LDS-based cross-wave synchronization
 
-**Kernel signature** (using `@flyc.kernel` API):
-```
-GPU_MODULE_NAME = "layernorm_module"
+**Kernel signature:**
+```python
+@flyc.kernel
+layernorm_kernel(Input, Gamma, Beta, Output, Mean, Rstd)
 
-@kernel
-layernorm_kernel(self, Input, Gamma, Beta, Output, m_in)
-
-@jit
-__call__(self, Input, Gamma, Beta, Output, m_in)
+@flyc.jit
+launch_layernorm(Input, Gamma, Beta, Output, m_in, stream=...)
+# store_stats=True inserts Mean and Rstd before m_in
 ```
+The builder returns the `launch_layernorm` closure. The row count `m_in` is a
+runtime launch argument, not a kernel parameter.
 
 ### 1.2 RMSNorm (`kernels/norm/rmsnorm_kernel.py`)
 
@@ -70,10 +70,18 @@ executor = build_rmsnorm_module(N=8192, dtype_str="bf16", store_rstd=False)
 ```
 
 `build_rmsnorm_module(N, dtype_str, store_rstd=False, eps=EPS,
-BLOCK_THREADS=BLOCK_THREADS, weight_dtype_str=None)` optionally writes the
+BLOCK_THREADS=None, weight_dtype_str=None)` optionally writes the
 per-row reciprocal std (`rstd`) for use by the backward pass.
 `weight_dtype_str` defaults to `dtype_str`; FP16/BF16 activations additionally
 support FP32 weights.
+
+**Quantized variants:** The DynamicQuant and SmoothQuant builders emit int8
+`Output` and fp32 per-row `YScale`. `Input` must use the element dtype named by
+the builder's `dtype_str`, and every other operand — `Gamma`, the fused-add
+`ResidualIn`/`ResidualOut`, and SmoothQuant `XScale` — must match it. The
+launchers raise `ValueError` on a mismatch, so a wrong dtype fails at compile
+time rather than silently producing corrupted scales. Unlike the plain forward,
+the quantized builders do not accept FP32 weights with FP16/BF16 activations.
 
 **Backward:** `build_rmsnorm_bwd_module(N, dtype_str,
 weight_dtype_str=None)` builds the fused RMSNorm backward kernel (grid `(M,)`,
@@ -84,19 +92,33 @@ grad). The forward bakes `eps` into `Rstd`, so the backward does not need it.
 The public plain and fused-add training wrappers return `dweight` in the
 original weight dtype.
 
-**Configuration constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
+**Configuration constants:**
+| Constant | Value | Description |
+|---|---|---|
+| `BLOCK_THREADS` | 256; 512 on gfx95x when `N >= 8192` | Resolved by `default_block_threads(N, arch)` when the builder argument is left at `None` |
+| `WARP_SIZE` | 64 on CDNA, 32 on RDNA | Wavefront size, resolved from the target arch |
+| `VEC_WIDTH` | 8 | Vector load/store width |
+| `EPS` | 1e-5 | Numerical stability epsilon |
 
-**Algorithm (3-pass with LDS caching):**
-1. **Pass 0**: Global → LDS row cache (one-pass global read, vectorized)
-2. **Pass 1**: Sum-of-squares computation from LDS row cache
-3. **Pass 2**: Normalize + gamma multiply + store with software pipeline for Gamma prefetch
+**Algorithm (2-pass, row cached in registers):**
+1. **Pass 1**: One vectorized global read per row; the input stays in registers
+   and the sum of squares is accumulated in the same pass. A scalar tail covers
+   the `N % VEC_WIDTH` leftover elements.
+2. **Pass 2**: Normalize, multiply by gamma, and store, reusing the registers
+   from pass 1. `Gamma` is preloaded during pass 1 on the gfx942 BF16 fast path.
+
+LDS holds only the cross-wave reduction slots, sized by the wave count rather
+than by `N`; the row itself never passes through shared memory. The quantized
+builders add a third pass that applies the per-row scale.
 
 **Kernel signature:**
-```
-GPU_MODULE_NAME = "rmsnorm_module"
+```python
+@flyc.kernel
+rmsnorm_kernel(Input, Gamma, Rstd, Output)
 
-@kernel
-rmsnorm_kernel(self, Input, Gamma, Output, m_in)
+@flyc.jit
+launch_rmsnorm(Input, Gamma, Output, m_in, stream=...)
+# store_rstd=True inserts Rstd between Output and m_in
 ```
 
 ---
@@ -117,9 +139,63 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 **Configuration:**
 | Parameter | Value | Description |
 |---|---|---|
-| `BLOCK_SIZE` | `min(256, next_power_of_2(N))`, min 32 | Adaptive block size |
-| `VEC_WIDTH` | 8 | Vector load/store width |
-| `WARP_SIZE` | 64 | AMD wavefront size |
+| `BLOCK_THREADS` | 256 by default; 64/128/256/512 for full-row candidates | Total threads per block |
+| `THREADS_PER_ROW` | Defaults to `BLOCK_THREADS`; 8/16/32/64 for short-row candidates | Reduction subgroup assigned to one row |
+| `ROWS_PER_BLOCK` | 1 by default; derived from `BLOCK_THREADS / THREADS_PER_ROW` | Independent rows packed into one block |
+| `vec_width` | `128 // elem_bits` (8 for f16/bf16, 4 for f32) | Derived from the 128-bit transaction contract |
+| `WARP_SIZE` | 64 on CDNA, 32 on RDNA | Wavefront size, resolved from the target arch |
+
+`THREADS_PER_ROW` also selects the data-movement path: with
+`tile_cols = THREADS_PER_ROW * vec_width`, a row takes the vectorized fast path when
+`N % tile_cols == 0` and the scalar generic path otherwise.
+
+**Opt-in autotuning** (`kernels/norm/softmax_autotune.py`):
+```python
+from kernels.norm.softmax_autotune import softmax_autotuned
+
+softmax_autotuned(x, y)              # serves the tuned or default config, never searches
+```
+Ordinary calls follow the searched-winner cache → offline artifact → compatibility default
+(`BLOCK_THREADS=256`) ordering and never benchmark. `FLYDSL_AUTOTUNE=1` forces a search over
+a bounded, shape-aware space:
+
+- full-row `BLOCK_THREADS ∈ {64,128,256,512}` ×
+  `waves_per_eu ∈ {none,1,2,4}`;
+- Quack-style short-row packing that decouples `THREADS_PER_ROW` from total
+  block threads and processes several rows per block.
+
+The search-space rationale was checked against AITER
+`536118aaf94047b0b559e0730749352659419b34`, SGLang
+`955704544c60e920672aa434cefa2ce78c0ceb4c`, and Tri Dao's Quack
+`60d88082272a256fa9b3b2ab631c82cfa78337c6`. Quack's portable ideas are the
+row-width-dependent reduction subgroup, a separate 128/256-thread CTA size,
+multiple rows per CTA, and an online/non-online algorithm choice; its
+multi-CTA cluster reduction is NVIDIA-specific. AITER's standalone Triton
+kernel is a fixed two-pass online/reload implementation (`.cg`, eight warps,
+two stages, `waves_per_eu=2`), not an autotuned space. The pinned SGLang tree
+has attention-local and top-k softmax implementations but no directly comparable
+standalone row-wise kernel; attention tile/stage choices are therefore not
+imported here.
+
+Every candidate is numerically validated before ranking and uses the shared
+GPU-backlog and batched-event timer. Input cache policy is deliberately not a
+search axis: on gfx950, non-temporal loads changed rank between repeated use of
+one address and rotation across fresh addresses. Cache residency is absent from
+the shape-only artifact identity, so persisting either result would encode an
+unstated workload assumption. The tested three-pass reload algorithm is also
+excluded because it lost to the register-buffered compatibility path; a future
+algorithm axis should implement a true online pair reduction before entering
+the default search.
+
+Within a 2% timing tie, the selector favors the compatibility default, then no
+explicit `waves_per_eu`, then more rows per block. Larger measured improvements
+still win; the tie rule only avoids persisting noise-level differences between
+6–10 µs candidates. Softmax uses 10 warmup and 100 measured launches, divided
+into five GPU-backlogged event windows, so bandwidth-scale candidates are also
+ranked from a stable sample.
+
+Artifacts use the name `softmax_fwd` and cover forward only. Softmax backward
+has no autotune adopter in this change. See [`autotune_guide.md`](autotune_guide.md).
 
 **Algorithm (6 stages):**
 1. **Load data**: Vectorized global loads into register buffer with validity masks
@@ -130,11 +206,12 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 6. **Normalize + store**: Divide by sum, convert to output dtype, vectorized store
 
 **Kernel signature:**
-```
-GPU_MODULE_NAME = f"softmax_{dtype_str}"
+```python
+build_softmax_module(M, N, dtype_str="f32", BLOCK_THREADS=256)  # M is vestigial
+launch_softmax(A, C, m_in, stream=...)                          # returned launcher
 
-@kernel
-softmax_kernel(self, A, C, m_in)
+# Direct-JIT entry point used by the autotuner
+softmax_direct(A, C, m_in, N, dtype_str, BLOCK_THREADS, tuning_schema, stream=...)
 ```
 
 ### 2.2 Softmax backward (`kernels/norm/softmax_bwd_kernel.py`)
@@ -232,8 +309,9 @@ Returns a `@flyc.jit`-decorated function that auto-compiles on first call.
 E8M0 scales, selecting the A element type via `a_dtype` (`"fp4"`, `"fp6"`, or
 `"fp8"`; B is always MXFP4). This unified `launch_gemm` is the current gfx950
 entry point (it replaced the earlier standalone `compile_mxfp6_gemm` from #780);
-the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is the
-distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
+the separate `launch_gemm_a8w4` entry point in
+`kernels/gemm/gemm_a8w4_gfx1250.py` is the distinct gfx1250 kernel.
+`batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
 **Pipeline details:**
@@ -297,6 +375,63 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
+## 3c. Implicit-GEMM convolution (`kernels/conv/conv3d_implicit.py`)
+
+bf16 convolution as an implicit GEMM: `M = N·Do·Ho·Wo`, `N = K/groups`,
+`K = (C/groups)·kT·kH·kW`. The spatial rank comes from `weight.dim() - 2`, so the
+same entry point serves conv1d/2d/3d; an unbatched input is accepted.
+
+**Entry point:**
+```python
+from kernels.conv.conv3d_implicit import flydsl_conv_implicit
+
+y = flydsl_conv_implicit(
+    x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1,
+    padding_mode="zeros",                        # zeros / reflect / replicate / circular
+    input_layout="NCDHW", output_layout="NCDHW", # or NDHWC; NCHW/NHWC, NCW/NWC below 3D
+    tile=None, wgm=None, splitk=None,            # None = heuristic
+    autotune=None,                               # True = sweep tiles x WGM once per shape
+    stream=None,
+)
+```
+`conv3d_implicit` is a back-compat alias.
+
+| Property | Value |
+|---|---|
+| Arch | gfx950 only (`SUPPORTED_GFX`); any other arch raises `RuntimeError` before compiling |
+| Dtypes | `x` and `weight` bf16; `bias` 1-D with `K` elements, added in fp32; output bf16 |
+| Layouts | Input and output layouts are independent. NDHWC input skips the NCDHW→NDHWC transpose kernel; weight is always `(K, C/groups, kT, kH, kW)` |
+| `padding` | int, per-axis tuple, `"valid"`, or `"same"` (stride 1) |
+| Pointwise | 1×1×1, unit stride, no padding, `groups=1` is answered by `torch.matmul` without a FlyDSL kernel |
+| Weight cache | The packed weight is cached per weight tensor and rebuilt when its `_version` changes. A write through `.data` (`w.data.copy_(...)`) does not bump it: call `clear_weight_cache()` from the same module afterwards |
+
+**Pipeline:** the A operand is gathered im2col-style straight into LDS with
+`buffer_load ... lds` DMA, B is the weight read as a `(K, CRS)` matrix, and the
+MMA is `mfma_f32_16x16x32_bf16` (`TILE_K = 32`) issued through `fx.gemm`. LDS holds
+4 stages of `(tile_m + tile_n) × 32` bf16. The epilogue adds bias and scatters to
+either layout; split-K accumulates fp32 partials with buffer atomics.
+
+**Tile selection.** Without an explicit `tile`, a heuristic picks the launch config
+from the problem shape and the CU count (`CU_NUM` overrides the probed value):
+the 256×256 tile when `K/groups` fills one N tile, else the largest rung of
+`TILE_LADDER` that still puts `TILE_MIN_WAVES_PER_CU` waves on every CU; WGM 8
+(L2 swizzle) when there is more than one N tile and enough blocks in flight;
+split-K only when the base grid underfills the device. `autotune=True` (or
+`FLYDSL_CONV3D_AUTOTUNE=1`) instead sweeps `conv3d_autotune.BF16_CANDIDATES` ×
+`WGM_VALUES` once per shape and caches the winner under `FLYDSL_AUTOTUNE_CACHE_DIR`.
+Explicit `tile` / `wgm` / `splitk` arguments override both.
+
+| Environment variable | Effect |
+|---|---|
+| `FLYDSL_CONV3D_AUTOTUNE` | `1`: autotune every shape that has no explicit `tile` |
+| `FLYDSL_CONV3D_DYN_HW` | `1` (default): D/H/W are runtime values, so one artifact serves every resolution. `0`: compile per size |
+
+**FP8 variant:** `conv3d_implicit_fp8(x, weight, ...)` in
+`kernels/conv/conv3d_implicit_fp8.py` takes fp8 e4m3fn inputs with `C % 16 == 0`
+and returns bf16, on the gfx95x 16x16x128 fp8 MFMA.
+
+---
+
 ## 4. Shared utilities
 
 ### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
@@ -312,40 +447,24 @@ Shared kernel utilities used across GEMM/MoE/norm kernels.
 | `atomic_add(...)` | Emit an atomic add |
 | `_if_then(if_op, scf=None)` / `_if_else(if_op, scf=None)` | SCF `if`/`else` region context managers |
 
-### 4.2 MFMA epilogues (`kernels/mma/mfma_epilogues.py`)
+### 4.2 Preshuffle layout (`kernels/common/mma/mfma_preshuffle_pipeline.py`)
 
-Configurable epilogue strategies for MFMA 16x16 kernels.
-
-| Function | Description |
-|---|---|
-| `default_epilog(...)` | Standard row-iterator: `row = bx_m + mi*16 + lane_div_16*4 + ii` |
-| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads → half2 store |
-| `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
-
-### 4.3 Preshuffle pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
-
-Shared data movement and layout utilities for preshuffle GEMM kernels.
+Shared layout and block-remapping utilities for preshuffle GEMM and MoE kernels.
 
 | Function | Description |
 |---|---|
 | `make_preshuffle_b_layout(...)` | Build B-preshuffle layout: (N/16, K/64, 4, 16, kpack_bytes) |
-| `load_b_pack_k32(...)` | Load B pack for K32 MFMA micro-step (returns i64) |
-| `tile_chunk_coord_i32(...)` | Map (thread, chunk) → (row, col) for tile loads |
-| `buffer_copy_gmem16_dwordx4(...)` | 16-byte global load via buffer-load dwordx4 |
-| `lds_store_16b_xor16(...)` | Store 16B to LDS with XOR16 swizzle |
-| `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
-| `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
+| `xcd_remap_bx_by(...)` | Remap blocks across XCDs and group tiles along M |
 
-### 4.4 Layout coordinate helpers
+### 4.3 Layout coordinate helpers
 
-Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_preshuffle_pipeline.py`):
+Coordinate mapping in `flydsl.expr`:
 
 | Function | Description |
 |---|---|
 | `fx.crd2idx(crd, layout)` | Coordinate → flat index (Fly dialect op) |
 | `fx.idx2crd(idx, layout)` | Flat index → coordinate tuple (Fly dialect op) |
-| `fx.get(int_tuple, mode)` | Extract element at index from `!fly.int_tuple` |
-| `crd2idx(crd, layout)` | Wrapper in `kernels/mma/mfma_preshuffle_pipeline.py` (auto index cast) |
+| `fx.get_(int_tuple, mode).unpack()` | Extract a scalar element at index from `!fly.int_tuple` |
 
 ---
 
@@ -396,12 +515,15 @@ What operation do you need?
 ├── MoE (Mixture of Experts)
 │   ├── Blockscale MoE (gate+up+reduce)
 │   └── Standard MoE (fp8/f16/bf16/int8/int4)
-│       └── → kernels/moe/moe_gemm_2stage.py
+│       └── → kernels/moe/moe_gemm_2stage/
+│
+├── Convolution (1D/2D/3D)
+│   ├── bf16, gfx950          → flydsl_conv_implicit() (kernels/conv/conv3d_implicit.py)
+│   └── fp8 e4m3fn, gfx95x    → conv3d_implicit_fp8() (kernels/conv/conv3d_implicit_fp8.py)
 │
 └── Building blocks
-    ├── Common kernel helpers    → kernels/common/kernels_common.py
-    ├── MFMA epilogue selection  → kernels/mma/mfma_epilogues.py
-    └── Preshuffle data movement → kernels/mma/mfma_preshuffle_pipeline.py
+    ├── Common kernel helpers → kernels/common/kernels_common.py
+    └── Preshuffle layout     → kernels/common/mma/mfma_preshuffle_pipeline.py
 ```
 
 ---
@@ -411,7 +533,7 @@ What operation do you need?
 | File | Description |
 |---|---|
 | `kernels/gemm/preshuffle_gemm.py` | GEMM (preshuffle layout) |
-| `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
+| `kernels/moe/moe_gemm_2stage/` | MoE GEMM 2-stage (gate/up + reduce) |
 | `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
@@ -421,16 +543,22 @@ What operation do you need?
 | `kernels/norm/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/norm/softmax_kernel.py` | Softmax (layout API) |
 | `kernels/norm/softmax_bwd_kernel.py` | Softmax backward (layout API) |
+| `kernels/norm/softmax_autotune.py` | Softmax opt-in autotune adopter |
 | `kernels/attention/fused_rope_cache_kernel.py` | Fused RoPE + KV cache |
+| `kernels/conv/conv3d_implicit.py` | bf16 implicit-GEMM convolution host entry (dispatch, tile heuristic) |
+| `kernels/conv/conv3d_implicit_gfx950.py` | bf16 implicit-GEMM conv kernel (gfx950) |
+| `kernels/conv/conv3d_autotune.py` | Conv opt-in autotune adopter (bf16 tiles x WGM, fp8 WGM) |
+| `kernels/conv/conv3d_implicit_fp8.py` | FP8 implicit-GEMM convolution (gfx95x) |
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
-| `kernels/gemm/gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `kernels/gemm/wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
-| `kernels/mma/mfma_epilogues.py` | MFMA epilogue helpers |
-| `kernels/mma/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
-| `kernels/mma/pipeline_utils.py` | Pipeline utility helpers |
+| `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
+| `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
+| `kernels/gemm/gemm_a4w4_gfx1250.py` | GFX1250 standalone MXFP4 x MXFP4 GEMM, 16x16 shuffled B / 32x4 shuffled scales, fused split-K |
+| `kernels/gemm/gemm_a8w4_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
+| `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
+| `kernels/gemm/fp8_gemm_utils.py` | FP8 GEMM helper utilities |
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |
 
@@ -447,11 +575,14 @@ What operation do you need?
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |
 | `tests/kernels/test_softmax_bwd.py` | Softmax backward |
+| `tests/kernels/test_softmax_autotune.py` | Softmax autotune selection and candidate correctness |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
+| `tests/kernels/test_conv3d_implicit.py` | bf16 conv1d/2d/3d |
+| `tests/kernels/test_conv3d_implicit_fp8.py` | FP8 conv |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `tests/kernels/test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `tests/kernels/test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `tests/kernels/test_vec_add.py` | Vector addition |
 | `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |

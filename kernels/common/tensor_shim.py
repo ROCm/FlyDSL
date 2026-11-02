@@ -8,12 +8,51 @@ import numpy as np
 import torch
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, vector
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
-from flydsl.expr import arith, as_ir_value, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
+from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
+
+_BUF_COPY_ATOM = {
+    16: fx.rocdl.BufferCopy128b,
+    8: fx.rocdl.BufferCopy64b,
+}
+BUF_VIEW_MAX_ELEMS = 0xFFFFFFFF
+
+
+def ptr_buf_tensor(ptr, elem, *, unit_elems, num_records_bytes):
+    """Buffer tensor with a runtime byte bound and vector-unit indexing."""
+    layout = fx.make_layout((BUF_VIEW_MAX_ELEMS, unit_elems), (unit_elems, 1))
+    typed_ptr = fx.PointerType.get(
+        elem.ir_type,
+        address_space=fx.AddressSpace.Global,
+        alignment=unit_elems * (elem.width // 8),
+    )
+    view = fx.make_view(fx.recast_iter(typed_ptr, ptr), layout)
+    return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+
+
+def _buf_copy_atom(elem, unit_elems, cache_modifier):
+    unit_bytes = unit_elems * (elem.width // 8)
+    return fx.make_copy_atom(_BUF_COPY_ATOM[unit_bytes](cache_modifier), elem)
+
+
+def buf_copy_load(buffer, index, elem, unit_elems, *, cache_modifier=0):
+    """Load one 8- or 16-byte unit from a bounded buffer tensor."""
+    fragment = fx.make_rmem_tensor(unit_elems, elem)
+    fx.copy(_buf_copy_atom(elem, unit_elems, cache_modifier), fx.slice(buffer, (index, None)), fragment)
+    return fragment.load()
+
+
+def buf_copy_store(buffer, index, value, elem, unit_elems, *, cache_modifier=0):
+    """Store one 8- or 16-byte unit into a bounded buffer tensor."""
+    fragment = fx.make_rmem_tensor(unit_elems, elem)
+    fragment.store(Vec(value))
+    fx.copy(_buf_copy_atom(elem, unit_elems, cache_modifier), fragment, fx.slice(buffer, (index, None)))
 
 
 def _run_compiled(exe, *args):
@@ -38,6 +77,17 @@ def _run_compiled(exe, *args):
         raise
 
 
+def _preload_compiled(exe, *args):
+    """Compile ``exe`` for ``args`` without dispatching its GPU kernels; returns ``None``.
+
+    ``_compile_only`` skips execution for this call alone. Setting the
+    process-wide ``COMPILE_ONLY`` flag instead would also suppress launches made
+    concurrently by other threads. The first real launch reuses the in-memory
+    compile cache.
+    """
+    return exe._compile_only(*args)
+
+
 def _to_raw(v):
     """Convert ArithValue / Numeric (Int32, Boolean, …) to raw ir.Value."""
     if isinstance(v, ir.Value):
@@ -56,31 +106,20 @@ def get_dtype_str(dtype):
         return "bf16"
 
 
-def get_dtype_in_kernel(dtype: str):
-    if dtype == "f32":
-        return T.f32
-    elif dtype == "f16":
-        return T.f16
-    elif dtype == "bf16":
-        return T.bf16
+def ptr_rsrc(ptr, num_records_bytes=None):
+    """Buffer resource over an fx pointer, with an optional byte OOB bound."""
+    return buffer_ops.create_buffer_resource_from_addr(fx.Int64(fx.ptrtoint(ptr)), num_records_bytes=num_records_bytes)
 
 
-def get_dtype_vec_size(dtype: str):
-    if dtype == "f32":
-        return 4
-    elif dtype == "f16":
-        return 8
-    elif dtype == "bf16":
-        return 8
-
-
-def get_dtype_bytes(dtype: str):
-    if dtype == "f32":
-        return 4
-    elif dtype == "f16":
-        return 2
-    elif dtype == "bf16":
-        return 2
+def buf_base_i64(base):
+    """Address of an fx pointer, tensor/memref, or integer byte address."""
+    raw = extract_to_ir_values(base)[0]
+    if str(raw.type).startswith(("!fly.ptr", "!llvm.ptr")):
+        return fx.Int64(fx.ptrtoint(base))
+    if isinstance(raw.type, (ir.IntegerType, ir.IndexType)):
+        return fx.Int64(base)
+    aligned = fly.extract_aligned_pointer_as_index(ir.Type.parse("!llvm.ptr<1>"), raw)
+    return fx.Int64(llvm.PtrToIntOp(T.i64, aligned).result)
 
 
 class TensorView:
@@ -299,7 +338,7 @@ class GTensor(TensorBase):
         if static_bytes_offset_i64 is None:
             self.rsrc = buffer_ops.create_buffer_resource(memref, max_size=True)
         else:
-            array_base_i64 = self.get_llvm_ptr(memref, (static_bytes_offset_i64))
+            array_base_i64 = buf_base_i64(memref) + fx.Int64(static_bytes_offset_i64)
             self.rsrc = buffer_ops.create_buffer_resource_from_addr(array_base_i64)
         self.cache_modifier = cache_modifier
 
@@ -309,14 +348,6 @@ class GTensor(TensorBase):
     def store(self, offset, value, vec_size=1):
         buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
 
-    def get_llvm_ptr(self, ptr, bytes_offset_i64, ptr_type="!llvm.ptr<1>"):
-        bytes_offset_i64 = arith.index_cast(T.i64, bytes_offset_i64)
-        _ptr_type = ir.Type.parse(ptr_type)
-        base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, extract_to_ir_values(ptr)[0])
-        base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
-        llvm_ptr = llvm.AddOp(base_ptr, bytes_offset_i64, llvm.IntegerOverflowFlags(0)).result
-        return llvm_ptr
-
 
 class STensor(TensorBase):
     def __init__(self, memptr, dtype, shape, stride=None, base_offset=0):
@@ -325,17 +356,16 @@ class STensor(TensorBase):
 
     def load(self, offset, vec_size=1):
         vec_t = T.vec(vec_size, self.dtype)
-        x = vector.load(vec_t, as_ir_value(self.memptr), [as_ir_value(offset)])
+        x = fx.Vector.load(vec_t, self.memptr, [offset])
         if vec_size > 1:
             return x
         else:
-            x = vector.extract(as_ir_value(x), dynamic_position=[], static_position=[0])
+            x = x[0]
             return x
 
     def store(self, offset, value, vec_size=1):
         if vec_size > 1:
-            vector.store(as_ir_value(value), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)
+            fx.Vector(value).store(self.memptr, [offset], alignment=16)
         else:
-            vec_t = T.vec(1, self.dtype)
-            vec = vector.from_elements(vec_t, [as_ir_value(value)])
-            vector.store(as_ir_value(vec), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)
+            vec = fx.Vector.from_elements([value], fx.Numeric.from_ir_type(self.dtype))
+            vec.store(self.memptr, [offset], alignment=16)

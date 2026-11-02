@@ -5,24 +5,16 @@
 """Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py)."""
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import rocdl
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import _to_raw as _raw
+from kernels.common.kernels_common import LOG2E
 
 
 def reps(tensor, mode):
     """Static repeat count of ``tensor``'s ``mode`` (shape size, as a Python int)."""
     return fx.size(fx.get_shape(tensor)[mode]).to_py_value()
-
-
-def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
-    """Encode s_waitcnt bitfield for CDNA3 (gfx94x)."""
-    vm_lo = vmcnt & 0xF
-    vm_hi = (vmcnt >> 4) & 0x3
-    return vm_lo | (expcnt << 4) | (lgkmcnt << 8) | (vm_hi << 14)
 
 
 def _as_ptr(p, dtype=None):
@@ -137,10 +129,9 @@ def make_preshuffle_b_layout_int4(N_full, K):
     A-fragment's ki-separated kpack byte addressing (see ``load_weight_int4_frag``).
     ``N_full`` = per-expert output channels (2*inter_dim gemm1 / model_dim gemm2);
     ``K`` = contraction dim in int8 elems."""
-    from flydsl.expr import arith as _lay_arith
     from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
-    return make_preshuffle_b_layout(_lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
+    return make_preshuffle_b_layout(c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
 
 
 def load_weight_int4_frag(bt_i32, b_layout, frag, expert_off_dwords, col_base, kb, tid, ki_reps):
@@ -220,7 +211,7 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
     """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
     out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds
     raw bits, so a mismatch silently reinterprets them (bf16 0x4480 == 1024.0 -> f16 4.5)."""
-    log2_exp1 = -1.4426950408889634
+    log2_exp1 = -LOG2E
     round_bit = fx.Uint32(0x8000)
     out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
     m_reps = reps(gate_frag, 1)
@@ -244,7 +235,7 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
                 if const_expr(a_scale is not None):
                     g = g * a_sc
                     u = u * a_sc
-                tmp = rocdl.exp2(T.f32, _raw(g * log2_exp1))
+                tmp = rocdl.exp2(T.f32, (g * log2_exp1).ir_value())
                 acc.append((g * rocdl.rcp(T.f32, 1.0 + tmp)) * u)
             acc = Vec.from_elements(acc, fx.Float32)
             if const_expr(out_dtype == fx.BFloat16):

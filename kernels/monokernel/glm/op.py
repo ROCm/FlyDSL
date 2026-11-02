@@ -1,0 +1,528 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+"""Host wrapper for the GLM-5 indexed decode MonoKernel."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import torch
+
+from kernels.monokernel.config import (
+    GLM5_CONFIG,
+    GLM5_KERNEL_SAMPLES,
+    HIDDEN,
+    KV_LORA,
+    PE_DIM,
+    AttentionWeight,
+    KvCacheLayout,
+    MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
+    as_kv_cache_layout,
+    glm5_tp_config,
+    validate_shard,
+)
+from kernels.monokernel.glm.kernel import build_glm5_monokernel
+from kernels.monokernel.glm.layout import INDEX_DIM, cohort_eligible, layout
+from kernels.monokernel.packing import (
+    pack_bf16,
+    pack_fp8,
+    pack_layer_weights,
+    pack_mxfp4,
+    pack_mxfp4_scale_tiles,
+    pack_ptpc_fp8,
+)
+from kernels.monokernel.runtime import SymmetricPeerBuffer
+from kernels.monokernel.weights import LayerWeights, prepare_mxfp4_expert_storage
+
+__all__ = ["Glm5MonoKernel"]
+
+MAX_TOTAL_TOKENS = 16
+
+
+def prepare_glm5_weights(W: LayerWeights, attention_weight: AttentionWeight | str) -> dict[str, torch.Tensor]:
+    """Pack one layer once for every graph bucket using it."""
+
+    t = W.t
+    expert_mxfp4 = t["w_ug"].dtype is torch.uint8
+    moe_mode = MoeMode.A16W4 if expert_mxfp4 else MoeMode.W8A8
+    profile = replace(W.config, attention_weight=AttentionWeight(attention_weight))
+    if profile.attention_weight is AttentionWeight.FP8_PTPC:
+        attention = {
+            "w_qkv_a": t["w_qkv_a"],
+            "w_q_b": t["w_q_b"],
+            "w_uk": pack_ptpc_fp8(t["w_uk"]),
+            "w_uv": pack_ptpc_fp8(t["w_uv"]),
+            "w_o": t["w_o"],
+        }
+    else:
+        attention = pack_layer_weights(t, moe_mode, profile, attention_only=True)
+    atom_experts = (
+        expert_mxfp4
+        and W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
+        and W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
+    )
+    if (
+        W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM or W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
+    ) and not atom_experts:
+        raise ValueError("ATOM expert storage requires MXFP4 values and scales together")
+    if atom_experts:
+        packed = attention
+        packed["w_r"] = pack_bf16(t["w_r"])
+        packed.update(dict(zip(("w_ug", "s_ug", "w_dn", "s_dn"), prepare_mxfp4_expert_storage(W, canonical=False))))
+        return packed
+    if profile.attention_weight is AttentionWeight.FP8_PTPC:
+        raise ValueError("PTPC attention currently requires ATOM expert storage")
+    packed = pack_layer_weights(
+        t,
+        moe_mode,
+        profile,
+        mxfp4_weight_layout=Mxfp4WeightLayout.NATIVE,
+        mxfp4_scale_layout=Mxfp4ScaleLayout.NATIVE,
+        router_weight_layout=RouterWeightLayout.NATIVE,
+        attention_only=expert_mxfp4,
+    )
+    if expert_mxfp4:
+        packed["w_r"] = pack_bf16(t["w_r"])
+        for weight, scale in (("w_ug", "s_ug"), ("w_dn", "s_dn")):
+            q, scales = t[weight], t[scale]
+            if weight == "w_ug":
+                # Preserve the native-storage optimization: eight gate/up row
+                # pairs form one contiguous MFMA tile at either TP geometry.
+                def pair_rows(value):
+                    experts, rows, cols = value.shape
+                    return (
+                        value.reshape(experts, 2, W.config.inter // 8, 8, cols)
+                        .permute(0, 2, 1, 3, 4)
+                        .reshape(experts, rows, cols)
+                    )
+
+                q, scales = pair_rows(q), pair_rows(scales)
+            packed[weight] = pack_mxfp4(q)
+            packed[scale] = pack_mxfp4_scale_tiles(scales)
+    return packed
+
+
+class Glm5MonoKernel:
+    """One TP rank of GLM-5's indexed decode MonoKernel.
+
+    With ``with_indexer=True``, a single persistent launch covers index K/Q/W
+    projection, index K normalization/RoPE/cache update, scoring, exact sparse
+    top-k selection, MLA, routing, all expert compute, and both TP reductions.
+    The fused path accepts flat BF16 caches for one request, or ATOM-layout
+    attention KV and physically paged BF16 index caches. Paged caches share
+    ``block_tables`` to resolve logical token positions; each launch groups ``index_request_width`` consecutive rows per
+    request (five rows for MTP4 C1/C2).
+    ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
+    in-kernel peer mailboxes for exact global selection. Index caches remain
+    replicated; each rank must receive identical indexer weights and inputs.
+    ``indexer_quant=True`` stores index K as MXFP4: each uint8 cache row has
+    64 packed E2M1 bytes followed by four E8M0 scales (one per 32 values).
+    Q is quantized once per head and scored with native scaled FP4 MFMA and
+    FP32 accumulation. Pack existing logical BF16 rows with ``pack_index_fp4``
+    before capture; query quantization and cache writes are fused.
+    The public API accepts at most sixteen total query tokens across requests,
+    including chunked calls. Native ATOM MXFP4 weights support every row count
+    through sixteen; the legacy path retains its existing buckets. Above twelve
+    rows, a full 256-CU device executes bounded row tiles in one kernel.
+    ``group`` is a torch.distributed group (None for npes=1).
+
+    The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
+    storage sharing. Scratch and symmetric buffers may be shared by all layers
+    because every launch uses a fresh ``tag``.
+    """
+
+    def __init__(
+        self,
+        W: LayerWeights,
+        samples: int,
+        rank: int = 0,
+        npes: int = 1,
+        group=None,
+        topk: int = 2048,
+        launches_per_step: int = 1,
+        with_indexer: bool = False,
+        index_max_seq: int = 4096,
+        indexer_cp: bool = False,
+        *,
+        indexer_quant: bool = False,
+        index_request_width: int | None = None,
+        index_page_size: int = 16,
+        index_block_table_stride: int | None = None,
+        attention_weight: AttentionWeight | str = AttentionWeight.FP8_BLOCK128,
+        kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
+        kv_cache_dtype: str = "bf16",
+        prepared_weights: dict[str, torch.Tensor] | None = None,
+        runtime: "Glm5MonoKernel | None" = None,
+        dcp_size: int = 1,
+        native_fp4_mfma: bool = False,
+        moe_activation_dtype: str = "fp8",
+        rope_dtype: str = "fp32",
+    ):
+        if not 1 <= samples <= MAX_TOTAL_TOKENS:
+            raise ValueError(f"total query tokens must be in [1, {MAX_TOTAL_TOKENS}], got {samples}")
+        if not isinstance(indexer_quant, bool):
+            raise ValueError("indexer_quant must be a bool")
+        if indexer_quant and not with_indexer:
+            raise ValueError("indexer_quant requires with_indexer=True")
+        self.indexer_quant = indexer_quant
+        if W.config not in (GLM5_CONFIG, glm5_tp_config(4)):
+            raise ValueError(f"unsupported GLM-5 shard configuration: {W.config}")
+        if W.config == glm5_tp_config(4) and npes != 4:
+            raise ValueError("the 16-head, 512-intermediate shard requires TP4")
+        output_heads = W.config.local_heads
+        attention_heads = output_heads * dcp_size
+        validate_shard(
+            samples,
+            W.heads,
+            rank,
+            npes,
+            topk,
+            W.config,
+            supported_samples=tuple(range(1, MAX_TOTAL_TOKENS + 1)) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
+            expected_heads=attention_heads,
+        )
+        if dcp_size not in (1, npes):
+            raise ValueError("DCP size must be 1 or the TP group size")
+        if with_indexer and dcp_size != 1:
+            raise ValueError("fused indexer currently requires dcp_size=1")
+        if indexer_cp and not with_indexer:
+            raise ValueError("indexer_cp=True requires with_indexer=True")
+        if with_indexer and (index_max_seq <= 0 or index_max_seq % 64):
+            raise ValueError("index_max_seq must be a positive multiple of 64")
+        if not 1 <= launches_per_step <= 128:
+            raise ValueError(f"launches_per_step must be in [1, 128], got {launches_per_step}")
+        self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
+        self.launches_per_step = launches_per_step
+        self.with_indexer = with_indexer
+        self.index_max_seq = index_max_seq
+        self.index_request_width = samples if index_request_width is None else index_request_width
+        self.index_page_size = index_page_size
+        if with_indexer and (self.index_request_width <= 0 or index_page_size <= 0):
+            raise ValueError("fused indexer requires positive request width and page size")
+        self.index_block_table_stride = (
+            index_max_seq // index_page_size if index_block_table_stride is None else index_block_table_stride
+        )
+        if with_indexer and (
+            samples % self.index_request_width != 0
+            or index_max_seq % index_page_size != 0
+            or self.index_block_table_stride < index_max_seq // index_page_size
+        ):
+            raise ValueError("fused indexer requires whole requests and a page-aligned index_max_seq")
+        self.attention_weight = AttentionWeight(attention_weight)
+        self.kv_cache_layout = as_kv_cache_layout(kv_cache_layout)
+        if kv_cache_dtype not in ("bf16", "fp8"):
+            raise ValueError(f"unsupported KV cache dtype {kv_cache_dtype!r}")
+        if rope_dtype not in ("fp32", "bf16"):
+            raise ValueError("rope_dtype must be fp32 or bf16")
+        self.rope_dtype = rope_dtype
+        self.kv_cache_dtype = kv_cache_dtype
+        self.dcp_size = dcp_size
+        self.output_heads = output_heads
+        self.indexer_cp = indexer_cp
+        t = W.t
+        self.expert_mxfp4 = t["w_ug"].dtype is torch.uint8
+        self.atom_experts = (
+            self.expert_mxfp4
+            and W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
+            and W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
+        )
+        if native_fp4_mfma and not self.atom_experts:
+            raise ValueError("native FP4 MFMA requires ATOM MXFP4 expert storage")
+        if moe_activation_dtype not in ("fp8", "fp4"):
+            raise ValueError("moe_activation_dtype must be fp8 or fp4")
+        if moe_activation_dtype == "fp4" and not native_fp4_mfma:
+            raise ValueError("A4 requires native scaled MFMA")
+        self.moe_activation_dtype = moe_activation_dtype
+        self.native_fp4_mfma = native_fp4_mfma
+        self.packed = dict(
+            prepare_glm5_weights(W, self.attention_weight) if prepared_weights is None else prepared_weights
+        )
+        if with_indexer:
+            required = ("w_index_k", "s_index_k", "w_index_w", "w_index_q", "s_index_q", "g_index_k", "b_index_k")
+            missing = [name for name in required if name not in t]
+            if missing:
+                raise ValueError(f"with_indexer=True requires weights: {', '.join(missing)}")
+            self.packed["w_index_k"] = pack_fp8(t["w_index_k"])
+            self.packed["w_index_q"] = pack_fp8(t["w_index_q"])
+            self.packed["w_index_w"] = pack_bf16(t["w_index_w"])
+        self.scr_layout, self.sym_layout = layout(
+            samples,
+            W.heads,
+            npes,
+            topk,
+            with_indexer,
+            index_max_seq,
+            indexer_cp=indexer_cp,
+            inter=W.config.inter,
+            output_heads=output_heads,
+            dcp_size=dcp_size,
+            native_fp4_mfma=native_fp4_mfma,
+            indexer_quant=indexer_quant,
+        )
+        dev = torch.device("cuda", torch.cuda.current_device())
+        if samples > 12 and torch.cuda.get_device_properties(dev).multi_processor_count != 256:
+            raise ValueError("tiled GLM execution requires a full 256-CU MI355X device")
+        self.identity_block_tables = (
+            torch.arange(self.index_block_table_stride, dtype=torch.int32, device=dev).unsqueeze(0)
+            if with_indexer
+            and self.kv_cache_layout is KvCacheLayout.ATOM
+            and samples == self.index_request_width
+            and self.index_block_table_stride == index_max_seq // index_page_size
+            else None
+        )
+        self.cohort_rows = (
+            npes == 4
+            and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)
+            and dcp_size == 1
+            and self.attention_weight is AttentionWeight.FP8_BLOCK128
+            and self.kv_cache_layout is KvCacheLayout.ATOM
+            and rope_dtype == "fp32"
+        )
+        if with_indexer:
+            index_tensors = dict(t, **self.packed)
+            self.index_params = torch.tensor(
+                [
+                    index_tensors[name].data_ptr()
+                    for name in (
+                        "w_index_k",
+                        "s_index_k",
+                        "w_index_w",
+                        "w_index_q",
+                        "s_index_q",
+                        "g_index_k",
+                        "b_index_k",
+                    )
+                ],
+                dtype=torch.int64,
+                device=dev,
+            )
+        else:
+            self.index_params = None
+        self._owns_runtime = runtime is None
+        if runtime is None:
+            self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
+            self.peer_buffer = SymmetricPeerBuffer(self.sym_layout["_bytes"], rank=rank, npes=npes, group=group)
+            self.step = torch.zeros(1, dtype=torch.int32, device=dev)
+        else:
+            if runtime.scr_layout != self.scr_layout or runtime.sym_layout != self.sym_layout:
+                raise ValueError("shared GLM runtime geometry mismatch")
+            self.scratch = runtime.scratch
+            self.peer_buffer = runtime.peer_buffer
+            self.step = runtime.step
+        self.sym_storage = self.peer_buffer.storage
+        self.sym = self.peer_buffer.local_address
+        self.peers = self.peer_buffer.addresses
+        self.launch = build_glm5_monokernel(
+            samples,
+            W.heads,
+            npes,
+            topk,
+            launches_per_step=launches_per_step,
+            with_indexer=with_indexer,
+            index_max_seq=index_max_seq,
+            index_request_width=self.index_request_width,
+            index_page_size=index_page_size,
+            index_block_table_stride=self.index_block_table_stride,
+            expert_mxfp4=self.expert_mxfp4,
+            atom_experts=self.atom_experts,
+            attention_weight=self.attention_weight,
+            kv_cache_layout=self.kv_cache_layout,
+            kv_cache_dtype=self.kv_cache_dtype,
+            inter=W.config.inter,
+            output_heads=output_heads,
+            dcp_size=dcp_size,
+            native_fp4_mfma=native_fp4_mfma,
+            moe_activation_dtype=moe_activation_dtype,
+            indexer_quant=indexer_quant,
+            rope_dtype=rope_dtype,
+            uv_scale_rows=(
+                128
+                if self.attention_weight in (AttentionWeight.BF16, AttentionWeight.FP8_PTPC)
+                else W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0]
+            ),
+            indexer_cp=indexer_cp,
+        )
+
+    def forward(
+        self,
+        h,
+        cur_pos,
+        kv_cache,
+        pe_cache,
+        indices,
+        cos,
+        sin,
+        x_out=None,
+        layer=0,
+        advance=True,
+        index_cache=None,
+        block_tables=None,
+        positions=None,
+        slot_mapping=None,
+        sparse_kv_indptr=None,
+    ):
+        """One layer.  Mailbox epochs are ``step * 128 + layer + 1``: layers sharing
+        this scratch within a decode step need distinct ``layer``; call
+        ``advance_step`` (or pass ``advance=True``) once per step.  Both are
+        stream-ordered device ops, so the sequence can be captured in a HIP graph.
+        For the fused path, ``block_tables`` is contiguous int32 with one row
+        per request and physical page IDs shared by both caches."""
+        if not 0 <= layer < self.launches_per_step:
+            raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
+        if h.ndim != 2 or h.shape[1] != HIDDEN:
+            raise ValueError(f"hidden must have {HIDDEN} columns")
+        if not 1 <= h.shape[0] <= MAX_TOTAL_TOKENS:
+            raise ValueError(f"total query tokens must be in [1, {MAX_TOTAL_TOKENS}], got {h.shape[0]}")
+        if cur_pos.shape != (1,) or cur_pos.dtype is not torch.int32:
+            raise ValueError("cur_pos must be int32[1]")
+        expected_rope_dtype = torch.bfloat16 if self.rope_dtype == "bf16" else torch.float32
+        if cos.dtype is not expected_rope_dtype or sin.dtype is not expected_rope_dtype:
+            raise ValueError(f"RoPE tables must be {expected_rope_dtype}")
+        if self.kv_cache_layout is KvCacheLayout.SPLIT:
+            if kv_cache.ndim != 2 or kv_cache.shape[1] != KV_LORA or pe_cache.shape != (kv_cache.shape[0], PE_DIM):
+                raise ValueError("split cache must be [capacity,512] KV and [capacity,64] PE")
+            if self.with_indexer and self.index_request_width != self.S:
+                raise ValueError("split index cache supports one consecutive request per launch")
+        total_samples = h.shape[0]
+        if total_samples % self.S:
+            raise ValueError(f"input rows {total_samples} must be divisible by kernel chunk {self.S}")
+        chunks = total_samples // self.S
+        if self.with_indexer and chunks != 1:
+            raise ValueError("fused indexer does not support chunked launches")
+        if not advance and chunks != 1:
+            raise ValueError("chunked launches must advance mailbox epochs")
+        if self.with_indexer:
+            if index_cache is None:
+                raise ValueError("index_cache is required when with_indexer=True")
+            cache_rows = (
+                index_cache.shape[0] * index_cache.shape[1]
+                if index_cache.ndim == 3
+                else index_cache.shape[0] if index_cache.ndim == 2 else 0
+            )
+            index_width = INDEX_DIM // 2 + INDEX_DIM // 32 if self.indexer_quant else INDEX_DIM
+            index_dtype = torch.uint8 if self.indexer_quant else torch.bfloat16
+            if (
+                index_cache.ndim not in (2, 3)
+                or cache_rows < self.index_max_seq
+                or index_cache.shape[-1] != index_width
+                or (index_cache.ndim == 3 and index_cache.shape[1] != self.index_page_size)
+                or index_cache.dtype is not index_dtype
+                or not index_cache.is_contiguous()
+            ):
+                raise ValueError(
+                    f"index_cache must be contiguous {index_dtype} [physical rows >= {self.index_max_seq}, {index_width}], got "
+                    f"{tuple(index_cache.shape)} {index_cache.dtype}"
+                )
+            if self.kv_cache_layout is KvCacheLayout.ATOM:
+                block_tables = self.identity_block_tables if block_tables is None else block_tables
+                expected_blocks = (self.S // self.index_request_width, self.index_block_table_stride)
+                if (
+                    block_tables is None
+                    or block_tables.ndim != 2
+                    or block_tables.shape[0] < expected_blocks[0]
+                    or block_tables.shape[1] != expected_blocks[1]
+                    or block_tables.dtype is not torch.int32
+                    or not block_tables.is_contiguous()
+                ):
+                    raise ValueError(f"block_tables must be contiguous int32 {expected_blocks} for fused indexer")
+        if self.kv_cache_layout is KvCacheLayout.ATOM:
+            cache_width = GLM5_CONFIG.kv_lora + GLM5_CONFIG.pe_dim
+            fp8_dtypes = {
+                dtype
+                for dtype in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e4m3fnuz", None))
+                if dtype is not None
+            }
+            expected_dtype = (
+                kv_cache.dtype in fp8_dtypes if self.kv_cache_dtype == "fp8" else kv_cache.dtype is torch.bfloat16
+            )
+            if not expected_dtype or not kv_cache.is_contiguous():
+                raise ValueError(f"ATOM KV cache must be contiguous {self.kv_cache_dtype}")
+            if kv_cache.shape[-1] != cache_width:
+                raise ValueError(f"ATOM KV cache last dimension must be {cache_width}, got {tuple(kv_cache.shape)}")
+            if kv_cache.data_ptr() != pe_cache.data_ptr():
+                raise ValueError("ATOM KV cache layout requires the same fused tensor for kv_cache and pe_cache")
+            for name, value, dtype, size in (
+                ("positions", positions, torch.int64, total_samples),
+                ("slot_mapping", slot_mapping, torch.int64, total_samples),
+                ("sparse_kv_indptr", sparse_kv_indptr, torch.int32, total_samples + 1),
+            ):
+                if value is None or value.dtype is not dtype or value.numel() < size or not value.is_contiguous():
+                    got = None if value is None else (tuple(value.shape), value.dtype)
+                    raise ValueError(f"{name} must be contiguous {dtype} with at least {size} values, got {got}")
+        t = dict(self.W.t, **self.packed)
+        if x_out is None:
+            x_out = torch.empty(total_samples, HIDDEN, dtype=torch.bfloat16, device=h.device)
+        elif x_out.shape != (total_samples, HIDDEN):
+            raise ValueError(f"x_out must have shape {(total_samples, HIDDEN)}, got {tuple(x_out.shape)}")
+        p = lambda x: x.data_ptr()  # noqa: E731
+        for chunk in range(chunks):
+            row = chunk * self.S
+            self.launch(
+                hidden_states=p(h) + row * HIDDEN * h.element_size(),
+                output=p(x_out) + row * HIDDEN * x_out.element_size(),
+                decode_position=p(cur_pos),
+                positions=p(cur_pos if positions is None else positions) + (0 if positions is None else row * 8),
+                slot_mapping=p(cur_pos if slot_mapping is None else slot_mapping)
+                + (0 if slot_mapping is None else row * 8),
+                sparse_kv_indptr=p(cur_pos if sparse_kv_indptr is None else sparse_kv_indptr)
+                + (0 if sparse_kv_indptr is None else row * 4),
+                kv_cache=p(kv_cache),
+                rope_cache=p(pe_cache),
+                kv_indices=0 if self.with_indexer else p(indices),
+                rope_cos=p(cos),
+                rope_sin=p(sin),
+                input_norm_weight=p(t["g_in"]),
+                q_norm_weight=p(t["g_q"]),
+                kv_norm_weight=p(t["g_kv"]),
+                post_attn_norm_weight=p(t["g_post"]),
+                qkv_proj_weight=p(t["w_qkv_a"]),
+                qkv_proj_scale=p(t.get("s_qkv_a", t["w_qkv_a"])),
+                q_proj_weight=p(t["w_q_b"]),
+                q_proj_scale=p(t.get("s_q_b", t["w_q_b"])),
+                k_proj_weight=p(t["w_uk"]),
+                k_proj_scale=p(t.get("s_uk", t["w_uk"])),
+                v_proj_weight=p(t["w_uv"]),
+                v_proj_scale=p(t.get("s_uv", t["w_uv"])),
+                o_proj_weight=p(t["w_o"]),
+                o_proj_scale=p(t.get("s_o", t["w_o"])),
+                gate_weight=p(t["w_r"]),
+                e_score_correction_bias=p(t["bias"]),
+                w1=p(t["w_ug"]),
+                w1_scale=p(t["s_ug"]),
+                w2=p(t["w_dn"]),
+                w2_scale=p(t["s_dn"]),
+                workspace=p(self.scratch),
+                peer_buffer=self.sym,
+                peer_ptrs=p(self.peers),
+                index_params=p(self.index_params) if self.with_indexer else 0,
+                step_counter=p(self.step),
+                tp_rank=self.rank,
+                layer_id=layer,
+                block_tables=(
+                    p(block_tables) if self.with_indexer and self.kv_cache_layout is KvCacheLayout.ATOM else 0
+                ),
+                index_cache=p(index_cache) if self.with_indexer else 0,
+                stream=torch.cuda.current_stream(),
+            )
+            if chunk + 1 < chunks or advance:
+                self.advance_step()
+        return x_out
+
+    def advance_step(self):
+        self.step.add_(1)
+
+    def close(self):
+        """Release this rank's remote HIP IPC mappings."""
+
+        if self._owns_runtime:
+            self.peer_buffer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()

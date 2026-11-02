@@ -7,6 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
+source "${SCRIPT_DIR}/python_interpreter.sh"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
 LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
@@ -15,9 +16,39 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
-LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_COMMIT_DEFAULT=$("${FLY_PYTHON_EXECUTABLE}" -c "import json, sys; print(json.load(open(sys.argv[1]))['upstream']['llvm_hash'])" "${LLVM_BUILD_INFO}")
+LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
+
+# FLYDSL_LLVM_REF / FLYDSL_LLVM_REMOTE build any commit, from any remote, without
+# editing the pin. The patches below still apply.
+LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+
+# FLYDSL_LLVM_NO_EXT=1 drops LLVM_EXTENSIONS and keeps REQUIRED_PATCHES: the
+# control arm for "is this regression ours?". See CONTRIBUTING.md.
+LLVM_NO_EXT="${FLYDSL_LLVM_NO_EXT:-0}"
+
+# The patch series lives next to the pin it applies to, in llvm-build-info.json:
+# upstream.required_patches go into every build (LLVM is broken for FlyDSL
+# without them), then upstream.extensions, in order. See CONTRIBUTING.md,
+# "Add an LLVM Extension".
+LLVM_PATCH_LIST="$("${FLY_PYTHON_EXECUTABLE}" - "${LLVM_BUILD_INFO}" <<'PY_EOF'
+import json, sys
+pin = json.load(open(sys.argv[1]))["upstream"]
+for kind in ("required_patches", "extensions"):
+    for entry in pin.get(kind, []):
+        print(kind, entry["file"])
+PY_EOF
+)"
+REQUIRED_PATCHES=()
+LLVM_EXTENSIONS=()
+while read -r kind file; do
+    case "${kind}" in
+      required_patches) REQUIRED_PATCHES+=("${file}") ;;
+      extensions)       LLVM_EXTENSIONS+=("${file}") ;;
+    esac
+done <<< "${LLVM_PATCH_LIST}"
+
+
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -48,9 +79,10 @@ echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
 echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
 echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
+echo "LLVM Patches:   ${LLVM_PATCHES[*]:-(none)}"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}}"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
@@ -77,6 +109,13 @@ fi
 # `--depth 1 --filter=blob:none` did not finish within 100 minutes.
 LLVM_FETCH_ARGS=(--depth 1)
 
+# The forced checkout below would silently discard an extension being authored.
+if [ -f .flydsl-extension-in-progress ]; then
+    echo "Error: an LLVM extension is being authored in ${PWD}: $(cat .flydsl-extension-in-progress)" >&2
+    echo "       Finish it (scripts/llvm_extension.sh --finish) before building." >&2
+    exit 1
+fi
+
 if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "Checking for local LLVM commit ${LLVM_REF} ..."
     if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
@@ -86,20 +125,66 @@ if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
         echo "LLVM commit ${LLVM_REF} is already available locally."
     fi
     echo "Checking out LLVM commit ${LLVM_REF} ..."
-    git checkout "${LLVM_REF}"
+    git checkout --force "${LLVM_REF}"
 else
     echo "Fetching ref ${LLVM_REF} ..."
     git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
-    git checkout FETCH_HEAD
+    git checkout --force FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
+# Replay the series from the pristine pin every run instead of detecting what is
+# already applied: `git apply --reverse --check` cannot tell for a series. Patches
+# go in with --index, so the forced checkout above also drops files they created.
+# Never `git clean`: build-flydsl/ and mlir_install/ live in this checkout.
+
+# Every .patch file must be listed, and every listed file must exist.
+LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
+for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
+    [ -e "${patch_file}" ] || continue
+    patch_base="$(basename "${patch_file}")"
+    listed=0
+    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+        [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
+    done
+    if [ "${listed}" -eq 0 ]; then
+        echo "Error: patch file is not listed in thirdparty/llvm-build-info.json: ${patch_base}" >&2
+        echo "       Add it to upstream.extensions (or upstream.required_patches, if" >&2
+        echo "       the build is broken without it), or delete it." >&2
+        exit 1
+    fi
+done
+for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+    if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
+        echo "Error: llvm-build-info.json lists a file that does not exist: ${patch_name}" >&2
+        echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
+        exit 1
+    fi
+done
+
+LLVM_APPLY=("${REQUIRED_PATCHES[@]}")
+if [[ "${LLVM_NO_EXT}" != "1" ]]; then
+    LLVM_APPLY+=("${LLVM_EXTENSIONS[@]}")
 fi
+
+echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
+if [[ "${LLVM_NO_EXT}" == "1" ]]; then
+    echo "LLVM Extensions: none (FLYDSL_LLVM_NO_EXT=1)"
+else
+    echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
+fi
+for ext_name in "${LLVM_APPLY[@]}"; do
+    echo "  applying ${ext_name}"
+    if ! git apply --index "${LLVM_EXT_DIR}/${ext_name}"; then
+        echo "" >&2
+        echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
+        echo "       LLVM pin: ${LLVM_REF}" >&2
+        echo "" >&2
+        echo "  Either the extension is stale against this pin, or it landed upstream." >&2
+        echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
+        echo "  If it landed:   delete it and drop its entry from thirdparty/llvm-build-info.json" >&2
+        exit 1
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
@@ -114,7 +199,8 @@ echo "Configuring LLVM..."
 
 # Install dependencies for Python bindings
 echo "Installing Python dependencies..."
-pip install nanobind numpy pybind11
+NANOBIND_VERSION="${NANOBIND_VERSION:-2.12.0}"
+"${FLY_PYTHON_EXECUTABLE}" -m pip install "nanobind==${NANOBIND_VERSION}" numpy pybind11
 
 # Check for ninja
 GENERATOR="Unix Makefiles"
@@ -126,8 +212,8 @@ else
 fi
 
 # Build the selected LLVM projects and targets in Release mode.
-# Explicitly set nanobind directory if found to help CMake locate it
-NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')")
+# Refresh nanobind after installation, retaining the interpreter resolved before cd.
+PYTHON_EXECUTABLE="${FLY_PYTHON_EXECUTABLE}" source "${SCRIPT_DIR}/python_interpreter.sh"
 
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
@@ -139,10 +225,10 @@ cmake -G "$GENERATOR" \
     -DCMAKE_CXX_STANDARD=17 \
     -DLLVM_ENABLE_ASSERTIONS=ON \
     -DLLVM_INSTALL_UTILS=ON \
+    -DLLVM_INSTALL_GTEST=ON \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
     -DMLIR_BINDINGS_PYTHON_NB_DOMAIN=mlir \
-    -DPython3_EXECUTABLE=$(which python3) \
-    -Dnanobind_DIR="$NANOBIND_DIR" \
+    "${FLY_PYTHON_CMAKE_ARGS[@]}" \
     -DBUILD_SHARED_LIBS=OFF \
     -DLLVM_BUILD_LLVM_DYLIB=OFF \
     -DLLVM_LINK_LLVM_DYLIB=OFF \
@@ -172,6 +258,26 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
     echo "Error: install prefix missing lib/cmake/mlir: ${LLVM_INSTALL_DIR}" >&2
     exit 1
+  fi
+
+  # The install tree is ~80% bin/, and those binaries carry a symbol table the
+  # build does not need: stripping takes ~20% off the tarball, which the CI
+  # cache transfers on every job. Static archives are left alone - they gained
+  # nothing when measured, and stripping an archive can drop symbols the link
+  # still needs. Set LLVM_STRIP_INSTALL=0 to keep symbols for crash backtraces.
+  if [[ "${LLVM_STRIP_INSTALL:-1}" == "1" ]] && command -v strip >/dev/null 2>&1; then
+    echo "Stripping installed binaries and shared libraries..."
+    before_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    # -type f skips the symlinks in bin/; non-ELF entries (the Python and Perl
+    # helper scripts) simply fail to strip and are skipped.
+    find "${LLVM_INSTALL_DIR}/bin" "${LLVM_INSTALL_DIR}/lib" \
+         "${LLVM_INSTALL_DIR}/python_packages" \
+         -type f ! -name '*.a' -print0 2>/dev/null |
+      while IFS= read -r -d '' f; do
+        strip --strip-unneeded "${f}" 2>/dev/null || true
+      done
+    after_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    echo "Install tree: $((before_kb / 1024)) MB -> $((after_kb / 1024)) MB"
   fi
 
   echo "Creating tarball..."
