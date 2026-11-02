@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-02T12:29:21Z",
+ "updated": "2026-11-02T12:54:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41448247424,
+   "pr": 1359,
+   "commit": "dbda5fa8da4206af22f8c60d4fd8aab22a48735a",
+   "branch": "stable-struct-names",
+   "event": "pull_request",
+   "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424",
+   "created_at": "2026-11-02T12:52:39Z",
+   "updated_at": "2026-11-02T12:52:50Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
+  {
+   "run_id": 41445521202,
+   "pr": 1360,
+   "commit": "d3d48ad745c455c5c2a4fb034cfc69dfc70016fd",
+   "branch": "cache-ast-rewrite",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Reuse the AST rewrite when a kernel factory is built again",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41445521202",
+   "created_at": "2026-11-02T12:32:20Z",
+   "updated_at": "2026-11-02T12:33:39Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41432173576,
    "pr": 1359,
@@ -10,11 +40,11 @@
    "branch": "stable-struct-names",
    "event": "pull_request",
    "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41432173576",
    "created_at": "2026-11-02T10:51:50Z",
-   "updated_at": "2026-11-02T10:53:14Z",
+   "updated_at": "2026-11-02T12:52:41Z",
    "actor": "RElbers",
    "jobs": []
   },
@@ -1878,67 +1908,6 @@
    "created_at": "2026-10-29T18:01:01Z",
    "updated_at": "2026-10-29T18:01:01Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 40861389045,
-   "pr": 1238,
-   "commit": "e5555047c0641a2b1a72f311860a5e4c16ac6f2d",
-   "branch": "migrate-kernels-tiled-tdm",
-   "event": "pull_request",
-   "title": "Migrate kernels tiled tdm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045",
-   "created_at": "2026-10-29T10:55:43Z",
-   "updated_at": "2026-10-29T23:02:14Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:17:04Z",
-     "completed_at": "2026-10-29T13:54:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863052"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:23:30Z",
-     "completed_at": "2026-10-29T13:43:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863085"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:00:52Z",
-     "completed_at": "2026-10-29T13:36:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861389045/job/123460863105",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 40861222658,
-   "pr": null,
-   "commit": "d3c3398f93d1232b30dd0f5e8264cbc74f5ef7e5",
-   "branch": "migrate-kernels-tiled-tdm",
-   "event": "pull_request",
-   "title": "Migrate kernels tiled tdm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40861222658",
-   "created_at": "2026-10-29T10:54:25Z",
-   "updated_at": "2026-10-29T10:55:58Z",
-   "actor": "xudoyuan",
    "jobs": []
   }
  ]
