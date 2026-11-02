@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-02T19:11:24Z",
+ "updated": "2026-11-02T20:12:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41509865804,
+   "pr": 1343,
+   "commit": "9ffdeab6d56570bf13c20ba69a71d06b7bd2286e",
+   "branch": "fix/debug-call-chain-scopes",
+   "event": "pull_request",
+   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41509865804",
+   "created_at": "2026-11-02T19:25:55Z",
+   "updated_at": "2026-11-02T19:50:43Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T19:51:41Z",
+     "completed_at": "2026-11-02T20:09:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41509865804/job/125511701416",
+     "machine": "bg-1w300-g1-2b",
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T19:50:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41509865804/job/125511701519"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T19:50:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41509865804/job/125511701647"
+    }
+   ]
+  },
   {
    "run_id": 41507228649,
    "pr": 1360,
@@ -10,13 +56,41 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649",
    "created_at": "2026-11-02T19:09:00Z",
-   "updated_at": "2026-11-02T19:09:20Z",
+   "updated_at": "2026-11-02T19:28:10Z",
    "actor": "RElbers",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T19:28:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804742"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T20:00:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804827"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-02T19:31:18Z",
+     "completed_at": "2026-11-02T19:38:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804866"
+    }
+   ]
   },
   {
    "run_id": 41478166582,
@@ -35,10 +109,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-02T18:18:16Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T19:16:16Z",
+     "completed_at": "2026-11-02T19:28:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263920"
     },
     {
@@ -740,11 +814,11 @@
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41266884417",
    "created_at": "2026-11-01T02:51:51Z",
-   "updated_at": "2026-11-02T17:34:53Z",
+   "updated_at": "2026-11-02T20:10:10Z",
    "actor": "edjson",
    "jobs": [
     {
@@ -1980,52 +2054,6 @@
      "started_at": "2026-10-30T05:09:54Z",
      "completed_at": "2026-10-30T06:21:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41003388106/job/123903672675"
-    }
-   ]
-  },
-  {
-   "run_id": 40993276813,
-   "pr": null,
-   "commit": "005498149157f5f2057142e452ee0e694ea860ae",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813",
-   "created_at": "2026-10-30T02:42:47Z",
-   "updated_at": "2026-10-30T04:41:44Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T03:40:35Z",
-     "completed_at": "2026-10-30T04:37:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488218"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T03:07:22Z",
-     "completed_at": "2026-10-30T03:45:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488243",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T03:31:21Z",
-     "completed_at": "2026-10-30T03:48:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488327"
     }
    ]
   }
