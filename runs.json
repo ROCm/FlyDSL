@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T09:44:15Z",
+ "updated": "2026-11-02T10:59:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41432173576,
+   "pr": 1359,
+   "commit": "10620d12a4acf3238a8451f806ad1002e8363be6",
+   "branch": "stable-struct-names",
+   "event": "pull_request",
+   "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41432173576",
+   "created_at": "2026-11-02T10:51:50Z",
+   "updated_at": "2026-11-02T10:53:14Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41422840145,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145",
    "created_at": "2026-11-02T09:42:24Z",
-   "updated_at": "2026-11-02T09:42:26Z",
+   "updated_at": "2026-11-02T09:44:28Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,13 +40,44 @@
    "branch": "zhimding/observe_launches_1102",
    "event": "pull_request",
    "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863",
    "created_at": "2026-11-02T08:54:57Z",
-   "updated_at": "2026-11-02T08:56:19Z",
+   "updated_at": "2026-11-02T10:57:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T10:09:29Z",
+     "completed_at": "2026-11-02T10:57:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938784"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T10:09:39Z",
+     "completed_at": "2026-11-02T10:41:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938820",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T10:09:13Z",
+     "completed_at": "2026-11-02T10:35:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938840"
+    }
+   ]
   },
   {
    "run_id": 41415897447,
@@ -382,11 +428,11 @@
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41266884417",
    "created_at": "2026-11-01T02:51:51Z",
-   "updated_at": "2026-11-01T02:51:51Z",
+   "updated_at": "2026-11-02T10:01:52Z",
    "actor": "edjson",
    "jobs": []
   },
@@ -1894,52 +1940,6 @@
    "updated_at": "2026-10-29T10:55:58Z",
    "actor": "xudoyuan",
    "jobs": []
-  },
-  {
-   "run_id": 40857792686,
-   "pr": null,
-   "commit": "717c807e8e14796f4fa6663021341015e34b35fc",
-   "branch": "glm-mono-kernel-structure-optmize",
-   "event": "pull_request",
-   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686",
-   "created_at": "2026-10-29T10:28:06Z",
-   "updated_at": "2026-10-29T14:46:10Z",
-   "actor": "james-huang09",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T14:07:54Z",
-     "completed_at": "2026-10-29T14:19:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965106"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:19:28Z",
-     "completed_at": "2026-10-29T13:49:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965178",
-     "machine": "smci350-odcdh2-a08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:48:39Z",
-     "completed_at": "2026-10-29T14:19:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40857792686/job/123460965311"
-    }
-   ]
   }
  ]
 }
