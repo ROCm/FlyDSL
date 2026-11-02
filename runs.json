@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T18:59:43Z",
+ "updated": "2026-11-02T19:11:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41507228649,
+   "pr": 1360,
+   "commit": "0c5011322aa497402e6cd04608f1de18803f5210",
+   "branch": "cache-ast-rewrite",
+   "event": "pull_request",
+   "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649",
+   "created_at": "2026-11-02T19:09:00Z",
+   "updated_at": "2026-11-02T19:09:20Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41478166582,
    "pr": 1361,
@@ -85,29 +100,29 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095",
    "created_at": "2026-11-02T14:45:34Z",
-   "updated_at": "2026-11-02T18:11:58Z",
+   "updated_at": "2026-11-02T19:09:02Z",
    "actor": "RElbers",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-02T18:11:58Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T19:09:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832000"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-02T18:11:58Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T19:09:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832024"
     },
     {
@@ -2013,21 +2028,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993276813/job/123866488327"
     }
    ]
-  },
-  {
-   "run_id": 40993051888,
-   "pr": null,
-   "commit": "55e8558dc05c57a728f9c6c85304eabd62d7d828",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40993051888",
-   "created_at": "2026-10-30T02:40:26Z",
-   "updated_at": "2026-10-30T02:43:38Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
