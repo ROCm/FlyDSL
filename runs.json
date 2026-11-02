@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T14:41:51Z",
+ "updated": "2026-11-02T14:47:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41464989095,
+   "pr": 1360,
+   "commit": "c3ce77f64006ba8c067550d48ae5969a55e0679e",
+   "branch": "cache-ast-rewrite",
+   "event": "pull_request",
+   "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095",
+   "created_at": "2026-11-02T14:45:34Z",
+   "updated_at": "2026-11-02T14:45:49Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41457501609,
    "pr": 1352,
@@ -40,11 +55,11 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41453148475",
    "created_at": "2026-11-02T13:27:31Z",
-   "updated_at": "2026-11-02T13:29:24Z",
+   "updated_at": "2026-11-02T14:45:35Z",
    "actor": "RElbers",
    "jobs": []
   },
@@ -1200,7 +1215,8 @@
      "conclusion": "success",
      "started_at": "2026-10-30T10:49:43Z",
      "completed_at": "2026-10-30T11:16:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904128"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904128",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1864,21 +1880,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40986644706",
    "created_at": "2026-10-30T01:34:26Z",
    "updated_at": "2026-10-30T01:50:09Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 40985468978,
-   "pr": null,
-   "commit": "47bff2129dac56912b2a16bbfbd4d84ef2efc6c1",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40985468978",
-   "created_at": "2026-10-30T01:22:33Z",
-   "updated_at": "2026-10-30T01:34:50Z",
    "actor": "jli-melchior",
    "jobs": []
   }
