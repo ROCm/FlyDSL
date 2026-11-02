@@ -1,8 +1,112 @@
 {
  "schema": 1,
- "updated": "2026-11-02T00:44:28Z",
+ "updated": "2026-11-02T02:25:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41376465992,
+   "pr": 1222,
+   "commit": "2ac3337aa82e60575eb8f2312ad75e6fa6687a1a",
+   "branch": "fix_cmake_rocm7.14",
+   "event": "pull_request",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992",
+   "created_at": "2026-11-02T02:12:31Z",
+   "updated_at": "2026-11-02T02:14:09Z",
+   "actor": "apinge",
+   "jobs": []
+  },
+  {
+   "run_id": 41374364481,
+   "pr": 1216,
+   "commit": "e58c08c83bf722b5366a511688141cd0a7255f8f",
+   "branch": "kernel/gfx1100-flash-attn",
+   "event": "pull_request",
+   "title": "[Kernel] Add dense Flash Attention for gfx1100",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481",
+   "created_at": "2026-11-02T01:48:16Z",
+   "updated_at": "2026-11-02T02:16:24Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-02T02:16:52Z",
+     "completed_at": "2026-11-02T02:18:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481/job/125058774238"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-02T02:16:48Z",
+     "completed_at": "2026-11-02T02:18:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481/job/125058774252"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T02:16:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481/job/125058774321"
+    }
+   ]
+  },
+  {
+   "run_id": 41370910996,
+   "pr": 1356,
+   "commit": "1ea480433895c70d4bde6a42f254f8ec8d9a2eb3",
+   "branch": "zhimding/observe_launches_1102",
+   "event": "pull_request",
+   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996",
+   "created_at": "2026-11-02T01:08:56Z",
+   "updated_at": "2026-11-02T02:23:08Z",
+   "actor": "zhiding512",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T01:21:22Z",
+     "completed_at": "2026-11-02T01:54:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362675",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T01:21:13Z",
+     "completed_at": "2026-11-02T01:41:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362698"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T01:21:30Z",
+     "completed_at": "2026-11-02T02:23:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362700"
+    }
+   ]
+  },
   {
    "run_id": 41301335116,
    "pr": 1338,
@@ -1924,128 +2028,6 @@
      "started_at": "2026-10-29T08:42:32Z",
      "completed_at": "2026-10-29T09:10:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943/job/123347058301"
-    }
-   ]
-  },
-  {
-   "run_id": 40836241717,
-   "pr": null,
-   "commit": "a951a793762348e7fcf9538337988c83239913b5",
-   "branch": "zhimding/ktrace_low_overhead_1027",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40836241717",
-   "created_at": "2026-10-29T07:33:56Z",
-   "updated_at": "2026-10-29T08:12:40Z",
-   "actor": "zhiding512",
-   "jobs": []
-  },
-  {
-   "run_id": 40835799901,
-   "pr": null,
-   "commit": "d45adb16c3925eec77c6d96bf37ec41703cf397b",
-   "branch": "xyw/mega_moe_merge",
-   "event": "pull_request",
-   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901",
-   "created_at": "2026-10-29T07:29:53Z",
-   "updated_at": "2026-10-29T17:04:38Z",
-   "actor": "Yaowu-Xiong",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:07:24Z",
-     "completed_at": "2026-10-29T09:40:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569928",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:05:32Z",
-     "completed_at": "2026-10-29T08:35:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569948"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:43:07Z",
-     "completed_at": "2026-10-29T09:32:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123332569987"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T11:03:51Z",
-     "completed_at": "2026-10-29T12:19:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123371766147"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T15:23:04Z",
-     "completed_at": "2026-10-29T17:04:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40835799901/job/123371766225"
-    }
-   ]
-  },
-  {
-   "run_id": 40833810850,
-   "pr": null,
-   "commit": "7f439907d9891c3b4a91e03d8dbab1821c3c63ba",
-   "branch": "migrate-kernels-tiled-tdm",
-   "event": "pull_request",
-   "title": "Migrate kernels tiled tdm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850",
-   "created_at": "2026-10-29T07:11:13Z",
-   "updated_at": "2026-10-29T08:02:39Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-29T07:44:31Z",
-     "completed_at": "2026-10-29T08:01:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220468"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-29T07:46:09Z",
-     "completed_at": "2026-10-29T08:02:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220493"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-29T07:45:03Z",
-     "completed_at": "2026-10-29T08:00:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40833810850/job/123325220547"
     }
    ]
   }
