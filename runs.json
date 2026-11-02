@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-02T15:24:51Z",
+ "updated": "2026-11-02T15:55:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41476043974,
+   "pr": 1361,
+   "commit": "ad1f2aa8d1bcad6452d4c0d3d605c3bdee5a9059",
+   "branch": "faster-trace-locations",
+   "event": "pull_request",
+   "title": "[DSL] Capture op locations in linear time and print the traced module once.",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41476043974",
+   "created_at": "2026-11-02T15:53:33Z",
+   "updated_at": "2026-11-02T15:53:48Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
+  {
+   "run_id": 41474707458,
+   "pr": 1361,
+   "commit": "1b65d47125a138f95f927ee322703636aad848b0",
+   "branch": "faster-trace-locations",
+   "event": "pull_request",
+   "title": "[DSL] Capture op locations in linear time and print the traced module once.",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41474707458",
+   "created_at": "2026-11-02T15:45:25Z",
+   "updated_at": "2026-11-02T15:53:35Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41464989095,
    "pr": 1360,
@@ -1851,36 +1881,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988515296/job/123855583121"
     }
    ]
-  },
-  {
-   "run_id": 40988092064,
-   "pr": null,
-   "commit": "b4a626ebca784ae16320b0707cefa9b2152779d3",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40988092064",
-   "created_at": "2026-10-30T01:49:24Z",
-   "updated_at": "2026-10-30T01:51:04Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 40986644706,
-   "pr": null,
-   "commit": "6ce558bb9b2a44b9fb2a0b7e7768856acaf7beaa",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40986644706",
-   "created_at": "2026-10-30T01:34:26Z",
-   "updated_at": "2026-10-30T01:50:09Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
