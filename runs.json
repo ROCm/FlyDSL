@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T02:54:23Z",
+ "updated": "2026-11-02T03:27:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,37 +25,40 @@
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
    "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992",
    "created_at": "2026-11-02T02:12:31Z",
-   "updated_at": "2026-11-02T02:27:34Z",
+   "updated_at": "2026-11-02T03:18:18Z",
    "actor": "apinge",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T02:28:23Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896843"
+     "completed_at": "2026-11-02T03:01:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896843",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T02:27:58Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T03:23:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896858"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-02T02:27:34Z",
+     "started_at": "2026-11-02T03:18:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896921"
     }
