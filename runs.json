@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T18:11:43Z",
+ "updated": "2026-11-02T18:25:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "faster-trace-locations",
    "event": "pull_request",
    "title": "[DSL] Speed up tracing by caching op source positions",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582",
    "created_at": "2026-11-02T16:06:17Z",
-   "updated_at": "2026-11-02T18:07:33Z",
+   "updated_at": "2026-11-02T18:18:16Z",
    "actor": "RElbers",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:18:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263920"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:21:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263970"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:18:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263972"
+    }
+   ]
   },
   {
    "run_id": 41476043974,
@@ -55,13 +83,41 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095",
    "created_at": "2026-11-02T14:45:34Z",
-   "updated_at": "2026-11-02T18:00:48Z",
+   "updated_at": "2026-11-02T18:11:58Z",
    "actor": "RElbers",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:11:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832000"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:11:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832024"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:12:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832188"
+    }
+   ]
   },
   {
    "run_id": 41457501609,
@@ -85,13 +141,41 @@
    "branch": "add-security-scanning",
    "event": "pull_request",
    "title": "chore: add security scanning workflows",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182",
    "created_at": "2026-11-02T13:49:28Z",
-   "updated_at": "2026-11-02T17:55:19Z",
+   "updated_at": "2026-11-02T18:15:02Z",
    "actor": "cgoea",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:22:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484564"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T18:15:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484574"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-02T18:15:28Z",
+     "completed_at": "2026-11-02T18:17:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484588"
+    }
+   ]
   },
   {
    "run_id": 41453148475,
@@ -149,10 +233,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-02T17:54:54Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T18:10:50Z",
+     "completed_at": "2026-11-02T18:22:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597287"
     },
     {
