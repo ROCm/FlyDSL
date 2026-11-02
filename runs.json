@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T03:27:01Z",
+ "updated": "2026-11-02T03:37:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
    "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992",
    "created_at": "2026-11-02T02:12:31Z",
-   "updated_at": "2026-11-02T03:18:18Z",
+   "updated_at": "2026-11-02T03:34:52Z",
    "actor": "apinge",
    "jobs": [
     {
@@ -56,10 +56,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T03:18:17Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T03:34:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896921"
     }
    ]
