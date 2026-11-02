@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T22:49:25Z",
+ "updated": "2026-11-02T23:42:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649",
    "created_at": "2026-11-02T19:09:00Z",
-   "updated_at": "2026-11-02T22:26:02Z",
+   "updated_at": "2026-11-02T23:40:46Z",
    "actor": "RElbers",
    "jobs": [
     {
@@ -99,11 +99,11 @@
    "branch": "faster-trace-locations",
    "event": "pull_request",
    "title": "[DSL] Speed up tracing by caching op source positions",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582",
    "created_at": "2026-11-02T16:06:17Z",
-   "updated_at": "2026-11-02T22:46:47Z",
+   "updated_at": "2026-11-02T22:54:44Z",
    "actor": "RElbers",
    "jobs": [
     {
@@ -113,7 +113,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T19:16:16Z",
      "completed_at": "2026-11-02T19:28:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263920"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125605432720"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -122,7 +122,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T18:21:27Z",
      "completed_at": "2026-11-02T18:44:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263970",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125605433413",
      "machine": "smci355-ccs-aus-m12-21",
      "host_model": "MI355"
     },
@@ -133,7 +133,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T21:57:46Z",
      "completed_at": "2026-11-02T22:37:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263972"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125605433620"
     }
    ]
   },
@@ -306,10 +306,10 @@
    "event": "pull_request",
    "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424",
    "created_at": "2026-11-02T12:52:39Z",
-   "updated_at": "2026-11-02T20:24:31Z",
+   "updated_at": "2026-11-02T23:40:21Z",
    "actor": "RElbers",
    "jobs": [
     {
@@ -319,16 +319,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T17:56:14Z",
      "completed_at": "2026-11-02T20:24:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597277"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T18:10:50Z",
-     "completed_at": "2026-11-02T18:22:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597287"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125605394094"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -337,9 +328,18 @@
      "conclusion": "success",
      "started_at": "2026-11-02T17:55:21Z",
      "completed_at": "2026-11-02T18:27:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597377",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125605394112",
      "machine": "smci355-ccs-aus-m12-29",
      "host_model": "MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-02T18:10:50Z",
+     "completed_at": "2026-11-02T18:22:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125605394247"
     }
    ]
   },
