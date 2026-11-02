@@ -41,7 +41,7 @@ def _env_fingerprint() -> tuple:
     try:
         from .compiler.jit_function import _cache_invalidating_env_values
 
-        return tuple(sorted(_cache_invalidating_env_values()))
+        return tuple(sorted(_cache_invalidating_env_values(_device_fingerprint())))
     except Exception:
         return ()
 
