@@ -59,11 +59,6 @@ def _escape_attr_string(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-# Scopes built for the current context, so a function has one subprogram per
-# compilation; only the last context is held.
-_scope_cache = [None, {}]
-
-
 def _frame_scope(code, context) -> ir.Attribute:
     """A debug scope for the Python function of *code*: a ``DILexicalBlockFile``
     in a ``DISubprogram`` named after it.
@@ -78,14 +73,20 @@ def _frame_scope(code, context) -> ir.Attribute:
     call chain. Each subprogram carries its own compile unit, as a distinct id
     in parsed attribute text is local to that parse.
     """
-    if _scope_cache[0] is not context:
-        _scope_cache[:] = [context, {}]
+    # Scopes built for the thread's current context, so a function has one
+    # subprogram per compilation. Per thread, like the rest of the trace state:
+    # a scope from another thread's context would outlive that context in this
+    # thread's locations. Only the last context of each thread is held.
+    cache = getattr(_tls, "scope_cache", None)
+    if cache is None or cache[0] is not context:
+        cache = _tls.scope_cache = (context, {})
+    scopes = cache[1]
     key = (code.co_filename, code.co_firstlineno, code.co_name)
-    if key not in _scope_cache[1]:
-        _scope_cache[1][key] = _parse_scope(
+    if key not in scopes:
+        scopes[key] = _parse_scope(
             code.co_filename, getattr(code, "co_qualname", code.co_name), code.co_firstlineno, context
         )
-    return _scope_cache[1][key]
+    return scopes[key]
 
 
 def _parse_scope(filename: str, name: str, line: int, context) -> ir.Attribute:
