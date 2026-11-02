@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T07:09:50Z",
+ "updated": "2026-11-02T07:44:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,39 +10,42 @@
    "branch": "glm-mono-kernel-structure-optmize",
    "event": "pull_request",
    "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991",
    "created_at": "2026-11-02T06:41:23Z",
-   "updated_at": "2026-11-02T07:07:25Z",
+   "updated_at": "2026-11-02T07:37:23Z",
    "actor": "james-huang09",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-02T07:07:25Z",
+     "started_at": "2026-11-02T07:09:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543506"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T07:07:44Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T07:37:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543533"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T07:07:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543553"
+     "completed_at": "2026-11-02T07:38:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543553",
+     "machine": "gbt350-odcdh1-b04-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
