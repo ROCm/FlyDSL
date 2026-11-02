@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T07:49:17Z",
+ "updated": "2026-11-02T08:42:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41410239840,
+   "pr": 1356,
+   "commit": "e1faa830fe60bb9b8eb4c5eb2894288f3043d632",
+   "branch": "zhimding/observe_launches_1102",
+   "event": "pull_request",
+   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41410239840",
+   "created_at": "2026-11-02T08:03:01Z",
+   "updated_at": "2026-11-02T08:04:20Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
   {
    "run_id": 41401502991,
    "pr": 1348,
@@ -10,20 +25,20 @@
    "branch": "glm-mono-kernel-structure-optmize",
    "event": "pull_request",
    "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991",
    "created_at": "2026-11-02T06:41:23Z",
-   "updated_at": "2026-11-02T07:37:23Z",
+   "updated_at": "2026-11-02T08:40:24Z",
    "actor": "james-huang09",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T07:09:10Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T08:40:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543506"
     },
     {
@@ -155,7 +170,7 @@
   },
   {
    "run_id": 41370910996,
-   "pr": 1356,
+   "pr": null,
    "commit": "1ea480433895c70d4bde6a42f254f8ec8d9a2eb3",
    "branch": "zhimding/observe_launches_1102",
    "event": "pull_request",
@@ -2015,21 +2030,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40842670886/job/123606600559"
     }
    ]
-  },
-  {
-   "run_id": 40839915872,
-   "pr": null,
-   "commit": "26c8f2bb094aba9c9641bf58853fc2996db5b075",
-   "branch": "zhimding/ktrace_low_overhead_1027",
-   "event": "pull_request",
-   "title": "[DSL][Perf] Remove KTRACE's shared cursor and per-event atomics",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839915872",
-   "created_at": "2026-10-29T08:07:38Z",
-   "updated_at": "2026-10-29T08:30:54Z",
-   "actor": "zhiding512",
-   "jobs": []
   }
  ]
 }
