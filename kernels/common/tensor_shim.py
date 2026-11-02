@@ -77,6 +77,17 @@ def _run_compiled(exe, *args):
         raise
 
 
+def _preload_compiled(exe, *args):
+    """Compile ``exe`` for ``args`` without dispatching its GPU kernels; returns ``None``.
+
+    ``_compile_only`` skips execution for this call alone. Setting the
+    process-wide ``COMPILE_ONLY`` flag instead would also suppress launches made
+    concurrently by other threads. The first real launch reuses the in-memory
+    compile cache.
+    """
+    return exe._compile_only(*args)
+
+
 def _to_raw(v):
     """Convert ArithValue / Numeric (Int32, Boolean, …) to raw ir.Value."""
     if isinstance(v, ir.Value):

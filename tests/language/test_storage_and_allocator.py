@@ -2144,9 +2144,11 @@ class TestStaticPlacement:
                 scratch: Scratch
 
             storage = fx.SharedAllocator().allocate(WithUnion)
-            assert object.__getattribute__(storage.scratch.fp16, "_ptr") is object.__getattribute__(
-                storage.scratch.fp32, "_ptr"
-            )
+            base = object.__getattribute__(storage.scratch, "_ptr")
+            for variant in (storage.scratch.fp16, storage.scratch.fp32):
+                view = object.__getattribute__(variant, "_ptr").owner
+                assert view.name == "fly.add_offset" and view.operands[0] == base
+                assert "<0>" in str(view.operands[1].type)
 
         make_ptrs = _make_ptr_lines(launch_ir(union_leaf_kernel))
         assert len(make_ptrs) == 2
@@ -2219,3 +2221,56 @@ class TestDynamicPlacement:
 
         text = launch_ir(kernel)
         assert "dynamic_shared_memory_size %c24_i32" in text
+
+
+@fx.struct
+class _HeadAndScratch:
+    head: fx.Int32
+    scratch: Scratch
+
+
+def _storage_shape(storage):
+    ptr = object.__getattribute__(storage, "_ptr")
+    return ptr is not None, {name: _storage_shape(child) for name, child in storage._prebuilt.items()}
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+class TestStorageAsDslType:
+    """A Storage handle carries its base pointer or its prebuilt fields' pointers."""
+
+    def test_base_pointer_and_prebuilt_fields_are_exclusive(self):
+        with pytest.raises(ValueError, match="not both"):
+            fx.Storage[Pair]("base", prebuilt={"left": fx.Storage[fx.Int32]("left")})
+
+    @pytest.mark.parametrize(
+        "static,target,nvalues,has_ptr",
+        [
+            (True, Pair, 2, False),  # one allocation per leaf, no common base
+            (True, _HeadAndScratch, 2, False),  # prebuilt struct holding a union leaf
+            (True, Scratch, 1, True),  # union: one allocation, variants at offset 0
+            (True, fx.Empty, 0, False),  # no bytes, nothing to carry
+            (False, Pair, 1, True),  # dynamic placement: one base pointer
+            (False, _HeadAndScratch, 1, True),
+        ],
+    )
+    def test_round_trip_and_dynamic_loop(self, static, target, nvalues, has_ptr):
+        @flyc.kernel
+        def kernel(n: fx.Int32):
+            storage = fx.SharedAllocator(static=static).allocate(target)
+            values = extract_to_ir_values(storage)
+            assert len(values) == nvalues
+            assert (object.__getattribute__(storage, "_ptr") is not None) == has_ptr
+            rebuilt = construct_from_ir_values(type(storage), storage, values)
+            assert type(rebuilt) is type(storage) and _storage_shape(rebuilt) == _storage_shape(storage)
+            assert extract_to_ir_values(rebuilt) == values
+            for _ in range(0, n):
+                if fx.const_expr(target is Pair):
+                    storage.left.poke(storage.left.peek() + 1)
+                elif fx.const_expr(target is _HeadAndScratch):
+                    storage.head.poke(storage.head.peek() + 1)
+                elif fx.const_expr(target is Scratch):
+                    storage.fp32.peek()[0] = 1.0
+                else:
+                    storage.poke(fx.Empty())
+
+        assert "scf.for" in launch_ir(kernel, fx.Int32(3))
