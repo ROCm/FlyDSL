@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T02:25:43Z",
+ "updated": "2026-11-02T02:40:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41378758831,
+   "pr": 1348,
+   "commit": "6e2baf7e1bc5f5bba03c754160d3f861b0379255",
+   "branch": "glm-mono-kernel-structure-optmize",
+   "event": "pull_request",
+   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41378758831",
+   "created_at": "2026-11-02T02:37:47Z",
+   "updated_at": "2026-11-02T02:39:07Z",
+   "actor": "james-huang09",
+   "jobs": []
+  },
   {
    "run_id": 41376465992,
    "pr": 1222,
@@ -10,13 +25,41 @@
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
    "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992",
    "created_at": "2026-11-02T02:12:31Z",
-   "updated_at": "2026-11-02T02:14:09Z",
+   "updated_at": "2026-11-02T02:27:34Z",
    "actor": "apinge",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T02:28:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896843"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-02T02:27:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896858"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-02T02:27:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41376465992/job/125061896921"
+    }
+   ]
   },
   {
    "run_id": 41374364481,
@@ -25,11 +68,11 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481",
    "created_at": "2026-11-02T01:48:16Z",
-   "updated_at": "2026-11-02T02:16:24Z",
+   "updated_at": "2026-11-02T02:38:22Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -53,10 +96,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-02T02:16:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T02:38:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481/job/125058774321"
     }
    ]
@@ -1982,52 +2025,6 @@
      "started_at": "2026-10-29T08:58:15Z",
      "completed_at": "2026-10-29T10:54:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/40839199904/job/123353490408"
-    }
-   ]
-  },
-  {
-   "run_id": 40837202943,
-   "pr": 1313,
-   "commit": "02eff54a34ec824ee055feb33953b1e808641aa9",
-   "branch": "pr/feat-core-layout-replacement",
-   "event": "pull_request",
-   "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943",
-   "created_at": "2026-10-29T07:42:56Z",
-   "updated_at": "2026-10-29T09:46:57Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:58:44Z",
-     "completed_at": "2026-10-29T09:46:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943/job/123347058234"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:42:41Z",
-     "completed_at": "2026-10-29T09:46:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943/job/123347058248",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T08:42:32Z",
-     "completed_at": "2026-10-29T09:10:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40837202943/job/123347058301"
     }
    ]
   }
