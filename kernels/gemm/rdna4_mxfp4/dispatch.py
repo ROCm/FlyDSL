@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Adaptive RDNA4 register/hybrid selection from measured configuration regions.
+"""CPU-only register/hybrid selection with measured profiles and guarded costs.
 
-The exported decision tree uses dimensions, alignment, K factors and a cache
-hint. Its leaves rank successful configurations. Selection is CPU-only and
-cached; K tiles/unroll and masked copies adapt to the actual unseen shape.
+Known N/K families interpolate configurations within matching M specializations.
+Nearby families propose compatible strategies; other shapes use a bounded cost
+check over regional priorities. Tensor execution and calibration are separate.
 """
 
 import json
@@ -53,10 +53,6 @@ def _region(m, n, k, cache_policy):
 
 def _adapt(config, m, n, k):
     config = dict(config)
-    # Partial tiny-M waves exhibit a large latency cliff at long K unrolls.
-    # Retain divisor-five schedules, but avoid the >=6 region for these tails.
-    if config["engine"] == "register" and m < 16 and m & (m - 1):
-        config["k_unroll"] = min(config.get("k_unroll", 1), 5)
     cfg = normalize_config(config, m, k)
     if cfg["engine"] == "register":
         bm = 16 * cfg["waves_m"] * cfg["repeat_m"]
@@ -64,42 +60,18 @@ def _adapt(config, m, n, k):
         if m % bm or n % bn:
             cfg["buffer_io"] = True
     else:
-        cfg["tile_k"] = max(b for b in (32, 64, 128, 256) if b <= cfg["tile_k"] and k % b == 0)
+        cfg["tile_k"] = max(
+            b for b in (32, 64, 128, 256) if b <= cfg["tile_k"] and k % b == 0
+        )
         cfg["operand_prefetch"] = min(cfg["operand_prefetch"], cfg["tile_k"] // 16 - 1)
     return cfg
 
 
-def _prefill_config(config, m, n, k, cache_policy):
-    if cache_policy != "rotating" or m < 128:
-        return None
-    # Skinny projections need enough independent workgroups before B reuse
-    # justifies a larger M tile.
-    if 32 <= n <= 128 and k >= 1024:
-        if math.ceil(m / 64) * math.ceil(n / 32) < 72:
-            return _adapt(dict(REGISTER_DEFAULTS, waves_n=2, repeat_m=1, repeat_n=1, k_unroll=4), m, n, k)
-        return _adapt(dict(HYBRID_DEFAULTS, tile_m=64, tile_n=32, tile_k=128, waves_m=2, waves_n=1), m, n, k)
-    if config["engine"] != "hybrid" or config["tile_m"] < 256:
-        return None
-    bm = config["tile_m"]
-    padded = math.ceil(m / bm) * bm
-    smaller = math.ceil(m / 128) * 128
-    if (m < 1024 or bm >= 512) and padded - m > m / 8 and smaller < padded:
-        return _adapt(
-            dict(HYBRID_DEFAULTS, tile_m=128, tile_n=64, tile_k=64 if m < 1024 else 128, waves_m=4, waves_n=1), m, n, k
-        )
-    return None
-
-
-def _candidates(m, n, k, cache_policy="auto"):
+def _regional_candidates(m, n, k, cache_policy="auto"):
     model = _model()
     seen = set()
     for index in model["leaves"][str(_region(m, n, k, cache_policy))]:
         cfg = _adapt(model["candidates"][index], m, n, k)
-        if not seen:
-            corrected = _prefill_config(cfg, m, n, k, cache_policy)
-            if corrected is not None and legal_config(corrected, m, n, k):
-                seen.add(tuple(sorted(corrected.items())))
-                yield corrected
         ident = tuple(sorted(cfg.items()))
         if ident not in seen and legal_config(cfg, m, n, k):
             seen.add(ident)
@@ -141,7 +113,10 @@ def rank_configurations(m, n, k, *, cache_policy="auto", limit=None):
     """
     _check(m, n, k, cache_policy)
     region = _region(m, n, k, cache_policy)
-    rows = [dict(config=cfg, priority=j, region=region) for j, cfg in enumerate(_candidates(m, n, k, cache_policy))]
+    rows = [
+        dict(config=cfg, priority=j, region=region)
+        for j, cfg in enumerate(_candidates(m, n, k, cache_policy))
+    ]
     return rows if limit is None else rows[:limit]
 
 
@@ -181,8 +156,12 @@ def tuning_candidates(m, n, k, *, cache_policy="auto", limit=64):
     def add(raw):
         cfg = dict(raw)
         if cfg["engine"] == "hybrid":
-            cfg["tile_k"] = max(b for b in (32, 64, 128, 256) if b <= cfg["tile_k"] and k % b == 0)
-            cfg["operand_prefetch"] = min(cfg["operand_prefetch"], cfg["tile_k"] // 16 - 1)
+            cfg["tile_k"] = max(
+                b for b in (32, 64, 128, 256) if b <= cfg["tile_k"] and k % b == 0
+            )
+            cfg["operand_prefetch"] = min(
+                cfg["operand_prefetch"], cfg["tile_k"] // 16 - 1
+            )
         cfg = normalize_config(cfg, m, k)
         if cfg["engine"] == "register":
             bm = 16 * cfg["waves_m"] * cfg["repeat_m"]
@@ -198,7 +177,9 @@ def tuning_candidates(m, n, k, *, cache_policy="auto", limit=64):
     for hint in hints:
         add(choose_config(m, n, k, cache_policy=hint))
     bk = max(b for b in (32, 64, 128, 256) if k % b == 0)
-    bm = 16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128 if m < 256 else 256
+    bm = (
+        16 if m <= 16 else 32 if m <= 32 else 64 if m <= 64 else 128 if m < 256 else 256
+    )
     for wn in (1, 2):
         add(
             dict(
@@ -274,3 +255,55 @@ def tuning_candidates(m, n, k, *, cache_policy="auto", limit=64):
         if len(selected) >= limit:
             break
     return selected[:limit]
+
+
+@lru_cache(maxsize=4096)
+def _profile_proposal(m, n, k, cache_policy):
+    from .profile_policy import measured_choice, profile_model
+
+    exact = measured_choice(m, n, k, cache_policy, _adapt)
+    if exact is not None:
+        return exact[0], tuple(sorted(exact[1].items()))
+
+    from .profile_transfer import transferred_choice
+
+    nearby = transferred_choice(
+        profile_model(), m, n, k, cache_policy, _adapt, legal_config
+    )
+    if nearby is not None:
+        return None, tuple(sorted(nearby[3].items()))
+    return None
+
+
+def _proposal_regional(m, n, k, cache_policy):
+    proposal = _profile_proposal(m, n, k, cache_policy)
+    first = dict(proposal[1]) if proposal is not None else None
+    if first is not None:
+        yield first
+    for config in _regional_candidates(m, n, k, cache_policy):
+        if config != first:
+            yield config
+
+
+def _candidates(m, n, k, cache_policy="auto"):
+    proposal = _profile_proposal(m, n, k, cache_policy)
+    if proposal is not None:
+        source_m, config = proposal
+        if source_m is not None and max(m, source_m) <= 1.25 * min(m, source_m):
+            yield dict(config)
+            return
+
+    from .cost_policy import rerank_configs
+
+    yield from rerank_configs(
+        m,
+        n,
+        k,
+        cache_policy,
+        lambda hint: _proposal_regional(m, n, k, hint),
+        _adapt,
+        legal_config,
+        REGISTER_DEFAULTS,
+        HYBRID_DEFAULTS,
+        improvement_margin=math.log(1.10) if proposal is not None else 0.0,
+    )

@@ -4,6 +4,10 @@
 """CPU shape, resource and legality helpers for the MXFP4 selector."""
 
 import math
+import struct
+
+REGISTER_MAX_ACCUMULATORS = 128
+
 
 REGISTER_DEFAULTS = dict(
     engine="register",
@@ -50,7 +54,9 @@ def normalize_config(config, m, k):
         request = result["k_unroll"]
         result["k_unroll"] = max(d for d in range(1, request + 1) if k // 32 % d == 0)
     elif engine == "hybrid":
-        result["cache_group_m"] = min(result["cache_group_m"], (m + result["tile_m"] - 1) // result["tile_m"])
+        result["cache_group_m"] = min(
+            result["cache_group_m"], (m + result["tile_m"] - 1) // result["tile_m"]
+        )
         if result["b_swizzle"] is not None:
             result["b_swizzle"] = tuple(result["b_swizzle"])
             result["fragment_lds"] = True
@@ -70,7 +76,9 @@ def geometry(config):
     bb = (
         bn * bk
         if config["b_swizzle"]
-        else bn // 16 * (bk // 16) * 34 * 8 if config["fragment_lds"] else bn * (bk + config["pad"])
+        else bn // 16 * (bk // 16) * 34 * 8
+        if config["fragment_lds"]
+        else bn * (bk + config["pad"])
     )
     return bm, bn, bk, wm, wn, bm // (16 * wm), bn // (16 * wn), bb * config["stages"]
 
@@ -85,7 +93,13 @@ def legal_config(config, m, n, k):
         if not 32 <= threads <= 1024 or rm * rn * 8 > 192:
             return False
         if config["engine"] == "register":
-            return 1 <= config["k_unroll"] <= 16 and k % bk == 0 and (config["buffer_io"] or m % bm == n % bn == 0)
+            if rm * rn * 8 > REGISTER_MAX_ACCUMULATORS:
+                return False
+            return (
+                1 <= config["k_unroll"] <= 16
+                and k % bk == 0
+                and (config["buffer_io"] or m % bm == n % bn == 0)
+            )
         if config["engine"] != "hybrid":
             return False
         if (
@@ -117,12 +131,40 @@ CONTEXT_FEATURE_NAMES = (
     "log_n_alignment",
     "log_k_alignment",
     "hot",
+    "log_output_bytes",
+    "log_operations",
+    "log_mn_tiles16",
+    *(f"m_utilization_{tile}" for tile in (16, 32, 64, 128, 256, 512, 1024)),
+    *(f"n_utilization_{tile}" for tile in (16, 32, 64, 128, 256, 512)),
+    *(f"k_groups_divisible_{factor}" for factor in (3, 5, 7, 9, 11, 13, 15)),
+    "log_max_k_divisor4",
+    "log_max_k_divisor8",
+    "log_max_k_divisor16",
+    "k_divisor_count16",
+    *(
+        f"log_workgroups_{bm}x{bn}"
+        for bm, bn in (
+            (16, 32),
+            (16, 64),
+            (64, 32),
+            (64, 64),
+            (128, 64),
+            (128, 128),
+            (256, 64),
+            (256, 128),
+            (512, 128),
+            (1024, 64),
+        )
+    ),
 )
+
+_CONTEXT_FLOATS = struct.Struct(f"<{len(CONTEXT_FEATURE_NAMES)}f")
 
 
 def context_features(m, n, k, hot):
     weight_bytes = ((n + 15) // 16 * 16) * (k * 17 / 32 + 4)
-    return [
+    divisors = [d for d in range(1, 17) if k // 32 % d == 0]
+    values = [
         math.log2(m),
         math.log2(n),
         math.log2(k),
@@ -134,4 +176,36 @@ def context_features(m, n, k, hot):
         math.log2(n & -n),
         math.log2(k & -k),
         float(hot),
+        math.log2(2 * m * n),
+        math.log2(2 * m * n * k),
+        math.log2(((m + 15) // 16) * ((n + 15) // 16)),
+        *(
+            m / (((m + tile - 1) // tile) * tile)
+            for tile in (16, 32, 64, 128, 256, 512, 1024)
+        ),
+        *(
+            n / (((n + tile - 1) // tile) * tile)
+            for tile in (16, 32, 64, 128, 256, 512)
+        ),
+        *(float(k // 32 % factor == 0) for factor in (3, 5, 7, 9, 11, 13, 15)),
+        *(math.log2(max(d for d in divisors if d <= bound)) for bound in (4, 8, 16)),
+        len(divisors) / 16,
+        *(
+            math.log2(((m + bm - 1) // bm) * ((n + bn - 1) // bn))
+            for bm, bn in (
+                (16, 32),
+                (16, 64),
+                (64, 32),
+                (64, 64),
+                (128, 64),
+                (128, 128),
+                (256, 64),
+                (256, 128),
+                (512, 128),
+                (1024, 64),
+            )
+        ),
     ]
+    # sklearn evaluates tree inputs as float32. Preserve those exact branch
+    # decisions at deployment without a NumPy dependency in the CPU selector.
+    return _CONTEXT_FLOATS.unpack(_CONTEXT_FLOATS.pack(*values))

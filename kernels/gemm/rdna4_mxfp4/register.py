@@ -15,6 +15,7 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 
+from .dispatch_features import REGISTER_MAX_ACCUMULATORS
 from .folding import magnitude_words
 from .layouts import (
     expand_nibbles,
@@ -47,6 +48,8 @@ def build_register(
     device_id=0,
     aligned_m=False,
 ):
+    if repeat_m * repeat_n * 8 > REGISTER_MAX_ACCUMULATORS:
+        raise ValueError("register repeats exceed the supported accumulator budget")
     assert fold_mode in ("grouped", "e4m3", "e5m2")
     assert isinstance(k_unroll, int) and 1 <= k_unroll <= 16
     assert weight_bits in (4, 8) and (weight_bits == 4 or fold_mode != "grouped")

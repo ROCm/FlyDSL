@@ -14,7 +14,8 @@ from flydsl.kernels.gemm.rdna4_mxfp4 import prepare_weights, gemm, choose_config
 # scales: uint8 [N, K/32], OCP E8M0 exponents.
 weights = prepare_weights(packed, scales)
 y = gemm(x_fp8_e4m3, weights, x_scale_fp32, cache_policy="rotating")
-print(choose_config(x_fp8_e4m3.shape[0], weights.n, weights.k, weights.mode))
+print(choose_config(x_fp8_e4m3.shape[0], weights.n, weights.k, weights.mode,
+                    cache_policy="rotating"))
 ```
 
 M and N can have tails. K must be a positive multiple of 32. Inputs and output
@@ -40,30 +41,87 @@ These are algorithm strategies. Tile sizes, unroll, stages and LDS layouts are
 configurations of a strategy. Exact grouped scaling uses register GEMM.
 Cooperative A+B LDS GEMM and historical HIP-style ports are not included.
 
-The CPU fallback is a frozen decision tree over dimensions, alignment,
-K factors, compressed footprint and a cache hint. Leaves rank measured successful
-configurations. Runtime adjusts K divisors and masked copies, checks legality,
-and caches the choice on the CPU. It needs neither a machine-learning package
-nor GPU timing. `auto` balances reused and rotating weights; `hot` targets
-repeated use of one weight; `rotating` targets cycling through model layers.
-`rank_configurations` exposes the selected region and its priority order.
-Its priorities are not latency predictions or a guarantee of optimality.
+The CPU selector first uses measured configuration profiles for matching N/K
+families. It interpolates M only within matching static/aligned/ragged compiler
+classes and a bounded launch-grid ratio. Direct interpolation requires an M
+ratio no greater than 1.25; farther profiles and compatible nearby families
+become proposals for the configuration-cost model. Replacing a proposal requires
+a predicted 10% gain. Narrow aligned queries reject odd-M profile sources.
+Register transfer checks both the chosen K loop and the available unroll factors.
+All proposals pass tile, accumulator, LDS and masked-copy legality checks.
 
-Rotating-weight prefill selection also accounts for workgroup availability
-in skinny projections and wasted rows in large M tiles. Skinny N32–128
-projections use register tiles until a small hybrid tile provides enough
-workgroups. Larger projections reduce the M tile when excessive rounding
-wastes computation. These corrections retain the register and hybrid strategies.
+`auto` balances hot and rotating weights, `hot` targets reuse of one weight, and
+`rotating` targets cycling through model layers. Selection imports only the
+Python standard library and caches its results on the CPU. It does not benchmark
+GPU candidates. `rank_configurations` describes the selected priorities; these
+are not latency measurements or a guarantee that every unseen shape is optimal.
 
-The exported policy was fitted on 198 shapes (126 original search shapes plus
-72 development shapes), with separate hot/rotating measurements. On a subsequent
-36-shape test across nine unseen N/K families, its geometric-mean latency ratio
-to an independently tuned reference was 1.128 with `auto`, and 1.084 with the
-matching cache hint; the worst ratios were 3.290 and 2.746. These misses motivate
-optional calibration rather than a claim that the CPU policy is optimal.
-The JSON records training shapes and the input-data digest. E4M3 is the
-performance training domain; E5M2 and exact grouped paths have separate
-correctness coverage.
+The profile/classifier data spans 15,429 development shapes, including Qwen3.8-27B
+and Gemma4-12B/31B linear dimensions at TP1/2/4. The cost model adds explicitly
+consumed N/K development cases and their complete bounded proposal banks, for
+15,936 fitting shapes and 1,259,942 hot/cold observations. Each N/K family has
+equal total fitting weight. JSON metadata records the provenance. Model
+holdouts, actual-checkpoint confirmation and the final fresh N/K/aligned tests
+are excluded from this fit.
+
+The source-frozen selector completes the full model and checkpoint validation
+matrix, including Qwen3.8-27B and Gemma4-12B/31B TP1/2/4. The table reports
+balanced (`auto`) latency against the best configuration in each frozen,
+freshly measured reference bank. Ratios above one are slower; the final column
+compares against the preceding native selector.
+
+| Validation cohort | Cases / configuration trials | Geomean latency / reference | Worst | Geomean speedup over preceding selector |
+|---|---:|---:|---:|---:|
+| Model families, unseen M | 2,194 / 90,739 | 1.00524× | 1.2180× | 1.1190× |
+| Checkpoint rank/dtype confirmation | 1,678 / 8,460 | 1.00290× | 1.0611× | 1.0586× |
+| Fresh N/K families | 195 / 10,703 | 1.04820× | 1.5544× | 1.3067× |
+| Fresh aligned shapes | 91 / 3,980 | 1.02982× | 1.5768× | 1.5264× |
+
+All trials pass sampled numerical checks against independent FP32 weight
+decoding/GEMM on fixed FP8 inputs, changed-input graph replay and output guards.
+Checkpoint confirmation uses representative pinned tensors for every declared
+linear family and all 168 rank shards, BF16/FP16 output and synthetic FP8
+activations. Two oversized Gemma12 TP1 output cases are excluded explicitly.
+The reference is a finite configuration bank. In particular, fresh-shape tails
+still expose proposal and cost-ranking misses; some cases regress against the
+preceding selector despite the geometric mean gains. These isolated GEMM
+results do not establish end-to-end serving gains.
+
+[Configurations, per-case results, checkpoint/source hashes and ISA metadata](../../../tests/perf/data/rdna4_mxfp4_comprehensive.json)
+also include two separately labeled consumed aligned development cohorts.
+The canonical package passes 75 CPU tests and preserves 170,199 public choices
+over 18,911 shapes against the measured source. The GPU suite passes 100 tests
+with 10 explicit skips. All 2,633 model-family warmup keys compile without GPU
+initialization using the installed SDK and existing compilation cache.
+
+Every audited selected executable uses native FP8/BF8 WMMA. Four selected
+hybrid objects in the model holdout use 8–108 bytes of scratch and VGPR spills.
+Their 16 policy selections are all within 3.57% of the measured bank best and
+faster than the preceding selector; 11 are the measured winners. They remain
+selected on timing evidence. The checkpoint and fresh-shape cohorts have zero
+selected scratch/VGPR-spill objects. Scalar spills also occur and are recorded
+per executable. These resource checks are not hardware-counter roofline data.
+
+The paired Qwen3.8-27B TP1 simple-agent comparison against the preceding native
+selector has effectively flat output TPS (within 0.32%). Mean TTFT changes are
++0.29%, +0.90%, -3.81% and -0.55% at streams 1/2/4/8. Both retained passes have
+complete requests, zero inference JIT warnings and no executable events at or
+above 50ms. These are point estimates from one workload on separate GPUs at
+default clocks, with small generated-history differences. They do not establish
+an all-concurrency TTFT win.
+
+Paired full GSM8K scores are 1,271/1,319 (96.36%) for this selector versus
+1,269/1,319 (96.21%) for the preceding native selector, with zero invalid
+answers. Both use five shots, greedy generation, thinking disabled and a
+1024-token output cap. The +0.1516 percentage-point difference has a paired
+95% interval of [-0.2274, +0.6065] percentage points, supporting no observed
+accuracy regression rather than a proven accuracy gain.
+
+Performance fitting covers normal E4M3-foldable weights on gfx1201. FP16 output,
+E5M2 folding and exact grouped rescaling have separate correctness tests. TP4
+coverage means per-rank kernel shapes on the available two GPUs; it does not
+establish four-device serving performance. The public 12B MLX packing is adapted
+for operand tests and does not establish vLLM checkpoint-loading compatibility.
 
 For a deployment's new shapes, calibrate before graph capture:
 

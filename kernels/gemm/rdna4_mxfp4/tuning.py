@@ -9,6 +9,7 @@ import math
 import os
 import statistics
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
@@ -107,7 +108,9 @@ class _Context:
             return
         m, k = self.x.shape
         n = self.weights.n
-        copies = max(8, min(128, math.ceil(256 * 2**20 / self.weights.storage_bytes)))
+        copies = max(2, min(128, math.ceil(256 * 2**20 / self.weights.storage_bytes)))
+        if copies * self.weights.storage_bytes < 128 * 2**20 or (m >= 128 and copies >= 8):
+            copies = 1
         self.rotation = [self.weights] + [
             replace(
                 self.weights,
@@ -117,8 +120,7 @@ class _Context:
             )
             for _ in range(copies - 1)
         ]
-        if copies * self.weights.storage_bytes < 256 * 2**20:
-            self.flush = torch.empty(256 * 2**20, device=self.x.device, dtype=torch.uint8)
+        self.flush = torch.ones(256 * 2**20, device=self.x.device, dtype=torch.uint8)
         self.rows = torch.linspace(0, m - 1, min(m, 8), device=self.x.device).long().unique()
         self.columns = torch.linspace(0, n - 1, min(n, 64), device=self.x.device).long().unique()
         columns = self.columns
@@ -147,8 +149,6 @@ class _Context:
 
     def launch(self, config):
         if self.phase == "rotating":
-            if self.flush is not None:
-                self.flush.fill_(1)
             for weights in self.rotation:
                 self.gemm(self.x, weights, self.scales, out=self.out, config=config)
         else:
@@ -175,26 +175,20 @@ class _Context:
             if float(error) > 0.006:
                 raise ValueError(f"calibration candidate relative RMS {float(error):.6f} exceeds 0.006")
 
-    @staticmethod
-    def measure(graph, calls):
-        graph.replay()
-        begin, end = (
-            torch.cuda.Event(enable_timing=True),
-            torch.cuda.Event(enable_timing=True),
-        )
-        begin.record()
-        graph.replay()
-        end.record()
-        end.synchronize()
-        repeats = max(1, math.ceil(3 / max(begin.elapsed_time(end), 0.001)))
+    def measure(self, graph, calls, events, *, cold=False):
+        # Captured events exclude CPU enqueue delay as well as the cache
+        # flush. Synchronizing the stream ensures this replay's timestamps
+        # are available even when an event was recorded by a prior replay.
+        settle_until = time.monotonic() + 0.003
+        while time.monotonic() < settle_until:
+            graph.replay()
+            torch.cuda.current_stream().synchronize()
+        begin, end = events
         samples = []
-        for _ in range(5):
-            begin.record()
-            for _ in range(repeats):
-                graph.replay()
-            end.record()
-            end.synchronize()
-            samples.append(begin.elapsed_time(end) / (repeats * calls))
+        for _ in range(16 if cold else 8):
+            graph.replay()
+            torch.cuda.current_stream().synchronize()
+            samples.append(begin.elapsed_time(end) / calls)
         return statistics.median(samples)
 
     def benchmark(self, fn, warmup=0, rep=0):
@@ -203,17 +197,19 @@ class _Context:
         for phase in phases:
             self.phase = phase
             graph = torch.cuda.CUDAGraph()
-            repeats = 8 if phase == "hot" else 1
+            repeats = (8 if self.x.shape[0] < 128 else 2) if phase == "hot" else 1
+            events = [torch.cuda.Event(enable_timing=True, external=True) for _ in range(2)]
             with torch.cuda.graph(graph):
+                if phase == "rotating":
+                    self.flush.sum(dtype=torch.int32)
+                    self.x.view(torch.uint8).sum(dtype=torch.int32)
+                    self.scales.sum()
+                events[0].record()
                 for _ in range(repeats):
                     fn()
+                events[1].record()
             calls = repeats * (len(self.rotation) if phase == "rotating" else 1)
-            elapsed = self.measure(graph, calls)
-            if phase == "rotating" and self.flush is not None:
-                flush_graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(flush_graph):
-                    self.flush.fill_(1)
-                elapsed = max(elapsed - self.measure(flush_graph, calls), 1e-6)
+            elapsed = self.measure(graph, calls, events, cold=phase == "rotating")
             values[phase] = elapsed
         self.phase = "hot"
         return math.sqrt(values["hot"] * values["rotating"]) if self.policy == "auto" else values[self.policy]
