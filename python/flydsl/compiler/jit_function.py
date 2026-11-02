@@ -989,6 +989,14 @@ class JitCacheManager:
         self.memory_cache: Dict[str, Any] = {}
         self._hits = 0
         self._misses = 0
+        self._scanned = False
+
+    def _scan_once(self) -> None:
+        """Run :meth:`load_all` before the first lookup rather than on creation: deriving a
+        launch's cache identity, its own or a nested ``@flyc.jit`` dependency's, reads no artifact."""
+        if not self._scanned:
+            self._scanned = True
+            self.load_all()
 
     @staticmethod
     def _safe_key(cache_key: str) -> str:
@@ -1006,6 +1014,7 @@ class JitCacheManager:
             pickle.dump(value, output)
 
     def get(self, cache_key: str) -> Optional[Any]:
+        self._scan_once()
         if cache_key in self.memory_cache:
             self._hits += 1
             return self.memory_cache[cache_key]
@@ -1052,6 +1061,7 @@ class JitCacheManager:
         and *writer* is None.  Otherwise *writer* is a callable that performs
         an atomic write under the already-held lock (no re-locking).
         """
+        self._scan_once()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._lock_file(cache_key)
         cache_file = self._cache_file(cache_key)
@@ -1387,7 +1397,6 @@ class JitFunction:
 
         cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
         self.cache_manager = JitCacheManager(cache_dir)
-        self.cache_manager.load_all()
 
     def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None):
         """Resolve raw call values into JitArgument instances *in place* and
@@ -1847,7 +1856,8 @@ class LaunchRecord:
 
     ``manager_key`` names the function's cache directory (``None`` while the disk cache is
     disabled) and ``cache_key`` the specialization within it, as the cache looks it up. Both are
-    opaque; equal records name the same compiled artifact.
+    opaque and only meaningful to the FlyDSL that produced them; equal records name the same
+    compiled artifact.
     """
 
     function: str
@@ -1861,7 +1871,8 @@ def observe_launches(*, stop: bool = False):
 
     Yields a list that receives one :class:`LaunchRecord` per launch, cached or not, in order.
     ``flyc.compile()`` is a launch; a ``@flyc.jit`` call made while another is being traced is
-    inlined into it and is not.
+    inlined into it and is not, and neither is a call of the :class:`CompiledFunction` that
+    ``flyc.compile()`` returns, which runs its compiled code directly.
 
     With ``stop=True`` a launch returns ``None`` as soon as its identity is known: nothing is
     traced, compiled, read from the cache or run. Host code run that way lists the

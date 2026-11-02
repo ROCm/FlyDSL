@@ -2,6 +2,7 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 """``flyc.observe_launches``: the cache identity of each ``@flyc.jit`` launch, and stopping a launch there."""
 
+import pickle
 import threading
 
 import pytest
@@ -19,7 +20,7 @@ def cache_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _launcher():
+def _launchers():
     # A JitFunction binds its disk cache on its first launch, so each test makes its own.
     @flyc.jit
     def inner(a: fx.Tensor):
@@ -29,7 +30,7 @@ def _launcher():
     def launch(a: fx.Tensor, n: fx.Constexpr[int]):
         inner(a)
 
-    return launch
+    return launch, inner
 
 
 def _cached(cache_dir, record):
@@ -38,7 +39,7 @@ def _cached(cache_dir, record):
 
 
 def test_records_each_launch_as_the_cache_stores_it(cache_dir):
-    launch = _launcher()
+    launch, _ = _launchers()
     a = torch.zeros(8)
     with flyc.observe_launches() as launches:
         launch(a, 1)
@@ -51,7 +52,7 @@ def test_records_each_launch_as_the_cache_stores_it(cache_dir):
 
 
 def test_stop_ends_a_launch_at_its_identity(cache_dir):
-    launch = _launcher()
+    launch, _ = _launchers()
     a = torch.zeros(8)
     with flyc.observe_launches(stop=True) as stopped:
         assert launch(a, 1) is None
@@ -64,8 +65,34 @@ def test_stop_ends_a_launch_at_its_identity(cache_dir):
     assert _cached(cache_dir, launched[0])
 
 
+def test_stop_reads_no_artifact_of_a_populated_cache(cache_dir, monkeypatch):
+    first, first_inner = _launchers()
+    a = torch.zeros(8)
+    first_inner(a)
+    with flyc.observe_launches() as populated:
+        first(a, 1)
+
+    loaded = []
+    real_load = pickle.load
+
+    def load(file, *args, **kwargs):
+        loaded.append(file.name)
+        return real_load(file, *args, **kwargs)
+
+    monkeypatch.setattr(pickle, "load", load)
+    # A fresh launcher of the same source, and its nested inner, bind the populated directories.
+    launch, _ = _launchers()
+    with flyc.observe_launches(stop=True) as stopped:
+        launch(a, 1)
+    assert stopped == populated
+    assert loaded == []
+
+    launch(a, 1)
+    assert loaded
+
+
 def test_observers_nest_and_see_only_their_thread(cache_dir):
-    launch = _launcher()
+    launch, _ = _launchers()
     a = torch.zeros(8)
     seen_by_thread = []
 

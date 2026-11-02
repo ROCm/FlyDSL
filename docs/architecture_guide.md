@@ -307,7 +307,9 @@ the `_AOTCompiledFunction` helper remain internal APIs.
 launch the current thread makes inside the block: one
 `LaunchRecord(function, manager_key, cache_key)` per launch, cached or not.
 `flyc.compile()` is a launch; a `@flyc.jit` call inlined into another's trace
-is not. With `stop=True` a launch returns `None` as soon as its identity is
+is not, nor is a call of the `CompiledFunction` that `flyc.compile()` returns.
+The keys are opaque and only meaningful to the FlyDSL version that produced
+them. With `stop=True` a launch returns `None` as soon as its identity is
 known, before anything is traced, compiled, read from the cache or run, so host
 code can be run to list the specializations it needs, e.g. to build or check an
 AOT cache:
