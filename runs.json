@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T13:23:36Z",
+ "updated": "2026-11-02T13:29:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41453148475,
+   "pr": 1360,
+   "commit": "13613ec78ac38ef6b99ac5d997d3ff8f2e999a43",
+   "branch": "cache-ast-rewrite",
+   "event": "pull_request",
+   "title": "[DSL][Perf] Reuse the AST rewrite when a kernel factory is built again",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41453148475",
+   "created_at": "2026-11-02T13:27:31Z",
+   "updated_at": "2026-11-02T13:27:46Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41452251082,
    "pr": 1360,
@@ -10,11 +25,11 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL][Perf] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41452251082",
    "created_at": "2026-11-02T13:21:17Z",
-   "updated_at": "2026-11-02T13:21:35Z",
+   "updated_at": "2026-11-02T13:27:32Z",
    "actor": "RElbers",
    "jobs": []
   },
@@ -1892,21 +1907,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/40926988002",
    "created_at": "2026-10-29T18:02:15Z",
    "updated_at": "2026-10-29T18:07:50Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 40926964338,
-   "pr": 1343,
-   "commit": "63db2605de13dc1f89ed396006f6a0b6ddad8907",
-   "branch": "fix/debug-call-chain-scopes",
-   "event": "pull_request",
-   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40926964338",
-   "created_at": "2026-10-29T18:02:06Z",
-   "updated_at": "2026-10-29T18:02:06Z",
    "actor": "jhinpan",
    "jobs": []
   }
