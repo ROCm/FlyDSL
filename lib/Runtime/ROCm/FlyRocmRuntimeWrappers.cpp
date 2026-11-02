@@ -45,6 +45,20 @@ extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module, const char *n
   return function;
 }
 
+// Max active blocks of kernel `name` per CU; loads a temporary module, launches nothing.
+extern "C" int32_t mgpuModuleOccupancyMaxActiveBlocks(void *data, const char *name,
+                                                      int32_t blockSize, int32_t smem) {
+  hipModule_t module = mgpuModuleLoad(data, /*gpuBlobSize=*/0);
+  if (!module)
+    return 0;
+  int blocks = 0;
+  if (hipFunction_t function = mgpuModuleGetFunction(module, name))
+    HIP_REPORT_IF_ERROR(
+        hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, function, blockSize, smem));
+  mgpuModuleUnload(module);
+  return blocks;
+}
+
 extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX, intptr_t gridY,
                                  intptr_t gridZ, intptr_t blockX, intptr_t blockY, intptr_t blockZ,
                                  int32_t smem, hipStream_t stream, void **params, void **extra,
@@ -165,6 +179,25 @@ extern "C" void mgpuMemset32(void *dst, int value, size_t count, hipStream_t str
 extern "C" void mgpuMemset16(void *dst, int shortValue, size_t count, hipStream_t stream) {
   HIP_REPORT_IF_ERROR(
       hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst), shortValue, count, stream));
+}
+
+extern "C" int mgpuTraceBufferClear(void *ptr, uint64_t sizeBytes) {
+  // Kernels on other streams may still be writing; the clear must also finish before the next
+  // traced launch on any stream.
+  hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess)
+    return err;
+  err = hipMemset(ptr, 0, sizeBytes);
+  if (err != hipSuccess)
+    return err;
+  return hipDeviceSynchronize();
+}
+
+extern "C" int mgpuTraceBufferRead(void *dst, void *src, uint64_t sizeBytes) {
+  hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess)
+    return err;
+  return hipMemcpy(dst, src, sizeBytes, hipMemcpyDeviceToHost);
 }
 
 extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {

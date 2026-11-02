@@ -35,7 +35,8 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 ```text
 FlyDSL/
 ├── scripts/                   # build & test scripts
-│   ├── build_llvm.sh          # build LLVM/MLIR from source
+│   ├── build_llvm.sh          # build LLVM/MLIR from source (applies thirdparty/llvm-extensions)
+│   ├── llvm_extension.sh      # create/rebase an LLVM extension
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
@@ -111,6 +112,20 @@ python -m pip install -e .
 ```
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
+
+The build scripts use `python3` on `PATH` by default. Set `PYTHON_EXECUTABLE`
+to select another Python 3.10+ interpreter (including a virtual environment):
+
+```bash
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build_llvm.sh -j64
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build.sh -j64
+```
+
+LLVM's Python dependencies are installed into that interpreter's environment.
+Both CMake Python detection passes are pinned to it. Builds launched by
+`python -m pip` or `python setup.py` use that Python interpreter instead of
+`PATH` or an inherited `PYTHON_EXECUTABLE`, so newly built bindings match the wheel ABI.
+Use a separate `FLY_BUILD_DIR` for each Python version to avoid reusing old bindings.
 
 ### Run tests
 

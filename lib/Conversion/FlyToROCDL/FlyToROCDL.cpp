@@ -11,8 +11,10 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -810,24 +812,10 @@ public:
     if (Value tok = op.getAsyncToken())
       asyncTokenType = tok.getType();
 
-    // There are two relevant builder signatures in this MLIR:
-    // - (kernel, ..., asyncTokenType, asyncDependencies, clusterSize)
-    // - (kernel, ..., asyncObject, clusterSize)
-    // Pick the one that matches the original op structure.
-    if (Value asyncObj = adaptor.getAsyncObject()) {
-      if (!adaptor.getAsyncDependencies().empty())
-        return rewriter.notifyMatchFailure(
-            op, "launch_func has both asyncObject and asyncDependencies");
-
-      rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
-          op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-          adaptor.getKernelOperands(), asyncObj, clusterSize);
-      return success();
-    }
-
     rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
         op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(), clusterSize);
+        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(),
+        adaptor.getAsyncObject(), clusterSize);
     return success();
   }
 };
@@ -848,6 +836,22 @@ public:
         return std::nullopt;
       return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
     });
+    // Small floats become same-width integers, but ops that stay legal keep the float type. Bridge
+    // exactly those pairs with a bitcast; any other mismatch is still a conversion error.
+    auto bitcastMaterialization = [&](OpBuilder &builder, Type resultType, ValueRange inputs,
+                                      Location loc) -> Value {
+      if (inputs.size() != 1)
+        return Value();
+      Type inputType = inputs.front().getType();
+      bool isConvertedPair =
+          convertType(inputType) == resultType || convertType(resultType) == inputType;
+      if (!isConvertedPair ||
+          !arith::BitcastOp::areCastCompatible(TypeRange{inputType}, TypeRange{resultType}))
+        return Value();
+      return arith::BitcastOp::create(builder, loc, resultType, inputs.front());
+    };
+    addSourceMaterialization(bitcastMaterialization);
+    addTargetMaterialization(bitcastMaterialization);
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
@@ -914,6 +918,21 @@ public:
   }
 };
 
+/// Poison has no value to convert, so a poison of a Fly type becomes one of its converted type.
+class PoisonOpTypeConversion : public OpConversionPattern<ub::PoisonOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(ub::PoisonOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type converted = getTypeConverter()->convertType(op.getType());
+    if (!converted)
+      return failure();
+    rewriter.replaceOpWithNewOp<ub::PoisonOp>(op, converted, op.getValue());
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -942,6 +961,11 @@ public:
 
     target.addDynamicallyLegalOp<arith::SelectOp>(
         [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
+    // Poison of a builtin type, such as a small-float vector, is left to the LLVM lowering.
+    target.addDynamicallyLegalOp<ub::PoisonOp>([&](ub::PoisonOp op) {
+      Type type = op.getType();
+      return isa<BuiltinDialect>(type.getDialect()) || typeConverter.isLegal(type);
+    });
     target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
         [&](Operation *op) { return typeConverter.isLegal(op); });
 
@@ -998,6 +1022,7 @@ public:
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
     patterns.add<SelectOpTypeConversion>(typeConverter, context);
+    patterns.add<PoisonOpTypeConversion>(typeConverter, context);
 
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);

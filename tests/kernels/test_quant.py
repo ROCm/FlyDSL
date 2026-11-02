@@ -136,7 +136,9 @@ def build_quant_module(N):
             return fx.memref_load(s_red, fx.Int32(0))
 
         # ── Layout API: buffer-backed tensors ────────────────────────────
-        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        # Tail threads load before masking; bound the descriptor so final-row
+        # reads past the allocation return zero instead of faulting.
+        Input_buf = fx.rocdl.make_buffer_tensor(Input, max_size=False)
         Out_buf = fx.rocdl.make_buffer_tensor(Output)
         Scales_buf = fx.rocdl.make_buffer_tensor(Scales)
 

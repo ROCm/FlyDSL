@@ -17,7 +17,7 @@ from kernels.monokernel.layout import (
     LAYER_SLOTS,
     symmetric_allreduce_nbytes,
 )
-from kernels.monokernel.ops import rsq, rsrc, uniform, xred
+from kernels.monokernel.ops import rsq, rsrc, uniform
 from kernels.monokernel.runtime import SymmetricPeerBuffer
 
 THREADS = 512
@@ -270,8 +270,7 @@ def build_symmetric_bf16_allreduce_rmsnorm(
             reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
 
         square_sum = reduced_lo * reduced_lo + reduced_hi * reduced_hi
-        for offset in (32, 16, 8, 4, 2, 1):
-            square_sum = xred(square_sum, offset, lambda lhs, rhs: lhs + rhs)
+        square_sum = fx.coop.warp_reduce(square_sum, fx.ReductionOp.ADD, width=64)
         reduction = fx.SharedAllocator().allocate(SharedStorage).peek().reduction.ptr
         if lane == 0:
             fx.ptr_store(square_sum, reduction + wave)

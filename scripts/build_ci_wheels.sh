@@ -122,6 +122,8 @@ build_wheel() {
 
 smoke_test_rocdl
 build_wheel "${REPO_ROOT}" pr
+# The Core C++ unit tests need no GPU; they reuse the PR wheel's build tree.
+FLY_BUILD_DIR="build-fly/build_py${PYTHON_SUFFIX}" bash "${SCRIPT_DIR}/run_core_tests.sh"
 
 base_repo_url="https://github.com/${BASE_REPO_NAME}.git"
 cleanup_base_worktree() {

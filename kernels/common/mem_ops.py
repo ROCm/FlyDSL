@@ -17,7 +17,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import as_ir_value, const_expr, rocdl
+from flydsl.expr import as_ir_value, rocdl
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops
 
@@ -60,10 +60,9 @@ def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
         ptr_type = ir.Type.parse("!llvm.ptr<1>")
     base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, ptr)
     base_ptr = _llvm.PtrToIntOp(T.i64, base_ptr).result
-    byte_offset = as_ir_value(fx.Int64(fx.Index(offset) * fx.Index(dtype_bytes)))
-    llvm_ptr = _llvm.AddOp(base_ptr, byte_offset, _llvm.IntegerOverflowFlags(0)).result
-    llvm_ptr = _llvm.IntToPtrOp(ptr_type, llvm_ptr).result
-    return llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
+    byte_offset = fx.Int64(fx.Index(offset) * fx.Index(dtype_bytes))
+    llvm_ptr = as_ir_value(fx.Int64(base_ptr) + byte_offset)
+    return _llvm.IntToPtrOp(ptr_type, llvm_ptr).result
 
 
 # Unified name for the element-pointer helper above.
@@ -71,11 +70,7 @@ element_ptr = get_llvm_ptr
 
 
 def _create_llvm_ptr(value, address_space: int = 1):
-    value = buffer_ops._unwrap_value(value)
-    if isinstance(value.type, ir.IndexType):
-        value = fx.Int64(value).ir_value()
-    ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
-    return _llvm.IntToPtrOp(ptr_type, value).result
+    return buffer_ops.create_llvm_ptr(value, address_space)
 
 
 # Unified name: int/index scalar -> typed llvm.ptr (any address space).
@@ -83,9 +78,8 @@ to_llvm_ptr = _create_llvm_ptr
 
 
 def extract_global_ptr(tensor):
-    raw = tensor.ir_value() if hasattr(tensor, "ir_value") and not isinstance(tensor, ir.Value) else tensor
     ptr_type = ir.Type.parse("!llvm.ptr<1>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
+    return _fly.extract_aligned_pointer_as_index(ptr_type, as_ir_value(tensor))
 
 
 # Unified name: tensor/memref -> aligned global base pointer.
@@ -93,8 +87,7 @@ aligned_ptr = extract_global_ptr
 
 
 def global_ptr_from_addr(addr_i64):
-    raw = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") and not isinstance(addr_i64, ir.Value) else addr_i64
-    return _llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<1>"), raw).result
+    return buffer_ops.create_llvm_ptr(addr_i64, address_space=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -110,7 +103,7 @@ def global_load_i64x2(global_ptr, byte_offset_i64):
 
 
 def global_load_i32(global_ptr, elem_offset_i32):
-    return global_load(global_ptr, fx.Int64(elem_offset_i32) * fx.Int64(4), T.i32, alignment=4)
+    return global_load(global_ptr, fx.Int64(elem_offset_i32) * 4, T.i32, alignment=4)
 
 
 def global_store(global_ptr, byte_offset, value, *, alignment):
@@ -121,9 +114,8 @@ def global_store(global_ptr, byte_offset, value, *, alignment):
     consolidation; the hand-rolled ``llvm.StoreOp`` sites are collected in a later
     phase, so this has no call site yet.
     """
-    val = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
     ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset), elem_type=T.i8)
-    _llvm.StoreOp(val, ptr, alignment=alignment)
+    _llvm.StoreOp(as_ir_value(value), ptr, alignment=alignment)
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +143,7 @@ def atomic_add(
     reused as the access alignment.
     """
     ptr = get_llvm_ptr(dst, offset, dtype_bytes, ptr_type=ptr_type)
-    val = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
+    val = as_ir_value(value)
     elem_ty = val.type.element_type if isinstance(val.type, ir.VectorType) else val.type
     bin_op = _llvm.AtomicBinOp.fadd if isinstance(elem_ty, ir.FloatType) else _llvm.AtomicBinOp.add
     if ordering is None:

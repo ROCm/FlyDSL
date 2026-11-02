@@ -48,6 +48,31 @@ func.func @if_pointers(%c: i1, %g: !fly.ptr<f32, global>, %s: !fly.ptr<f32, shar
   return %p#0, %p#1 : !fly.ptr<f32, global>, !fly.ptr<f32, shared>
 }
 
+// A branch can yield poison to lanes that never read it, as KTRACE's split ifs do. A Fly
+// pointer's poison takes the pointer's converted type; poison of a builtin type keeps its own.
+// CHECK-LABEL: func.func @if_poison_pointers
+// CHECK: } else {
+// CHECK-DAG: %[[GLOBAL:.*]] = ub.poison : !llvm.ptr<1>
+// CHECK-DAG: %[[BUFFER:.*]] = ub.poison : !llvm.struct<(ptr<8>, i32)>
+// CHECK-DAG: %[[SMALL:.*]] = ub.poison : vector<4xf8E4M3FN>
+// CHECK-DAG: %[[BITS:.*]] = arith.bitcast %[[SMALL]] : vector<4xf8E4M3FN> to vector<4xi8>
+// CHECK: scf.yield %[[GLOBAL]], %[[BUFFER]], %[[BITS]] : !llvm.ptr<1>, !llvm.struct<(ptr<8>, i32)>, vector<4xi8>
+// CF-LABEL: func.func @if_poison_pointers
+// CF: ub.poison : !llvm.ptr<1>
+// CF: cf.br {{.*}}!llvm.ptr<1>, !llvm.struct<(ptr<8>, i32)>, vector<4xi8>
+func.func @if_poison_pointers(%c: i1, %g: !fly.ptr<f32, global>, %b: !fly.ptr<f32, #fly_rocdl.buffer_desc>, %v: vector<4xf8E4M3FN>)
+    -> (!fly.ptr<f32, global>, !fly.ptr<f32, #fly_rocdl.buffer_desc>, vector<4xf8E4M3FN>) {
+  %p:3 = scf.if %c -> (!fly.ptr<f32, global>, !fly.ptr<f32, #fly_rocdl.buffer_desc>, vector<4xf8E4M3FN>) {
+    scf.yield %g, %b, %v : !fly.ptr<f32, global>, !fly.ptr<f32, #fly_rocdl.buffer_desc>, vector<4xf8E4M3FN>
+  } else {
+    %pg = ub.poison : !fly.ptr<f32, global>
+    %pb = ub.poison : !fly.ptr<f32, #fly_rocdl.buffer_desc>
+    %pv = ub.poison : vector<4xf8E4M3FN>
+    scf.yield %pg, %pb, %pv : !fly.ptr<f32, global>, !fly.ptr<f32, #fly_rocdl.buffer_desc>, vector<4xf8E4M3FN>
+  }
+  return %p#0, %p#1, %p#2 : !fly.ptr<f32, global>, !fly.ptr<f32, #fly_rocdl.buffer_desc>, vector<4xf8E4M3FN>
+}
+
 // CHECK-LABEL: func.func @for_pointers
 // CHECK: scf.for {{.*}} iter_args({{.*}}) -> (!llvm.ptr<1>, !llvm.ptr<3>)
 // CHECK: llvm.getelementptr {{.*}} : (!llvm.ptr<1>, i32) -> !llvm.ptr<1>, f32

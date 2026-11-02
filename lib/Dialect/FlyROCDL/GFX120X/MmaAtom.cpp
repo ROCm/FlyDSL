@@ -25,9 +25,31 @@ namespace mlir::fly_rocdl {
 //     ROCDL intrinsics take the plain 3-operand {a, b, c} form — unlike
 //     gfx1250, whose 16x16x32 ops carry mods/reuse operands.
 //   * The register ABI is the gfx1250 "v8" one — each lane holds K/2 = 8 A/B
-//     elements instead of the gfx11 16 (which broadcast across lane halves),
-//     so the fragment layouts come from the shared gfx1250 helpers.
+//     elements instead of the gfx11 16 (which broadcast across lane halves).
+//     K=16 A/B and all C fragments reuse the gfx1250 helpers (same numbers as
+//     numBlocks==1 / 32-bit C). IU4 K=32 uses a local A/B layout.
 //===----------------------------------------------------------------------===//
+
+namespace {
+
+// GFX120X-local. Do NOT call gfx1250::getThrValLayoutAB(ctx, 32, i4):
+// gfx1250 has no V_WMMA_I32_16X16X32_IU4 (LLVM gates the pattern on
+// HasWMMA128bInsts + isGFX11PlusNot12_50), so that helper's numBlocks==2
+// output for this shape is an untested extrapolation, not a second ABI.
+// Paper check vs gfx1250 numBlocks==2:
+//   (g,v)=(0,8): RDNA4 K=16g+v = 8;  gfx1250 = 16
+//   (g,v)=(1,0): RDNA4 K=16g+v = 16; gfx1250 = 8
+static LayoutAttr getThrValLayoutAB_IU4_K32(MLIRContext *ctx) {
+  auto getContext = [&]() { return ctx; };
+  // RDNA4 ISA §7.12.2 A-matrix 16×32 data size 4, wave32:
+  //   lane = {K[4], M[3:0]}, vgpr = K[3], startPosn = K[2:0]
+  //   => M = l%16,  K = (l/16)*16 + v     v ∈ [0, 16)
+  // column-major (M,K) stride (1, 16):
+  //   pos = M + K*16 = (l%16)*1 + (l/16)*256 + v*16
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(16)), FxStride(FxThr(1, 256), FxVal(16)));
+}
+
+} // namespace
 
 bool MmaOpGFX120X_WMMAType::isStatic() const { return true; }
 
@@ -49,15 +71,18 @@ Attribute MmaOpGFX120X_WMMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
-// For K=16 the shared gfx1250 helper yields shape (thr=(16,2), val=8) with
-// stride (thr=(1,128), val=16) over a column-major (M,K) reference space, i.e.
-//   M = lane % 16,  K = (lane / 16) * 8 + val
-// which is exactly the RDNA4 v8 A/B fragment.
+// K=16 integer A/B: same numbers as gfx1250 numBlocks==1.
+// Authority: RDNA4 ISA §7.12.2 A-matrix 16×16, data size 4 (IU4) and data
+// size 8 (IU8) — different rows, same map M = l%16, K = (l/16)*8 + v.
 Attribute MmaOpGFX120X_WMMAType::getThrValLayoutA() const {
+  if (getElemTyA().isInteger(4) && getK() == 32)
+    return getThrValLayoutAB_IU4_K32(getContext());
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());
 }
 
 Attribute MmaOpGFX120X_WMMAType::getThrValLayoutB() const {
+  if (getElemTyB().isInteger(4) && getK() == 32)
+    return getThrValLayoutAB_IU4_K32(getContext());
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyB());
 }
 
@@ -70,26 +95,44 @@ static bool isFp8OrBf8(Type elemTy) { return isa<Float8E4M3FNType, Float8E5M2Typ
 LogicalResult MmaOpGFX120X_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                             int32_t n, int32_t k, Type elemTyA, Type elemTyB,
                                             Type elemTyAcc, bool signA, bool signB, bool clamp) {
-  if (m != 16 || n != 16 || k != 16) {
-    return emitError() << "GFX120X WMMA floating-point forms require M=N=K=16, got " << m << "x"
-                       << n << "x" << k;
+  if (m != 16 || n != 16) {
+    return emitError() << "GFX120X WMMA requires M=N=16, got " << m << "x" << n;
   }
 
   const bool isFp8 = isFp8OrBf8(elemTyA) && isFp8OrBf8(elemTyB) && elemTyAcc.isF32();
   const bool isFp = (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32()) ||
                     (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32()) || isFp8;
 
-  if (!isFp) {
+  auto isInt = [](Type t, unsigned width) {
+    auto it = dyn_cast<IntegerType>(t);
+    return it && it.getWidth() == width;
+  };
+  const bool isI8 = isInt(elemTyA, 8) && isInt(elemTyB, 8) && elemTyAcc.isSignlessInteger(32);
+  const bool isI4 = isInt(elemTyA, 4) && isInt(elemTyB, 4) && elemTyAcc.isSignlessInteger(32);
+
+  if (!isFp && !isI8 && !isI4) {
     return emitError() << "unsupported GFX120X WMMA configuration: " << m << "x" << n << "x" << k
                        << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
 
-  // The floating-point intrinsics have no sign/clamp operands; refuse to build an
-  // atom promising something codegen cannot deliver.
-  if (signA || signB || clamp) {
-    return emitError() << "GFX120X WMMA floating-point path does not accept signA/signB/clamp "
-                          "(the ROCDL fp WMMA intrinsics have no such operands); got signA="
-                       << signA << ", signB=" << signB << ", clamp=" << clamp;
+  if (isFp) {
+    if (k != 16) {
+      return emitError() << "GFX120X WMMA floating-point forms require M=N=K=16, got " << m << "x"
+                         << n << "x" << k;
+    }
+    if (signA || signB || clamp) {
+      return emitError() << "GFX120X WMMA floating-point path does not accept signA/signB/clamp "
+                            "(the ROCDL fp WMMA intrinsics have no such operands); got signA="
+                         << signA << ", signB=" << signB << ", clamp=" << clamp;
+    }
+  }
+
+  if (isI8 && k != 16) {
+    return emitError() << "GFX120X WMMA IU8 requires K=16, got " << m << "x" << n << "x" << k;
+  }
+  if (isI4 && k != 16 && k != 32) {
+    return emitError() << "GFX120X WMMA IU4 requires K=16 or K=32, got " << m << "x" << n << "x"
+                       << k;
   }
 
   return success();
@@ -104,9 +147,19 @@ LogicalResult MmaOpGFX120X_WMMAType::verify(function_ref<InFlightDiagnostic()> e
 //   fp16 -> vector<8xf16>
 //   bf16 -> vector<8xi16>   (the bf16 WMMA intrinsic takes integer operands)
 //   fp8/bf8 -> vector<2xi32>   (8 packed 8-bit values)
-static Type getWmmaABType(MLIRContext *ctx, Type elemTy) {
+//   iu8 K=16 -> vector<2xi32>  (8 packed 8-bit values)
+//   iu4 K=16 -> i32            (8 packed 4-bit values)
+//   iu4 K=32 -> vector<2xi32>  (16 packed 4-bit values)
+static Type getWmmaABType(MLIRContext *ctx, Type elemTy, int32_t k) {
+  Type i32Ty = IntegerType::get(ctx, 32);
+  if (elemTy.isInteger(4) && k == 16)
+    return i32Ty;
+  if (elemTy.isInteger(4) && k == 32)
+    return VectorType::get({2}, i32Ty);
+  if (elemTy.isInteger(8) && k == 16)
+    return VectorType::get({2}, i32Ty);
   if (isFp8OrBf8(elemTy))
-    return VectorType::get({2}, IntegerType::get(ctx, 32));
+    return VectorType::get({2}, i32Ty);
   if (elemTy.isBF16())
     return VectorType::get({8}, IntegerType::get(ctx, 16));
   if (elemTy.isF16())
@@ -114,9 +167,9 @@ static Type getWmmaABType(MLIRContext *ctx, Type elemTy) {
   return nullptr;
 }
 
-// Accumulator/result vector type on RDNA4 wave32: 8 f32 slots per lane.
+// Accumulator/result vector type on RDNA4 wave32: 8 f32/i32 slots per lane.
 static Type getWmmaAccRawType(Type elemTyAcc) {
-  if (elemTyAcc.isF32())
+  if (elemTyAcc.isF32() || elemTyAcc.isInteger(32))
     return VectorType::get({8}, elemTyAcc);
   return nullptr;
 }
@@ -140,11 +193,11 @@ FailureOr<Value> MmaOpGFX120X_WMMAType::emitAtomCallSSA(
   Type elemTyAcc = getElemTyAcc();
   MLIRContext *ctx = builder.getContext();
 
-  if (m != 16 || n != 16 || k != 16)
+  if (m != 16 || n != 16)
     return failure();
 
-  Type abTyA = getWmmaABType(ctx, elemTyA);
-  Type abTyB = getWmmaABType(ctx, elemTyB);
+  Type abTyA = getWmmaABType(ctx, elemTyA, k);
+  Type abTyB = getWmmaABType(ctx, elemTyB, k);
   Type rawAccTy = getWmmaAccRawType(elemTyAcc);
   if (!abTyA || !abTyB || !rawAccTy)
     return failure();
@@ -169,6 +222,25 @@ FailureOr<Value> MmaOpGFX120X_WMMAType::emitAtomCallSSA(
   if (isa<Float8E5M2Type>(elemTyA) && isa<Float8E5M2Type>(elemTyB))
     return ROCDL::wmma_f32_16x16x16_bf8_bf8::create(builder, loc, rawAccTy, a, b, c).getResult();
 
+  // Integer forms share the sign and clamp attributes.
+  StringRef opName;
+  if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32) && k == 16)
+    opName = ROCDL::wmma_i32_16x16x16_iu8::getOperationName();
+  else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32) && k == 16)
+    opName = ROCDL::wmma_i32_16x16x16_iu4::getOperationName();
+  else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32) && k == 32)
+    opName = ROCDL::wmma_i32_16x16x32_iu4::getOperationName();
+
+  if (!opName.empty()) {
+    OperationState state(loc, opName);
+    state.addTypes(rawAccTy);
+    state.addOperands({a, b, c});
+    state.addAttribute("signA", builder.getBoolAttr(getSignA()));
+    state.addAttribute("signB", builder.getBoolAttr(getSignB()));
+    state.addAttribute("clamp", builder.getBoolAttr(getClamp()));
+    return builder.create(state)->getResult(0);
+  }
+
   return failure();
 }
 
@@ -186,8 +258,8 @@ LogicalResult MmaOpGFX120X_WMMAType::emitAtomCall(OpBuilder &builder, Location l
 
   MLIRContext *ctx = builder.getContext();
 
-  Type abTyA = getWmmaABType(ctx, getElemTyA());
-  Type abTyB = getWmmaABType(ctx, getElemTyB());
+  Type abTyA = getWmmaABType(ctx, getElemTyA(), getK());
+  Type abTyB = getWmmaABType(ctx, getElemTyB(), getK());
   Type accTy = getWmmaAccRawType(getElemTyAcc());
   if (!abTyA || !abTyB || !accTy)
     return failure();

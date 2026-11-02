@@ -26,8 +26,7 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, as_ir_value, range_constexpr
-from flydsl.expr.arith import ArithValue
+from flydsl.expr import arith, range_constexpr
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E, dtype_to_elem_type, get_warp_size
@@ -199,18 +198,9 @@ def _emit_topk_gating_softmax_body(
     in_range = global_token < i32_num_tokens
     global_token_safe = in_range.select(global_token, fx.Int32(0))
 
-    def group_reduce(x, mode):
-        """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
-        width_i32 = c_tpt
-        w = x
-        for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-            off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-            peer = w.shuffle_xor(off, width_i32)
-            if mode == "max":
-                w = fx.max(w, peer)
-            else:
-                w = w.addf(peer, fastmath=fm_fast)
-        return w
+    def group_reduce(x, op):
+        with fx.fastmath(fm_fast if op == fx.ReductionOp.ADD else arith.FastMathFlags.none):
+            return fx.coop.warp_reduce(x, op, width=THREADS_PER_TOKEN)
 
     def group_reduce_argmax(val, idx):
         """Butterfly argmax within a THREADS_PER_TOKEN sub-warp group.
@@ -225,7 +215,7 @@ def _emit_topk_gating_softmax_body(
             peer_v = wv.shuffle_xor(off, width_i32)
             peer_i = wi.shuffle_xor(off, width_i32)
             is_greater = peer_v > wv
-            is_equal = ArithValue(peer_v) == ArithValue(wv)
+            is_equal = peer_v == wv
             peer_lower_idx = peer_i < wi
             take_peer = is_greater | (is_equal & peer_lower_idx)
             wv = take_peer.select(peer_v, wv)
@@ -294,9 +284,9 @@ def _emit_topk_gating_softmax_body(
         # so its element type is f32. Reinterpret the i32 bits as f32 and
         # store via the f32 copy atom (avoids signed-vs-signless legalize
         # failures when going through si32).
-        val_f32 = ArithValue(val).bitcast(T.f32)
+        val_f32 = fx.Int32(val).bitcast(fx.Float32)
         r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-        v = fx.Vector.from_elements([val_f32], fx.Float32)
+        v = fx.full(1, val_f32, fx.Float32)
         fx.memref_store_vec(v, r)
         view = fx.slice(divided, (None, index))
         fx.copy(copy_atom_f32, r, view)
@@ -317,7 +307,7 @@ def _emit_topk_gating_softmax_body(
             x_list.append(xv)
             thread_max = fx.max(thread_max, xv)
 
-    group_max = group_reduce(thread_max, "max")
+    group_max = group_reduce(thread_max, fx.ReductionOp.MAX)
 
     # Pass 2: exp(x - max) and per-token sum
     thread_sum = c_zero_f
@@ -329,7 +319,7 @@ def _emit_topk_gating_softmax_body(
         exp_list.append(ev)
         thread_sum = thread_sum + ev
 
-    group_sum = group_reduce(thread_sum, "sum")
+    group_sum = group_reduce(thread_sum, fx.ReductionOp.ADD)
 
     # Pass 3: normalise -> softmax probabilities (kept in registers)
     inv_sum = c_one_f / group_sum
@@ -360,7 +350,7 @@ def _emit_topk_gating_softmax_body(
 
         for v in range_constexpr(VPT):
             ci = col_idx_list[v]
-            is_winner = ArithValue(ci) == ArithValue(global_best_idx)
+            is_winner = ci == global_best_idx
             prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
 
     # Pass 5: leader writes weights/indices/tei (with optional renorm).
@@ -369,7 +359,7 @@ def _emit_topk_gating_softmax_body(
     inv_denom = c_one_f / denom
 
     if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
-        num_tokens_v = ArithValue(i32_num_tokens)
+        num_tokens_v = fx.Int32(i32_num_tokens)
         for k_idx in range_constexpr(topk):
             w_val = selected_weights[k_idx]
             if renormalize:
@@ -420,7 +410,6 @@ def _build_topk_gating_softmax_module(
     ATOM_BITS = layout["ATOM_BITS"]
     ELEMS_PER_ATOM = layout["ELEMS_PER_ATOM"]
     ATOMS_PER_THREAD = layout["ATOMS_PER_THREAD"]
-    USE_DPP = max_vpt == 8 and ballot_argmax
 
     # No shared memory used — every reduction stays inside a sub-warp lane group.
 
@@ -463,28 +452,9 @@ def _build_topk_gating_softmax_module(
         global_token_safe = in_range.select(global_token, fx.Int32(0))
 
         # Sub-warp reductions over the THREADS_PER_TOKEN-lane group
-        def group_reduce(x, mode):
-            """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
-            width_i32 = c_tpt
-            w = x
-            for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-                offset = THREADS_PER_TOKEN // (2 << _sh)
-                off = fx.Int32(offset)
-                peer = w
-                if USE_DPP and offset in (1, 2):
-                    # Quad permutations preserve the fixed XOR1/2 lane map
-                    # without a DS instruction and its dependency wait.
-                    ctrl = 0xB1 if offset == 1 else 0x4E
-                    bits = fx.Float32(w).bitcast(fx.Int32)
-                    peer_bits = fx.rocdl.update_dpp(T.i32, as_ir_value(bits), as_ir_value(bits), ctrl, 0xF, 0xF, True)
-                    peer = fx.Int32(peer_bits).bitcast(fx.Float32)
-                else:
-                    peer = w.shuffle_xor(off, width_i32)
-                if mode == "max":
-                    w = fx.max(w, peer)
-                else:
-                    w = w.addf(peer, fastmath=fm_fast)
-            return w
+        def group_reduce(x, op):
+            with fx.fastmath(fm_fast if op == fx.ReductionOp.ADD else arith.FastMathFlags.none):
+                return fx.coop.warp_reduce(x, op, width=THREADS_PER_TOKEN)
 
         def group_reduce_argmax(val, idx):
             """Reduce probability, then identify its lowest-index lane."""
@@ -493,8 +463,8 @@ def _build_topk_gating_softmax_module(
                 # A lane owns a contiguous, increasing expert interval. The
                 # lowest lane among equal maxima therefore owns the lowest
                 # expert index, including ties caused by probability underflow.
-                winner_val = group_reduce(val, "max")
-                contenders = fx.Int64(fx.rocdl.ballot(T.i64, ArithValue(val) == ArithValue(winner_val)))
+                winner_val = group_reduce(val, fx.ReductionOp.MAX)
+                contenders = fx.Int64(fx.rocdl.ballot(T.i64, val == winner_val))
                 group_base = lane - expert_lane
                 group_bits = contenders.shrui(fx.Int64(group_base)) & fx.Int64((1 << THREADS_PER_TOKEN) - 1)
                 winner_lane = group_base + fx.Int32(fx.cttz(group_bits))
@@ -507,7 +477,7 @@ def _build_topk_gating_softmax_module(
                     peer_v = winner_val.shuffle_xor(off, width_i32)
                     peer_i = winner_idx.shuffle_xor(off, width_i32)
                     is_greater = peer_v > winner_val
-                    is_equal = ArithValue(peer_v) == ArithValue(winner_val)
+                    is_equal = peer_v == winner_val
                     peer_lower_idx = peer_i < winner_idx
                     take_peer = is_greater | (is_equal & peer_lower_idx)
                     winner_val = take_peer.select(peer_v, winner_val)
@@ -560,9 +530,9 @@ def _build_topk_gating_softmax_module(
             # so its element type is f32. Reinterpret the i32 bits as f32 and
             # store via the f32 copy atom (avoids signed-vs-signless legalize
             # failures when going through si32).
-            val_f32 = ArithValue(val).bitcast(T.f32)
+            val_f32 = fx.Int32(val).bitcast(fx.Float32)
             r = fx.make_rmem_tensor(1, fx.Float32)
-            v = fx.Vector.from_elements([val_f32], fx.Float32)
+            v = fx.full(1, val_f32, fx.Float32)
             fx.memref_store_vec(v, r)
             view = fx.slice(divided, (None, index))
             fx.copy(copy_atom_f32, r, view)
@@ -589,7 +559,7 @@ def _build_topk_gating_softmax_module(
                 x_list.append(xv)
                 thread_max = fx.max(thread_max, xv)
 
-        group_max = group_reduce(thread_max, "max")
+        group_max = group_reduce(thread_max, fx.ReductionOp.MAX)
 
         # Pass 2: exp(x - max) and per-token sum
         thread_sum = c_zero_f
@@ -601,7 +571,7 @@ def _build_topk_gating_softmax_module(
             exp_list.append(ev)
             thread_sum = thread_sum + ev
 
-        group_sum = group_reduce(thread_sum, "sum")
+        group_sum = group_reduce(thread_sum, fx.ReductionOp.ADD)
 
         # Pass 3: Normalize -> softmax probabilities (kept in registers)
         inv_sum = c_one_f / group_sum
@@ -642,7 +612,7 @@ def _build_topk_gating_softmax_module(
             # the next iteration finds the runner-up.
             for v in range_constexpr(VPT):
                 ci = col_idx_list[v]
-                is_winner = ArithValue(ci) == ArithValue(global_best_idx)
+                is_winner = ci == global_best_idx
                 prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
 
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
@@ -651,7 +621,7 @@ def _build_topk_gating_softmax_module(
         inv_denom = c_one_f / denom
 
         if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
-            num_tokens_v = ArithValue(i32_num_tokens)
+            num_tokens_v = i32_num_tokens
             for k_idx in range_constexpr(topk):
                 w_val = selected_weights[k_idx]
                 if renormalize:
@@ -676,10 +646,7 @@ def _build_topk_gating_softmax_module(
         # We use the (n - 1) // tpb + 1 form (valid for n >= 1) since the
         # additive (n + tpb - 1) form was producing the wrong grid count
         # under JIT specialization in this DSL.
-        c_tpb_idx = fx.Index(TOKENS_PER_BLOCK)
-        c_one_idx = fx.Index(1)
-        nt_idx = arith.index_cast(T.index, num_tokens_in)
-        grid_x = (nt_idx - c_one_idx) // c_tpb_idx + c_one_idx
+        grid_x = (num_tokens_in - 1) // fx.Int32(TOKENS_PER_BLOCK) + 1
 
         launcher = topk_gating_softmax_kernel(
             GatingOutput,
@@ -726,7 +693,7 @@ def build_topk_gating_softmax_module(
         num_tokens_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        if num_tokens_in <= fx.Int32(2048):
+        if num_tokens_in <= 2048:
             narrow(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
         else:
             wide(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)

@@ -400,6 +400,39 @@ Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 bash scripts/dumpir.sh python my_kernel.py
 ```
 
+### Running a hand-edited `.s`
+
+To try "what if these few instructions were different" without rebuilding the compiler, edit the dumped ISA and run
+the unmodified test against it with `tools/inject_asm/inject_asm.py`:
+
+```bash
+python3 tools/inject_asm/inject_asm.py prepare ./ws -- python -m pytest tests/kernels/test_my_kernel.py -k one_case
+vim ./ws/edited.s
+python3 tools/inject_asm/inject_asm.py run ./ws                # the edited assembly
+python3 tools/inject_asm/inject_asm.py run ./ws --baseline     # the unedited dump, under the same conditions
+```
+
+`prepare` runs the command twice into a fresh workspace: once with `FLYDSL_DUMP_IR` for the ISA, and once with a
+scratch `FLYDSL_RUNTIME_CACHE_DIR` for the compiled kernel, since a dump run leaves the cache alone. It copies the
+dump to `original.s` (read-only) and `edited.s`. `run` assembles `edited.s`, swaps it into the cache entry's
+`gpu.binary`, and reruns the command with `FLYDSL_RUNTIME_RUN_ONLY=1`, so a cache miss is an error rather than a
+silent recompile. This works because a cache entry stores the compiled module as MLIR text and rebuilds its
+ExecutionEngine from it on load.
+
+The command must compile exactly one JIT function in one specialization; narrow it with `-k` otherwise. Constexpr
+specializations of a kernel share its symbol, so the dump keeps only the last one compiled and their cache entries
+cannot be told apart. Keep every kernel symbol unchanged in `edited.s`, since the host launches kernels by name.
+
+FlyDSL assembles with the LLVM it was built with, while the tool defaults to the ROCm `clang`, which is usually older;
+both link with the ROCm `ld.lld`. `prepare` checks that `original.s` reassembles to the compiler's code object byte for
+byte, which holds on gfx942 and gfx950. Dumps for gfx11 and later use directives the ROCm `clang` cannot read, so for
+those pass `prepare --clang` with the `clang` of the LLVM FlyDSL was built with; `run` reuses it.
+
+`inject_asm.py inject CACHE_DIR FILE.s` is the single patching step on its own, for a cache you populated yourself.
+`--check` compares instead of patching and `--save-hsaco` also writes the code object next to the `.s`. It refuses
+any directory that contains or lies inside the default cache `~/.flydsl/cache`, where a patched entry would be served
+to every later run.
+
 ---
 
 ## 10. Source files
@@ -409,6 +442,7 @@ bash scripts/dumpir.sh python my_kernel.py
 | `scripts/run_tests.sh` | Full test runner (pytest + examples + FileCheck) |
 | `scripts/run_benchmark.sh` | Benchmark harness with configurable shapes |
 | `scripts/dumpir.sh` | IR dump helper script |
+| `tools/inject_asm/inject_asm.py` | Run a test against a hand-edited ISA dump (debug only) |
 | `tests/conftest.py` | Pytest fixtures (MLIR context, module, insert point) |
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |

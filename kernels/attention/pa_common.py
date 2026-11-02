@@ -9,7 +9,7 @@ carried byte-identical copies.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from kernels.common import buffer_ops
 from kernels.common.utils import copy_load
 
@@ -23,7 +23,7 @@ def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
     phys_block_i64 = fx.Int64(phys_block)
     block_stride_i64 = fx.Int64(block_stride)
     head_offset_i64 = fx.Int64(head_offset)
-    return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> fx.Int64(2)
+    return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> 2
 
 
 @flyc.jit
@@ -41,7 +41,7 @@ def _prefetch_q_chunks(
     # one i32 word, so the per-lane store is `vec<2, i32>` = 8 B = 1 i64.
     q_load_lane = lane16id
     if const_expr(q_lanes_per_head < MFMA_N):
-        q_load_lane = arith.select(lane16id < fx.Int32(q_lanes_per_head), lane16id, fx.Int32(0))
+        q_load_lane = (lane16id < fx.Int32(q_lanes_per_head)).select(lane16id, fx.Int32(0))
     q_elem = q_base + q_load_lane * fx.Int32(Q_ELEMS_PER_LANE)
     q_chunks = []
     for qwi in range_constexpr(Q_CHUNKS_PER_LANE):

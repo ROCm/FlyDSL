@@ -8,7 +8,7 @@ num_q_heads + 1: bid_x ∈ [0, H) handle Q heads, bid_x == H handles KV).
 
 Hard-coded MVP shape: D=512, RD=64, BLOCK_THREADS=64. Each block uses one
 wave (64 threads × 8 bf16 = 512 elems = D), so reductions are wave-local
-(shuffle_xor, no LDS, no barrier).
+(coop warp collectives, no LDS, no barrier).
 
 Layout per block:
   - thread t ∈ [0, ROPE_THREAD_LO) owns NOPE elements [t*8, t*8+8)
@@ -46,11 +46,10 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.arith import CmpFPredicate
 from flydsl.expr.typing import Int32, ReductionOp, Stream, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
-from kernels.common.tensor_shim import GTensor, _to_raw, ptr_rsrc
+from kernels.common.tensor_shim import GTensor, ptr_rsrc
 
 # --- shape constants (V4-Pro MVP) -------------------------------------------
 BLOCK_THREADS = 64  # 1 wave64
@@ -109,7 +108,7 @@ def _store_bf16_vec_g(vals_list, g_out, row_off_elems, idx, vec):
     base is already shifted per-token. ``row_off_elems`` is this head's row
     offset within the token (i32 elements); ``idx`` is the lane id."""
     bf16v = fx.Vector.from_elements(vals_list, fx.Float32).to(fx.BFloat16)
-    my_off = fx.Int32(row_off_elems) + fx.Int32(idx) * vec
+    my_off = row_off_elems + idx * vec
     g_out.store(my_off, bf16v, vec_size=vec)
 
 
@@ -122,31 +121,27 @@ def _store_fp8_packed(vals_list, out_rsrc, row_base_bytes, idx, vec):
     0x80 (NaN) for inputs that round to negative zero, which propagates
     through downstream attention as NaN. Clamp v ∈ (-2^-8, 0) to +0 first.
     """
-    f32 = T.f32
     i32 = T.i32
-    c0 = arith.constant(0.0, type=f32)
-    c_neg_uf = arith.constant(-(2.0**-8), type=f32)
+    c0 = fx.Float32(0.0)
+    c_neg_uf = fx.Float32(-(2.0**-8))
 
     safe = []
     for v in vals_list:
-        vv = v.ir_value() if hasattr(v, "ir_value") else v
-        is_tn = arith.andi(
-            arith.cmpf(CmpFPredicate.OLT, vv, c0),
-            arith.cmpf(CmpFPredicate.OGT, vv, c_neg_uf),
-        )
-        safe.append(arith.select(is_tn, c0, vv))
+        vv = fx.Float32(v)
+        is_tn = (vv < c0) & (vv > c_neg_uf)
+        safe.append(is_tn.select(c0, vv))
 
     # Pack each pair (s[2i], s[2i+1]) into a packed-fp8 i32, then
     # combine 4 fp8 into one i32 via cvt_pk_fp8_f32 (lane 0 + lane 1).
     assert vec == 8, "fp8 store helper hardcoded for VEC=8"
-    p0 = arith.constant(0, type=i32)
+    p0 = fx.Int32(0)
     p0 = rocdl.cvt_pk_fp8_f32(i32, safe[0], safe[1], p0, 0)
     p0 = rocdl.cvt_pk_fp8_f32(i32, safe[2], safe[3], p0, 1)
-    p1 = arith.constant(0, type=i32)
+    p1 = fx.Int32(0)
     p1 = rocdl.cvt_pk_fp8_f32(i32, safe[4], safe[5], p1, 0)
     p1 = rocdl.cvt_pk_fp8_f32(i32, safe[6], safe[7], p1, 1)
 
-    off_bytes = row_base_bytes + fx.Int32(idx) * 8
+    off_bytes = row_base_bytes + idx * 8
     store_vec = fx.Vector.from_elements([p0, p1], fx.Int32)
     buffer_ops.buffer_store(store_vec, out_rsrc, off_bytes, offset_is_bytes=True)
 
@@ -213,13 +208,7 @@ def _build_kernel(
     assert TPG > 0 and (TPG & (TPG - 1)) == 0, f"TPG {TPG} must be a power of 2 (for butterfly reduce)"
     assert scale_dtype in SCALE_DTYPE_OPTIONS, f"scale_dtype {scale_dtype!r} must be one of {SCALE_DTYPE_OPTIONS}"
 
-    log2_block = int(math.log2(BLOCK_THREADS))
     log2_tpg = int(math.log2(TPG))
-    # In the butterfly loop, sumsq shuffles at offsets [BLOCK/2, ..., 1].
-    # amax must NOT cross groups → only shuffles at offsets < TPG → only at
-    # the last log2(TPG) loop iterations (sh_exp >= amax_start_step).
-    amax_start_step = log2_block - log2_tpg
-
     elem_dtype = fx.BFloat16
     is_e8m0 = scale_dtype == SCALE_DTYPE_E8M0
 
@@ -281,14 +270,6 @@ def _build_kernel(
         cos_div = fx.logical_divide(cos_row, rope_lay)
         sin_div = fx.logical_divide(sin_row, rope_lay)
 
-        def wave_reduce_add(x):
-            w = _to_raw(x)
-            for sh_exp in range_constexpr(int(math.log2(BLOCK_THREADS))):
-                off = BLOCK_THREADS // (2 << sh_exp)
-                peer = _to_raw(fx.Float32(w).shuffle_xor(off, BLOCK_THREADS))
-                w = arith.AddFOp(w, peer, fastmath=fm_fast).result
-            return w
-
         def emit_body(
             *,
             weighted: bool,
@@ -305,6 +286,8 @@ def _build_kernel(
             VEC-wide fp32 vectors already loaded by the caller."""
             x2 = x_f32_vec * x_f32_vec
             sq_local = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+            with fx.fastmath(fm_fast):
+                sq_block = fx.coop.warp_reduce(sq_local, ReductionOp.ADD, width=BLOCK_THREADS)
 
             if const_expr(quant):
                 if const_expr(weighted):
@@ -313,44 +296,22 @@ def _build_kernel(
                 else:
                     am_local = fmath.absf(x_f32_vec).reduce(ReductionOp.MAX)
 
-                # Fused wave reduce: interleave sumsq-ADD and amax-MAX
-                # shuffles in one loop so the LLVM scheduler can overlap the
-                # two shuffle chains (each shuffle has ~4-cycle XCC latency
-                # on gfx950; running them serially doubles latency).
-                #
-                # sumsq reduces over the FULL row (RMSNorm scope = D).
-                # amax reduces over a single QUANT GROUP (TPG threads,
-                # = group_size elements). Both can interleave in the loop's
-                # "tail" steps where shuffle offset < TPG; earlier steps do
-                # sumsq-only (amax would cross group boundaries).
-                w_sq = _to_raw(sq_local)
-                w_am = _to_raw(am_local)
-                for sh_exp in range_constexpr(log2_block):
-                    off = BLOCK_THREADS // (2 << sh_exp)
-                    peer_sq = _to_raw(fx.Float32(w_sq).shuffle_xor(off, BLOCK_THREADS))
-                    w_sq = arith.AddFOp(w_sq, peer_sq, fastmath=fm_fast).result
-                    if const_expr(sh_exp >= amax_start_step):
-                        peer_am = _to_raw(fx.Float32(w_am).shuffle_xor(off, BLOCK_THREADS))
-                        w_am = arith.maximumf(w_am, peer_am)
-                sq_block = w_sq
-                am_group = w_am  # per-group after partial butterfly
-            else:
-                sq_block = wave_reduce_add(sq_local)
+                am_group = fx.coop.warp_reduce(am_local, ReductionOp.MAX, width=TPG)
 
             rstd = fmath.rsqrt(sq_block * (1.0 / D) + 1e-6, fastmath=fm_fast)
 
             if const_expr(quant):
-                am_safe = arith.maximumf(am_group, arith.constant(1e-12, type=f32))
+                am_safe = fx.max(am_group, 1e-12)
 
                 if const_expr(is_e8m0):
                     # silu_and_mul_fq-style e8m0 encoding. amax_post incorporates
                     # rstd (per-row) and SQRT2 (post-RoPE upper bound) so the
                     # forward factor applied to x_norm (= x_in * rstd) bounds
                     # the result by 2^_E8M0_HEADROOM ≤ FP8_MAX.
-                    c_sqrt2 = arith.constant(_SQRT2, type=f32)
+                    c_sqrt2 = fx.Float32(_SQRT2)
                     amax_post = am_safe * rstd * c_sqrt2
 
-                    amax_i32 = fx.Float32(amax_post).bitcast(fx.Uint32)
+                    amax_i32 = amax_post.bitcast(fx.Uint32)
                     bits_up = (amax_i32 + 0x400000) & 0xFF800000
                     exp_field = bits_up >> 23
                     # Subtract HEADROOM only. The IEEE bias (+127) is absorbed
@@ -364,7 +325,7 @@ def _build_kernel(
                     # to x_in directly, so absorb the per-row rstd: factor =
                     # rstd * quant_scale.
                     quant_exp = fx.Int32(254) - e8m0_biased
-                    quant_scale = (quant_exp << 23).bitcast(fx.Float32).ir_value()
+                    quant_scale = (quant_exp << 23).bitcast(fx.Float32)
                     factor = rstd * quant_scale
                 else:
                     # FP32 scale with the rstd-cancellation trick.
@@ -374,8 +335,8 @@ def _build_kernel(
                     # x_in * factor → dequant: x_norm = scale * out = x_in * rstd.
                     rcp_am = rocdl.rcp(f32, am_safe)
                     _fc = _fp8_const()
-                    factor = arith.constant(_fc["max_over_sqrt2"], type=f32) * rcp_am
-                    scale_val = am_safe * rstd * arith.constant(_fc["inv_max_sqrt2"], type=f32)
+                    factor = fx.Float32(_fc["max_over_sqrt2"]) * rcp_am
+                    scale_val = am_safe * rstd * fx.Float32(_fc["inv_max_sqrt2"])
 
                 # Group-leader lanes (one per quant group) write the scale.
                 # Predicate: tid & (TPG-1) == 0. For TPG=64 (per-row) this is
@@ -384,8 +345,8 @@ def _build_kernel(
                 # NOTE: tried buffer_ops.buffer_store(mask=...) for
                 # predication but the mask path sets offset to 0x7FFFFFFF on
                 # masked-off lanes → OOB GPU fault on gfx950. Stay with scf.if.
-                group_idx = tid >> fx.Int32(log2_tpg)
-                lane_in_group = tid & fx.Int32(TPG - 1)
+                group_idx = tid >> log2_tpg
+                lane_in_group = tid & (TPG - 1)
                 if lane_in_group == 0:
                     my_scale_off = scale_base_off + group_idx
                     if const_expr(is_e8m0):
@@ -394,10 +355,10 @@ def _build_kernel(
                     else:
                         buffer_ops.buffer_store(scale_val, scale_rsrc, my_scale_off)
 
-            is_rope = tid >= fx.Int32(ROPE_THREAD_LO)
+            is_rope = tid >= ROPE_THREAD_LO
             if is_rope:
                 # ---- ROPE path: 8 elements in this thread = 4 GPT-J pairs ----
-                rope_rel = tid - fx.Int32(ROPE_THREAD_LO)
+                rope_rel = tid - ROPE_THREAD_LO
                 cos_vec = load_vec(cos_div, rope_rel, layout=rope_lay, atom=rope_atom)
                 sin_vec = load_vec(sin_div, rope_rel, layout=rope_lay, atom=rope_atom)
                 cos_f32 = cos_vec.to(fx.Float32)
@@ -455,7 +416,7 @@ def _build_kernel(
         # signed i32 at H*D = 65k+ per token.
         q_tok_off_bytes = bid_t_idx * (H * D * 2)
 
-        if bid_x < fx.Int32(H):
+        if bid_x < H:
             # ---------- Q path ----------
             head_idx = bid_x
             # Q in: per-token shifted base via GTensor. Each thread reads VEC
@@ -468,13 +429,7 @@ def _build_kernel(
                 static_bytes_offset_i64=q_tok_off_bytes,
             )
             q_my_off = head_idx * D + tid * VEC
-            raw_x_vec = q_in_tok.load(q_my_off, vec_size=VEC)
-            # Round-trip through rmem so the rest of emit_body (.to/.reduce)
-            # sees a Fly-wrapped vec instead of a raw MLIR vec.
-            q_rmem = fx.make_rmem_tensor(full_lay, elem_dtype)
-            fx.memref_store_vec(raw_x_vec, q_rmem)
-            x_vec = fx.memref_load_vec(q_rmem)
-            x_f32 = x_vec.to(fx.Float32)
+            x_f32 = fx.Vector(q_in_tok.load(q_my_off, vec_size=VEC)).to(fx.Float32)
 
             # Optional per-channel Q weight (RMSNorm gamma for Q). Loaded only
             # when q_weighted=True; otherwise q_weight tensor is a dummy and
@@ -538,17 +493,12 @@ def _build_kernel(
             # KV is often a strided slice of a wider tensor (V4: kv = split of
             # qkv_a → row stride = q_lora + head_dim). fx.slice/logical_divide
             # do not pull stride from torch.Tensor metadata, so use raw
-            # buffer_ops with the explicit kv_in_row_stride argument, then
-            # round-trip through an rmem tensor to get a Fly-wrapped vec that
-            # the rest of emit_body (.to/.reduce/[i]) expects.
+            # buffer_ops with the explicit kv_in_row_stride argument.
             kv_rsrc = ptr_rsrc(kv_in)
             kv_off_elems = bid_t * kv_in_row_stride + tid * VEC
             kv_off_dw = fx.Uint32(kv_off_elems) >> 1
             x_raw = buffer_ops.buffer_load(kv_rsrc, kv_off_dw, vec_width=VEC // 2, dtype=i32)
-            x_vec_bf16 = fx.Vector(x_raw).bitcast(fx.BFloat16)
-            kv_rmem = fx.make_rmem_tensor(full_lay, elem_dtype)
-            fx.memref_store_vec(x_vec_bf16, kv_rmem)
-            x_vec = fx.memref_load_vec(kv_rmem)
+            x_vec = fx.Vector(x_raw).bitcast(fx.BFloat16)
 
             kvw_buf = fx.rocdl.make_buffer_tensor(kv_weight)
             w_div = fx.logical_divide(kvw_buf, full_lay)
@@ -566,7 +516,7 @@ def _build_kernel(
                     static_bytes_offset_i64=kv_tok_off_fp8,
                 )
                 kvo_rsrc = kvo_g_tmp.rsrc
-                row_base_bytes = arith.constant(0, type=i32)  # already at token base
+                row_base_bytes = fx.Int32(0)  # already at token base
                 kvs_rsrc = ptr_rsrc(kv_scale)
                 # kv_scale layout (T, NG) flat: bid_t * NG. Per-lane adds
                 # group_idx inside emit_body.
@@ -595,7 +545,7 @@ def _build_kernel(
                     x_f32_vec=x_f32,
                     w_f32_vec=w_f32,
                     bf16_out_g=kvo_g,
-                    bf16_out_row_off=arith.constant(0, type=i32),
+                    bf16_out_row_off=fx.Int32(0),
                     fp8_out_rsrc=None,
                     scale_rsrc=None,
                     scale_base_off=None,

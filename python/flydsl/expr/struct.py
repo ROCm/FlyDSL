@@ -869,9 +869,37 @@ class Storage:
         class _StorageImpl(Storage):
             _target_type = target_type
 
+            # The bytes are reached through exactly one of:
+            # - ``ptr``: a base pointer; composite fields live at their byte offsets from it.
+            # - ``prebuilt``: field name -> Storage, for a struct whose fields are separate
+            #   allocations without a common base (static SharedAllocator).
+            # Neither is set for storage without bytes (Empty, constexpr-only structs).
             def __init__(self, ptr, prebuilt=None):
+                if ptr is not None and prebuilt:
+                    raise ValueError(f"Storage[{target_name}] takes a base pointer or prebuilt fields, not both")
                 object.__setattr__(self, "_ptr", ptr)
                 object.__setattr__(self, "_prebuilt", prebuilt or {})
+
+            def __extract_to_ir_values__(self):
+                ptr = object.__getattribute__(self, "_ptr")
+                if ptr is not None:
+                    return extract_to_ir_values(ptr)
+                return extract_to_ir_values(object.__getattribute__(self, "_prebuilt"))
+
+            @classmethod
+            def __construct_from_ir_values__(cls, values, exemplar=None):
+                # The type alone does not tell a base pointer from prebuilt fields (static
+                # and dynamic placement share Storage[T]), so without an exemplar assume a
+                # base pointer. Control flow and struct fields always pass the exemplar.
+                if exemplar is None:
+                    if len(values) != 1:
+                        raise ValueError(f"Storage[{target_name}] expected 1 ir.Value, got {len(values)}")
+                    return cls(Pointer.__construct_from_ir_values__(values))
+                ptr = object.__getattribute__(exemplar, "_ptr")
+                if ptr is not None:
+                    return cls(construct_from_ir_values(type(ptr), ptr, values))
+                prebuilt = object.__getattribute__(exemplar, "_prebuilt")
+                return cls(None, prebuilt=construct_from_ir_values(dict, prebuilt, values))
 
             def peek(self):
                 dsl_type = type(self)._target_type

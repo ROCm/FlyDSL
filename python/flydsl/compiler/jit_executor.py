@@ -134,7 +134,7 @@ def _load_gpu_modules(engine: ExecutionEngine) -> List[int]:
     return [module.value]
 
 
-def build_abi_storage(ctypes_seq):
+def build_abi_storage(ctypes_seq, presets=None):
     """One zeroed ctypes storage per slot ctype, plus a packed pointer array of their addresses."""
     packed = (ctypes.c_void_p * len(ctypes_seq))()
     storages = []
@@ -143,6 +143,8 @@ def build_abi_storage(ctypes_seq):
             s = ct(0)
         except TypeError:
             s = ct()
+        if presets and i in presets:
+            s.value = presets[i]
         storages.append(s)
         packed[i] = ctypes.addressof(s)
     return storages, packed
@@ -191,18 +193,20 @@ class CallState:
     -- no per-slot loop, no ctypes allocation. Thread-local for thread safety.
     """
 
-    __slots__ = ("_func_exe", "_spec", "_tls", "_factory")
+    __slots__ = ("_func_exe", "_spec", "_tls", "_factory", "_presets", "_predispatch")
 
-    def __init__(self, slot_specs, func_exe):
+    def __init__(self, slot_specs, func_exe, presets=None, predispatch=None):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, fill)
+        self._presets = presets or {}
         self._tls = threading.local()
         self._factory = _build_dispatch_factory(slot_specs)
+        self._predispatch = predispatch
 
     def _make_dispatch(self):
         # Allocate one typed storage per slot + the packed pointer array; the null
         # auto-stream slot uses c_void_p -> NULL (its fill is None, never written).
-        storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec])
+        storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec], self._presets)
         # The dispatch closure keeps packed + storages alive
         self._tls.packed = packed
         self._tls.storages = storages
@@ -212,7 +216,15 @@ class CallState:
         dispatch = getattr(self._tls, "dispatch", None)
         if dispatch is None:
             dispatch = self._tls.dispatch = self._make_dispatch()
-        return dispatch(args_tuple)
+        if self._predispatch is None:
+            return dispatch(args_tuple)
+
+        from ..expr import ktrace as _ktrace
+
+        with _ktrace.collection_lock():
+            _ktrace.invalidate_records()
+            self._predispatch()
+            return dispatch(args_tuple)
 
 
 class CompiledArtifact:
@@ -236,6 +248,9 @@ class CompiledArtifact:
         self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
+        self._ktrace_names: dict = {}
+        self._ktrace_traced: bool = False
+        self._ktrace_buffer_config = None
 
     def __getstate__(self):
         # Keep pre-lowering source IR process-local. The compiled MLIR is needed
@@ -282,6 +297,9 @@ class CompiledArtifact:
             "processor_refs": refs,
             "link_libs": self._link_libs,
             "uses_explicit_module": self._uses_explicit_module,
+            "ktrace_names": self._ktrace_names,
+            "ktrace_traced": self._ktrace_traced,
+            "ktrace_buffer_config": self._ktrace_buffer_config,
         }
 
     def __setstate__(self, state):
@@ -294,6 +312,9 @@ class CompiledArtifact:
         self._source_ir = state.get("source_ir")
         self._link_libs = state.get("link_libs", [])
         self._uses_explicit_module = state.get("uses_explicit_module", False)
+        self._ktrace_names = state.get("ktrace_names", {})
+        self._ktrace_traced = state.get("ktrace_traced", False)
+        self._ktrace_buffer_config = state.get("ktrace_buffer_config")
         self._post_load_processors = []
         missing: List[str] = []
         for ref in state.get("processor_refs", []):
@@ -385,6 +406,41 @@ class CompiledArtifact:
                 print("Original MLIR IR:")
                 print("=" * 60)
                 print(self._source_ir)
+
+    def max_blocks_per_cu(self) -> int:
+        from .._mlir.dialects import gpu
+        from .jit_function import _create_mlir_context
+
+        def constant(value):
+            if value is None:
+                return 0
+            if getattr(value.owner, "name", None) != "llvm.mlir.constant":
+                raise ValueError("max_blocks_per_cu() needs constant block and smem sizes")
+            return ir.IntegerAttr(value.owner.attributes["value"]).value
+
+        binaries, launches = {}, set()
+
+        def visit(op):
+            if op.name == "gpu.binary":
+                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
+                objects = ir.ArrayAttr(op.attributes["objects"])
+                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = gpu.ObjectAttr(objects[0]).object
+            elif op.name == "gpu.launch_func":
+                launch = op.opview
+                block = constant(launch.blockSizeX) * constant(launch.blockSizeY) * constant(launch.blockSizeZ)
+                launches.add((*ir.SymbolRefAttr(launch.kernel).value, block, constant(launch.dynamicSharedMemorySize)))
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        if len(launches) != 1:
+            raise ValueError(f"max_blocks_per_cu() needs exactly one kernel launch, found {len(launches)}")
+        module_name, kernel_name, block, smem = launches.pop()
+        lib = ctypes.CDLL(_resolve_runtime_libs()[0])
+        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(binaries[module_name], kernel_name.encode(), block, smem)
+        if blocks <= 0:
+            raise RuntimeError("max_blocks_per_cu(): HIP occupancy query failed")
+        return blocks
 
     @property
     def ir(self) -> str:

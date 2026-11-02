@@ -244,7 +244,7 @@ def _expand_int_tuple_leaves(value):
     if isinstance(value, Numeric):
         if isinstance(value.value, ir.Value) and type(value).width < 32:
             return Int32(value).value
-        return value.value
+        return _expand_int_tuple_leaves(value.value)
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IntegerType) and value.type.width < 32:
         return Int32(value).value
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IndexType):
@@ -1471,8 +1471,5 @@ def make_tile(*args):
         raise ValueError(f"make_tile: expected int, None, tuple, or Layout, got {type(m)}")
 
     resolved = [_resolve(m) for m in args]
-    if len(resolved) == 1:
-        tile_type = TileType.get(resolved[0])
-    else:
-        tile_type = TileType.get(resolved)
+    tile_type = TileType.get(resolved)
     return static(tile_type)

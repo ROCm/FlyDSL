@@ -58,6 +58,7 @@ __all__ = [
     "make_buffer_ptr",
     "make_buffer_tensor",
     "get_buffer_rsrc",
+    "s_buffer_load",
     # Operations
     "sched_mfma",
     "sched_vmem",

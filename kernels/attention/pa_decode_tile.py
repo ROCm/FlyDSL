@@ -46,7 +46,6 @@ from kernels.common.kernels_common import LOG2E
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,
-    exp2_amdgcn_scalar,
     exp2_f32_fast,
     rcp_f32,
 )
@@ -230,7 +229,7 @@ def compile_pa_decode_tile(
 
             def _load(elem_idx):
                 fx.copy(copy_atom, fx.slice(div, (None, elem_idx)), reg)
-                return fx.Vector(fx.memref_load_vec(reg))
+                return fx.memref_load_vec(reg)
 
             return _load
 
@@ -289,18 +288,14 @@ def compile_pa_decode_tile(
         # Per-tensor: a single global scale, read once. Per-token: read
         # per-token instead (see _kv_scale_ops/_stage_kv_scale_to_lds below).
         if const_expr(not per_token_kv and not is_bf16_kv):
-            key_scale = fx.Int32(
-                buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
-            ).bitcast(fx.Float32)
-            value_scale = fx.Int32(
-                buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
-            ).bitcast(fx.Float32)
+            key_scale = fx.rocdl.s_buffer_load(ks_rsrc, fx.Int32(0)).bitcast(fx.Float32)
+            value_scale = fx.rocdl.s_buffer_load(vs_rsrc, fx.Int32(0)).bitcast(fx.Float32)
 
         num_tiles = cdiv(context_len, TILE_TOK)
         tiles_per_part = cdiv(num_tiles, NP)
         part_start = part * tiles_per_part
         part_end_raw = part_start + tiles_per_part
-        part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
+        part_end = (part_end_raw < num_tiles).select(part_end_raw, num_tiles)
 
         # One i8 blob carved into typed byte-offset pointers. `lds_base` is an
         # ir.Value pointer (safe inside scf control flow); the Python `lds`
@@ -329,10 +324,7 @@ def compile_pa_decode_tile(
         NCHUNK = TILE_TOK // TOK_CHUNK  # 4
 
         def _load_phys_scalar(page, vec_width=1):
-            result = buffer_ops.buffer_load(
-                bt_rsrc, seq * max_blocks_per_seq + page, vec_width=vec_width, is_scalar=True
-            )
-            return fx.Int32(result) if vec_width == 1 else result
+            return fx.rocdl.s_buffer_load(bt_rsrc, seq * max_blocks_per_seq + page, count=vec_width)
 
         def _v_page_fetch_and_stage(tt_i32):
             # V's page depends on `rgroup` (shared across warps): warp w fetches
@@ -341,7 +333,7 @@ def compile_pa_decode_tile(
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             if lane == 0:
                 fetched_vec = (
-                    fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
+                    fx.Vector.from_elements([fetched], dtype=fx.Int32)
                     if const_expr(PAGES_PER_CHUNK == 1)
                     else fx.Vector(fetched)
                 )
@@ -379,12 +371,12 @@ def compile_pa_decode_tile(
                 _lds_store(
                     sKScale_off + buf_off + slot,
                     fx.Float32,
-                    fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
+                    fx.full(1, k_scale_scalar, fx.Float32),
                 )
                 _lds_store(
                     sVScale_off + buf_off + slot,
                     fx.Float32,
-                    fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                    fx.full(1, v_scale_scalar, fx.Float32),
                 )
 
         def _load_scale_vec(base_off, a, buf_off=0):
@@ -425,7 +417,7 @@ def compile_pa_decode_tile(
             base_page = tt_i32 * TILE_TOK // block_size  # tile start is page-aligned
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             phys_vec = (
-                fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
+                fx.Vector.from_elements([fetched], dtype=fx.Int32)
                 if const_expr(PAGES_PER_CHUNK == 1)
                 else fx.Vector(fetched)
             )
@@ -440,7 +432,7 @@ def compile_pa_decode_tile(
 
         # ── prologue: prefetch the first tile's K ──
         num_tiles_m1 = num_tiles - 1
-        start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
+        start_safe = (part_start < num_tiles).select(part_start, num_tiles_m1)
         k_pf0, phys_vec0 = _k_ops_flat(start_safe)
         # V page-index prefetch, issued here too for the same overlap; the
         # LDS write is visible after the barrier below.
@@ -528,7 +520,7 @@ def compile_pa_decode_tile(
 
                 q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
                 inv = fx.Float32(rcp_f32(fx.maxnumf(q_scale, fx.Float32(1e-20))))
-                inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QLOAD_UNIT)
+                inv_b = fx.full(QLOAD_UNIT, inv, fx.Float32)
 
                 for u in range_constexpr(N_QLOADS):
                     q_scaled_unit = q_units[u].to(fx.Float32) * inv_b
@@ -563,12 +555,12 @@ def compile_pa_decode_tile(
                         _lds_store(
                             q_row_off + elem_off * 2,
                             fx.BFloat16,
-                            fx.Vector.filled(QLOAD_UNIT, 0.0, fx.BFloat16),
+                            fx.full(QLOAD_UNIT, 0.0, fx.BFloat16),
                         )
                 else:
                     _st_words(
                         q_row_off + qh_local * head_dim + lane16 * QCHUNK,
-                        fx.Vector.filled(QCHUNK // 4, 0, fx.Int32),
+                        fx.full(QCHUNK // 4, 0, fx.Int32),
                     )
                     if lane16 == 0:
                         _st1(sQscale_off, qh_local * M_TILES + m, ZERO_F)
@@ -665,7 +657,7 @@ def compile_pa_decode_tile(
         def _l_slot(m):
             return 2 + STATE_PER_M * m + VHE_CHUNKS + 1
 
-        o_zero = fx.Vector.filled(OP_ELEMS, 0.0, fx.Float32)
+        o_zero = fx.full(OP_ELEMS, 0.0, fx.Float32)
         init_state = [k_pf0, v_page_pf0]
         for _m in range_constexpr(M_TILES):
             init_state.extend([o_zero] * VHE_CHUNKS + [NEG_INF, ZERO_F])
@@ -724,7 +716,7 @@ def compile_pa_decode_tile(
                 for m in range_constexpr(M_TILES):
                     frag_Ss = []
                     for a in range_constexpr(NCHUNK):
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.full(4, 0.0, fx.Float32)
                         for s in range_constexpr(N_SUBCHUNKS):
                             acc = _mfma(
                                 k_cur[a * N_SUBCHUNKS + s],
@@ -736,8 +728,8 @@ def compile_pa_decode_tile(
                     scale = scale_qk if const_expr(is_bf16_kv) else scale_qk * fx.Float32(q_scale_vec[m])
                     n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                     base_tok_f = fx.Int32(warp * TOK_CHUNK + rgroup * 4).to(fx.Float32)
-                    thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
-                    neg4 = fx.Vector.filled(4, float("-inf"), fx.Float32)
+                    thr = fx.full(4, fx.Float32(n_valid_tile - base_tok_f), fx.Float32)
+                    neg4 = fx.full(4, float("-inf"), fx.Float32)
 
                     if const_expr(per_token_kv):
                         scaled_frags = [frag_Ss[a] * k_scale_shared[a] for a in range_constexpr(NCHUNK)]
@@ -797,7 +789,7 @@ def compile_pa_decode_tile(
                         v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX)
                         v_max_safe = v_max_scaled + fx.Float32(1e-8 / FP8_MAX)
                         norm_factor = fx.Float32(rcp_f32(v_max_safe))
-                        norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
+                        norm_factor_b = fx.full(4, norm_factor, fx.Float32)
 
                     m_new = fx.maxnumf(
                         m_prev,
@@ -806,8 +798,8 @@ def compile_pa_decode_tile(
                     )
                     # Fully-invalid row: use 0 as the effective max so masked lanes
                     # give exp2(-inf-0)==0 (avoids the -inf-(-inf) cancellation).
-                    safe_max = arith.select(m_new > NEG_INF, m_new, ZERO_F)
-                    m_new_b = fx.Vector.from_elements([safe_max], dtype=fx.Float32).broadcast_to(4)
+                    safe_max = (m_new > NEG_INF).select(m_new, ZERO_F)
+                    m_new_b = fx.full(4, fx.Float32(safe_max), fx.Float32)
                     ls = fx.Float32(0.0)
                     p_chunks = []
                     for a in range_constexpr(NCHUNK):
@@ -823,7 +815,7 @@ def compile_pa_decode_tile(
                         elif const_expr(is_bf16_kv):
                             p_scaled = Pa
                         else:
-                            p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
+                            p_scaled = Pa * fx.full(4, FP8_MAX, fx.Float32)
                         if const_expr(is_bf16_kv):
                             p_chunks.append(p_scaled.to(fx.BFloat16))
                         else:
@@ -847,8 +839,8 @@ def compile_pa_decode_tile(
                         ls = ls + ls.shuffle_xor(sh, WAVE)
                     # PV output is [head-dim, query-row=lane16] after the operand
                     # swap, so correction/denominator are per-lane scalars (no sCorr).
-                    safe_prev = arith.select(m_prev > NEG_INF, m_prev, ZERO_F)
-                    corr_reg = fx.Float32(exp2_amdgcn_scalar(safe_prev - safe_max))
+                    safe_prev = (m_prev > NEG_INF).select(m_prev, ZERO_F)
+                    corr_reg = fx.Float32(fx.rocdl.exp2(T.f32, fx.as_ir_value(safe_prev - safe_max)))
                     if rgroup == 0:
                         _st_lw(sLsum_off, lane16, warp, ls)
                     gpu.barrier()
@@ -861,17 +853,17 @@ def compile_pa_decode_tile(
                         NVOPS,
                     )
 
-                    corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
+                    corr_b = fx.full(OP_ELEMS, corr_reg, fx.Float32)
                     for vh in range_constexpr(VHE_CHUNKS):
                         v_vh = v_vh_shared[vh]
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.full(4, 0.0, fx.Float32)
                         for s in range_constexpr(NVOPS):
                             # SWAPPED operands (V=A, P=B): output row =
                             # head-dim, output col = query-row=lane16.
                             acc = _mfma(v_vh[s], p_ops[s], acc)
                         op = fx.Vector(acc)
                         if const_expr(per_token_kv):
-                            op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
+                            op = op * fx.full(OP_ELEMS, fx.Float32(v_max_scaled), fx.Float32)
                         o_acc[vh] = o_acc[vh] * corr_b + op
                     next_state.extend([*o_acc, m_new, l_new])
                     # sP and sLsum are reused by the next M-tile. Synchronize
@@ -888,7 +880,7 @@ def compile_pa_decode_tile(
                 # QK: each NCHUNK chunk accumulates N_SUBCHUNKS k_steps into an f32x4.
                 frag_Ss = []
                 for a in range_constexpr(NCHUNK):
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.full(4, 0.0, fx.Float32)
                     for s in range_constexpr(N_SUBCHUNKS):
                         acc = _mfma(
                             k_cur[a * N_SUBCHUNKS + s],
@@ -908,8 +900,8 @@ def compile_pa_decode_tile(
                 scale = scale_qk if const_expr(is_bf16_kv) else scale_qk * _ld1(sQscale_off, lane16)
                 n_valid_tile = (causal_bound[0] - tok0).to(fx.Float32)
                 base_tok_f = fx.Int32(warp * TOK_CHUNK + rgroup * 4).to(fx.Float32)
-                thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
-                neg4 = fx.Vector.filled(4, -1e30, fx.Float32)
+                thr = fx.full(4, fx.Float32(n_valid_tile - base_tok_f), fx.Float32)
+                neg4 = fx.full(4, -1e30, fx.Float32)
                 # per_token_kv: K-scale varies per token, so fold it in BEFORE the max-reduce.
                 v_scale_vecs = None
                 if const_expr(per_token_kv):
@@ -954,16 +946,16 @@ def compile_pa_decode_tile(
                     v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX)
                     v_max_safe = v_max_scaled + fx.Float32(1e-8 / FP8_MAX)
                     norm_factor = fx.Float32(rcp_f32(v_max_safe))
-                    norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
+                    norm_factor_b = fx.full(4, norm_factor, fx.Float32)
                 # pass 2: global max over warps -> exp -> fp8 P pack (-> sP) -> sum
                 m_new = fx.maxnumf(m_prev, _ld_lw_row(sLmax_off, lane16).reduce(ReductionOp.MAX))
-                m_new_b = fx.Vector.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
+                m_new_b = fx.full(4, fx.Float32(m_new), fx.Float32)
                 ls = fx.Float32(0.0)
                 p_chunks = []
-                zero4_p = fx.Vector.filled(4, 0.0, fx.Float32)
+                zero4_p = fx.full(4, 0.0, fx.Float32)
                 for a in range_constexpr(NCHUNK):
                     # re-mask Pa so a fully-masked chunk contributes exactly 0
-                    valid_a = masked_chunks[a] > fx.Vector.filled(4, -1e29, fx.Float32)
+                    valid_a = masked_chunks[a] > fx.full(4, -1e29, fx.Float32)
                     Pa = valid_a.select(fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p)
                     ls = ls + Pa.reduce(ReductionOp.ADD)
                     if const_expr(per_token_kv):
@@ -976,7 +968,7 @@ def compile_pa_decode_tile(
                     elif const_expr(is_bf16_kv):
                         p_scaled = Pa
                     else:
-                        p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
+                        p_scaled = Pa * fx.full(4, FP8_MAX, fx.Float32)
                     if const_expr(is_bf16_kv):
                         p_chunks.append(p_scaled.to(fx.BFloat16))
                     else:
@@ -1001,7 +993,7 @@ def compile_pa_decode_tile(
                     ls = ls + ls.shuffle_xor(sh, WAVE)
                 # PV (V=A, P=B) -> output [head-dim, query-row=lane16]; same as
                 # the phase-split path.
-                corr_reg = fx.Float32(exp2_amdgcn_scalar(m_prev - m_new))
+                corr_reg = fx.Float32(fx.rocdl.exp2(T.f32, fx.as_ir_value(m_prev - m_new)))
                 if rgroup == 0:
                     _st_lw(sLsum_off, lane16, warp, ls)
                 gpu.barrier()
@@ -1012,18 +1004,18 @@ def compile_pa_decode_tile(
                     fx.Int64,
                     NVOPS,
                 )
-                corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
+                corr_b = fx.full(OP_ELEMS, corr_reg, fx.Float32)
                 # Single tile: batch both vh's V loads upfront (no sibling chain
                 # to hide the latency behind).
                 v_vh_batch = [_v_ops(v_page_cur, vh) for vh in range_constexpr(VHE_CHUNKS)]
                 for vh in range_constexpr(VHE_CHUNKS):
                     v_vh = v_vh_batch[vh]
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.full(4, 0.0, fx.Float32)
                     for s in range_constexpr(NVOPS):
                         acc = _mfma(v_vh[s], p_ops[s], acc)
                     op = fx.Vector(acc)
                     if const_expr(per_token_kv):
-                        op = op * fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
+                        op = op * fx.full(OP_ELEMS, fx.Float32(v_max_scaled), fx.Float32)
                     o_acc[vh] = o_acc[vh] * corr_b + op
                 next_state.extend([*o_acc, m_new, l_new])
             results = yield next_state
@@ -1035,13 +1027,13 @@ def compile_pa_decode_tile(
         for m in range_constexpr(M_TILES):
             row = m * MFMA_MNK + lane16  # flat (mtp, gqa) query-row for this lane
             l_row = o_final[_l_slot(m)]
-            safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
+            safe_l = (l_row > ZERO_F).select(l_row, fx.Float32(1.0))
             inv_l = fx.Float32(rcp_f32(safe_l))
             if const_expr(per_token_kv or is_bf16_kv):
                 o_scale = inv_l
             else:
                 o_scale = inv_l * (v_scale_f * inv_fp8)
-            o_scale_b = fx.Vector.from_elements([o_scale], dtype=fx.Float32).broadcast_to(OP_ELEMS)
+            o_scale_b = fx.full(OP_ELEMS, o_scale, fx.Float32)
             qi_e = row // query_group_size
             gs_head_e = row - qi_e * query_group_size
             qh = kv_h * query_group_size + gs_head_e
