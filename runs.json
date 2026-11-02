@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-02T08:51:58Z",
+ "updated": "2026-11-02T08:56:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41416520863,
+   "pr": 1356,
+   "commit": "f57cb39076d58241de9b5fb1f434909da25dbd76",
+   "branch": "zhimding/observe_launches_1102",
+   "event": "pull_request",
+   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863",
+   "created_at": "2026-11-02T08:54:57Z",
+   "updated_at": "2026-11-02T08:55:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41415897447,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature (\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41415897447",
    "created_at": "2026-11-02T08:49:48Z",
-   "updated_at": "2026-11-02T08:50:09Z",
+   "updated_at": "2026-11-02T08:51:10Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -35,16 +50,16 @@
   },
   {
    "run_id": 41410239840,
-   "pr": 1356,
+   "pr": null,
    "commit": "e1faa830fe60bb9b8eb4c5eb2894288f3043d632",
    "branch": "zhimding/observe_launches_1102",
    "event": "pull_request",
    "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41410239840",
    "created_at": "2026-11-02T08:03:01Z",
-   "updated_at": "2026-11-02T08:04:20Z",
+   "updated_at": "2026-11-02T08:54:58Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -1925,52 +1940,6 @@
    "updated_at": "2026-10-29T10:28:07Z",
    "actor": "james-huang09",
    "jobs": []
-  },
-  {
-   "run_id": 40854060000,
-   "pr": 1347,
-   "commit": "c548e2f29ec119ac9cdcf6887bc2bdb33cf57565",
-   "branch": "pr/feat-storage-dsltype",
-   "event": "pull_request",
-   "title": "[Feat] Support DslType protocol for Storage[T]",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000",
-   "created_at": "2026-10-29T10:00:21Z",
-   "updated_at": "2026-10-29T13:48:06Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T12:48:14Z",
-     "completed_at": "2026-10-29T13:19:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455083957",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T12:47:50Z",
-     "completed_at": "2026-10-29T13:16:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455083968"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-29T13:03:44Z",
-     "completed_at": "2026-10-29T13:23:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/40854060000/job/123455084071"
-    }
-   ]
   }
  ]
 }
