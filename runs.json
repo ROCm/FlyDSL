@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-02T18:25:08Z",
+ "updated": "2026-11-02T18:59:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,11 +29,13 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T18:21:27Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263970"
+     "completed_at": "2026-11-02T18:44:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41478166582/job/125462263970",
+     "machine": "smci355-ccs-aus-m12-21",
+     "host_model": "MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -111,10 +113,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-02T18:12:39Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T18:30:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832188"
     }
    ]
@@ -151,10 +153,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-02T18:22:48Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T18:37:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484564"
     },
     {
@@ -214,11 +216,11 @@
    "branch": "stable-struct-names",
    "event": "pull_request",
    "title": "[Bugfix] Name inline struct types from a digest that is the same in every process",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424",
    "created_at": "2026-11-02T12:52:39Z",
-   "updated_at": "2026-11-02T17:54:54Z",
+   "updated_at": "2026-11-02T18:27:41Z",
    "actor": "RElbers",
    "jobs": [
     {
@@ -242,11 +244,13 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T17:55:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597377"
+     "completed_at": "2026-11-02T18:27:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41448247424/job/125449597377",
+     "machine": "smci355-ccs-aus-m12-29",
+     "host_model": "MI355"
     }
    ]
   },
@@ -749,10 +753,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-02T17:20:48Z",
-     "completed_at": null,
+     "completed_at": "2026-11-02T18:26:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41266884417/job/125430484806"
     }
    ]
