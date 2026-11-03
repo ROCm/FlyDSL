@@ -3,13 +3,39 @@
 
 """The calibration oracle decodes storage independently and rejects bad output."""
 
+import importlib
+import json
+import shutil
+from pathlib import Path
+
 import pytest
 import torch
 
-from kernels.gemm.rdna4_mxfp4.api import PreparedMXFP4
+from kernels.gemm.rdna4_mxfp4.entrypoint import PreparedMXFP4
 from kernels.gemm.rdna4_mxfp4.tuning import _Context
 
 pytestmark = pytest.mark.l0_backend_agnostic
+
+
+def test_persisted_tuning_is_invalidated_when_selector_data_changes(tmp_path, monkeypatch):
+    """A changed selector must not reuse calibration entries from old data."""
+    tuning = importlib.import_module(_Context.__module__)
+    source = Path(tuning.__file__).parent
+    for path in source.iterdir():
+        if path.suffix in (".py", ".json"):
+            shutil.copyfile(path, tmp_path / path.name)
+    monkeypatch.setattr(tuning, "__file__", str(tmp_path / "tuning.py"))
+    tuning._schema.cache_clear()
+    try:
+        before = tuning._schema()
+        path = tmp_path / "heuristic.json"
+        data = json.loads(path.read_text())
+        data["cost"]["gate"]["margin"] += 0.01
+        path.write_text(json.dumps(data))
+        tuning._schema.cache_clear()
+        assert tuning._schema() != before
+    finally:
+        tuning._schema.cache_clear()
 
 
 @pytest.mark.parametrize("layout", ["linear", "split"])

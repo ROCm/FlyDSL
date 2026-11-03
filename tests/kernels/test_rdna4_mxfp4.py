@@ -205,7 +205,7 @@ def test_input_device_owns_compilation_and_execution():
 
 def test_native_calibration_persists_and_replays_changed_inputs(tmp_path, monkeypatch):
     from kernels.gemm.rdna4_mxfp4 import get_warmup_keys
-    from kernels.gemm.rdna4_mxfp4.api import specialization_key
+    from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
     from kernels.gemm.rdna4_mxfp4.tuning import cached_configurations
 
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))

@@ -30,6 +30,49 @@ folded plans. It does not retain dense decoded weights. Auto preparation uses
 lossless E4M3 folding, then E5M2 folding for wider exponent spans, then exact
 grouped K32 rescaling. Forced folding raises when it would lose information.
 
+## File structure
+
+```text
+rdna4_mxfp4/
+├── __init__.py       # Lazy public exports
+├── entrypoint.py     # Weight preparation, GEMM launch, compile-only warmup
+├── register.py       # Register-fed GPU strategy
+├── hybrid.py         # A registers / B LDS GPU strategy
+├── heuristic.py      # CPU configuration selection and legality checks
+├── common.py         # Shared device layouts, unpacking and folding helpers
+├── tuning.py         # Optional native calibration and persistent cache
+├── heuristic.json    # Generated dispatch, profiles and cost data
+└── README.md
+```
+
+The main path is `gemm()` → `choose_config()` → register or hybrid. Public
+imports stay at `flydsl.kernels.gemm.rdna4_mxfp4`; `entrypoint.py` avoids a
+submodule name colliding with the exported `gemm()` function. Startup warmup
+and runtime execution share the same specialization-key implementation.
+
+`heuristic.py` owns profile matching, compatible transfers, bounded proposals,
+cost ranking and resource legality. It imports only the Python standard library.
+`heuristic.json` stores the existing data as `dispatch`, `profiles` and `cost`
+sections under `format_version: 1`. The consolidation preserves the measured
+selection policy and model parameters. Training/export tools and performance
+records remain outside the runtime package.
+
+Optional calibration uses the selector's shortlist. Its cache fingerprint covers
+launch, kernel, selector and calibration sources plus the combined data, so
+changing the source layout invalidates earlier calibration entries. Recalibrate
+and compile warmup keys for the installed version before serving.
+
+Consolidation preserves 170,199 public choices across 18,911 shapes, 1,536
+calibration shortlists and all 2,633 warmup keys. Checks pass 78 CPU tests,
+100 GPU tests (10 explicit skips), and 10 vLLM backend tests. Sixteen randomized
+paired rounds on eight shapes and both GPUs give 32 hot/rotating comparisons:
+updated/previous latency is 1.0006× geometrically, worst 1.0099×. Every compared
+instruction fingerprint, resource count, prepared weight buffer and changed-input
+replay output matches. Timing covers BF16 output and normal E4M3 folding;
+correctness tests additionally cover FP16, E5M2 and grouped scaling.
+[Refactor validation data](../../../tests/perf/data/rdna4_mxfp4_structure.json)
+records the source hashes, per-case timings and executed ISA resources.
+
 ## Two strategies
 
 | Strategy | Dataflow | Configuration parameters |
@@ -191,7 +234,7 @@ y = gemm(x_fp8_e4m3, weights, x_scale_fp32,
 Run focused tests from a built FlyDSL checkout:
 
 ```bash
-python -m pytest tests/unit/test_rdna4_mxfp4_dispatch.py
+python -m pytest tests/unit/test_rdna4_mxfp4_heuristic.py
 python -m pytest tests/unit/test_rdna4_mxfp4_tuning.py
 python -m pytest tests/kernels/test_rdna4_mxfp4.py
 ```

@@ -15,15 +15,15 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 
-from .dispatch_features import REGISTER_MAX_ACCUMULATORS
-from .folding import magnitude_words
-from .layouts import (
+from .common import (
     expand_nibbles,
     global_tensor,
     identity_tensor,
+    magnitude_words,
     tensor_load,
     tiled_wmma,
 )
+from .heuristic import REGISTER_MAX_ACCUMULATORS
 
 
 @lru_cache(maxsize=256)

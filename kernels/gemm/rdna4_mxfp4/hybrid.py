@@ -16,11 +16,11 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 
-from .folding import magnitude_words
-from .layouts import (
+from .common import (
     expand_nibbles,
     global_tensor,
     identity_tensor,
+    magnitude_words,
     swizzled_layout,
     tensor_load,
     tiled_wmma,

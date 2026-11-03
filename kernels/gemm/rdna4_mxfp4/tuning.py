@@ -19,8 +19,7 @@ import torch
 
 from flydsl.autotune import Autotuner, Config
 
-from .dispatch import choose_config, tuning_candidates
-from .dispatch_features import legal_config, normalize_config
+from .heuristic import _legal_config, _normalize_config, _tuning_candidates, choose_config
 
 _choices = {}
 _lock = threading.RLock()
@@ -31,13 +30,17 @@ _KEY_FIELDS = ("m", "n", "k", "mode", "normal", "layout", "output_dtype", "devic
 def _schema():
     root = Path(__file__).resolve().parent
     files = [
-        root / "dispatch.py",
-        root / "dispatch_features.py",
-        root / "dispatch_model.json",
-        root / "tuning.py",
-        root / "api.py",
+        root / name
+        for name in (
+            "entrypoint.py",
+            "register.py",
+            "hybrid.py",
+            "common.py",
+            "heuristic.py",
+            "heuristic.json",
+            "tuning.py",
+        )
     ]
-    files += [root / (name + ".py") for name in ("register", "hybrid", "folding", "layouts")]
     return hashlib.sha256(b"".join(path.read_bytes() for path in files)).hexdigest()
 
 
@@ -72,8 +75,8 @@ def cached_configurations(n, k, max_m, *, mode, normal_only, nibble_layout, dtyp
         m = int(fields["m"])
         if not 1 <= m <= max_m:
             continue
-        config = normalize_config(value.kwargs["config"], m, k)
-        if legal_config(config, m, n, k):
+        config = _normalize_config(value.kwargs["config"], m, k)
+        if _legal_config(config, m, n, k):
             rows.append((m, config))
     return rows
 
@@ -283,7 +286,7 @@ def resolve_config(gemm, x, weights, scales, out, cache_policy, *, calibrate=Fal
                 tuner = Autotuner(
                     launch,
                     configs=lambda *args, **kwargs: [
-                        Config(config=c) for c in tuning_candidates(m, n, k, cache_policy=cache_policy)
+                        Config(config=c) for c in _tuning_candidates(m, n, k, cache_policy=cache_policy)
                     ],
                     key=_KEY_FIELDS,
                     warmup=0,
@@ -314,7 +317,7 @@ def resolve_config(gemm, x, weights, scales, out, cache_policy, *, calibrate=Fal
                     _schema(),
                     cache_policy,
                 )
-                config = normalize_config(selected.kwargs["config"], m, k)
+                config = _normalize_config(selected.kwargs["config"], m, k)
                 measured = any(selected is entry for entry in tuner.cache.values())
                 _choices[key] = (dict(config), measured)
                 return dict(config)
