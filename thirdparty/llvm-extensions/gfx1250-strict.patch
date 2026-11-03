@@ -845,3 +845,32 @@ diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
          .Case("12.51", Triple::AMDGPUSubArch1251)
          .Case("13", Triple::AMDGPUSubArch13)
          .Case("13.10", Triple::AMDGPUSubArch1310)
+diff --git a/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp b/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp
+--- a/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp
++++ b/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp
+@@ -14,6 +14,8 @@ namespace mlir::amdgpu {
+ FailureOr<Chipset> Chipset::parse(StringRef name) {
+   if (!name.consume_front("gfx"))
+     return failure();
++  // Ignore processor feature suffixes such as "-strict" (e.g. gfx1250-strict).
++  name = name.split('-').first;
+   if (name.size() < 3)
+     return failure();
+ 
+   unsigned major = 0;
+diff --git a/mlir/unittests/Dialect/AMDGPU/AMDGPUUtilsTest.cpp b/mlir/unittests/Dialect/AMDGPU/AMDGPUUtilsTest.cpp
+--- a/mlir/unittests/Dialect/AMDGPU/AMDGPUUtilsTest.cpp
++++ b/mlir/unittests/Dialect/AMDGPU/AMDGPUUtilsTest.cpp
+@@ -30,6 +30,12 @@ TEST(ChipsetTest, Parsing) {
+   EXPECT_EQ(chipset->majorVersion, 11u);
+   EXPECT_EQ(chipset->minorVersion, 0u);
+   EXPECT_EQ(chipset->steppingVersion, 3u);
++
++  chipset = Chipset::parse("gfx1250-strict");
++  ASSERT_TRUE(succeeded(chipset));
++  EXPECT_EQ(chipset->majorVersion, 12u);
++  EXPECT_EQ(chipset->minorVersion, 5u);
++  EXPECT_EQ(chipset->steppingVersion, 0u);
+ }
+ 
+ TEST(ChipsetTest, ParsingInvalid) {
