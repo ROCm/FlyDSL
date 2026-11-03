@@ -61,6 +61,9 @@ class RocmBackend(BaseBackend):
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
+        # MLIR Chipset::parse only accepts bare gfxNNNN. Keep the full arch
+        # (e.g. gfx1250-strict) for rocdl-attach-target so LLVM codegen sees it.
+        chipset = chip.split("-", 1)[0]
 
         # ROCDL never reads gpu-module-to-binary's opts=, so nothing may be
         # routed through it.
@@ -99,7 +102,7 @@ class RocmBackend(BaseBackend):
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-rocdl-fastmath-ops,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
+            f"convert-gpu-to-rocdl{{chipset={chipset} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
         ]
         binary_prep_fragments = [
