@@ -362,4 +362,24 @@ def Fly_AotModuleAttr : Fly_Attr<"AotModule", "aot_module", [
   let genVerifyDecl = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// Experimental features
+//===----------------------------------------------------------------------===//
+
+// Symbolic reference: LLVM class IDs are target- and version-local.
+def Fly_RegisterClassAttr : Fly_Attr<"RegisterClass", "register_class", []> {
+  let summary = "Reference an LLVM target register class by architecture and name";
+  let description = [{
+    `target` is the LLVM triple architecture (for example `amdgcn`). `name`
+    names an LLVM register class (for example `VGPR_32`); no LLVM numeric
+    class ID is serialized. Placement indices address the ordered members of
+    that class, not LLVM's global physical register IDs. `bits` is the width
+    of one class member; register storage is split into members of this
+    width. The classes a target supports are checked during lowering.
+  }];
+  let parameters = (ins StringRefParameter<>:$target, StringRefParameter<>:$name,
+                        "unsigned":$bits);
+  let assemblyFormat = "`<` $target `,` $name `,` $bits `>`";
+}
+
 #endif // FLY_ATTRDEFS
