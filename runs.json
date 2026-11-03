@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-03T04:24:32Z",
+ "updated": "2026-11-03T04:39:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41578091447,
+   "pr": 901,
+   "commit": "3d52c197cd08ec5a4063213a5e4c676791d65669",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41578091447",
+   "created_at": "2026-11-03T04:25:57Z",
+   "updated_at": "2026-11-03T04:28:29Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 41572453385,
    "pr": 1362,
@@ -2021,21 +2036,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41005986921",
    "created_at": "2026-10-30T05:00:27Z",
    "updated_at": "2026-10-30T05:01:47Z",
-   "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 41004973509,
-   "pr": 1350,
-   "commit": "369021669cbb2fd1aa152da5198042032a4afc40",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41004973509",
-   "created_at": "2026-10-30T04:48:57Z",
-   "updated_at": "2026-10-30T04:50:17Z",
    "actor": "xudoyuan",
    "jobs": []
   }
