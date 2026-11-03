@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-03T06:31:40Z",
+ "updated": "2026-11-03T08:06:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41598329030,
+   "pr": 1343,
+   "commit": "19e769400cb4f441426be98e5f5136140bae09c2",
+   "branch": "fix/debug-call-chain-scopes",
+   "event": "pull_request",
+   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41598329030",
+   "created_at": "2026-11-03T07:44:36Z",
+   "updated_at": "2026-11-03T07:44:36Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 41590895344,
+   "pr": null,
+   "commit": "d3d3037a1359c4ac20da11efb49352c379f36b89",
+   "branch": "fix/debug-call-chain-scopes",
+   "event": "pull_request",
+   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41590895344",
+   "created_at": "2026-11-03T06:35:57Z",
+   "updated_at": "2026-11-03T06:35:57Z",
+   "actor": "hanli0612",
+   "jobs": []
+  },
   {
    "run_id": 41589785101,
    "pr": 1350,
@@ -14,9 +44,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41589785101",
    "created_at": "2026-11-03T06:25:26Z",
-   "updated_at": "2026-11-03T06:26:46Z",
+   "updated_at": "2026-11-03T06:55:35Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-03T06:56:07Z",
+     "completed_at": "2026-11-03T07:26:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41589785101/job/125773645322",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-03T06:56:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41589785101/job/125773645336"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-03T06:55:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41589785101/job/125773645935"
+    }
+   ]
   },
   {
    "run_id": 41585963468,
@@ -25,38 +86,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Restore gfx1250-strict chipset parse and SMEM mapping (#1362)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468",
    "created_at": "2026-11-03T05:47:34Z",
-   "updated_at": "2026-11-03T06:23:05Z",
+   "updated_at": "2026-11-03T08:04:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-03T06:23:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807488"
+     "completed_at": "2026-11-03T06:54:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807488",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-03T06:23:18Z",
-     "completed_at": null,
+     "completed_at": "2026-11-03T06:48:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807537"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-03T06:23:30Z",
-     "completed_at": null,
+     "completed_at": "2026-11-03T06:59:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807565"
     }
    ]
@@ -155,7 +219,7 @@
   },
   {
    "run_id": 41509865804,
-   "pr": 1343,
+   "pr": null,
    "commit": "9ffdeab6d56570bf13c20ba69a71d06b7bd2286e",
    "branch": "fix/debug-call-chain-scopes",
    "event": "pull_request",
@@ -1975,98 +2039,6 @@
      "started_at": "2026-10-30T06:47:31Z",
      "completed_at": "2026-10-30T07:35:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231231/job/123909300181"
-    }
-   ]
-  },
-  {
-   "run_id": 41007230967,
-   "pr": 1245,
-   "commit": "c0e9c457e96244ddd2f3a1bebb8a57077a121bb9",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr1-shared-fixes",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Fix ds_read_tr waitcnt hazard and stagger SCC clobber (1/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967",
-   "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T10:58:25Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T09:43:04Z",
-     "completed_at": "2026-10-30T10:02:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008018"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T08:20:07Z",
-     "completed_at": "2026-10-30T08:50:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008068",
-     "machine": "smci350-odcdh2-a08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T07:27:05Z",
-     "completed_at": "2026-10-30T09:25:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230967/job/123914008109"
-    }
-   ]
-  },
-  {
-   "run_id": 41007230961,
-   "pr": 1248,
-   "commit": "5bc612a3496f2e32b413112010535cdbfdfe87fd",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr4-forward",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add the gfx950 attention forward kernel (dual-wave and wide bodies) (4/8)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961",
-   "created_at": "2026-10-30T05:13:35Z",
-   "updated_at": "2026-10-30T10:18:52Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T05:29:16Z",
-     "completed_at": "2026-10-30T05:55:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961/job/123909315274",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T05:29:09Z",
-     "completed_at": "2026-10-30T05:47:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961/job/123909315293"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T09:26:08Z",
-     "completed_at": "2026-10-30T10:18:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007230961/job/123909315346"
     }
    ]
   }
