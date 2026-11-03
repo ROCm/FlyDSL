@@ -1,6 +1,8 @@
 add_mlir_conversion_library(MLIRFlyToROCDL
   FastMathOps.cpp
   FlyToROCDL.cpp
+  RegisterPlacement.cpp
+  SerializeRegisterKernels.cpp
 
   DEPENDS
   MLIRFlyIncGen
@@ -23,4 +25,10 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRTransforms
   MLIRUBDialect
   MLIRVectorDialect
+  LLVMCodeGen
+  LLVMTarget
+  LLVMAMDGPUAsmParser
+  LLVMMCParser
+  MLIRGPUTransforms
+  MLIRROCDLTarget
 )

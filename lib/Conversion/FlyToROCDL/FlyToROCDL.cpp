@@ -19,6 +19,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/bit.h"
 
@@ -40,6 +41,10 @@ namespace mlir {
 using namespace mlir;
 using namespace mlir::fly;
 using namespace mlir::fly_rocdl;
+
+namespace mlir::fly {
+void registerRegisterPlacementCodegen();
+}
 
 namespace {
 
@@ -933,6 +938,98 @@ public:
   }
 };
 
+// Numbers each fly.register_value before conversion; see RegisterValueLowering.
+constexpr StringLiteral kRegisterRequestAttr = "fly.register_request";
+
+class RegisterValueLowering : public OpConversionPattern<RegisterValueOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(RegisterValueOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto registerClass = op.getRegisterClass();
+
+    if (registerClass.getTarget() != "amdgcn")
+      return op.emitOpError("Fly-to-ROCDL register placement requires target amdgcn");
+
+    auto module = op->getParentOfType<gpu::GPUModuleOp>();
+    if (!module)
+      return op.emitOpError("register placement lowering requires a gpu.module");
+
+    if (auto targets = module.getTargetsAttr())
+      for (Attribute attr : targets)
+        if (auto target = dyn_cast<ROCDL::ROCDLTargetAttr>(attr); target && target.getO() == 0)
+          return op.emitOpError(
+              "explicit register placement requires optimized SelectionDAG codegen");
+
+    if (registerClass.getName() != "AGPR_32" && registerClass.getName() != "VGPR_32" &&
+        registerClass.getName() != "SGPR_32")
+      return op.emitOpError(
+          "unsupported AMDGPU register class; expected AGPR_32, VGPR_32 or SGPR_32");
+
+    mlir::fly::registerRegisterPlacementCodegen();
+    auto type = adaptor.getValue().getType();
+    std::string typeName;
+    llvm::raw_string_ostream(typeName) << type;
+    for (char &c : typeName)
+      if (!llvm::isAlnum(c))
+        c = '_';
+    // One declaration per request: its ID lets the serializer report a
+    // rejection at this operation. Distinct callees also keep LLVM from merging
+    // calls of different requests and replacing their constant operands.
+    auto requestAttr = op->getAttrOfType<IntegerAttr>(kRegisterRequestAttr);
+    std::string request = std::to_string(requestAttr ? requestAttr.getInt() : 0);
+    std::string name =
+        ("__flydsl_register_value_" + registerClass.getName() + "_" + typeName + "_r" + request)
+            .str();
+
+    auto i32 = rewriter.getI32Type();
+    auto signature = LLVM::LLVMFunctionType::get(type, {type, i32, i32, i32});
+
+    auto metadata = rewriter.getArrayAttr(
+        {rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-target"),
+                                rewriter.getStringAttr(registerClass.getTarget())}),
+         rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-class"),
+                                rewriter.getStringAttr(registerClass.getName())}),
+         rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-bits"),
+                                rewriter.getStringAttr(std::to_string(registerClass.getBits()))}),
+         rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-request"),
+                                rewriter.getStringAttr(request)})});
+
+    constexpr auto noModRef = LLVM::ModRefInfo::NoModRef;
+    auto memoryEffects = rewriter.getAttr<LLVM::MemoryEffectsAttr>(noModRef, noModRef, noModRef,
+                                                                   noModRef, noModRef, noModRef);
+
+    if (Operation *existing = SymbolTable::lookupSymbolIn(module, name)) {
+      auto func = dyn_cast<LLVM::LLVMFuncOp>(existing);
+      if (!func || func.getFunctionType() != signature || !func.getBody().empty() ||
+          func.getPassthroughAttr() != metadata || func.getMemoryEffectsAttr() != memoryEffects ||
+          !func.getNoUnwind())
+        return op.emitOpError("register placement marker symbol conflicts with existing symbol: ")
+               << name;
+    } else {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      auto func = LLVM::LLVMFuncOp::create(rewriter, op.getLoc(), name, signature);
+
+      func.setPassthroughAttr(metadata);
+      // Placement carries a value, not a memory access. Allow LLVM to optimize
+      // ordinary loads/stores across it, but do not expose its identity with
+      // `returned` or make unused carriers removable with `willreturn`: the
+      // backend must still diagnose requests without materialized machine uses.
+      func.setMemoryEffectsAttr(memoryEffects);
+      func.setNoUnwind(true);
+    }
+
+    auto startIdx = LLVM::ConstantOp::create(rewriter, op.getLoc(), i32, op.getStartIdxAttr());
+    auto offset = LLVM::ConstantOp::create(rewriter, op.getLoc(), i32, op.getBitOffsetAttr());
+    auto size = LLVM::ConstantOp::create(rewriter, op.getLoc(), i32, op.getStorageBitsAttr());
+
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, TypeRange{type}, name, ValueRange{adaptor.getValue(), startIdx, offset, size});
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -954,6 +1051,12 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+    int64_t registerRequests = 0;
+    getOperation()->walk([&](RegisterValueOp op) {
+      op->setAttr(kRegisterRequestAttr,
+                  IntegerAttr::get(IntegerType::get(context, 64), registerRequests++));
+    });
+    patterns.add<RegisterValueLowering>(typeConverter, context);
 
     // Convert every control-flow boundary along with its users.
     scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
