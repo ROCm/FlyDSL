@@ -80,10 +80,20 @@ python examples/07-ktrace_wave_timeline.py --layers 3
 | `inactive_token(name)` | Inactive token for a loop-carried range |
 
 Use `with ktrace.range(...)` when both endpoints fit in one source block.
-`range_push` and `range_pop` pair in LIFO order along the executed path. Both
-endpoints must execute under the same active-lane guard, such as the same branch
-or warp role. Token ranges have the same guard requirement: changing the active
-leader between endpoints can leave the range unpaired.
+`range_push` and `range_pop` pair in LIFO order along the executed path. A token
+range pairs on its token. The lanes that reach a `range_stop` can hold different
+tokens, as after a loop they leave at different iterations: the stop closes the
+latest range any of them started, and records nothing if none did.
+
+A wave numbers its events in a register. An event in a lane-divergent branch
+takes the wave's next slot. After every branch or loop that records, the lanes of
+the wave agree on the count, so later events continue past every slot it used,
+whichever lanes record them. When both branches of an `if` record, as in
+`if lane < 32: mark("a")` with `else: mark("b")`, the traced kernel runs the
+branches as two `if`s on the same condition, the then branch first, so a wave
+that runs both keeps both records. Under a wave-uniform condition, such as the
+warp role, the agreement compiles to nothing and the second `if` adds one
+uniform branch.
 
 Use tokens when the range crosses loop iterations:
 
@@ -216,10 +226,15 @@ mode disabled.
 - **255 events per wave per launch.** Larger buffers and filtering other blocks
   do not increase this limit. Overflow raises during collection because dropped
   range endpoints would make the timeline incomplete.
-- **Finite collection window.** Waves reserve 256 slots each, including a counter
-  slot. The default buffer holds 8191 waves. Use block filters and periodic reads
-  for large grids or repeated launches. The global reservation counter is 32-bit;
-  accumulating 2²⁴ waves without a read wraps it and invalidates overflow detection.
+- **Finite collection window.** Waves reserve 256 slots each, including a header
+  slot. A wave takes its slots from one of up to 256 partitions. Consecutive waves
+  of a row of workgroups take consecutive partitions, so waves that start together
+  do not contend for one counter and a launch fills the partitions evenly; successive
+  launches start at different partitions. The default 64 MiB buffer has 64 partitions
+  of about 128 waves, 8190 waves in all, and a trace overflows when its busiest
+  partition fills: one launch fits up to about 8100 waves. Use block filters
+  and periodic reads for large grids or repeated launches. The overflow error names
+  a buffer size that holds the recorded launches.
 - **One device per process.** Access from another device raises. Trace multiple
   devices in separate processes. Traced binaries cannot be exported to C.
 - **Synchronized collection.** Reading waits for device work and serializes with
@@ -227,12 +242,16 @@ mode disabled.
 - **Reference-clock timestamps.** `s_memrealtime` runs at 100 MHz (10 ns per tick),
   independently of the GPU core clock. Observed resolution on gfx950 is about
   40 ns. Shorter ranges can appear as zero-duration markers.
-- **Instrumentation changes timing.** Simple-loop measurements on MI355X were
-  about 40 ns per event. In a software-pipelined GEMM, probes cost 729–909 ns each
-  and the densest annotations slowed the loop by 4.3×. Timestamp consumption can
-  drain outstanding LDS/SMEM traffic, and scheduling can move independent work
-  across a timestamp. Use coarse phases and compare with an untraced baseline;
-  subtracting a constant per-event cost does not undo these scheduling changes.
+- **Instrumentation changes timing.** A wave makes one atomic when it starts, on
+  its partition's counter. An event reads the clock and issues two scalar stores,
+  with no branch, no atomic and no VGPR. On MI355X an event in a loop cost about
+  20 ns, and ranges around the body, the K loop and the epilogue of a 4096-wave FP16
+  GEMM cost under 1%; a token range in every K-loop iteration cost about 2% and 16
+  more VGPRs. Timestamp consumption can drain outstanding LDS/SMEM traffic, and
+  scheduling can move independent work across a timestamp. Use coarse phases and
+  compare with an untraced baseline; subtracting a constant per-event cost does not
+  undo these scheduling changes. Reading a trace idles the GPU while the host
+  decodes it, so time traced launches between reads rather than across them.
 - **Partial launch coverage.** The first and last annotations need not coincide
   with kernel entry and exit. Gaps between tracks do not measure host launch
   latency or complete kernel overlap. Use a runtime profiler for those questions.
