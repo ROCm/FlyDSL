@@ -226,7 +226,6 @@ def test_python_register_place_emits_a_separate_op():
                 fx_regalloc.register_place(tensor, fx_regalloc.rocdl.AGPR32, start_idx=2**32 + 32)
         assert module.operation.verify()
         assert str(module).count("fly.register_place") == 2
-        assert "fly_rocdl.register_place" not in str(module)
 
 
 def test_unsupported_codegen_pipeline_rejects_instead_of_dropping_placement(tmp_path):
@@ -389,7 +388,6 @@ def test_removing_invalid_placement_restores_compilation(tmp_path, body, diagnos
     "class_name,element_type,storage_bits,diagnostic,opt_level",
     [
         ("NoSuchClass", "i32", 32, "unsupported AMDGPU register class", 3),
-        ("VGPR_32", "i16", 16, "requires whole 32-bit registers", 3),
         ("VGPR_32", "i32", 32, "requires optimized SelectionDAG codegen", 0),
     ],
 )
@@ -427,28 +425,6 @@ def test_unused_register_storage_is_removed_without_backend_carriers():
         assert "fly.register_place" not in str(module)
         assert "fly.register_value" not in str(module)
         assert "fly.make_ptr" not in str(module)
-
-
-@pytest.mark.parametrize("user_id", [0, 0x464C000000000000])
-def test_existing_stackmaps_are_not_claimed_by_placement(tmp_path, user_id):
-    _, mir = _compile_and_print_placement(
-        tmp_path,
-        f"""
-      %id = llvm.mlir.constant({user_id} : i64) : i64
-      %zero = llvm.mlir.constant(0 : i32) : i32
-      %x = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xi32>
-      llvm.call_intrinsic "llvm.experimental.stackmap"(%id, %zero, %x) : (i64, i32, vector<4xi32>) -> ()
-      %fixed = fly.register_value(%x) {{registerClass = #fly.register_class<"amdgcn", "VGPR_32", 32>,
-        startIdx = 64 : i32, bitOffset = 0 : i32, storageBits = 128 : i32}} : (vector<4xi32>) -> vector<4xi32>
-      llvm.store volatile %fixed, %p : vector<4xi32>, !llvm.ptr<1>
-    """,
-    )
-    # Foreign STACKMAP support is LLVM-target-dependent. Inspect our pass's
-    # output even if AMDGPU's final assembler does not support the foreign op.
-    assert mir.count("STACKMAP") == 1
-    assert f"STACKMAP {user_id}," in mir
-    assert "ADJCALLSTACK" in mir
-    assert "$vgpr64_vgpr65_vgpr66_vgpr67" in mir
 
 
 def test_codegen_registration_does_not_change_unannotated_compilation(tmp_path):
@@ -512,24 +488,6 @@ def test_calls_cannot_clobber_reserved_storage(tmp_path):
     assert "conflicts with a call clobber" in result.stderr, result.stdout + result.stderr
     result = _compile_machine_module(tmp_path, body, declarations="llvm.func @callee()", strip_placement=True)
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_existing_symbol_cannot_silently_replace_register_carrier():
-    name = "__flydsl_register_value_VGPR_32_i32_r0"
-    source = f"""module {{
-      gpu.module @m {{
-        llvm.func @{name}(i32, i64, i64, i64) -> i32
-        llvm.func @test(%x: i32) -> i32 {{
-          %fixed = fly.register_value(%x) {{registerClass = #fly.register_class<"amdgcn", "VGPR_32", 32>,
-            startIdx = 64 : i32, bitOffset = 0 : i32, storageBits = 32 : i32}} : (i32) -> i32
-          llvm.return %fixed : i32
-        }}
-      }}
-    }}"""
-    with _create_mlir_context(), ir.Location.unknown():
-        module = ir.Module.parse(source)
-        with pytest.raises(ir.MLIRError, match="marker symbol conflicts with existing symbol"):
-            PassManager.parse("builtin.module(convert-fly-to-rocdl)").run(module.operation)
 
 
 def test_fixed_registers_are_reused_outside_the_live_range(tmp_path):

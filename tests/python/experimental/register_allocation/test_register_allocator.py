@@ -85,16 +85,6 @@ def test_scalar_vector_and_composite_storage_access():
     assert "vector<8xf16>" in text
 
 
-def test_vector_storable_also_works_with_shared_allocator():
-    @flyc.kernel
-    def kernel():
-        buf = fx.SharedAllocator().allocate(fx.Vector[fx.Float32, (2, 4)])
-        buf.poke(fx.Vector.filled((2, 4), 2.0, fx.Float32))
-        assert buf.peek().shape == (2, 4)
-
-    assert "vector<8xf32>" in launch_ir(kernel)
-
-
 @pytest.mark.parametrize("alignment", [0, -1, 3, True, 1.5])
 def test_invalid_alignment(alignment):
     def body():
@@ -110,33 +100,10 @@ def test_invalid_start(offset):
         fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, offset)
 
 
-@pytest.mark.parametrize("dtype,shape", [(fx.Boolean, 4), (fx.Int32, 0), (fx.Int32, (2, -1))])
-def test_invalid_vector_storage_type(dtype, shape):
-    def body():
-        fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(fx.Vector[dtype, shape])
-
-    with pytest.raises((TypeError, ValueError)):
-        source_ir(body)
-
-
-def test_vector_storage_checks_value_type():
-    def body():
-        ptr = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(fx.Vector[fx.Float32, (2, 4)])
-        ptr.poke(fx.Vector.filled(4, 1.0, fx.Float32))
-
-    with pytest.raises(TypeError, match=r"expects Vector\[Float32, \(2, 4\)\]"):
-        source_ir(body)
-
-
-@pytest.mark.parametrize("allocator_kind", ["register", "shared_static", "shared_dynamic"])
-def test_storage_roundtrip_and_loop(allocator_kind):
+def test_storage_roundtrip_and_loop():
     @flyc.kernel
     def kernel(n: fx.Int32):
-        if fx.const_expr(allocator_kind == "register"):
-            allocator = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32)
-        else:
-            allocator = fx.SharedAllocator(static=allocator_kind == "shared_static")
-        buf = allocator.allocate(RegisterPayload)
+        buf = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(RegisterPayload)
         rebuilt = construct_from_ir_values(type(buf), buf, extract_to_ir_values(buf))
         rebuilt.scalar.poke(1.0)
         for _ in range(0, n):

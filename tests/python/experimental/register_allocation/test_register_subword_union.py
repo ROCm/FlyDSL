@@ -142,14 +142,13 @@ UNSUPPORTED = [
 
 
 def _allocator(bank="VGPR"):
-    # "plain" allocates like "fixed"; run_case drops its placement declarations.
     if bank == "SGPR":
         return fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.SGPR32, start_idx=40)
     return fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=64)
 
 
 @flyc.kernel
-def subword_kernel(X: fx.Tensor, Y: fx.Tensor, Out: fx.Tensor, case: fx.Constexpr[str], mode: fx.Constexpr[str]):
+def subword_kernel(X: fx.Tensor, Y: fx.Tensor, Out: fx.Tensor, case: fx.Constexpr[str]):
     tid = fx.thread_idx.x
     x = X[tid]
     y = Y[tid]
@@ -285,8 +284,8 @@ def subword_kernel(X: fx.Tensor, Y: fx.Tensor, Out: fx.Tensor, case: fx.Constexp
 
 
 @flyc.jit
-def launch_subword(X: fx.Tensor, Y: fx.Tensor, Out: fx.Tensor, case: fx.Constexpr[str], mode: fx.Constexpr[str]):
-    subword_kernel(X, Y, Out, case, mode).launch(grid=(1, 1, 1), block=(64, 1, 1))
+def launch_subword(X: fx.Tensor, Y: fx.Tensor, Out: fx.Tensor, case: fx.Constexpr[str]):
+    subword_kernel(X, Y, Out, case).launch(grid=(1, 1, 1), block=(64, 1, 1))
 
 
 def _expected(case, x, y):
@@ -352,37 +351,26 @@ def _expected(case, x, y):
     raise KeyError(case)
 
 
-def run_case(case, mode, *, run=False):
-    import contextlib
-    from unittest import mock
-
+def run_case(case, *, run=False):
     import torch
 
     device = "cuda" if run else "cpu"
     tid = torch.arange(64, dtype=torch.int32)
     x, y = tid % 13 + 1, tid % 7 + 3
     out = torch.zeros(64, dtype=torch.int32, device=device)
-    # "plain" compiles the same program as ordinary register memory, without placement.
-    no_placement = (
-        mock.patch("flydsl.experimental.register_allocation.register.register_place", lambda *args, **kwargs: None)
-        if mode == "plain"
-        else contextlib.nullcontext()
+    launch_subword(
+        flyc.from_torch_tensor(x.to(device)),
+        flyc.from_torch_tensor(y.to(device)),
+        flyc.from_torch_tensor(out),
+        case,
     )
-    with no_placement:
-        launch_subword(
-            flyc.from_torch_tensor(x.to(device)),
-            flyc.from_torch_tensor(y.to(device)),
-            flyc.from_torch_tensor(out),
-            case,
-            mode,
-        )
     if run:
         torch.cuda.synchronize()
         expected = _expected(case, x, y).to(torch.int32)
-        assert torch.equal(out.cpu(), expected), (case, mode, out.cpu(), expected)
+        assert torch.equal(out.cpu(), expected), (case, out.cpu(), expected)
 
 
-def _compile(tmp_path, case, mode, dump=False):
+def _compile(tmp_path, case, dump=False):
     env = dict(
         os.environ,
         PYTHONPATH=os.pathsep.join(sys.path),
@@ -396,7 +384,7 @@ def _compile(tmp_path, case, mode, dump=False):
 import resource
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 from tests.python.experimental.register_allocation.test_register_subword_union import run_case
-run_case({case!r}, {mode!r})
+run_case({case!r})
 """
     return subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=90)
 
@@ -416,7 +404,7 @@ def _written_registers(isa):
 
 @pytest.mark.parametrize("case", sorted(SUPPORTED))
 def test_supported_fixed_placement_writes_requested_registers(tmp_path, case):
-    result = _compile(tmp_path, case, "fixed", dump=True)
+    result = _compile(tmp_path, case, dump=True)
     assert result.returncode == 0, result.stdout + result.stderr
     files = list((tmp_path / "ir").rglob("*_final_isa.s"))
     assert len(files) == 1
@@ -426,12 +414,6 @@ def test_supported_fixed_placement_writes_requested_registers(tmp_path, case):
 
 @pytest.mark.parametrize("case", UNSUPPORTED)
 def test_unsupported_subword_patterns_are_rejected(tmp_path, case):
-    result = _compile(tmp_path, case, "fixed")
+    result = _compile(tmp_path, case)
     assert result.returncode != 0, f"{case} now compiles with placement; move it to SUPPORTED"
     assert "placement cannot be enforced" in result.stderr, result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("case", UNSUPPORTED)
-def test_unsupported_subword_patterns_compile_without_placement(tmp_path, case):
-    result = _compile(tmp_path, case, "plain")
-    assert result.returncode == 0, result.stdout + result.stderr

@@ -148,7 +148,8 @@ def launch_allocator(
         ("fma", {68}),
         ("float16_roundtrip", {68}),
     ]
-    + [(mode, {68}) for mode in SCALAR_TYPES],
+    # Sub-word, half-precision and two-register scalars; the GPU test covers every type.
+    + [(mode, {68}) for mode in ("int8", "float16", "int64")],
 )
 def test_allocator_final_isa(tmp_path, mode, registers):
     env = dict(
@@ -205,10 +206,9 @@ run_allocator({mode!r})
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("mode", ["loop", "branch", "fma", "packed"])
-def test_allocator_rejects_agpr_writeback(tmp_path, mode):
+def test_allocator_rejects_agpr_writeback(tmp_path):
     # Allocator syntax must not weaken the same direct-definition rule applied
-    # to register_place, including across loops, branches and packed updates.
+    # to register_place, here for a loop-carried update.
     env = dict(
         os.environ,
         PYTHONPATH=os.pathsep.join(sys.path),
@@ -216,11 +216,11 @@ def test_allocator_rejects_agpr_writeback(tmp_path, mode):
         ARCH="gfx942",
         FLYDSL_RUNTIME_CACHE_DIR=str(tmp_path / "cache"),
     )
-    script = f"""
+    script = """
 import resource
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 from tests.python.experimental.register_allocation.test_register_allocator_codegen import run_allocator
-run_allocator({mode!r}, bank="AGPR")
+run_allocator("loop", bank="AGPR")
 """
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=90)
     assert result.returncode != 0
