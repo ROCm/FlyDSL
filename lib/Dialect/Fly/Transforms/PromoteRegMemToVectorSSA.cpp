@@ -3,6 +3,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -14,6 +15,7 @@
 #include "mlir/Transforms/CSE.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
@@ -84,7 +86,7 @@ bool isRegOperandOrResult(Operation *op) {
   return false;
 }
 
-/// Resolves the root alloca of an add_offset chain and its accumulated offset.
+/// Resolve static add_offset/recast_iter chains, measuring displacement in bits.
 ///
 /// Nullopt result: the chain does not bottom out in a MakePtrOp.
 /// Nullopt `second`: the root is known but some link carries a dynamic offset,
@@ -103,8 +105,14 @@ std::optional<std::pair<MakePtrOp, std::optional<int32_t>>> resolveRegOffset(Val
     IntAttr intAttr = addOffsetOp.getOffset().getType().getAttr().getLeafAsInt();
     if (!base->second || !intAttr.isStatic())
       return std::pair<MakePtrOp, std::optional<int32_t>>{base->first, std::nullopt};
-    return std::pair<MakePtrOp, std::optional<int32_t>>{base->first,
-                                                        *base->second + intAttr.getValue()};
+    int32_t delta, offset;
+    auto elemTy = cast<PointerType>(addOffsetOp.getPtr().getType()).getElemTy();
+    if (llvm::MulOverflow(intAttr.getValue(), int32_t(elemTy.getIntOrFloatBitWidth()), delta) ||
+        llvm::AddOverflow(*base->second, delta, offset))
+      return std::pair<MakePtrOp, std::optional<int32_t>>{base->first, std::nullopt};
+    return std::pair<MakePtrOp, std::optional<int32_t>>{base->first, offset};
+  } else if (auto recast = ptr.getDefiningOp<RecastIterOp>()) {
+    return resolveRegOffset(recast.getSrc());
   } else {
     return std::nullopt;
   }
@@ -130,6 +138,11 @@ public:
   }
 
 private:
+  struct Placement {
+    RegisterClassAttr registerClass;
+    IntegerAttr startIdx;
+  };
+  DenseMap<MakePtrOp, Placement> placements;
   DenseMap<MakePtrOp, RegAllocaInfo> regAllocaInfos;
   SmallVector<MakePtrOp> allocaOrder;
 
@@ -138,11 +151,13 @@ private:
 
     regAllocaInfos.clear();
     allocaOrder.clear();
+    placements.clear();
 
     funcOp.walk([&](MakePtrOp makePtrOp) {
       if (!isRegValue(makePtrOp))
         return;
-      auto allocSizeAttr = makePtrOp.getDictAttrs()->getAs<IntegerAttr>("allocSize");
+      auto dict = makePtrOp.getDictAttrs();
+      auto allocSizeAttr = dict ? dict->getAs<IntegerAttr>("allocSize") : IntegerAttr{};
       if (!allocSizeAttr || allocSizeAttr.getInt() <= 0)
         return;
 
@@ -156,6 +171,40 @@ private:
       allocaOrder.push_back(makePtrOp);
     });
 
+    SmallVector<RegisterPlaceOp> declarations;
+    bool invalidPlacement = false;
+    funcOp.walk([&](RegisterPlaceOp op) {
+      Value storage = op.getStorage();
+      if (auto view = storage.getDefiningOp<MakeViewOp>())
+        storage = view.getIter();
+      if (!isa<PointerType>(storage.getType())) {
+        op.emitOpError("expected storage lowered to a register pointer or make_view");
+        invalidPlacement = true;
+        return;
+      }
+      auto root = resolveRegOffset(storage);
+      if (!root || !root->second || *root->second != 0 || !regAllocaInfos.count(root->first)) {
+        op.emitOpError("requires the base of a static register allocation with positive allocSize");
+        invalidPlacement = true;
+        return;
+      }
+      if (op->getBlock() != root->first->getBlock()) {
+        op.emitOpError("must be declared in the same block as its allocation");
+        invalidPlacement = true;
+        return;
+      }
+      auto [it, inserted] = placements.try_emplace(
+          root->first, Placement{op.getRegisterClassAttr(), op.getStartIdxAttr()});
+      if (!inserted && (it->second.registerClass != op.getRegisterClassAttr() ||
+                        it->second.startIdx != op.getStartIdxAttr())) {
+        op.emitOpError("conflicting declarations for the same register allocation");
+        invalidPlacement = true;
+      }
+      declarations.push_back(op);
+    });
+    if (invalidPlacement)
+      return failure();
+
     funcOp.walk([&](RecastIterOp recastOp) {
       if (recastOp->use_empty())
         return;
@@ -165,7 +214,7 @@ private:
         // Only the root identity matters here: a dynamic offset must not stop
         // the recast-reachable alloca from being excluded.
         auto root = resolveRegOffset(v);
-        if (root)
+        if (root && !cast<PointerType>(root->first.getType()).getElemTy().isInteger(8))
           regAllocaInfos.erase(root->first);
       }
     });
@@ -181,6 +230,59 @@ private:
         regAllocaInfos.erase(root->first);
     });
 
+    for (MakePtrOp root : allocaOrder) {
+      int32_t storageBits;
+      if (auto *info = getAllocaInfo(root);
+          info && placements.count(root) &&
+          llvm::MulOverflow(info->allocSize, int32_t(info->elemTy.getIntOrFloatBitWidth()),
+                            storageBits))
+        return root.emitOpError("explicit register storage must be smaller than 2^31 bits");
+      if (auto *info = getAllocaInfo(root);
+          info && info->elemTy.isInteger(8) && placements.count(root))
+        if (unsigned bits = placements.find(root)->second.registerClass.getBits();
+            bits % 8 || info->allocSize % (bits / 8))
+          return root.emitOpError("explicit byte storage must be padded to whole ")
+                 << bits << "-bit registers";
+      if (!regAllocaInfos.count(root) && placements.count(root))
+        return root.emitOpError("explicit register storage requires static offsets; "
+                                "recast_iter requires byte-backed storage");
+    }
+    // Without a placement, storage with an access the slot model cannot
+    // express (e.g. a sub-byte recast of byte storage) stays in memory form,
+    // as recast-reachable storage always did. Placed storage must promote.
+    SmallVector<MakePtrOp> unanalyzable;
+    WalkResult validAccesses = funcOp.walk([&](Operation *op) -> WalkResult {
+      Value ptr;
+      Type valueType;
+      if (auto load = dyn_cast<PtrLoadOp>(op)) {
+        ptr = load.getPtr();
+        valueType = load.getType();
+      } else if (auto store = dyn_cast<PtrStoreOp>(op)) {
+        ptr = store.getPtr();
+        valueType = store.getValue().getType();
+      } else {
+        return WalkResult::advance();
+      }
+      if (!isRegValue(ptr))
+        return WalkResult::advance();
+      auto root = resolveRegOffset(ptr);
+      if (root && regAllocaInfos.count(root->first) && !getRegAccessInfo(ptr, valueType)) {
+        if (!placements.count(root->first)) {
+          unanalyzable.push_back(root->first);
+          return WalkResult::advance();
+        }
+        op->emitOpError(
+            "register access must be static, in bounds, and use whole storage elements");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (validAccesses.wasInterrupted())
+      return failure();
+    for (MakePtrOp root : unanalyzable)
+      regAllocaInfos.erase(root);
+    for (auto op : declarations)
+      op.erase();
     bool hasExcludedRoots = allocaOrder.size() != regAllocaInfos.size();
     llvm::erase_if(allocaOrder, [&](MakePtrOp r) { return !regAllocaInfos.count(r); });
 
@@ -246,19 +348,27 @@ private:
     if (!rootAndOffset || !rootAndOffset->second)
       return std::nullopt;
 
-    int32_t width = 0;
-    if (auto vecTy = dyn_cast<VectorType>(valueType))
-      width = vecTy.getNumElements();
-    else if (isa<IntegerType, FloatType>(valueType))
-      width = 1;
-    else
+    Type elemTy = valueType;
+    int64_t count = 1;
+    if (auto vecTy = dyn_cast<VectorType>(valueType)) {
+      if (vecTy.getRank() != 1 || vecTy.isScalable())
+        return std::nullopt;
+      count = vecTy.getNumElements();
+      elemTy = vecTy.getElementType();
+    }
+    if (!isa<IntegerType, FloatType>(elemTy))
       return std::nullopt;
-
     const RegAllocaInfo *info = getAllocaInfo(rootAndOffset->first);
     if (!info)
       return std::nullopt;
-
-    return RegAccessInfo{rootAndOffset->first, *rootAndOffset->second, width, info->elemTy};
+    int64_t bits = count * elemTy.getIntOrFloatBitWidth();
+    int32_t unit = info->elemTy.getIntOrFloatBitWidth();
+    int32_t bitOffset = *rootAndOffset->second;
+    if (bitOffset < 0 || bitOffset % unit || bits % unit || bitOffset / unit > info->allocSize ||
+        bits / unit > info->allocSize - bitOffset / unit)
+      return std::nullopt;
+    return RegAccessInfo{rootAndOffset->first, bitOffset / unit, static_cast<int32_t>(bits / unit),
+                         info->elemTy};
   }
 
   LogicalResult collectTouchedRegAllocaInRegion(Region &region, Operation *boundaryOp,
@@ -352,6 +462,74 @@ private:
     return bitcastScalarViaVector(builder, loc, value, originalTy);
   }
 
+  Value bitcastStorage(OpBuilder &builder, Location loc, Value value, Type targetTy) {
+    if (value.getType() == targetTy)
+      return value;
+    if (!isa<VectorType>(value.getType()))
+      value = vector::FromElementsOp::create(builder, loc, VectorType::get({1}, value.getType()),
+                                             value);
+    auto targetVec = dyn_cast<VectorType>(targetTy);
+    if (!targetVec)
+      targetVec = VectorType::get({1}, targetTy);
+    if (value.getType() != targetVec)
+      value = vector::BitCastOp::create(builder, loc, targetVec, value);
+    if (!isa<VectorType>(targetTy))
+      value = vector::ExtractOp::create(builder, loc, value, ArrayRef<int64_t>{0});
+    return value;
+  }
+
+  // Merge explicitly by lane, including partially overlapping slices. This
+  // avoids relying on extract_strided_slice folding through an insert chain
+  // when a later store updates only the tail of an earlier slice.
+  VectorValue insertByteSlice(OpBuilder &builder, Location loc, Value slice, VectorValue storage,
+                              int64_t offset) {
+    int64_t size = storage.getType().getNumElements();
+    int64_t width = cast<VectorType>(slice.getType()).getNumElements();
+    SmallVector<int64_t> mask;
+    for (int64_t i = 0; i < size; ++i)
+      mask.push_back(i >= offset && i < offset + width ? size + i - offset : i);
+    return vector::ShuffleOp::create(builder, loc, storage, slice, mask);
+  }
+
+  // Read the covering registers before extracting a sub-register field. Keep
+  // the slice separate: a load does not update the remaining storage bytes.
+  Value readByteStorage(OpBuilder &builder, Location loc, VectorValue value, RegAccessInfo access) {
+    auto it = placements.find(access.makePtrOp);
+    bool placed = it != placements.end();
+    // Placed byte storage was checked to be padded to whole class members.
+    int64_t unit = placed ? it->second.registerClass.getBits() / 8 : 1;
+    int64_t begin = access.offset / unit * unit;
+    int64_t end = (int64_t(access.offset) + access.width + unit - 1) / unit * unit;
+    Value slice =
+        vector::ExtractStridedSliceOp::create(builder, loc, value, ArrayRef<int64_t>{begin},
+                                              ArrayRef<int64_t>{end - begin}, ArrayRef<int64_t>{1});
+    if (!placed)
+      return slice;
+    auto bytesTy = slice.getType();
+    slice =
+        bitcastStorage(builder, loc, slice,
+                       VectorType::get({(end - begin) / unit}, builder.getIntegerType(unit * 8)));
+    int64_t relativeOffset = access.offset - begin;
+    access.offset = begin;
+    slice = bindRegister(builder, loc, slice, access);
+    slice = bitcastStorage(builder, loc, slice, bytesTy);
+    if (!relativeOffset && access.width == end - begin)
+      return slice;
+    return vector::ExtractStridedSliceOp::create(
+        builder, loc, slice, ArrayRef<int64_t>{relativeOffset}, ArrayRef<int64_t>{access.width},
+        ArrayRef<int64_t>{1});
+  }
+
+  Value bindRegister(OpBuilder &builder, Location loc, Value value, RegAccessInfo access) {
+    auto it = placements.find(access.makePtrOp);
+    if (it == placements.end())
+      return value;
+    // Placed storage was checked to stay below 2^31 bits.
+    int32_t bitOffset = access.offset * int32_t(access.elemTy.getIntOrFloatBitWidth());
+    return RegisterValueOp::create(builder, loc, value.getType(), value, it->second.registerClass,
+                                   it->second.startIdx, builder.getI32IntegerAttr(bitOffset));
+  }
+
   LogicalResult rewritePtrStore(PtrStoreOp storeOp, OpBuilder &builder, IRMapping &mapping,
                                 RegMem2VectorSSAMap &state) {
     auto access = getRegAccessInfo(storeOp.getPtr(), storeOp.getValue().getType());
@@ -368,7 +546,18 @@ private:
 
     const RegAllocaInfo *info = getAllocaInfo(access->makePtrOp);
     assert(info && "missing alloca info for register ptr.store");
+    if (info->elemTy.isInteger(8)) {
+      storedValue = bitcastStorage(builder, loc, storedValue,
+                                   VectorType::get({access->width}, builder.getI8Type()));
+      updatedVec = insertByteSlice(builder, loc, storedValue, currentVec, access->offset);
+      // Bind the packed representation when it is read. Binding every partial
+      // write would constrain historical full-register values whose unchanged
+      // bytes LLVM may reuse after a later write to the same register.
+      state[access->makePtrOp] = updatedVec;
+      return success();
+    }
     storedValue = bitcastToSSAElem(builder, loc, storedValue, info->vectorSSATy.getElementType());
+    storedValue = bindRegister(builder, loc, storedValue, *access);
 
     if (isa<IntegerType, FloatType>(storedValue.getType())) {
       assert(access->width == 1 && "expected scalar type with width 1");
@@ -400,6 +589,12 @@ private:
     Type resultType = loadOp.getResult().getType();
     Value extracted;
 
+    if (access->elemTy.isInteger(8)) {
+      extracted = readByteStorage(builder, loc, currentVec, *access);
+      mapping.map(loadOp, bitcastStorage(builder, loc, extracted, resultType));
+      return success();
+    }
+
     if (isa<IntegerType, FloatType>(resultType)) {
       assert(access->width == 1 && "expected scalar type with width 1");
       extracted = vector::ExtractOp::create(builder, loc, currentVec, access->offset);
@@ -413,6 +608,7 @@ private:
           ArrayRef<int64_t>{access->width}, ArrayRef<int64_t>{1});
     }
     extracted = bitcastFromSSAElem(builder, loc, extracted, resultType);
+    extracted = bindRegister(builder, loc, extracted, *access);
     mapping.map(loadOp, extracted);
     return success();
   }
@@ -660,8 +856,15 @@ private:
           mapping.map(
               makePtrOp.getResult(),
               ub::PoisonOp::create(builder, makePtrOp.getLoc(), makePtrOp.getType()).getResult());
-          state[makePtrOp] = cast<VectorValue>(
-              ub::PoisonOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
+          // A packed field is bitcast to its covering registers for register
+          // placement. LLVM tracks poison per integer value but undef per bit,
+          // so undef keeps the written bits without materializing padding.
+          if (info->elemTy.isInteger(8) && placements.count(makePtrOp))
+            state[makePtrOp] = cast<VectorValue>(
+                LLVM::UndefOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
+          else
+            state[makePtrOp] = cast<VectorValue>(
+                ub::PoisonOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
         } else {
           builder.clone(op, mapping);
         }

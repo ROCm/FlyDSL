@@ -567,4 +567,22 @@ def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_inde
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
+//===----------------------------------------------------------------------===//
+// Experimental features
+//===----------------------------------------------------------------------===//
+
+// Compile-time declaration; intentionally effectful until promotion consumes it.
+def Fly_RegisterPlaceOp : Fly_Op<"register_place"> {
+  let summary = "Assign existing register memory to members of an LLVM register class";
+  let arguments = (ins AnyType:$storage, Fly_RegisterClassAttr:$registerClass, I32Attr:$startIdx);
+}
+
+// Internal SSA carrier, not a public scalar register allocation API.
+def Fly_RegisterValueOp : Fly_Op<"register_value", [SameOperandsAndResultType]> {
+  let summary = "Carry register-memory placement on a promoted SSA slice";
+  let arguments = (ins AnyType:$value, Fly_RegisterClassAttr:$registerClass, I32Attr:$startIdx,
+                       I32Attr:$bitOffset);
+  let results = (outs AnyType:$result);
+}
+
 #endif // FLY_OPS
