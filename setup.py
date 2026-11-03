@@ -427,6 +427,8 @@ setup(
             "_mlir_libs/lib*.so",
             "_mlir_libs/lib*.so.*",
             "_mlir_libs/libfly_*_aot_runtime.a",
+            "_mlir_libs/*.pyd",
+            "_mlir_libs/*.dll",
             "*.pyi",
         ],
     },

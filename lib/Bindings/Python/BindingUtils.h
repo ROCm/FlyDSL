@@ -4,6 +4,11 @@
 #ifndef FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 #define FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 
+// Under MSVC-compatible compilers (clang-cl too) Interop.h leaves Python.h to its
+// includer; nanobind brings it in with the right debug-runtime handling.
+#ifdef _MSC_VER
+#include "mlir/Bindings/Python/Nanobind.h"
+#endif
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir/Bindings/Python/IRCore.h"
 #include "mlir/Bindings/Python/Nanobind.h"

@@ -291,6 +291,8 @@ _softmax_tuner = autotune(
 def _fast_context_token():
     """Cheap invalidation axes for the adapter-level compiled-call cache."""
     data = getattr(os.environ, "_data", None)
+    if not os.supports_bytes_environ:  # Windows keys _data by upper-cased str, not bytes
+        data = None
     if data is None:
         environment = tuple(os.environ.get(name, "") for name in _FAST_CONTEXT_ENV_VARS)
     else:

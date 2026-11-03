@@ -42,6 +42,11 @@ set(_fly_rocm_runtime_common
   FlyRocmAotRuntime.cpp
   FlyRocmRuntimeError.cpp
 )
+if(WIN32)
+  # The AOT runtime is written against pthread and dlfcn, and AOT export is
+  # Linux-only, so Windows builds neither it nor its archive below.
+  list(REMOVE_ITEM _fly_rocm_runtime_common FlyRocmAotRuntime.cpp)
+endif()
 
 add_library(FlyJitRuntime SHARED
   FlyRocmRuntimeWrappers.cpp
@@ -51,6 +56,13 @@ target_include_directories(FlyJitRuntime PRIVATE ${LLVM_INCLUDE_DIRS} ${MLIR_INC
 target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
 target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64 ${CMAKE_DL_LIBS})
 set_target_properties(FlyJitRuntime PROPERTIES OUTPUT_NAME "fly_jit_runtime")
+
+if(WIN32)
+  # JIT-compiled host code resolves the mgpu* wrappers in this DLL by name, and
+  # a DLL exports nothing that is not marked.
+  set_target_properties(FlyJitRuntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  return()
+endif()
 
 # ROCm AOT exports partially link this PIC archive into the generated host object.
 # Its hidden symbols are localized by the relocatable link, leaving HIP and
