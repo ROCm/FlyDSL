@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-03T09:24:24Z",
+ "updated": "2026-11-03T12:16:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41618409851,
+   "pr": 1350,
+   "commit": "d7c163a59ef46b4005472bb3da7efe6c1762b436",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851",
+   "created_at": "2026-11-03T10:20:14Z",
+   "updated_at": "2026-11-03T12:13:25Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-03T10:49:35Z",
+     "completed_at": "2026-11-03T11:12:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267713"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-03T10:49:42Z",
+     "completed_at": "2026-11-03T11:22:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267737",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-03T11:15:00Z",
+     "completed_at": "2026-11-03T12:08:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267767"
+    }
+   ]
+  },
   {
    "run_id": 41600871411,
    "pr": 1352,
@@ -300,13 +346,22 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649",
    "created_at": "2026-11-02T19:09:00Z",
-   "updated_at": "2026-11-02T23:40:46Z",
+   "updated_at": "2026-11-03T12:07:56Z",
    "actor": "RElbers",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-03T12:07:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125907327085"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -314,7 +369,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T20:25:32Z",
      "completed_at": "2026-11-02T22:24:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804742"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125907329504"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -323,16 +378,7 @@
      "conclusion": "success",
      "started_at": "2026-11-02T20:00:21Z",
      "completed_at": "2026-11-02T20:13:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804827"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-02T19:31:18Z",
-     "completed_at": "2026-11-02T19:38:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125499804866"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125907329647"
     }
    ]
   },
@@ -1931,52 +1977,6 @@
      "machine": "smci350-rck-g03-f19-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 41007231850,
-   "pr": 1246,
-   "commit": "86a1220586a36da1c54aad171af62c3394ea32b4",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr2-attention-common",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add arch-neutral attention common, abi, philox and dispatch modules (2/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850",
-   "created_at": "2026-10-30T05:13:36Z",
-   "updated_at": "2026-10-30T10:36:16Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T10:07:30Z",
-     "completed_at": "2026-10-30T10:36:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506968",
-     "machine": "smci350-odcdh2-a08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T06:47:36Z",
-     "completed_at": "2026-10-30T07:36:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910506988"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T10:02:36Z",
-     "completed_at": "2026-10-30T10:16:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41007231850/job/123910507037"
     }
    ]
   }
