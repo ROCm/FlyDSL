@@ -1309,6 +1309,86 @@ bool hasNoFlyTypes(Operation *op) {
          });
 }
 
+// Lowers a placed slice to strict ROCDL register scheduling hints. A hint
+// restricts register allocation of the value to the requested registers; it
+// reserves nothing, and LLVM may still split or spill the value elsewhere.
+// The hints take 32-, 64-, 128-, 256- and 512-bit values, so the slice is
+// hinted as 32-bit words, in chunks of those sizes.
+class RegisterValueLowering : public OpConversionPattern<RegisterValueOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(RegisterValueOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto registerClass = op.getRegisterClass();
+    if (registerClass.getTarget() != "amdgcn")
+      return op.emitOpError("Fly-to-ROCDL register placement requires target amdgcn");
+    StringRef name = registerClass.getName();
+    if ((name != "AGPR_32" && name != "VGPR_32" && name != "SGPR_32") ||
+        registerClass.getBits() != 32)
+      return op.emitOpError(
+          "unsupported AMDGPU register class; expected 32-bit AGPR_32, VGPR_32 or SGPR_32");
+
+    Location loc = op.getLoc();
+    Value value = adaptor.getValue();
+    Type type = value.getType();
+    Type elementType = getElementTypeOrSelf(type);
+    int64_t bits = elementType.isIntOrFloat() ? elementType.getIntOrFloatBitWidth() : 0;
+    if (auto vectorType = dyn_cast<VectorType>(type))
+      bits *= vectorType.getNumElements();
+    int64_t bitOffset = op.getBitOffsetAttr().getInt();
+    if (!bits || bits % 32 || bitOffset < 0 || bitOffset % 32)
+      return op.emitOpError("explicit register slices must cover whole 32-bit registers");
+    int64_t count = bits / 32;
+    int64_t first = op.getStartIdxAttr().getInt() + bitOffset / 32;
+    if (first < 0 || first + count > std::numeric_limits<int32_t>::max())
+      return op.emitOpError("explicit register index is outside the int32 range");
+
+    Type i32 = rewriter.getI32Type();
+    auto index = [&](int64_t i) {
+      return LLVM::ConstantOp::create(rewriter, loc, i32, rewriter.getI32IntegerAttr(i));
+    };
+    auto bitcast = [&](Value v, Type to) -> Value {
+      return v.getType() == to ? v : LLVM::BitcastOp::create(rewriter, loc, to, v);
+    };
+    auto hint = [&](Value v, int64_t regnum) -> Value {
+      auto attr = rewriter.getI32IntegerAttr(regnum);
+      if (name == "VGPR_32")
+        return ROCDL::ScheduleVGPROp::create(rewriter, loc, v.getType(), v, attr, UnitAttr());
+      if (name == "SGPR_32")
+        return ROCDL::ScheduleSGPROp::create(rewriter, loc, v.getType(), v, attr, UnitAttr());
+      return ROCDL::ScheduleAGPROp::create(rewriter, loc, v.getType(), v, attr, UnitAttr());
+    };
+
+    Value words = bitcast(value, count == 1 ? i32 : VectorType::get({count}, i32));
+    Value result;
+    if (llvm::has_single_bit(uint64_t(count)) && count <= 16) {
+      result = hint(words, first);
+    } else {
+      result = LLVM::PoisonOp::create(rewriter, loc, words.getType());
+      for (int64_t offset = 0; offset < count;) {
+        int64_t size = std::min<int64_t>(16, llvm::bit_floor(uint64_t(count - offset)));
+        SmallVector<int32_t> mask;
+        for (int64_t i = 0; i < size; ++i)
+          mask.push_back(offset + i);
+        Value chunk;
+        if (size == 1)
+          chunk = LLVM::ExtractElementOp::create(rewriter, loc, words, index(offset));
+        else
+          chunk = LLVM::ShuffleVectorOp::create(rewriter, loc, words, words, mask);
+        chunk = hint(chunk, first + offset);
+        for (int64_t i = 0; i < size; ++i) {
+          Value word =
+              size == 1 ? chunk : LLVM::ExtractElementOp::create(rewriter, loc, chunk, index(i));
+          result = LLVM::InsertElementOp::create(rewriter, loc, result, word, index(offset + i));
+        }
+        offset += size;
+      }
+    }
+    rewriter.replaceOp(op, bitcast(result, type));
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -1329,6 +1409,7 @@ public:
     target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
 
     FlyTypeConverter typeConverter;
+    patterns.add<RegisterValueLowering>(typeConverter, context);
 
     // Convert every control-flow boundary along with its users.
     scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);

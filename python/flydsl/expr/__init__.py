@@ -32,15 +32,20 @@ _EXTENSION_MODULES = {
 }
 
 if TYPE_CHECKING:
+    from .. import experimental as experimental
     from ..extension import coop as coop
     from ..extension import random as random
 
     from . import ktrace as ktrace
 
 
-# lazy load backend subpackages and extension libraries
+# lazy load backend subpackages, extension libraries and experimental APIs
 def __getattr__(name: str):
-    module_name = _BACKEND_MODULES.get(name) or _EXTENSION_MODULES.get(name)
+    if name == "experimental":
+        # The only entry to experimental APIs: features stay under fx.experimental.<name>.
+        module_name = "..experimental"
+    else:
+        module_name = _BACKEND_MODULES.get(name) or _EXTENSION_MODULES.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

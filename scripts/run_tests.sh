@@ -53,7 +53,7 @@ pytest_args=(-q --no-header --tb=short --durations=20 -m "${pytest_markers}")
 # repeated here, especially on single-GPU jobs backed by an 8-GPU host.
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + language + unit + system + extension + examples"
+echo "Pytest: kernels + language + unit + system + extension + examples + experimental"
 echo "========================================================================"
 
 python3 -m pytest \
@@ -63,6 +63,7 @@ python3 -m pytest \
     tests/system/ \
     tests/extension/ \
     tests/python/examples/ \
+    tests/python/experimental/ \
     "${pytest_args[@]}"
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ echo "========================================================================"
 
 # Architecture assignments from tests/arch_compat.py, checked before execution.
 _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
-for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py; do
+for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py "${REPO_ROOT}"/examples/experimental/*.py; do
     [ -f "${example}" ] || continue
     # Named by their path under examples/, so nested ones stay unambiguous.
     name="${example#"${REPO_ROOT}"/examples/}"
