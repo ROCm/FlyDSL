@@ -131,6 +131,13 @@ def run_external_binary_codegen(
     bundled MLIR runtime.
     """
 
+    # Placement markers are only lowered by passes registered in the bundled LLVM.
+    if "@__flydsl_register_value_" in module.operation.get_asm():
+        raise ExternalLLVMError(
+            "Explicit register placement (flydsl.experimental.register_allocation) "
+            "is not supported with FLYDSL_COMPILE_LLVM_DIR external codegen."
+        )
+
     prefix = _llvm_dir()
     mlir_opt = _tool(prefix, "mlir-opt")
     pipeline = f"builtin.module({binary_fragment})"

@@ -27,3 +27,21 @@ def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
     "ROCDL::ROCDLDialect"
   ];
 }
+
+def ROCDLSerializeRegisterKernelsPass : Pass<"rocdl-serialize-register-kernels"> {
+  let summary = "Serialize explicit register kernels with LLVM assembler validation";
+  let description = [{
+    Serializes AMDGPU modules containing FlyDSL register placement carriers.
+    Uses the upstream ROCDL serializer and checks LLVM MC assembler errors
+    before returning ISA or linking an object. Other GPU modules are left for
+    the ordinary gpu-module-to-binary pass.
+  }];
+  let options = [
+    Option<"format", "format", "std::string", "\"fatbin\"", "Output format: isa, bin, or fatbin">,
+    Option<"toolkit", "toolkit", "std::string", "\"\"", "ROCm toolkit path">,
+    Option<"cmdOptions", "opts", "std::string", "\"\"", "Target compilation options">,
+    Option<"section", "section", "std::string", "\"\"", "ELF section name">,
+    ListOption<"linkFiles", "link-files", "std::string", "Files to link">
+  ];
+  let dependentDialects = ["gpu::GPUDialect", "ROCDL::ROCDLDialect"];
+}
