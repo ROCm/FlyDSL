@@ -9,9 +9,13 @@ A load gathers those rows into LDS; a store scatters LDS back to them. That make
 it the right tool whenever the rows a block needs are scattered through the tensor,
 such as a token table or a paged cache.
 
-Passing ``index_tensor`` to ``make_tiled_tdm_atom`` is what selects the mode. The
-row list then travels beside the coordinate: ``tdm_partition`` hands back a third
-tensor, and ``copy`` takes the pair as ``[coord, index]``.
+The copy op selects the mode -- ``TensorLoadGather`` / ``TensorStoreScatter`` instead
+of ``TensorLoad`` / ``TensorStore`` -- and ``index_tensor`` supplies the row list. The
+list then travels beside the coordinate: ``tdm_partition`` hands back a third tensor,
+and ``copy`` takes the pair as ``[coord, index]``.
+
+Both forms issue the same TDM instruction; only the descriptor differs. One issue
+carries 1..8 rows at 32-bit indices, 1..16 at 16-bit.
 
 Run with COMPILE_ONLY=1 ARCH=gfx1250 to build it without the hardware.
 """
@@ -36,7 +40,7 @@ def gather_scatter(src: fx.Tensor, dst: fx.Tensor, rows: fx.Tensor):
 
     # Gather: the atom reads `rows` to learn which source rows to collect.
     load_atom, load_coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorLoad(), src, tile, (ROWS, WIDTH), index_tensor=rows
+        fx.rocdl.TensorLoadGather(), src, tile, (ROWS, WIDTH), index_tensor=rows
     )
     load_blk = fx.zipped_divide(load_coord, (ROWS, WIDTH))[None, (0, None)]
     tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(load_atom, 0, fx.make_layout(1, 1), smem, [load_blk, rows])
@@ -45,7 +49,7 @@ def gather_scatter(src: fx.Tensor, dst: fx.Tensor, rows: fx.Tensor):
 
     # Scatter: the same row list, now naming where the tile lands.
     store_atom, store_coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorStore(), dst, tile, (ROWS, WIDTH), index_tensor=rows
+        fx.rocdl.TensorStoreScatter(), dst, tile, (ROWS, WIDTH), index_tensor=rows
     )
     store_blk = fx.zipped_divide(store_coord, (ROWS, WIDTH))[None, (0, None)]
     tBs, tBg, tBi = fx.rocdl.cdna5.tdm_partition(store_atom, 0, fx.make_layout(1, 1), smem, [store_blk, rows])
