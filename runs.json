@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-03T12:28:17Z",
+ "updated": "2026-11-03T12:41:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -346,21 +346,24 @@
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
    "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649",
    "created_at": "2026-11-02T19:09:00Z",
-   "updated_at": "2026-11-03T12:07:56Z",
+   "updated_at": "2026-11-03T12:39:16Z",
    "actor": "RElbers",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-03T12:07:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125907327085"
+     "completed_at": "2026-11-03T12:39:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41507228649/job/125907327085",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
