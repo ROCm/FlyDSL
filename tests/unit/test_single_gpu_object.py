@@ -133,3 +133,25 @@ class TestSingleCodeObject:
         exe(A, torch.cuda.current_stream(A.device))
         torch.cuda.synchronize()
         torch.testing.assert_close(A, torch.arange(64, dtype=torch.float32, device="cuda"))
+
+    @pytest.mark.parametrize("arch", ["gfx1201", "gfx1250"])
+    def test_wave32_object_carries_no_wave64(self, arch, monkeypatch, tmp_path):
+        """Cross-compiled for a wave32 arch, the one object must carry no_wave64.
+
+        A target without that flag counts as wave64, so OCML/OCKL code linked
+        into the kernel would see ``__oclc_wavefrontsize64 = 1``. The tests
+        above compile for the host arch, which on the CDNA runners is wave64.
+        """
+        _reset_jit_caches(_vec_launch, monkeypatch, tmp_path)
+        # flyc.compile[hints] in the tests above left hints on _vec_launch.
+        # Clear them: this case is about wave32 alone.
+        monkeypatch.setattr(_vec_launch, "compile_hints", {})
+        monkeypatch.setenv("ARCH", arch)
+        monkeypatch.setenv("COMPILE_ONLY", "1")
+
+        _vec_launch(torch.zeros(64, dtype=torch.float32))
+
+        _key, artifact = _vec_launch._last_compiled
+        count, targets = _gpu_objects(artifact._ir_text)
+        assert count == 1, f"{arch}: expected exactly one #gpu.object, found {targets}"
+        assert "no_wave64" in targets[0], f"{arch}: no_wave64 missing on the shipped target: {targets[0]}"
