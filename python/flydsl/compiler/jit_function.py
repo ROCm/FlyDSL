@@ -838,7 +838,8 @@ class MlirCompiler:
         link_libs: Optional[list] = None,
         printed_asm: Optional[str] = None,
     ) -> ir.Module:
-        """Lower *module* to a GPU binary. *printed_asm* is the module already printed with debug info, if the caller has it."""
+        """Lower *module* to a GPU binary. *printed_asm*, if given, is lowered in place of *module*, so it must be
+        *module* as it is now, printed with debug info."""
         try:
             module.operation.verify()
         except ir.MLIRError as exc:
@@ -1562,6 +1563,8 @@ class JitFunction:
                             self.func(**named_args)
                     func.ReturnOp([])
 
+        # Reused by compile() as printed_asm, so it must match what compile() would print: same flags, and no module
+        # edits before compile() other than extern linking, which withholds this text.
         original_ir = module.operation.get_asm(enable_debug_info=True)
 
         link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None

@@ -3,8 +3,10 @@
 
 import contextlib
 import inspect
+import itertools
 import os
 import threading
+import types
 from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, overload
 
@@ -29,6 +31,9 @@ __all__ = [
 # Any frame whose file lives under this prefix is treated as DSL library code
 # and skipped when locating the user's source position.
 _FLYDSL_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Python 3.10 has no column positions.
+_HAS_CO_POSITIONS = hasattr(types.CodeType, "co_positions")
 
 
 @lru_cache(maxsize=1024)
@@ -55,7 +60,7 @@ def _stack():
 
 
 def _source_path_and_positions(code) -> tuple:
-    """Absolute source path and co_positions() of *code*, cached per thread while a tracing scope is open."""
+    """Absolute source path and co_positions() of *code*. The positions are None outside a trace, which caches them."""
     cache = getattr(_tls, "source_position_cache", None)
 
     # Keyed by id, since code objects from different files can compare equal.
@@ -65,24 +70,29 @@ def _source_path_and_positions(code) -> tuple:
 
     file = inspect.getsourcefile(code) or inspect.getfile(code)
     source_path = os.path.abspath(file)
-    positions = tuple(code.co_positions()) if hasattr(code, "co_positions") else ()
+    if cache is None:
+        return source_path, None
 
-    if cache is not None:
-        # code is part of cache value to keep it alive
-        cache[id(code)] = (code, source_path, positions)
-
+    positions = tuple(code.co_positions()) if _HAS_CO_POSITIONS else ()
+    # code is part of cache value to keep it alive
+    cache[id(code)] = (code, source_path, positions)
     return source_path, positions
 
 
 def _frame_position(frame) -> tuple:
     """Source path, line and column of *frame*'s current instruction, as inspect.getframeinfo reports them."""
-    path, positions = _source_path_and_positions(frame.f_code)
+    code = frame.f_code
+    path, positions = _source_path_and_positions(code)
 
     line = None
     col = None
     # co_positions() has one (line, end_line, col, end_col) entry per 2-byte code unit; Python 3.10 has none.
-    if positions and frame.f_lasti >= 0:
-        line, _, col, _ = positions[frame.f_lasti // 2]
+    if _HAS_CO_POSITIONS and frame.f_lasti >= 0:
+        index = frame.f_lasti // 2
+        if positions is None:
+            line, _, col, _ = next(itertools.islice(code.co_positions(), index, None))
+        else:
+            line, _, col, _ = positions[index]
 
     return (
         path,
