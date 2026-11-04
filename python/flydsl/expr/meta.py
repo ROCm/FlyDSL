@@ -60,7 +60,7 @@ def _stack():
 
 
 def _source_path_and_positions(code) -> tuple:
-    """Absolute source path and co_positions() of *code*. The positions are None outside a trace, which caches them."""
+    """Absolute source path and co_positions() of *code*. Positions are None unless a frame with a func is open."""
     cache = getattr(_tls, "source_position_cache", None)
 
     # Keyed by id, since code objects from different files can compare equal.
@@ -112,7 +112,9 @@ def tracing_context(func=None, **options):
     -- an explicit ``None`` shadows an enclosing setting.
     """
     stack = _stack()
-    if not stack:
+    # Only the outermost trace owns the cache; a fastmath scope can span traces and would pin their code objects.
+    owns_cache = func is not None and getattr(_tls, "source_position_cache", None) is None
+    if owns_cache:
         _tls.source_position_cache = {}
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
@@ -124,7 +126,7 @@ def tracing_context(func=None, **options):
         stack = _stack()
         if stack:
             stack.pop()
-        if not stack:
+        if owns_cache:
             _tls.source_position_cache = None
 
 

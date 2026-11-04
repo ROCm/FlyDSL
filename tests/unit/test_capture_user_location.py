@@ -72,7 +72,7 @@ def test_identical_code_in_two_files_keeps_each_file(tmp_path):
     assert helpers[0][0].__code__ == helpers[1][0].__code__
 
     # One tracing scope, so both captures go through the same position cache.
-    with ir.Context(), ir.Location.unknown(), tracing_context():
+    with ir.Context(), ir.Location.unknown(), tracing_context(_boundary):
         for helper, path in helpers:
             assert str(helper(capture_user_location)).startswith(f'loc(callsite("{path}":2:')
 
@@ -93,3 +93,21 @@ def test_position_cache_lives_for_one_trace():
             _boundary()
             assert meta._tls.source_position_cache
         assert meta._tls.source_position_cache is None
+
+
+def test_position_cache_is_per_trace_not_per_fastmath_scope():
+    with ir.Context(), ir.Location.unknown(), tracing_context(fastmath=None):
+        with tracing_context(_boundary):
+            _boundary()
+            cache = meta._tls.source_position_cache
+            assert cache
+            with tracing_context(_capture_two):
+                assert meta._tls.source_position_cache is cache
+        assert meta._tls.source_position_cache is None
+
+
+def test_position_cache_is_dropped_when_a_trace_raises():
+    with pytest.raises(RuntimeError):
+        with tracing_context(_boundary):
+            raise RuntimeError
+    assert meta._tls.source_position_cache is None
