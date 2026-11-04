@@ -17,10 +17,13 @@ Optional B preshuffle uses the same on-disk layout as
 ``preshuffle_gemm`` / ``shuffle_weight((16, 16))``.
 """
 
+import os
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import as_ir_value, const_expr, range_constexpr
+from flydsl.expr import rocdl as _rocdl
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -37,13 +40,44 @@ from kernels.gemm.fp8_gemm_utils import (
     xcd_remap_pid,
 )
 
+_AGPR_PIN_IMPL = os.environ.get("FP8_AGPR_PIN_IMPL", "asm")
+if _AGPR_PIN_IMPL not in ("asm", "sched"):
+    raise ValueError(f"FP8_AGPR_PIN_IMPL must be 'asm' or 'sched', got {_AGPR_PIN_IMPL!r}")
+
 
 class Mfma16x16x128AGPR(Mfma16x16x128):
     """fp8 16x16x128 MFMA that pins the accumulator in AGPR via inline asm
     (constraint `=a,v,v,0`), so the f32x4 accumulator accumulates in-place and
     the compiler does not insert v_accvgpr_mov/read + s_nop to shuffle the
     accumulator between AGPR slots (the dominant stall in the ssa-lowered path).
-    scale is left default (=0); the real per-token scale is applied in StoreC."""
+    scale is left default (=0); the real per-token scale is applied in StoreC.
+
+    ``FP8_AGPR_PIN_IMPL=sched`` pins the same accumulator with strict
+    ``sched_agpr`` on the MFMA intrinsic instead, at ``agpr_base + 4 * idx``."""
+
+    def call_one(self, a, b, c, i, j, agpr_base=0):
+        assert i < self.n_tiles_a and j < self.n_tiles_b
+        acc = c[self.idx(i, j)]
+        if const_expr(_AGPR_PIN_IMPL == "sched"):
+            return self._do_mma_sched(a[i], b[j], acc, agpr_base + 4 * self.idx(i, j))
+        return self._do_mma(a[i], b[j], acc)
+
+    def _do_mma_sched(self, a, b, c, agpr_regnum):
+        from flydsl.expr.rocdl.experimental import sched_agpr
+
+        a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
+        b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
+        # The first K-step accumulates into the shared zero vector: feed it unpinned
+        # so src2 becomes the inline constant 0 instead of 64 AGPR initializations.
+        pinned_acc = c if c is self.zero_value else sched_agpr(c, regnum=agpr_regnum)
+        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+            _T.vec(4, _T.f32), [a_i32x8, b_i32x8, pinned_acc, 0, 0, 0, 0, 0, 0]
+        )
+        result = sched_agpr(result, regnum=agpr_regnum)
+        # Inline asm is opaque to the machine scheduler; freeze the same
+        # MFMA/load interleave for the intrinsic path.
+        _rocdl.sched_barrier(0)
+        return result
 
     def _do_mma(self, a, b, c):
         a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
@@ -237,58 +271,59 @@ def compile_fp8_gemm_4w(
             b,
             c,
             lds_src_preshuffled=False,
+            agpr_base=0,
         ):
             rt_dst = []
 
-            c[mfma.idx(0, 0)] = mfma.call_one(a, b, c, 0, 0)
-            c[mfma.idx(0, 1)] = mfma.call_one(a, b, c, 0, 1)
+            c[mfma.idx(0, 0)] = mfma.call_one(a, b, c, 0, 0, agpr_base)
+            c[mfma.idx(0, 1)] = mfma.call_one(a, b, c, 0, 1, agpr_base)
 
             lds_swz = _compute_lds_swizzle(s2r, preshuffled=lds_src_preshuffled)
             g2s.load_one(lds_dst, k_offset, 0)
             rt_dst_0 = s2r.load_one(lds_src, lds_swz[0][0])
 
-            c[mfma.idx(0, 2)] = mfma.call_one(a, b, c, 0, 2)
+            c[mfma.idx(0, 2)] = mfma.call_one(a, b, c, 0, 2, agpr_base)
 
             rt_dst_1 = s2r.load_one(lds_src, lds_swz[0][1])
             rt_dst.append(pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
-            c[mfma.idx(0, 3)] = mfma.call_one(a, b, c, 0, 3)
+            c[mfma.idx(0, 3)] = mfma.call_one(a, b, c, 0, 3, agpr_base)
 
             g2s.load_one(lds_dst, k_offset, 1)
             rt_dst_0 = s2r.load_one(lds_src, lds_swz[1][0])
 
-            c[mfma.idx(1, 0)] = mfma.call_one(a, b, c, 1, 0)
-            c[mfma.idx(1, 1)] = mfma.call_one(a, b, c, 1, 1)
+            c[mfma.idx(1, 0)] = mfma.call_one(a, b, c, 1, 0, agpr_base)
+            c[mfma.idx(1, 1)] = mfma.call_one(a, b, c, 1, 1, agpr_base)
 
             rt_dst_1 = s2r.load_one(lds_src, lds_swz[1][1])
             rt_dst.append(pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
-            c[mfma.idx(1, 2)] = mfma.call_one(a, b, c, 1, 2)
-            c[mfma.idx(1, 3)] = mfma.call_one(a, b, c, 1, 3)
+            c[mfma.idx(1, 2)] = mfma.call_one(a, b, c, 1, 2, agpr_base)
+            c[mfma.idx(1, 3)] = mfma.call_one(a, b, c, 1, 3, agpr_base)
 
             g2s.load_one(lds_dst, k_offset, 2)
             rt_dst_0 = s2r.load_one(lds_src, lds_swz[2][0])
 
-            c[mfma.idx(2, 0)] = mfma.call_one(a, b, c, 2, 0)
-            c[mfma.idx(2, 1)] = mfma.call_one(a, b, c, 2, 1)
+            c[mfma.idx(2, 0)] = mfma.call_one(a, b, c, 2, 0, agpr_base)
+            c[mfma.idx(2, 1)] = mfma.call_one(a, b, c, 2, 1, agpr_base)
 
             rt_dst_1 = s2r.load_one(lds_src, lds_swz[2][1])
             rt_dst.append(pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
-            c[mfma.idx(2, 2)] = mfma.call_one(a, b, c, 2, 2)
-            c[mfma.idx(2, 3)] = mfma.call_one(a, b, c, 2, 3)
+            c[mfma.idx(2, 2)] = mfma.call_one(a, b, c, 2, 2, agpr_base)
+            c[mfma.idx(2, 3)] = mfma.call_one(a, b, c, 2, 3, agpr_base)
 
             g2s.load_one(lds_dst, k_offset, 3)
             rt_dst_0 = s2r.load_one(lds_src, lds_swz[3][0])
 
-            c[mfma.idx(3, 0)] = mfma.call_one(a, b, c, 3, 0)
-            c[mfma.idx(3, 1)] = mfma.call_one(a, b, c, 3, 1)
+            c[mfma.idx(3, 0)] = mfma.call_one(a, b, c, 3, 0, agpr_base)
+            c[mfma.idx(3, 1)] = mfma.call_one(a, b, c, 3, 1, agpr_base)
 
             rt_dst_1 = s2r.load_one(lds_src, lds_swz[3][1])
             rt_dst.append(pack_i32x4_i32x8(rt_dst_0, rt_dst_1))
 
-            c[mfma.idx(3, 2)] = mfma.call_one(a, b, c, 3, 2)
-            c[mfma.idx(3, 3)] = mfma.call_one(a, b, c, 3, 3)
+            c[mfma.idx(3, 2)] = mfma.call_one(a, b, c, 3, 2, agpr_base)
+            c[mfma.idx(3, 3)] = mfma.call_one(a, b, c, 3, 3, agpr_base)
 
             return c, rt_dst
 
@@ -318,6 +353,7 @@ def compile_fp8_gemm_4w(
             b,
             c,
             lds_src_preshuffled=False,
+            agpr_base=0,
         ):
             if const_expr(_use_interleaved_block):
                 return _interleaved_cluster(
@@ -330,6 +366,7 @@ def compile_fp8_gemm_4w(
                     b,
                     c,
                     lds_src_preshuffled=lds_src_preshuffled,
+                    agpr_base=agpr_base,
                 )
             else:
                 return _compute_cluster(
@@ -400,6 +437,7 @@ def compile_fp8_gemm_4w(
                 b0_frag,
                 c00_frag,
                 lds_src_preshuffled=b_preshuffled,
+                agpr_base=0 * 4 * N_ACCUMS,
             )
 
             c01_frag, a1_frag = _compute_block(
@@ -411,6 +449,7 @@ def compile_fp8_gemm_4w(
                 a0_frag,
                 b1_frag,
                 c01_frag,
+                agpr_base=1 * 4 * N_ACCUMS,
             )
 
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
@@ -424,6 +463,7 @@ def compile_fp8_gemm_4w(
                 a1_frag,
                 b0_frag,
                 c10_frag,
+                agpr_base=2 * 4 * N_ACCUMS,
             )
 
             c11_frag, b0_frag = _compute_block(
@@ -436,6 +476,7 @@ def compile_fp8_gemm_4w(
                 b1_frag,
                 c11_frag,
                 lds_src_preshuffled=b_preshuffled,
+                agpr_base=3 * 4 * N_ACCUMS,
             )
 
             a_cur0, a_next0 = a_next0, a_cur0
