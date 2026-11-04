@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-04T08:19:59Z",
+ "updated": "2026-11-04T08:22:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41798476601,
+   "pr": 901,
+   "commit": "3d52c197cd08ec5a4063213a5e4c676791d65669",
+   "branch": "moe_sorting_optimization",
+   "event": "pull_request",
+   "title": "Add Optimized MoE Routing Path",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41798476601",
+   "created_at": "2026-11-04T08:18:21Z",
+   "updated_at": "2026-11-04T08:18:43Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 41798409815,
    "pr": 887,
@@ -1883,52 +1898,6 @@
      "completed_at": "2026-10-30T10:37:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017056670/job/123940792661",
      "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 41017022152,
-   "pr": 1338,
-   "commit": "3d837c2a82f79d168c664f62efe210ec2f952e65",
-   "branch": "pr/fix-jit-ir-cache-key",
-   "event": "pull_request",
-   "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152",
-   "created_at": "2026-10-30T06:56:21Z",
-   "updated_at": "2026-10-30T14:06:56Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T12:59:46Z",
-     "completed_at": "2026-10-30T14:06:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152/job/123940857095"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T13:17:39Z",
-     "completed_at": "2026-10-30T13:38:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152/job/123940857162"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T09:09:46Z",
-     "completed_at": "2026-10-30T09:37:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41017022152/job/123940857178",
-     "machine": "smci350-odcdh2-a08-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
     }
