@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-04T01:47:38Z",
+ "updated": "2026-11-04T03:20:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41758721274,
+   "pr": null,
+   "commit": "97677775dc0ea8fa8d8c47c6955d817915bd2e02",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Move unaccepted sched_* register hints to experimental (#1364)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41758721274",
+   "created_at": "2026-11-04T02:08:07Z",
+   "updated_at": "2026-11-04T03:17:43Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T02:30:16Z",
+     "completed_at": "2026-11-04T03:01:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41758721274/job/126348783521",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T02:45:28Z",
+     "completed_at": "2026-11-04T03:17:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41758721274/job/126348783612"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T02:30:10Z",
+     "completed_at": "2026-11-04T03:05:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41758721274/job/126348783639"
+    }
+   ]
+  },
   {
    "run_id": 41740398006,
    "pr": 1364,
@@ -1964,21 +2010,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41013033236/job/123927904180"
     }
    ]
-  },
-  {
-   "run_id": 41012563752,
-   "pr": 1350,
-   "commit": "6ad63731ae0542920471785e175fd7fcec100fb6",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41012563752",
-   "created_at": "2026-10-30T06:10:47Z",
-   "updated_at": "2026-10-30T06:15:55Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
