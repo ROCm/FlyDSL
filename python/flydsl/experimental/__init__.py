@@ -3,12 +3,13 @@
 
 """Experimental APIs, one subpackage per feature.
 
-Unlike ``fx.<extension>`` libraries, features are not flattened into a common
-namespace: each one is imported explicitly by its subpackage, so every use is
-visibly experimental. For example::
+Like the ``fx.<extension>`` libraries, each feature is a subpackage, reached as
+``fx.experimental.<feature>``; feature names are not flattened into ``fx`` or
+into this package, so every use is visibly experimental. For example::
+
+    fx.experimental.register_allocation.register_place(frag_A, ..., start_idx=0)
 
     from flydsl.experimental import register_allocation as fx_regalloc
-
     fx_regalloc.register_place(frag_A, fx_regalloc.rocdl.AGPR32, start_idx=0)
 
 Names here are not part of the stable ``fx`` surface and may change or be
