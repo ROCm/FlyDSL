@@ -273,7 +273,7 @@ def build_flash_attn_dualwave_swp_module(
             _BIAS_READ_BATCH = min(4, _BIAS_GROUPS)
             _bias_frag_ty = Vec.make_type(_BIAS_VEC, ctx.elem_dtype)
             _bias_frag_align = _BIAS_VEC * traits.BF16_BYTES
-            _bias_log2e = Vec.filled(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
+            _bias_log2e = fx.full(_BIAS_VEC, BIAS_LOG2E, fx.Float32)
             _bias_lds_base_idx = fx.Index(fx.ptrtoint(ctx.lds.bias.ptr))
             _bias_gran_bytes = traits.DMA_BYTES
             _bias_gran_elems = traits.DMA_BYTES // traits.BF16_BYTES
@@ -298,10 +298,10 @@ def build_flash_attn_dualwave_swp_module(
             _alibi_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(AlibiSlopes), fx.make_layout(1, 1))
             _alibi_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
             _alibi_frag = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-            _alibi_idx_i32 = fx.Int32(ctx.batch_idx) * fx.Int32(alibi_stride_b) + fx.Int32(ctx.q_head_idx)
+            _alibi_idx_i32 = fx.Int32(ctx.batch_idx) * alibi_stride_b + fx.Int32(ctx.q_head_idx)
             fx.copy(_alibi_atom, fx.slice(_alibi_div, (None, _alibi_idx_i32)), _alibi_frag)
 
-            _alibi_neg_slope = Vec(_alibi_frag.load(), (1,), fx.Float32)[0] * fx.Float32(-BIAS_LOG2E)
+            _alibi_neg_slope = _alibi_frag.load()[0] * fx.Float32(-BIAS_LOG2E)
 
         # ---------------- Attention sink ----------------
         # Split-K folds the sink in the combine pass instead, so skip the load here.
@@ -314,7 +314,7 @@ def build_flash_attn_dualwave_swp_module(
 
                 fx.copy(_sink_atom, fx.slice(_sink_div, (None, fx.Int32(ctx.q_head_idx))), _sink_frag)
 
-                return Vec(_sink_frag.load(), (1,), fx.Float32)[0] * fx.Float32(BIAS_LOG2E)
+                return _sink_frag.load()[0] * fx.Float32(BIAS_LOG2E)
 
         _BIAS_VMCNT = ctx.NUM_DMA_K + ctx.NUM_DMA_V
         _BIAS_VMCNT_NO_K = ctx.NUM_DMA_V
@@ -362,7 +362,7 @@ def build_flash_attn_dualwave_swp_module(
                 for gb in range_constexpr(0, _BIAS_GROUPS, _BIAS_READ_BATCH):
                     raw = [_read_bias_frag(h, gb + k, buf) for k in range_constexpr(_BIAS_READ_BATCH)]
                     for k in range_constexpr(_BIAS_READ_BATCH):
-                        bv = Vec(Vec(raw[k], (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32))
+                        bv = Vec(raw[k], (_BIAS_VEC,), ctx.elem_dtype).to(fx.Float32)
                         r0 = (gb + k) * _BIAS_VEC
                         acc = Vec.from_elements([out[r0 + e] for e in range_constexpr(_BIAS_VEC)], fx.Float32)
                         fused = bv * _bias_log2e + acc

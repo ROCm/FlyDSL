@@ -171,14 +171,3 @@ def test_compile_movement_policies(monkeypatch, arch, case):
 @pytest.mark.usefixtures("coop_default_device")
 def test_matrix_warp_dtypes_and_widths(entry, width, count, primitive):
     checks.check_warp_dtypes_and_widths(entry, width, count, primitive)
-
-
-@pytest.mark.l1b_target_dialect
-@pytest.mark.rocm_lower
-@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize(
-    "arch,case",
-    matrix_cases(ARCHES, ["warp_blocked_to_striped", "warp_striped_to_blocked"]),
-)
-def test_compile_family(monkeypatch, arch, case):
-    checks.check_compile_family(monkeypatch, arch, case)

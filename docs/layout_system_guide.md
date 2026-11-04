@@ -335,7 +335,8 @@ ptr = fx.add_offset(ptr, offset)
 | `fx.rocdl.BufferCopy128b()` | AMD buffer-descriptor 128-bit copy |
 | `fx.rocdl.BufferCopy64b()` | AMD buffer-descriptor 64-bit copy |
 | `fx.rocdl.BufferCopy32b()` | AMD buffer-descriptor 32-bit copy |
-| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | gfx1250 TDM async Global↔LDS whole-tile copy (1–5D); descriptor carried as atom state |
+| `fx.rocdl.cdna5.make_tiled_tdm_atom(op, tensor, smem_layout, tiler, ...)` + `fx.rocdl.cdna5.tdm_partition(...)` | gfx1250 TDM async Global↔LDS tile copy (1–5D), preferred for new kernels; built over the whole tensor, cut per warp |
+| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | older gfx1250 TDM form with explicit per-dim extent/stride as atom state; kept for copies the tiled atom cannot express |
 
 #### Construction
 

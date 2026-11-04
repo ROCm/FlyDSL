@@ -152,8 +152,7 @@ def create_wmma_int8_gemm_module(
     gpu_arch = str(get_rocm_arch() or "")
     if not gpu_arch.startswith("gfx11"):
         raise RuntimeError(
-            f"rdna3_int8_gemm requires gfx11* (RDNA3 / RDNA3.5); current arch is {gpu_arch!r}. "
-            "gfx120* (RDNA4) has no integer WMMA."
+            f"rdna3_int8_gemm requires gfx11* (RDNA3 / RDNA3.5 v16 WMMA ABI); current arch is {gpu_arch!r}."
         )
 
     if reg_m is None:

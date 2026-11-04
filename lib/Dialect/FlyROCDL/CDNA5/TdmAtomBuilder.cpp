@@ -67,14 +67,14 @@ FailureOr<tdm::Geometry> deriveTdmAtom(AdaptorT adaptor, tdm::Request &request, 
   auto geometry = tdm::derive(request, emitError);
   if (failed(geometry))
     return failure();
-  // Check the actual per-issue dimension after coalescing and warp splitting:
-  // a sufficiently wide collective tile can still leave each warp below 16 B.
-  int64_t innerBits =
-      static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
-  if (innerBits < 16 * 8)
-    return emitError() << "physical TDM tile_dim0 must span at least 16 bytes, got "
-                       << geometry->descriptorShape.back() << " elements at "
-                       << dataType.getIntOrFloatBitWidth() << " bits";
+  if (geometry->padAmount) {
+    int64_t innerBits =
+        static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
+    if (innerBits % (4 * 8))
+      return emitError() << "a padded TDM tile_dim0 must span a whole multiple of 4 bytes, got "
+                         << geometry->descriptorShape.back() << " elements at "
+                         << dataType.getIntOrFloatBitWidth() << " bits";
+  }
   return geometry;
 }
 

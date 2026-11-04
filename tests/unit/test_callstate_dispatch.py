@@ -12,7 +12,9 @@ implementation, so they hold regardless of loop-vs-codegen internals.
 """
 
 import ctypes
+import gc
 import struct
+import weakref
 
 import pytest
 
@@ -99,3 +101,20 @@ def test_callstate_dispatch_packs_changing_args_and_auto_stream():
         assert layout == _expected_layout_bytes(t)
         assert scalar == ival
         assert auto_stream in (None, 0)  # auto-stream slot stays NULL (default stream)
+
+
+def test_dlpack_dynamic_layout_fill_does_not_retain_tensor():
+    """The layout-dynamic ``DLTensorJitArg`` fills hand one DLPack adaptor from the
+    pointer fill to the layout fill. It must not outlive the launch: the fills live
+    as long as the cached CallState, so a kept adaptor pins each argument's last
+    tensor (and its device memory) until the next launch replaces it."""
+    proto = torch.empty((4, 8), dtype=torch.float32)
+    (dp_ctype, dp_fill), (buf_ctype, pack) = ja.DLTensorJitArg(proto).__c_abi_spec__()
+
+    t = torch.empty((4, 8), dtype=torch.float32)
+    dp_fill(t, dp_ctype(0))
+    pack(t, buf_ctype())
+    ref = weakref.ref(t)
+    del t
+    gc.collect()
+    assert ref() is None

@@ -1,4 +1,5 @@
 add_subdirectory(Fly)
+add_subdirectory(FlyKtrace)
 get_property(_dirs GLOBAL PROPERTY FLYDSL_BACKEND_INCLUDE_DIALECT_SUBDIRS)
 foreach(_dir ${_dirs})
   add_subdirectory(${_dir})

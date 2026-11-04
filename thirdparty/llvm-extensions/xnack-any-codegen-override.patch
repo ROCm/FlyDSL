@@ -1,0 +1,31 @@
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
+index ed10fb97d261..2e079d473b7c 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUTargetMachine.cpp
+@@ -15,6 +15,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "AMDGPUTargetMachine.h"
++#include "llvm/Support/Process.h"
+ #include "AMDGPU.h"
+ #include "AMDGPUAliasAnalysis.h"
+ #include "AMDGPUAsmPrinter.h"
+@@ -1359,6 +1360,18 @@ GCNTargetMachine::getSubtargetImpl(const Function &F) const {
+ 
+   using AMDGPU::TargetIDSetting;
+   TargetIDSetting Xnack = getTargetIDSettingFromModuleFlag(M, "amdgpu.xnack");
++  // Experiment only: hardware XNACK is disabled. Override the per-function
++  // machine subtarget for Any while retaining the module/global MC target
++  // identity as Any. The asm printer therefore still serializes Any ELF flags
++  // and metadata. Explicit module flag settings retain their normal behavior.
++  if (GPU == "gfx1250" && Xnack == TargetIDSetting::Any) {
++    if (auto Mode = sys::Process::GetEnv("LLVM_GFX1250_ANY_XNACK_CODEGEN")) {
++      if (*Mode != "0" && *Mode != "1")
++        report_fatal_error("LLVM_GFX1250_ANY_XNACK_CODEGEN must be 0 or 1");
++      Xnack = *Mode == "1" ? TargetIDSetting::On : TargetIDSetting::Off;
++    }
++  }
++
+   TargetIDSetting SramEcc =
+       getTargetIDSettingFromModuleFlag(M, "amdgpu.sramecc");
+ 

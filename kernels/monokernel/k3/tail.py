@@ -14,7 +14,7 @@ from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import EPS
 from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS
-from kernels.monokernel.ops import mxfp8_to_bf16x8, rsq, rsrc, uniform, xred
+from kernels.monokernel.ops import mxfp8_to_bf16x8, rsq, rsrc, uniform
 
 _THREADS = 512
 _WAVE_SIZE = 64
@@ -244,8 +244,7 @@ def build_kimi_k3_tail(
                 reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
 
             square_sum = reduced_lo * reduced_lo + reduced_hi * reduced_hi
-            for offset in (32, 16, 8, 4, 2, 1):
-                square_sum = xred(square_sum, offset, lambda lhs, rhs: lhs + rhs)
+            square_sum = fx.coop.warp_reduce(square_sum, fx.ReductionOp.ADD, width=64)
             if lane == 0:
                 fx.ptr_store(square_sum, reduction + wave)
             gpu.barrier()
@@ -328,7 +327,7 @@ def build_kimi_k3_tail(
             tile_in_task = wave // _WAVES_PER_TILE
             wave_in_tile = wave % _WAVES_PER_TILE
             row_tile = row_tile_base + tile_in_task
-            accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+            accumulator = fx.full(4, 0.0, fx.Float32)
             for chunk_index in range_constexpr(chunks_per_wave):
                 chunk = wave_in_tile * chunks_per_wave + chunk_index
                 if chunk < k_chunks:
@@ -357,8 +356,8 @@ def build_kimi_k3_tail(
                             )
                         )
                         scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
-                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
-                        scale = ((scale_byte & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & 0xFF
+                        scale = ((scale_byte & 0xFF) << 23).bitcast(fx.Float32)
                         lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
                         rhs = fx.ptr_load(
                             activation + (sample * k_dim + chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,

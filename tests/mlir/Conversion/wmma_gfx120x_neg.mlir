@@ -32,3 +32,62 @@ func.func @bad_sign_clamp(
     %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = true, clamp = true>>) {
   return
 }
+
+// -----
+
+// M/N is its own diagnostic. Must not stay folded into the FP K=16 string.
+// CHECK: GFX120X WMMA requires M=N=16, got 32x16
+func.func @bad_shape_mn(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<32x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// CHECK: GFX120X WMMA IU8 requires K=16
+func.func @bad_iu8_k32(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x32, (i8, i8) -> i32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// CHECK: GFX120X WMMA IU4 requires K=16 or K=32
+func.func @bad_iu4_k64(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x64, (i4, i4) -> i32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// CHECK: unsupported GFX120X WMMA configuration
+func.func @bad_mixed_i4_i8(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i8) -> i32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// CHECK: unsupported GFX120X WMMA configuration
+func.func @bad_iu4_acc_f32(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> f32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// Integer intrinsics require a signless i32 accumulator.
+// CHECK: unsupported GFX120X WMMA configuration
+func.func @bad_iu4_acc_si32(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> si32, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// Integer intrinsics require a signless i32 accumulator.
+// CHECK: unsupported GFX120X WMMA configuration
+func.func @bad_iu4_acc_ui32(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> ui32, signA = false, signB = false, clamp = false>>) {
+  return
+}

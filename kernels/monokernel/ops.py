@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
+from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
@@ -27,12 +28,12 @@ _UMAX_DPP_ASM = "\n".join(
 )
 
 
-def rsrc(addr):
-    return bo.create_buffer_resource_from_addr(addr)
+def rsrc(addr, nbytes=None):
+    return bo.create_buffer_resource_from_addr(addr, num_records_bytes=nbytes)
 
 
 def uniform(value):
-    return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(value).ir_value()))
+    return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(value)))
 
 
 def uniform_f32(value):
@@ -42,7 +43,7 @@ def uniform_f32(value):
 def spin_pause() -> None:
     """Keep tagged-mailbox polling loads inside the retry loop."""
 
-    llvm.InlineAsmOp(None, [], "s_nop 0", "", has_side_effects=True)
+    rocdl.s_nop(0)
 
 
 def read_lane_i32(value, lane):
@@ -77,20 +78,17 @@ def mem_realtime():
     return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
 
 
-def _hardware_f32(name, value):
-    return fx.Float32(llvm.call_intrinsic(T.f32, name, [fx.Float32(value).ir_value()], [], []))
-
-
 def rsq(value):
-    return _hardware_f32("llvm.amdgcn.rsq.f32", value)
+    return fx.Float32(rocdl.rsq(T.f32, fx.Float32(value).ir_value()))
 
 
 def rcp(value):
-    return _hardware_f32("llvm.amdgcn.rcp.f32", value)
+    return fx.Float32(rocdl.rcp(T.f32, fx.Float32(value)))
 
 
 def exp(value):
-    return _hardware_f32("llvm.amdgcn.exp2.f32", fx.Float32(value) * 1.4426950408889634)
+    value = fx.Float32(value) * 1.4426950408889634
+    return fx.Float32(rocdl.exp2(T.f32, value.ir_value()))
 
 
 def xshfl(value, offset):
@@ -146,6 +144,21 @@ def fp8_roundtrip(lhs, rhs):
     pair_type = fx.Vector.make_type(2, fx.Float32)
     pair = fx.Vector(rocdl.cvt_pk_f32_fp8(res=pair_type, src=word, word_sel=False))
     return pair[0], pair[1]
+
+
+def div_rn(value, divisor, reciprocal):
+    """IEEE-rounded quotient from one exact reciprocal using Markstein refinement."""
+
+    quotient = value * reciprocal
+    residual = fmath.fma(-quotient, divisor, value)
+    return fx.Float32(fmath.fma(fx.Float32(residual), reciprocal, quotient))
+
+
+def fp8_pack4(a, b, c, d):
+    """Pack four in-range FP32 values as E4M3 bytes."""
+
+    lo = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(0), False))
+    return fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, c, d, lo, True))
 
 
 def f8_word(k):

@@ -35,7 +35,8 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 ```text
 FlyDSL/
 ├── scripts/                   # build & test scripts
-│   ├── build_llvm.sh          # build LLVM/MLIR from source
+│   ├── build_llvm.sh          # build LLVM/MLIR from source (applies thirdparty/llvm-extensions)
+│   ├── llvm_extension.sh      # create/rebase an LLVM extension
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
@@ -112,6 +113,20 @@ python -m pip install -e .
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
 
+The build scripts use `python3` on `PATH` by default. Set `PYTHON_EXECUTABLE`
+to select another Python 3.10+ interpreter (including a virtual environment):
+
+```bash
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build_llvm.sh -j64
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build.sh -j64
+```
+
+LLVM's Python dependencies are installed into that interpreter's environment.
+Both CMake Python detection passes are pinned to it. Builds launched by
+`python -m pip` or `python setup.py` use that Python interpreter instead of
+`PATH` or an inherited `PYTHON_EXECUTABLE`, so newly built bindings match the wheel ABI.
+Use a separate `FLY_BUILD_DIR` for each Python version to avoid reusing old bindings.
+
 ### Run tests
 
 Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
@@ -163,6 +178,16 @@ bash scripts/build.sh -j64
     ```bash
     export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
     ```
+
+## Claude Code plugin
+
+The skills under [`.claude/skills/`](.claude/skills) for authoring, debugging, profiling and optimizing FlyDSL kernels are also published as a [Claude Code](https://claude.com/claude-code) plugin, so you can use them outside this checkout:
+
+```
+/plugin install flydsl --marketplace ROCm/FlyDSL
+```
+
+Or from the shell: `claude plugin marketplace add ROCm/FlyDSL && claude plugin install flydsl@flydsl`. Skills are invoked as `/flydsl:<skill>` (e.g. `/flydsl:debug-flydsl-kernel`); update with `claude plugin update flydsl@flydsl`.
 
 ## Documentation
 

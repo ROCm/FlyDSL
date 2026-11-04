@@ -9,7 +9,8 @@ Kernel implementation: ``kernels/gemm/mxfp8_gemm_8wave.py`` (gfx950 only).
 
 ``C[M,N] = A[M,K] @ B[N,K]^T`` with per-1x32 E8M0 block scales on both operands,
 bf16 output. A and B are row-major fp8 e4m3; both scales are ``shuffle_scale_w4``
-permuted (the kernel reads that layout directly, see its module docstring).
+permuted (the kernel reads that layout directly, see its module docstring), or raw
+row-major ``[rows, K // 32]`` with ``scale_preshuffled=False``.
 """
 
 import os
@@ -52,6 +53,7 @@ def _run_mxfp8_gemm(
     K,
     *,
     b_preshuffled=False,
+    scale_preshuffled=True,
     xcd_swizzle=0,
     num_warmups=10,
     num_iters=100,
@@ -72,9 +74,14 @@ def _run_mxfp8_gemm(
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
 
     b_in = preshuffle_b(b_q.view(torch.int8)).view(torch.float8_e4m3fn) if b_preshuffled else b_q
-    a_scale_in = gemm_common_utils.shuffle_scale_w4(a_scale, 1, False)
-    b_scale_in = gemm_common_utils.shuffle_scale_w4(b_scale, 1, False)
-    launch_fn = compile_mxfp8_gemm_8w(K=K, b_preshuffled=b_preshuffled, xcd_swizzle=xcd_swizzle)
+    if scale_preshuffled:
+        a_scale_in = gemm_common_utils.shuffle_scale_w4(a_scale, 1, False)
+        b_scale_in = gemm_common_utils.shuffle_scale_w4(b_scale, 1, False)
+    else:
+        a_scale_in, b_scale_in = a_scale, b_scale
+    launch_fn = compile_mxfp8_gemm_8w(
+        K=K, b_preshuffled=b_preshuffled, scale_preshuffled=scale_preshuffled, xcd_swizzle=xcd_swizzle
+    )
 
     def _args(c, a, b, sa, sb):
         return (
@@ -98,12 +105,13 @@ def _run_mxfp8_gemm(
 
     if report:
         tflops = 2.0 * M * N * K / (us * 1e-6) / 1e12
-        tag = f"B={'pre' if b_preshuffled else 'raw'}"
+        tag = f"B={'pre' if b_preshuffled else 'raw'} scale={'pre' if scale_preshuffled else 'raw'}"
         print(f"\n[mxfp8_gemm_8wave] M={M} N={N} K={K} {tag}: {us:.1f} us, {tflops:.1f} TFLOPS")
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.05, atol=0.05)
 
 
+@pytest.mark.parametrize("scale_preshuffled", [True, False])
 @pytest.mark.parametrize("b_preshuffled", [False, True])
 @pytest.mark.parametrize(
     "M, N, K, xcd_swizzle",
@@ -118,5 +126,13 @@ def _run_mxfp8_gemm(
         pytest.param(8192, 8192, 8192, 4, marks=pytest.mark.large_shape),
     ],
 )
-def test_mxfp8_gemm_8wave(M, N, K, xcd_swizzle, b_preshuffled):
-    _run_mxfp8_gemm(M, N, K, b_preshuffled=b_preshuffled, xcd_swizzle=xcd_swizzle, report=True)
+def test_mxfp8_gemm_8wave(M, N, K, xcd_swizzle, b_preshuffled, scale_preshuffled):
+    _run_mxfp8_gemm(
+        M,
+        N,
+        K,
+        b_preshuffled=b_preshuffled,
+        scale_preshuffled=scale_preshuffled,
+        xcd_swizzle=xcd_swizzle,
+        report=True,
+    )
