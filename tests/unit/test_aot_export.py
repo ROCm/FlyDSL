@@ -486,7 +486,8 @@ class TestExportCompile:
         obj = _Scaler()
         hinted = flyc.compile[{"fast_fp_math": True}](obj.launch)
         assert isinstance(hinted, partial)
-        assert _Scaler.launch.compile_hints == {"fast_fp_math": True}
+        assert hinted.func.__self__.compile_hints == {"fast_fp_math": True}
+        assert _Scaler.launch.compile_hints == {}
 
         bound = _aot_view(hinted, _ptr(), 4)
         unbound = _aot_view(_Scaler.launch, obj, _ptr(), 4)

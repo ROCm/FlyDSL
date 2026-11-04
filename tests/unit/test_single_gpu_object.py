@@ -116,7 +116,7 @@ class TestSingleCodeObject:
         exe(A, torch.cuda.current_stream(A.device))
         torch.cuda.synchronize()
 
-        _key, artifact = _vec_launch._last_compiled
+        _key, artifact = exe._last_compiled
         count, targets = _gpu_objects(artifact._ir_text)
         assert count == 1
         target_attr = targets[0]

@@ -162,8 +162,9 @@ seeds ambient tracing fastmath, the second does not.
   ```python
   opts = {**fn.compile_hints.get("llvm_options", {}), "new-flag": True}
   ```
-- `flyc.compile[{...}](fn)` **mutates the JitFunction permanently** — it is not a
-  scoped copy. For scoped behaviour use `CompilationContext.compile_hints({...})`.
+- `flyc.compile[{...}](fn)` returns or compiles a **copy** of `fn` with the hints;
+  `fn` itself is unchanged. To change `fn`'s defaults, edit `fn.compile_hints`. For
+  scoped behaviour use `CompilationContext.compile_hints({...})`.
 - The autotuner reaches only `waves_per_eu`; every other key must be set around
   the tuned call, e.g. in a `CompilationContext.compile_hints({...})` block.
 

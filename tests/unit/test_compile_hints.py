@@ -156,9 +156,10 @@ class TestCompileCallable:
             flyc.compile["not_a_dict"]
 
     def test_deferred_compilation_sets_hints(self):
-        """flyc.compile[hints](fn) without args should set hints on JitFunction."""
+        """flyc.compile[hints](fn) without args returns fn with the hints; fn itself keeps its own."""
         hinted = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True}](_noop_launch)
         assert hinted.compile_hints == {"fast_fp_math": True, "unsafe_fp_math": True}
+        assert _noop_launch.compile_hints == {}, "the hints leaked into every later compile of fn"
 
     def test_bare_compile_no_hints(self):
         """flyc.compile(fn) without subscript should not set hints."""
