@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-04T12:28:46Z",
+ "updated": "2026-11-04T14:07:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41843924231,
+   "pr": 1368,
+   "commit": "9a85c3b1019a115184832e378be07d23fd7a770b",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843924231",
+   "created_at": "2026-11-04T14:04:20Z",
+   "updated_at": "2026-11-04T14:05:14Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 41843344152,
+   "pr": null,
+   "commit": "833f7133c026e0faacea468c334624dfb646a52e",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843344152",
+   "created_at": "2026-11-04T14:00:42Z",
+   "updated_at": "2026-11-04T14:04:59Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 41812286983,
    "pr": 1366,
@@ -1871,67 +1901,6 @@
    "created_at": "2026-10-30T08:10:17Z",
    "updated_at": "2026-10-30T08:18:57Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 41020605383,
-   "pr": null,
-   "commit": "515af47723fa5b21547df5a38458e945a51ec14d",
-   "branch": "glm-mono-kernel-structure-optmize",
-   "event": "pull_request",
-   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383",
-   "created_at": "2026-10-30T07:31:25Z",
-   "updated_at": "2026-10-30T14:28:00Z",
-   "actor": "james-huang09",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T10:43:02Z",
-     "completed_at": "2026-10-30T11:20:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106906",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T13:46:42Z",
-     "completed_at": "2026-10-30T14:27:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952106910"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T13:56:27Z",
-     "completed_at": "2026-10-30T14:12:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020605383/job/123952107048"
-    }
-   ]
-  },
-  {
-   "run_id": 41020519519,
-   "pr": null,
-   "commit": "ad3bcfc331b6cbadaa726b95304dadad51762b85",
-   "branch": "glm-mono-kernel-structure-optmize",
-   "event": "pull_request",
-   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41020519519",
-   "created_at": "2026-10-30T07:30:36Z",
-   "updated_at": "2026-10-30T07:31:59Z",
-   "actor": "james-huang09",
    "jobs": []
   }
  ]
