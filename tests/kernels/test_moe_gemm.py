@@ -944,7 +944,7 @@ def test_mxfp_moe_variants(a_dtype, variant):
 
 
 @pytest.mark.skipif(not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)")
-@pytest.mark.parametrize("w_dtype", ["mxfp4", "bf16"], ids=["a16w4", "a16w16"])
+@pytest.mark.parametrize("w_dtype", ["mxfp4", "int4", "bf16"], ids=["a16w4", "a16wi4", "a16w16"])
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [
@@ -954,10 +954,17 @@ def test_mxfp_moe_variants(a_dtype, variant):
     ],
 )
 def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m, w_dtype):
-    """a16w4 (bf16 A x mxfp4 W1/W2) and a16w16 (bf16 A x raw bf16 W1/W2) fused MoE e2e
-    correctness on a small shape and the Kimi-K3 3584x512 E896 k16 production shape.
-    bf16 A (no quant), bf16 sorted intermediate, atomic gemm2. a16w4 cos vs torch at
-    the fp4 bar; a16w16 is unquantized so cos should be ~1.0."""
+    """a16w4 (bf16 A x mxfp4 W1/W2), a16wi4 (bf16 A x signed-int4 W1/W2, groupwise
+    bf16 scale at A16WI4_GROUP_SIZE=32) and a16w16 (bf16 A x raw bf16 W1/W2) fused
+    MoE e2e correctness on a small shape and the Kimi-K3 3584x512 E896 k16 production
+    shape. bf16 A (no quant), bf16 sorted intermediate, atomic gemm2. Each variant is
+    compared against a reference built from its own quantized weights, so all three
+    share one verify_output bar; a16w16 is unquantized so cos should be ~1.0.
+
+    a16wi4 is the kernel vLLM reaches through ``--moe-backend flydsl`` for Kimi K2.5
+    (compressed-tensors INT4, symmetric, group_size=32). Before this parametrization
+    it had no pytest coverage at all -- only the ``--in_dtype int4_bf16`` CLI entry
+    point in __main__ ran it."""
     device = torch.device("cuda")
     s = 0.2
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
@@ -1225,6 +1232,16 @@ _MOE_2STAGE_CASES = [
     pytest.param(
         129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "a16w4", "f16", False, False, True, -1, id="M-graph"
     ),
+    # a16wi4 / W4A16: same shape as M-eager/M-graph, signed-int4 W with a groupwise
+    # bf16 scale. group_size=32 matches A16WI4_GROUP_SIZE and the compressed-tensors
+    # INT4 layout vLLM uses for Kimi K2.5. (The helper derives the kernel-side group
+    # size from w_dtype; the parameter gates the case and documents the intent.)
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "int4_bf16", "f16", False, False, False, 32, id="I4-eager"
+    ),
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "int4_bf16", "f16", False, False, True, 32, id="I4-graph"
+    ),
     pytest.param(
         333,
         4096,
@@ -1389,6 +1406,18 @@ def test_moe_gemm_2stage(
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
+    # Default routing + comparison knobs for test stability:
+    # - Use torch routing (no aiter dependency for sorting).
+    # - Only compare aiter for fp8, and only when explicitly requested.
+    # These must be resolved BEFORE build_routing_buffers: passing moe_sort_mode=None
+    # into it falls through to aiter's moe_sorting, which defeats the "no aiter
+    # dependency" intent above and hard-fails the whole test whenever the installed
+    # aiter's moe_sorting signature differs from this tree's expectation.
+    if moe_sort_mode is None:
+        moe_sort_mode = "torch"
+    if compare_aiter_ck is None:
+        compare_aiter_ck = False
+
     routing = build_routing_buffers(
         topk_ids=topk_ids,
         topk_weights=topk_weights,
@@ -1397,14 +1426,6 @@ def test_moe_gemm_2stage(
         tile_m=tile_m,
         moe_sort_mode=moe_sort_mode,
     )
-
-    # Default routing + comparison knobs for test stability:
-    # - Use torch routing (no aiter dependency for sorting).
-    # - Only compare aiter for fp8, and only when explicitly requested.
-    if moe_sort_mode is None:
-        moe_sort_mode = "torch"
-    if compare_aiter_ck is None:
-        compare_aiter_ck = False
 
     if in_dtype in ("fp4", "a8w4", "a16w4", "int4_bf16"):
         # a4w4 / a8w4 drive the fused mxfp_moe pipeline (device-side fp4 re-quant).
