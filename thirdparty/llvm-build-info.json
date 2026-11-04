@@ -40,7 +40,7 @@
       },
       {
         "file": "schedule-bank-and-gpr.patch",
-        "description": "Add sched.bank / sched.vgpr / sched.sgpr / sched.agpr hints on pin 941a04e. Retargeted from the patch written against 1df311a6: keep the functional changes and drop the clang-format-only churn that does not apply here.",
+        "description": "Add sched.bank / sched.vgpr / sched.sgpr / sched.agpr hints on pin 941a04e. A strict sched.agpr pin stays on the AGPR file: the pseudo is kept through coalescing so the class is not widened to AV_*, and allocation hints admit only that file. Retargeted from the patch written against 1df311a6: keep the functional changes and drop the clang-format-only churn that does not apply here.",
         "upstream_status": "not yet submitted; adapted from jli/schedule-bank-gpr-llvm-head (LLVM 1df311a6)"
       },
       {
