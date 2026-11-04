@@ -1,28 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Explicit register placement with the experimental register_allocation feature.
+"""Explicit register placement with ``fx.experimental.register_allocation``.
 
-Experimental features are imported by their subpackage rather than reached through
-``fx``, so every use is visibly experimental:
+``add_kernel`` allocates placed register memory with ``RegisterAllocator``;
+``mma_kernel`` places MMA fragments with ``register_place``. The API and its
+limitations are described in docs/experimental/register_allocation.md.
 
-    from flydsl.experimental import register_allocation as fx_regalloc
-
-The feature has two entry points:
-
-* ``fx_regalloc.RegisterAllocator`` allocates new register memory in a register class,
-  with the same ``allocate(T)`` / ``Storage[T]`` interface as ``SharedAllocator``.
-* ``fx_regalloc.register_place`` places register memory created elsewhere, such as
-  MMA fragments.
-
-Register classes are symbolic LLVM classes; ``fx_regalloc.rocdl`` provides the AMDGPU
-ones (``SGPR32``, ``VGPR32``, ``AGPR32``), numbered in 32-bit registers. Both entry
-points take ``start_idx``, the number of the first register. Placement is a strict
-register allocation hint, not a guarantee: LLVM may still put a value elsewhere without
-an error, as mma_kernel below shows. See docs/experimental/register_allocation.md.
-
-The comments after each kernel show its gfx942 ISA. To inspect it yourself, run with
-``FLYDSL_DUMP_IR=1`` and
+The comments after each kernel show its gfx942 ISA, including where the hints are
+not met. To inspect it yourself, run with ``FLYDSL_DUMP_IR=1`` and
 ``FLYDSL_RUNTIME_ENABLE_CACHE=0`` and open ``<kernel>/*_final_isa.s`` under
 ``FLYDSL_DUMP_DIR`` (default ``~/.flydsl/debug``).
 """
@@ -31,15 +17,15 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.experimental import register_allocation as fx_regalloc
+
+fx_regalloc = fx.experimental.register_allocation
 
 BLOCK_SIZE = 64
 BLOCKS = 4
 TILE_M, TILE_N, TILE_K = 64, 64, 8
 
 
-# One struct per register class: an allocation is a single block of register memory,
-# so values that belong in different classes go into different structs.
+# One struct per register class: each allocation is placed in a single class.
 @fx.struct
 class BlockRegisters:  # uniform across the block -> SGPRs
     base: fx.Int32
@@ -60,8 +46,6 @@ def add_kernel(
     Out: fx.Tensor,
     bias: fx.Int32,
 ):
-    # start_idx is the first register number. Each allocator hands out consecutive
-    # numbers, padded to whole registers.
     sgprs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.SGPR32, start_idx=40)
     vgprs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=32)
     block = sgprs.allocate(BlockRegisters)  # s40-s41
@@ -71,7 +55,6 @@ def add_kernel(
     Y = fx.rocdl.make_buffer_tensor(Y)
     Out = fx.rocdl.make_buffer_tensor(Out)
 
-    # Fields are read and written through peek()/poke(), like any other Storage.
     block.base.poke(fx.Int32(fx.block_idx.x) * BLOCK_SIZE)
     block.bias.poke(bias)
     index = block.base.peek() + fx.Int32(fx.thread_idx.x)  # not placed: LLVM chooses freely
@@ -118,9 +101,7 @@ def mma_kernel(
     thr_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma).get_slice(tid)
     thr_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma).get_slice(tid)
 
-    # Fragments are register memory that the MMA API creates, so they are placed with
-    # register_place rather than allocated. Call it on the fragment itself (not a view
-    # or slice of it), in the block that creates it; it covers the whole fragment.
+    # The MMA API creates the fragments, so they are placed rather than allocated.
     frag_A = thr_mma.make_fragment_A(A)  # 4 x f32 per lane
     frag_B = thr_mma.make_fragment_B(B)  # 4 x f32 per lane
     frag_C = thr_mma.make_fragment_C(C)  # 16 x f32 per lane

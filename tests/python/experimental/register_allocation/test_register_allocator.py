@@ -29,6 +29,11 @@ class RegisterOverlay:
 
 
 def test_register_api_is_reached_only_through_its_subpackage():
+    import flydsl.experimental
+    from flydsl.expr import experimental
+
+    # Like fx.<extension> libraries: fx.experimental is the flydsl.experimental package.
+    assert experimental is fx.experimental is flydsl.experimental
     assert fx.experimental.register_allocation is fx_regalloc
     for name in ("RegisterAllocator", "RegisterClass", "register_place"):
         assert getattr(fx_regalloc, name) is getattr(fx_regalloc.register, name)
