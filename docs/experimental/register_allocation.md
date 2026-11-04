@@ -4,14 +4,18 @@
 # Register allocation (experimental)
 
 `flydsl.experimental.register_allocation` asks the register allocator to place per-thread register
-memory at chosen numbers of a register class: the A/B operands of an MFMA in given AGPRs, an
+memory at chosen numbers of a register class, such as the A/B operands of an MFMA in given AGPRs, an
 accumulator in a given VGPR range, a few uniform values in fixed SGPRs.
 
-The feature is experimental and may change or be removed without a deprecation period. It is not
-reachable from the stable `fx` namespace. Import its subpackage explicitly, so that every use is
-visibly experimental:
+The feature is experimental and may change or be removed without a deprecation period. It is
+reached only as the subpackage `fx.experimental.register_allocation`; this page binds it to a short
+name:
 
 ```python
+import flydsl.expr as fx
+
+fx_regalloc = fx.experimental.register_allocation
+# or, equivalently:
 from flydsl.experimental import register_allocation as fx_regalloc
 ```
 
@@ -29,18 +33,16 @@ uses both entry points in complete kernels.
 
 The register class is required: it is what the feature places values in. Register memory without
 placement, where the compiler chooses both the class and the numbers, is created with
-`fx.make_rmem_tensor`.
+`fx.make_rmem_tensor` or `fx.make_fragment`.
 
 Numbers index the members of the class and count whole members: `start_idx=40` in `SGPR32` is
 `s40`. Both entry points take `start_idx`, the first register; the storage occupies it and the
 registers after it, exactly.
 
-Placement is a register allocation hint, not a guarantee. The values of placed storage are lowered
-to LLVM's strict register hints (`rocdl.sched.vgpr`, `rocdl.sched.sgpr`
-and `rocdl.sched.agpr`): the register allocator considers only the requested registers for that
-value. Nothing checks the result. When the requested registers are taken, unusable, or the value
-has to be split or spilled, LLVM places the value or part of it elsewhere and compilation still
-succeeds, in a few cases with wrong code (see [Limitations](#limitations)). Check the final ISA.
+Placement is a register allocation hint, not a guarantee. Nothing checks the result. When the
+requested registers are taken, unusable, or the value has to be split or spilled, LLVM places the
+value or part of it elsewhere and compilation still succeeds, in a few cases with wrong code (see
+[Limitations](#limitations)). Check the final ISA.
 
 The registers are not reserved for the whole kernel: other values may use them before the first
 write and after the last read. Because a fixed number sets a floor on the kernel's register count
@@ -74,20 +76,9 @@ vgprs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=32)
 block = sgprs.allocate(BlockRegisters)  # s40-s41
 lane = vgprs.allocate(LaneRegisters)    # v32-v34
 
-block.base.poke(fx.Int32(fx.block_idx.x) * 64)
-lane.x.poke(X[block.base.peek() + fx.Int32(fx.thread_idx.x)])
+block.base.poke(fx.block_idx.x * 64)
+lane.x.poke(X[block.base.peek() + fx.thread_idx.x])
 ```
-
-Fields are navigated and accessed exactly as for shared memory. What differs is the memory behind
-them:
-
-|                   | `SharedAllocator`             | `RegisterAllocator`                                                                        |
-| ----------------- | ----------------------------- | ------------------------------------------------------------------------------------------ |
-| Memory            | shared by the workgroup       | private to each thread, in `register_class`                                                |
-| Each `allocate`   | a region of one shared space  | independent register memory; no `base_ptr`, no `free`                                      |
-| Padding           | to the type's alignment       | also to whole registers: an `Int8` takes one 32-bit register, two `Int16` fields share one |
-| `allocated_bytes` | the bytes the kernel reserves | the logical layout and padding, not the kernel's register usage                            |
-| Per kernel        | one                           | any number; allocators do not coordinate their ranges                                      |
 
 Sizes and alignments stay in bytes, as for shared memory: an allocation is aligned to the larger of
 `dsl_align_of(T)` and `allocate(..., alignment=...)`. The same alignment constrains register
@@ -131,25 +122,15 @@ both.
 
 ## Limitations
 
-Placement constrains where the register allocator puts values; it does not change which
-instructions compute them, and LLVM does not report a hint it could not meet. The cases below were
-observed on gfx942.
+Placement does not change which instructions compute a value.
 
 - **Conflicts move values silently.** If the requested registers are held by another live value,
   including another placed value, or register pressure forces a split or spill, the value or part
   of its live range ends up in other registers, with copies. Keeping an old `peek()` result alive
   across a `poke()` to the same storage is an easy way to cause this.
-- **AGPR and VGPR numbers are not kept apart.** On gfx90a and later, a value that may live in either
-  bank, such as a load result or an MFMA operand, can be given the VGPR with the requested number
-  instead of the AGPR (an `AGPR32` request for 5 yields `v5`), and the reverse. A hint can also
-  follow a copy into another class: an `SGPR32` number can end up on a VGPR copy of the value.
 - **Placing part of a placed value.** Every read of placed storage is hinted, including a read of a
   single element, such as storing an MMA accumulator element by element. The element's hint can
   override the hint of the whole value, which then usually ends up elsewhere, with copies.
-- **Unusable numbers produce wrong code.** An odd start for a 64-bit or wider VGPR or AGPR value on
-  gfx90a and later, or a number beyond the register file, makes register allocation fail with
-  "ran out of registers during register allocation". FlyDSL does not stop on this LLVM error: it is
-  printed and the kernel is built with conflicting registers.
 - **SGPRs hold uniform values only.** Placing a value that differs between lanes in SGPRs fails with
   "illegal VGPR to SGPR copy", with the same consequence: the error is printed and the code is
   wrong.

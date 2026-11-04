@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Register-memory allocation with optional register class and number placement.
+"""Placement of register memory at chosen numbers of a register class.
 
-Imported as ``from flydsl.experimental import register_allocation as fx_regalloc``;
-``rocdl`` holds the AMDGPU register class descriptors (``fx_regalloc.rocdl.VGPR32``).
+Placement is a register allocation hint, not a guarantee; see
+docs/experimental/register_allocation.md. ``rocdl`` holds the AMDGPU register classes.
 """
 
 from . import register as register

@@ -1,23 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Symbolic LLVM register classes and register placement for register memory.
-
-``RegisterAllocator`` allocates register-memory ``Storage[T]`` and places it at
-fixed numbers of a register class. ``register_place`` places register memory
-created elsewhere, such as MMA fragments. ``RegisterClass`` names an LLVM
-register class that is resolved during lowering. Placement is a register
-allocation hint, not a guarantee.
-
-Typical usage example:
-
-    from flydsl.experimental import register_allocation as fx_regalloc
-
-    regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=32)
-    acc = regs.allocate(fx.Array[fx.Float32, 4], alignment=16)  # v32-v35
-
-    fx_regalloc.register_place(frag_A, fx_regalloc.rocdl.AGPR32, start_idx=0)
-"""
+"""Implementation of :mod:`flydsl.experimental.register_allocation`."""
 
 from dataclasses import dataclass
 
@@ -37,10 +21,9 @@ class RegisterClass:
 
     Only the target and TableGen class names and the member width are stored,
     never LLVM's numeric class IDs, which vary across LLVM versions. Placement
-    numbers index the ordered members of the class; for AMDGPU's ``AGPR_32``,
-    ``VGPR_32`` and ``SGPR_32`` they are the ISA ``aN``, ``vN`` and ``sN``
-    numbers. Creating a descriptor does not imply that the backend supports
-    placement in it; lowering checks the class and its width.
+    numbers index the ordered members of the class. Creating a descriptor does
+    not imply that the backend supports placement in it; lowering checks the
+    class and its width.
 
     Attributes:
         target: LLVM target architecture name, such as ``"amdgcn"``.
@@ -69,26 +52,16 @@ class RegisterClass:
 
 
 class RegisterAllocator(Arena):
-    """Allocator of register-memory ``Storage[T]`` at fixed register numbers.
+    """Allocator of register-memory ``Storage[T]`` placed in one register class.
 
     The allocator has the ``allocate(T)`` / ``Storage[T]`` interface of
-    ``SharedAllocator``, and sizes and alignments are likewise in bytes. Each
-    ``allocate`` call creates independent register memory, so there is no
-    common base pointer and no ``free``. ``allocated_bytes`` describes the
-    logical layout including padding, not the kernel's register usage.
-
-    Every allocation is placed in ``register_class``, at numbers starting from
-    class member index ``start_idx``. Register memory without placement is
-    created with ``fx.make_rmem_tensor``.
+    ``SharedAllocator``, with sizes and alignments in bytes. Each ``allocate``
+    call creates independent register memory, so there is no common base
+    pointer and no ``free``.
 
     Attributes:
         register_class: The ``RegisterClass`` of every allocation.
         start_idx: The class member index where numbering starts.
-
-    Example:
-        regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=65)
-        count = regs.allocate(fx.Int32)                               # v65
-        tile = regs.allocate(fx.Vector[fx.Float32, 4], alignment=16)  # v68-v71
     """
 
     def __init__(self, register_class: RegisterClass, start_idx: int):
@@ -193,8 +166,7 @@ def register_place(
     Use this for register memory that ``RegisterAllocator.allocate`` did not
     create, such as MMA fragments. Call it on the allocation base, in the
     block of the allocation; the declaration covers the entire allocation.
-    Target support is checked during lowering. The placement is a strict
-    register allocation hint: LLVM may still put the values elsewhere.
+    Target support is checked during lowering.
 
     Args:
         storage: Register-memory pointer or tensor to place.

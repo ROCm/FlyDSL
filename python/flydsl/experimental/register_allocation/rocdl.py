@@ -4,7 +4,7 @@
 """AMDGPU register class descriptors for :mod:`flydsl.experimental.register_allocation`.
 
 The suffix is the width of one class member, which is also the unit of
-placement numbers.
+placement numbers; the numbers are the ISA ``aN``, ``vN`` and ``sN``.
 """
 
 from .register import RegisterClass
