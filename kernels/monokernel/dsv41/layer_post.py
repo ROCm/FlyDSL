@@ -85,6 +85,7 @@ class LayerPostBuild:
     # K1's GEMV weights, 2 + K2a's wo_a / wo_b, 3 + K2b's dense (router, shared expert)
     pf_next: int = 0
     timeline: bool = False
+    herd: bool = False  # HERD routing (``MoeBuild.herd``): off
 
     def halves(self):
         """(K2a's build key, K2b's): one debug area (absolute offsets) for both."""
@@ -92,7 +93,7 @@ class LayerPostBuild:
             k2a.AttnPostBuild(tokens=self.tokens, tp=self.tp, diag_off=self.diag_off, tok_par=self.tok_par,
                               index_bound_max=self.index_bound_max, index_fp4=self.index_fp4),
             MoeBuild(tokens=self.tokens, tp=self.tp, diag_off=self.diag_off, ug_groups=self.ug_groups,
-                     router_groups=self.router_groups),
+                     router_groups=self.router_groups, herd=self.herd),
         )
 
 
@@ -205,7 +206,7 @@ def build_layer_post(key: LayerPostBuild):
     Lds = fx.union(type("K2Lds", (), {"__annotations__": {"a": LdsA, "b": LdsB}, "__module__": __name__}))
     name = kernel_name("dsv41_layer_post", s=s, e=rs.experts, k=rs.topk, tp=key.tp, g=key.ug_groups, tl=int(key.timeline),
                        pf=key.l2pf, tpar=int(key.tok_par), fr=int(key.forced_route), ib=key.index_bound_max,
-                       rg=key.router_groups, pn=key.pf_next)  # fmt: skip
+                       rg=key.router_groups, pn=key.pf_next, hd=int(key.herd))  # fmt: skip
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def layer_post(

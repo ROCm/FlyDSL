@@ -36,6 +36,10 @@ class MoeBuild:
     # the router's token groups at most (``RouteShape.router_groups``; 0: as many as
     # one round of CTAs holds)
     router_groups: int = 0
+    # HERD routing (aiter ``herd_topk``): route top-(k+1) candidates, each token drops
+    # its least batch-popular one (``moe._herd_route``): fewer distinct experts, a
+    # different routing than the model's (``reference.route_herd``)
+    herd: bool = False
 
 
 # ---------------------------------------------------------------- the task plan

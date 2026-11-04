@@ -407,6 +407,28 @@ def route_topk(logits, bias, topk):
     return ids, w * (MOE_SCALE / total.clamp_min(1e-20))
 
 
+def route_herd(logits, bias, topk):
+    """aiter ``herd_topk`` (``MoeBuild.herd``): ``route_topk``'s top-(k + 1) by score +
+    bias; each expert's count among all tokens' candidates; each token drops its
+    least counted candidate (ties: the lower score, then the lower id), keeps the
+    other k in candidate order, renormalized to MOE_SCALE.
+    -> (ids (T, topk) int64, weights (T, topk) fp32)."""
+    ids, _ = route_topk(logits, bias, topk + 1)
+    x = logits.to(F32)
+    score = torch.nan_to_num(torch.sqrt(torch.where(x > 20.0, x, torch.log1p(torch.exp(x)))), nan=0.0).cpu()
+    vals = torch.gather(score, 1, ids)
+    pop = torch.bincount(ids.flatten(), minlength=x.shape[-1])
+    keep_ids, keep_w = [], []
+    for t in range(ids.shape[0]):
+        cand = ids[t].tolist()
+        drop = min(range(topk + 1), key=lambda j: (int(pop[cand[j]]), float(vals[t, j]), cand[j]))
+        kept = [j for j in range(topk + 1) if j != drop]
+        w = vals[t, kept]
+        keep_ids.append([cand[j] for j in kept])
+        keep_w.append(w * (MOE_SCALE / w.sum().clamp_min(1e-20)))
+    return torch.tensor(keep_ids, dtype=torch.int64), torch.stack(keep_w)
+
+
 def silu_mul_shared(g, u):
     """aiter silu_and_mul with a limit on bf16 gate / up: gate min limit (bf16),
     up clamped, x / (1 + exp(-x)) x up -> bf16."""

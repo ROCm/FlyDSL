@@ -9,7 +9,8 @@ golden (``dsv41.reference``), and its per-layer time.
 * TP4, token parallel, one process a GPU over a HIP VMM peer buffer:
   - accuracy: K1 (seam outputs on the rank's tokens, q and the window row on
     every token) and K2 (seam outputs, ``normed``, the router's top-k and the
-    reduced MoE ``out``, the MoE teacher-forced on the kernel's own rows and route);
+    reduced MoE ``out``, the MoE teacher-forced on the kernel's own rows and route;
+    also the HERD routing build, its top-k against ``reference.route_herd``);
   - performance: one CUDA graph of a decode step (clears, ``step_begin``, then
     ``LAYERS`` layers of K1 + K2, every layer its own weights), each kernel's
     device time from torch.profiler, held to a budget. The step replays a served
@@ -205,14 +206,14 @@ def _k2_case(s, tp, rank, seed=0):
     return {"x": x, "w": w, "q": q, "sink": sink, "pool": pool, "kmeta": kmeta, "attn": attn, "wm": wm}
 
 
-def _k2(s, tp, rank, buf, gather) -> dict:
+def _k2(s, tp, rank, buf, gather, herd=False) -> dict:
     """One rank's token-parallel K2 (bounded waits) -> {output: rel_l2}, plus
     ``route`` (1.0: the kernel's top-k is its own logits' golden top-k) and
     ``waits`` (CTAs that gave up a wait)."""
     dev = "cuda"
     c = _k2_case(s, tp, rank)
     w, x, wm = c["w"], c["x"], c["wm"]
-    opts = {"tok_par": True}
+    opts = {"tok_par": True, "herd": herd}
     layout = k2_layout(LayerPostBuild(tokens=s, tp=tp, **opts))
     diag_off = -(-max(o + n for o, n in layout.values()) // 256) * 256
     scratch = torch.zeros(diag_off + BLOCKS * (DIAG_WORDS + 1) * 4, dtype=torch.uint8, device=dev)
@@ -268,16 +269,21 @@ def _k2(s, tp, rank, buf, gather) -> dict:
     logits = ref.bf16(lp.sum(-1))
     xk = o["normed"].float()
     errs["logits"] = _rel_l2(logits, ref.bf16((xk @ wm["gate_w"].float().T).cpu()))
-    route = _pairs(sc, layout, "route").view(ROUTE_COPIES, s, 2, TOPK)[0]
+    # ROUTE: each token's top-k (ids, weights); HERD: its top-(k + 1) candidates (ids,
+    # scores), the drop is the kernel's own (checked through ``out``)
+    kc = TOPK + int(herd)
+    route = _pairs(sc, layout, "route").view(ROUTE_COPIES, s, 2, kc)[0]
     ids, wts = route[:, 0].long(), route[:, 1].view(torch.float32)
-    errs["route"] = float(torch.equal(ids, ref.route_topk(logits, wm["bias"].cpu(), TOPK)[0]))
+    errs["route"] = float(torch.equal(ids, ref.route_topk(logits, wm["bias"].cpu(), kc)[0]))
+    if herd:
+        ids, wts = ref.route_herd(logits, wm["bias"].cpu(), TOPK)
     full = torch.stack([v.float() for v in gather(ref.moe_partial(wm, xk, ids, wts.to(dev), tp).cpu())])
     errs["out"] = _rel_l2(got["out"][own], ref.bf16(full.sum(0))[own])
     errs["waits"] = waits
     return errs
 
 
-def _accuracy_rank(rank, tp, s, port, results):
+def _accuracy_rank(rank, tp, s, herd, port, results):
     torch.cuda.set_device(rank)
     torch.set_num_threads(8)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=tp)
@@ -296,7 +302,7 @@ def _accuracy_rank(rank, tp, s, port, results):
             dist.barrier()
         with VmmPeerBuffer(peer_bytes(s, tp), rank=rank, npes=tp) as buf:
             dist.barrier()
-            k2 = _k2(s, tp, rank, buf, gather)
+            k2 = _k2(s, tp, rank, buf, gather, herd)
             dist.barrier()
         results[rank] = {"k1": k1, "k2": k2}
     finally:
@@ -306,9 +312,11 @@ def _accuracy_rank(rank, tp, s, port, results):
 # ---------------------------------------------------------------------------- perf
 
 
-def _perf_rank(rank, tp, s, layers, port, results, warmup=5, replays=10):
+def _perf_rank(rank, tp, s, layers, route, port, results, warmup=5, replays=10):
     """One rank of a captured decode step of ``layers`` layers -> each kernel's mean
-    device time a call and the step's replay wall time (us)."""
+    device time a call, the step's replay wall time (us) and the last layer's |U|.
+    ``route``: "recorded" (the served step's picks, ``forced_route``), "router" (the
+    kernel's own of the random router) or "herd" (that, HERD's)."""
     import torch.profiler as tprof
 
     from kernels.monokernel.dsv41.peer import VmmPeerBuffer, memset_async
@@ -377,9 +385,10 @@ def _perf_rank(rank, tp, s, layers, port, results, warmup=5, replays=10):
               "aux": dv(torch.zeros(16, dtype=torch.int32)), "n1": dv(torch.zeros(s, HIDDEN, dtype=bf)),
               "iq": dv(torch.zeros(s, 32, 128, dtype=torch.uint8)), "iqs": dv(torch.zeros(s, 32)), "iw": dv(torch.zeros(s, 32))}  # fmt: skip
         scr1 = dv(torch.zeros(k1_scratch_bytes(s), dtype=torch.uint8))
-        k2key = {"tok_par": True, "forced_route": True}
+        k2key = {"tok_par": True, "forced_route": route == "recorded", "herd": route == "herd"}
+        k2lay = k2_layout(LayerPostBuild(tokens=s, tp=tp, **k2key))
         scr2 = dv(torch.zeros(k2_scratch_bytes(LayerPostBuild(tokens=s, tp=tp, **k2key)), dtype=torch.uint8))
-        froute_off = k2_layout(LayerPostBuild(tokens=s, tp=tp, **k2key))["froute"][0]
+        froute_off = k2lay["froute"][0] if route == "recorded" else 0
         epoch = dv(torch.zeros(4, dtype=torch.int32))
         buf = VmmPeerBuffer(symmetric_bytes(s, tp), rank=rank, npes=tp)
         sym, peers, bar = buf.local_address, buf.addresses, barrier_offset(s, tp)
@@ -389,7 +398,8 @@ def _perf_rank(rank, tp, s, layers, port, results, warmup=5, replays=10):
         def step(stream):
             scr1.zero_()
             scr2.zero_()
-            scr2[froute_off : froute_off + froute.numel()].copy_(froute)
+            if route == "recorded":
+                scr2[froute_off : froute_off + froute.numel()].copy_(froute)
             memset_async(sym, bar, stream)
             begin(p(epoch), sym, p(peers), bar, rank, stream=stream)
             for li in range(layers):
@@ -450,7 +460,14 @@ def _perf_rank(rank, tp, s, layers, port, results, warmup=5, replays=10):
             for stem, name in (("attn_pre", "k1_us"), ("layer_post", "k2_us")):
                 if stem in e.key and dev_us(e) > 0:
                     k[name] = dev_us(e) / e.count
-        results[rank] = k | {"step_us": t0.elapsed_time(t1) * 1e3 / replays}
+        # the last layer's |U|: its picks (recorded / router), or HERD's of its candidates
+        sc = scr2.cpu()
+        kc = TOPK + int(route == "herd")
+        ids = _pairs(sc, k2lay, "route").view(ROUTE_COPIES, s, 2, kc)[0][:, 0].long()
+        if route == "herd":
+            lp = _pairs(sc, k2lay, "logit").view(torch.float32).view(s, -1, ROUTER_PARTS)
+            ids = ref.route_herd(ref.bf16(lp.sum(-1)), lw[-1][3][1].cpu(), TOPK)[0]
+        results[rank] = k | {"step_us": t0.elapsed_time(t1) * 1e3 / replays, "u": int(torch.unique(ids).numel())}
         graph = None
         buf.close()
     finally:
@@ -469,8 +486,8 @@ def _spawn(fn, *args):
     return [results[r] for r in range(TP)]
 
 
-def run_accuracy(s=S):
-    per = _spawn(_accuracy_rank, s)
+def run_accuracy(s=S, herd=False):
+    per = _spawn(_accuracy_rank, s, herd)
     bad = []
     for r, res in enumerate(per):
         print(f"rank {r} K1: " + ", ".join(f"{k} {v:.2e}" for k, v in res["k1"].items()))
@@ -484,12 +501,12 @@ def run_accuracy(s=S):
     return bad
 
 
-def run_perf(s=S, layers=LAYERS):
-    per = _spawn(_perf_rank, s, layers)
+def run_perf(s=S, layers=LAYERS, route="recorded"):
+    per = _spawn(_perf_rank, s, layers, route)
     k1 = sum(r["k1_us"] for r in per) / TP
     k2 = sum(r["k2_us"] for r in per) / TP
     step = max(r["step_us"] for r in per)
-    res = {"tokens": s, "tp": TP, "layers": layers, "k1_us": round(k1, 1), "k2_us": round(k2, 1),
+    res = {"tokens": s, "tp": TP, "layers": layers, "route": route, "u_last": per[0]["u"], "k1_us": round(k1, 1), "k2_us": round(k2, 1),
            "layer_wall_us": round(step / layers, 1), "k1_us_max": K1_US_MAX, "k2_us_max": K2_US_MAX}  # fmt: skip
     print(json.dumps(res), flush=True)
     return res
@@ -499,8 +516,9 @@ def run_perf(s=S, layers=LAYERS):
 @pytest.mark.rocm_lower
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(not _gfx1250() or torch.cuda.device_count() < TP, reason=f"needs {TP} gfx1250 GPUs")
-def test_layer_tp4_accuracy():
-    bad = run_accuracy()
+@pytest.mark.parametrize("herd", [False, True])
+def test_layer_tp4_accuracy(herd):
+    bad = run_accuracy(herd=herd)
     assert not bad, bad
 
 
@@ -513,14 +531,27 @@ def test_layer_tp4_perf():
     assert res["k1_us"] <= K1_US_MAX and res["k2_us"] <= K2_US_MAX, res
 
 
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(not _gfx1250() or torch.cuda.device_count() < TP, reason=f"needs {TP} gfx1250 GPUs")
+def test_layer_tp4_perf_herd():
+    """HERD against the kernel's own routing (the random router's: many distinct
+    experts): fewer of them, and K2 no slower."""
+    own, herd = run_perf(route="router"), run_perf(route="herd")
+    print(f"HERD: |U| {own['u_last']} -> {herd['u_last']}, K2 {own['k2_us']} -> {herd['k2_us']} us")
+    assert herd["u_last"] < own["u_last"] and herd["k2_us"] <= own["k2_us"], (own, herd)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--perf", action="store_true", help="the TP4 timing alone")
     ap.add_argument("--accuracy", action="store_true", help="the TP4 accuracy alone")
     ap.add_argument("--layers", type=int, default=LAYERS)
+    ap.add_argument("--route", choices=("recorded", "router", "herd"), default="recorded", help="--perf's routing")
     a = ap.parse_args()
     if a.perf or not a.accuracy:
-        run_perf(layers=a.layers)
+        run_perf(layers=a.layers, route=a.route)
     if a.accuracy or not a.perf:
         bad = run_accuracy()
         print("PASS" if not bad else f"FAIL {bad}")

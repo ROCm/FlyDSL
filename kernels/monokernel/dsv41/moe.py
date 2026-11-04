@@ -123,7 +123,7 @@ def scratch_layout(key: MoeBuild) -> dict:
         "x8s": s * HIDDEN // 32 // 2,
         "x8rdy": s,
         "logit": s * rs.experts * ROUTER_PARTS,
-        "route": ROUTE_COPIES * s * 2 * rs.topk,
+        "route": ROUTE_COPIES * s * 2 * (rs.topk + int(key.herd)),
         "smid": s * d.sh_inter,
         "smq": s * d.sh_inter // 4,
         "smc": s * d.sh_inter // 32,
@@ -322,11 +322,15 @@ def stage_route(c, t, tl=None):
     ``red``). The top-k write (id, weight) at their place and wave 0's first k
     lanes sum the weights in pick order and publish. Picking one by one (a
     wave's argmax, 3 butterflies a pick, then a merge) took ~10 us at S = 48;
-    counting against all E experts in LDS 7.5 us (2026-10-29 stamps)."""
+    counting against all E experts in LDS 7.5 us (2026-10-29 stamps). ``herd``:
+    the top-(k + 1) published with their scores as they are (``_herd_route``
+    drops one and renormalizes)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     rs = c["rs"]
-    topk, experts = rs.topk, rs.experts
+    herd = c["herd"]
+    topk, experts = rs.topk + int(herd), rs.experts
     forced = c.get("froute") is not None
+    assert not (forced and herd), "a recorded routing is the model's: no HERD"
     assert experts <= THREADS and experts % WAVE == 0 and topk <= WAVE
     n_c = experts // WAVE * topk  # candidates
     a = c["args"]
@@ -395,7 +399,10 @@ def stage_route(c, t, tl=None):
         # a recorded routing (a bench's ``--route-npz``) published in place of the picks,
         # the logits still awaited and ranked: the served path's time (publishing it
         # without them put the route ~8 us early: K2 97.1 vs 105.2 us, 2026-11-03)
-        pub_id, pub_w = _recorded_pick(c, t, k, topk) if forced else (my_id, my_w * scale)
+        if const_expr(herd):
+            pub_id, pub_w = my_id, my_w
+        else:
+            pub_id, pub_w = _recorded_pick(c, t, k, topk) if forced else (my_id, my_w * scale)
         if lane < topk:
             for r in range_constexpr(ROUTE_COPIES):
                 slot = (r * c["S"] + t) * 2 * topk + lane
@@ -414,6 +421,76 @@ def lane_prefix(v, lane):
 
 
 @traced
+def _herd_route(c, tab):
+    """``MoeBuild.herd`` (aiter ``herd_topk``'s finalize): every token's top-(k + 1)
+    candidates (ids, scores) from ROUTE into RED; each expert's popularity among the
+    step's candidates (counted in the expert bitmaps' words, before ``load_route``
+    clears them); each token drops its least popular candidate (ties: the lower
+    score, then the lower id) and keeps the other k in candidate order, renormalized
+    to SCALE -> ``tab``'s (ids, weights) rows, as ``_poll_route`` leaves them."""
+    s, tid = c["S"], c["tid"]
+    rs = c["rs"]
+    topk, experts = rs.topk, rs.experts
+    kc = topk + 1
+    m = s * kc
+    cand, pop = c["red"], tab + rs.mask0
+    assert 2 * m <= WAVES * WAVE * 8 and m <= THREADS
+    idxs = [plus(pas, tid) for pas in range(0, 2 * m, THREADS)]
+    copy_at = c["bid"] % ROUTE_COPIES * (2 * m)
+    got = c["poll"]([(c["route"], copy_at + fx.min(idx, 2 * m - 1), 1) for idx in idxs])
+    for i in range_constexpr(len(idxs)):
+        if idxs[i] < 2 * m:
+            fx.ptr_store(got[i][0].bitcast(fx.Float32), cand + idxs[i])
+    for pas in range_constexpr(0, experts, THREADS):
+        idx = plus(pas, tid)
+        if idx < experts:
+            fx.ptr_store(fx.Int32(0), pop + idx)
+    lds_barrier()
+    if tid < m:
+        eid = fx.ptr_load(cand + (tid // kc * 2 * kc + tid % kc)).bitcast(fx.Int32)
+        fx.llvm.atomic_add(pop + eid, fx.Int32(1), syncscope="workgroup")
+    lds_barrier()
+    if tid < s:
+        row = cand + tid * 2 * kc
+        ids = [fx.ptr_load(row + j).bitcast(fx.Int32) for j in range_constexpr(kc)]
+        vals = [fx.Float32(fx.ptr_load(row + (kc + j))) for j in range_constexpr(kc)]
+        pops = [fx.ptr_load(pop + ids[j]) for j in range_constexpr(kc)]
+        drop, d_id, d_val, d_pop = fx.Int32(0), ids[0], vals[0], pops[0]
+        for j in range_constexpr(1, kc):
+            lower = (vals[j] < d_val) | ((vals[j] == d_val) & (ids[j] < d_id))
+            take = (pops[j] < d_pop) | ((pops[j] == d_pop) & lower)
+            drop = take.select(fx.Int32(j), drop)
+            d_id = take.select(ids[j], d_id)
+            d_val = fx.Float32(take.select(vals[j], d_val))
+            d_pop = take.select(pops[j], d_pop)
+        total = fx.Float32(0.0)
+        for j in range_constexpr(kc):
+            total = total + fx.Float32((drop != j).select(vals[j], fx.Float32(0.0)))
+        scale = fx.Float32(SCALE) / fx.max(total, fx.Float32(1e-20))
+        out = tab + tid * 2 * topk
+        for j in range_constexpr(kc):
+            at = j - (drop < j).select(fx.Int32(1), fx.Int32(0))
+            w = fx.Float32(vals[j] * scale)
+            if drop != j:
+                fx.ptr_store(ids[j], out + at)
+                fx.ptr_store(w.bitcast(fx.Int32), out + (topk + at))
+    lds_barrier()
+
+
+@traced
+def _poll_route(c, tab):
+    """Every token's (ids, weights) from ROUTE into ``tab``'s rows."""
+    s, tid = c["S"], c["tid"]
+    n = s * c["rs"].topk
+    idxs = [plus(pas, tid) for pas in range(0, 2 * n, THREADS)]
+    copy_at = c["bid"] % ROUTE_COPIES * (2 * n)
+    got = c["poll"]([(c["route"], copy_at + fx.min(idx, 2 * n - 1), 1) for idx in idxs])
+    for i in range_constexpr(len(idxs)):
+        if idxs[i] < 2 * n:
+            fx.ptr_store(got[i][0], tab + idxs[i])
+
+
+@traced
 def load_route(c, tab):
     """Every token's (ids, weights) into LDS ``tab``, then the union U of the ids
     (ascending), each (t, k)'s slot, each expert's slot, the picks in slot order
@@ -425,12 +502,10 @@ def load_route(c, tab):
     topk, max_u, experts = rs.topk, rs.max_u, rs.experts
     n = s * topk
     assert s <= 32 * MASK_WORDS
-    idxs = [plus(pas, tid) for pas in range(0, 2 * n, THREADS)]
-    copy_at = c["bid"] % ROUTE_COPIES * (2 * n)
-    got = c["poll"]([(c["route"], copy_at + fx.min(idx, 2 * n - 1), 1) for idx in idxs])
-    for i in range_constexpr(len(idxs)):
-        if idxs[i] < 2 * n:
-            fx.ptr_store(got[i][0], tab + idxs[i])
+    if const_expr(c["herd"]):
+        _herd_route(c, tab)
+    else:
+        _poll_route(c, tab)
     for pas in range_constexpr(0, MASK_WORDS * experts, THREADS):
         idx = plus(pas, tid)
         if idx < MASK_WORDS * experts:
@@ -1654,7 +1729,7 @@ def moe_context(key, lds, mb, bases, layout, scratch, args, rank, sym, x_ready=F
         "put": mb.put, "put_bf": mb.put_bf, "put_words": mb.put_words, "poll": mb.poll, "tag": mb.tag,
         "peer_addr": lambda p: bases[p], "rank": rank, "sym": sym, "peer": peer_offsets(s, key.tp),
         "args": args, "x_ready": x_ready, "x_cm": SCOPE_DEV if x_ready else 0, "tl": None, "l2pf": 0,
-        "tok_par": False, "x_xg": None,
+        "tok_par": False, "x_xg": None, "herd": key.herd,
     }  # fmt: skip
     for region, (off, _) in layout.items():
         c[region] = sreg(scratch, off, region)
@@ -1669,7 +1744,7 @@ def build_moe(key: MoeBuild):
     rs = route_shape(key)
     layout = scratch_layout(key)
     Lds = moe_lds(key)
-    name = kernel_name("dsv41_moe", s=s, e=rs.experts, k=rs.topk, tp=key.tp, g=key.ug_groups)
+    name = kernel_name("dsv41_moe", s=s, e=rs.experts, k=rs.topk, tp=key.tp, g=key.ug_groups, hd=int(key.herd))
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def moe(
