@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-04T08:22:17Z",
+ "updated": "2026-11-04T09:25:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,13 +55,41 @@
    "branch": "pr/enh-coop-op-shortcuts",
    "event": "pull_request",
    "title": "[Chore][Coop] Add specialization shortcut for primitives",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41793280671",
    "created_at": "2026-11-04T07:35:04Z",
-   "updated_at": "2026-11-04T07:41:10Z",
+   "updated_at": "2026-11-04T09:22:09Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-04T09:22:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41793280671/job/126496064108"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-04T09:22:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41793280671/job/126496064181"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-04T09:22:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41793280671/job/126496064555"
+    }
+   ]
   },
   {
    "run_id": 41769488913,
