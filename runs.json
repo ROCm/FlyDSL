@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-04T04:11:33Z",
+ "updated": "2026-11-04T05:34:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41769488913",
    "created_at": "2026-11-04T03:49:43Z",
-   "updated_at": "2026-11-04T03:53:53Z",
+   "updated_at": "2026-11-04T05:31:47Z",
    "actor": "vlluvia",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T04:14:59Z",
+     "completed_at": "2026-11-04T04:41:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41769488913/job/126383679577"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T04:53:29Z",
+     "completed_at": "2026-11-04T05:31:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41769488913/job/126383679578"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T04:15:16Z",
+     "completed_at": "2026-11-04T04:48:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41769488913/job/126383679694",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 41758721274,
