@@ -238,6 +238,7 @@ class CompileEnvManager(EnvManager):
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
     llvm_dir = OptStr("", description="External LLVM/MLIR install prefix for final code generation")
+    enable_asan = OptBool(False, description="Enable GPU Address Sanitizer (requires HSA_XNACK=1 at runtime)")
 
 
 class DebugEnvManager(EnvManager):
