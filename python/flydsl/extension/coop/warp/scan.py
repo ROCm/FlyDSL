@@ -26,6 +26,8 @@ __all__ = [
     "WarpScan",
     "warp_inclusive_scan",
     "warp_exclusive_scan",
+    "warp_inclusive_sum",
+    "warp_exclusive_sum",
     "warp_scan",
     "warp_scan_with_aggregate",
     "warp_broadcast",
@@ -351,6 +353,30 @@ def warp_exclusive_scan(
     return exclusive if valid_items is None else _select_value(lane_id() % width < valid_items, exclusive, value)
 
 
+def warp_inclusive_sum(
+    value,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_inclusive_scan(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_inclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_exclusive_sum(
+    value,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_exclusive_scan(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_exclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
+
+
 def warp_scan(
     value,
     op,
@@ -643,6 +669,36 @@ class WarpScan(WarpPrimitive):
         value = cls._prepare(value)
         return cls._invoke(
             warp_exclusive_scan, value, op, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
+        )
+
+    @classmethod
+    def inclusive_sum(
+        cls,
+        value,
+        *,
+        init=None,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``inclusive_scan(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(
+            warp_inclusive_sum, value, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
+        )
+
+    @classmethod
+    def exclusive_sum(
+        cls,
+        value,
+        *,
+        init=None,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``exclusive_scan(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(
+            warp_exclusive_sum, value, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
         )
 
     @classmethod

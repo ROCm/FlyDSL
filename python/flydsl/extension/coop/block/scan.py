@@ -586,6 +586,94 @@ class BlockScan(metaclass=_BlockScanMeta):
         )
 
     @classmethod
+    def inclusive_sum(
+        cls,
+        value,
+        *,
+        storage,
+        init=None,
+        identity=None,
+        valid_items: int | Integer | None = None,
+        prefix_callback=None,
+    ):
+        """Shorthand for ``inclusive(value, fx.ReductionOp.ADD, ...)``."""
+        return cls.inclusive(
+            value,
+            ReductionOp.ADD,
+            storage=storage,
+            init=init,
+            identity=identity,
+            valid_items=valid_items,
+            prefix_callback=prefix_callback,
+        )
+
+    @classmethod
+    def exclusive_sum(
+        cls,
+        value,
+        *,
+        storage,
+        init=None,
+        identity=None,
+        valid_items: int | Integer | None = None,
+        prefix_callback=None,
+    ):
+        """Shorthand for ``exclusive(value, fx.ReductionOp.ADD, ...)``."""
+        return cls.exclusive(
+            value,
+            ReductionOp.ADD,
+            storage=storage,
+            init=init,
+            identity=identity,
+            valid_items=valid_items,
+            prefix_callback=prefix_callback,
+        )
+
+    @classmethod
+    def inclusive_sum_with_aggregate(
+        cls,
+        value,
+        *,
+        storage,
+        init=None,
+        identity=None,
+        valid_items: int | Integer | None = None,
+        prefix_callback=None,
+    ):
+        """Shorthand for ``inclusive_with_aggregate(value, fx.ReductionOp.ADD, ...)``."""
+        return cls.inclusive_with_aggregate(
+            value,
+            ReductionOp.ADD,
+            storage=storage,
+            init=init,
+            identity=identity,
+            valid_items=valid_items,
+            prefix_callback=prefix_callback,
+        )
+
+    @classmethod
+    def exclusive_sum_with_aggregate(
+        cls,
+        value,
+        *,
+        storage,
+        init=None,
+        identity=None,
+        valid_items: int | Integer | None = None,
+        prefix_callback=None,
+    ):
+        """Shorthand for ``exclusive_with_aggregate(value, fx.ReductionOp.ADD, ...)``."""
+        return cls.exclusive_with_aggregate(
+            value,
+            ReductionOp.ADD,
+            storage=storage,
+            init=init,
+            identity=identity,
+            valid_items=valid_items,
+            prefix_callback=prefix_callback,
+        )
+
+    @classmethod
     def _scan(cls, value, op, storage, *, inclusive, init=None, identity=None, valid_items=None, prefix_callback=None):
         if cls.block_threads is None:
             raise TypeError("specialize first, e.g. BlockScan[fx.Float32, 256]")
