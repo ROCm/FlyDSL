@@ -3,10 +3,13 @@
 
 """Explicit register placement with the experimental register_allocation feature.
 
-Experimental features are imported by their subpackage rather than reached through
-``fx``, so every use is visibly experimental:
+Experimental features are not flattened into ``fx``. Like the extension libraries
+(``fx.coop``), each one is a subpackage, here ``fx.experimental.register_allocation``,
+so every use is visibly experimental. This example binds it to a short name:
 
-    from flydsl.experimental import register_allocation as fx_regalloc
+    fx_regalloc = fx.experimental.register_allocation
+
+which is equivalent to ``from flydsl.experimental import register_allocation as fx_regalloc``.
 
 The feature has two entry points:
 
@@ -31,7 +34,8 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.experimental import register_allocation as fx_regalloc
+
+fx_regalloc = fx.experimental.register_allocation
 
 BLOCK_SIZE = 64
 BLOCKS = 4
