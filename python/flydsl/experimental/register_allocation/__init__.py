@@ -3,7 +3,8 @@
 
 """Register-memory allocation with optional register class and number placement.
 
-Imported as ``from flydsl.experimental import register_allocation as fx_regalloc``;
+Reached as ``fx.experimental.register_allocation``, or imported with
+``from flydsl.experimental import register_allocation as fx_regalloc``;
 ``rocdl`` holds the AMDGPU register class descriptors (``fx_regalloc.rocdl.VGPR32``).
 """
 

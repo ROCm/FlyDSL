@@ -7,11 +7,17 @@
 register class: the A/B operands of an MFMA in given AGPRs, an accumulator in a given VGPR range, a
 few uniform values in fixed SGPRs.
 
-The feature is experimental and may change or be removed without a deprecation period. It is not
-reachable from the stable `fx` namespace. Import its subpackage explicitly, so that every use is
-visibly experimental:
+The feature is experimental and may change or be removed without a deprecation period. Its names
+are not flattened into the stable `fx` namespace: like the extension libraries under `fx.coop` and
+`fx.random`, it is a subpackage, reached as `fx.experimental.register_allocation`, so every use is
+visibly experimental. Use `fx.experimental.register_allocation.<name>` directly, or bind the
+subpackage to a short name, as the rest of this page does:
 
 ```python
+import flydsl.expr as fx
+
+fx_regalloc = fx.experimental.register_allocation
+# or, equivalently:
 from flydsl.experimental import register_allocation as fx_regalloc
 ```
 
