@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-04T00:41:36Z",
+ "updated": "2026-11-04T01:14:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,24 @@
    "branch": "jli/rocdl-sched-experimental",
    "event": "pull_request",
    "title": "[ROCDL] Move unaccepted sched_* register hints to experimental",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006",
    "created_at": "2026-11-03T23:35:48Z",
-   "updated_at": "2026-11-04T00:29:37Z",
+   "updated_at": "2026-11-04T00:56:48Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-04T00:29:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145284"
+     "completed_at": "2026-11-04T00:58:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145284",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -38,9 +41,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-04T00:29:37Z",
+     "started_at": "2026-11-04T00:56:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145439"
     }
