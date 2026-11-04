@@ -3,17 +3,19 @@
 ## RDNA4 MXFP4 × FP8 dense GEMM
 
 `flydsl.kernels.gemm.rdna4_mxfp4` exposes `prepare_weights`, `gemm`,
-`tune_gemm`, `choose_config`, and `rank_configurations`. Source lives under
-`kernels/gemm/rdna4_mxfp4/`. It targets ROCm gfx1200/gfx1201; measured performance
+`choose_config`, `get_device_capabilities`, `get_warmup_keys`, and `compile_gemm`.
+Source lives under `kernels/gemm/rdna4_mxfp4/`. It targets ROCm gfx1200/gfx1201; measured performance
 currently covers gfx1201. Packed OCP MXFP4 weights remain compressed and feed
 native FP8 WMMA with FP32 accumulation and BF16/FP16 output.
 
 Preparation losslessly folds block scales into FP8/BF8 operands when possible,
 with exact grouped scaling for wider spans. The two strategies are register
-GEMM and a hybrid with A in registers and B staged in LDS. A cached CPU shape
-policy selects configurations and adapts K divisors and masked copies.
-Optional pre-capture `tune_gemm` calibration uses the native FlyDSL autotuning
-cache; ordinary GEMM calls read measured choices without benchmarking. The
+GEMM and a hybrid with A in registers and B staged in LDS. A pure host selector
+uses shape, processor count, cache capacity and LDS limits to choose launch
+configurations. Runtime and compile-only startup use the same rules and cached
+capacities. There is no runtime JSON, profile matching or configuration search.
+Explicit configurations can be compared with the offline benchmark and passed
+to `gemm(config=...)`; the former `tune_gemm` API is removed. The
 `cache_policy` hint is `auto`, `hot`, or `rotating` (model-layer cycling).
 
 See [the kernel API and configuration guide](../kernels/gemm/rdna4_mxfp4/README.md)

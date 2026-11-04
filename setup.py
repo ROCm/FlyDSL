@@ -421,7 +421,7 @@ setup(
     # IMPORTANT: we must include versioned shared libraries (e.g. *.so.22.0git),
     # otherwise the wheel will miss required runtime deps and be unusable.
     package_data={
-        "flydsl.kernels.gemm.rdna4_mxfp4": ["heuristic.json", "README.md"],
+        "flydsl.kernels.gemm.rdna4_mxfp4": ["README.md"],
         "flydsl._mlir": [
             "_mlir_libs/_*.so",
             "_mlir_libs/libFlyPythonCAPI.so.*",

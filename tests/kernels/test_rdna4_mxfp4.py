@@ -3,16 +3,10 @@
 
 """MXFP4 bit packing, scale modes, tails, replay and device ownership on RDNA4."""
 
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
-from kernels.gemm.rdna4_mxfp4 import gemm, prepare_weights, tune_gemm
+from kernels.gemm.rdna4_mxfp4 import gemm, get_device_capabilities, prepare_weights
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -132,8 +126,6 @@ def test_compile_only_warmup_serves_unseen_rows_with_guarded_stores(mode, tmp_pa
     from kernels.gemm.rdna4_mxfp4 import compile_gemm, get_warmup_keys
 
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "kernels"))
-    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "tuning"))
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
     _, packed, _, scales = make_case((73, 93, 672), seed=301)
     prepared = prepare_weights(packed, scales, mode=mode)
     keys = get_warmup_keys(
@@ -144,6 +136,7 @@ def test_compile_only_warmup_serves_unseen_rows_with_guarded_stores(mode, tmp_pa
         normal_only=prepared.normal_only,
         device_id=packed.device.index,
         cache_policy="rotating",
+        **get_device_capabilities(packed.device.index),
     )
     allocated = torch.cuda.memory_allocated()
     for key in keys:
@@ -201,90 +194,3 @@ def test_input_device_owns_compilation_and_execution():
             assert torch.cuda.current_device() == 0
     finally:
         torch.cuda.set_device(original)
-
-
-def test_native_calibration_persists_and_replays_changed_inputs(tmp_path, monkeypatch):
-    from kernels.gemm.rdna4_mxfp4 import get_warmup_keys
-    from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
-    from kernels.gemm.rdna4_mxfp4.tuning import cached_configurations
-
-    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
-    x, packed, xs, scales = make_case((7, 80, 224))
-    prepared = prepare_weights(packed, scales)
-    check(gemm(x, prepared, xs, cache_policy="hot"), reference(x, packed, xs, scales))
-    assert not list(tmp_path.iterdir())
-    choice = tune_gemm(x, prepared, xs[:, None], cache_policy="hot")
-    cached = cached_configurations(
-        prepared.n,
-        prepared.k,
-        7,
-        mode=prepared.mode,
-        normal_only=prepared.normal_only,
-        nibble_layout=prepared.nibble_layout,
-        dtype=torch.bfloat16,
-        device_id=x.device.index,
-        cache_policy="hot",
-    )
-    assert (7, choice) in cached
-    keys = get_warmup_keys(
-        prepared.n,
-        prepared.k,
-        7,
-        mode=prepared.mode,
-        normal_only=prepared.normal_only,
-        dtype=torch.bfloat16,
-        device_id=x.device.index,
-        cache_policy="hot",
-    )
-    assert (
-        specialization_key(
-            7,
-            prepared.n,
-            prepared.k,
-            mode=prepared.mode,
-            normal_only=prepared.normal_only,
-            dtype=torch.bfloat16,
-            device_id=x.device.index,
-            config=choice,
-        )
-        in keys
-    )
-    cache = tmp_path / "rdna4_mxfp4_choice_d0.json"
-    assert cache.exists() and json.loads(cache.read_text())
-    timestamp = cache.stat().st_mtime_ns
-    y = gemm(x, prepared, xs, cache_policy="hot")
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        gemm(x, prepared, xs, out=y, cache_policy="hot")
-    x.view(torch.uint8).bitwise_xor_(128)
-    xs.mul_(0.5)
-    graph.replay()
-    torch.cuda.synchronize()
-    check(y, reference(x, packed, xs, scales))
-
-    # A new process has no in-memory choice: explicit calibration must load
-    # the native disk cache without measuring configurations again.
-    code = """
-import json
-import torch
-from kernels.gemm.rdna4_mxfp4 import prepare_weights, tune_gemm
-g = torch.Generator(device='cuda').manual_seed(19)
-x = (torch.randn(7, 224, generator=g, device='cuda') * 3).to(torch.float8_e4m3fn)
-p = torch.randint(0, 256, (80, 112), generator=g, device='cuda', dtype=torch.uint8)
-s = torch.randint(124, 132, (80, 7), generator=g, device='cuda', dtype=torch.uint8)
-xs = torch.linspace(0.5, 1.5, 7, device='cuda')
-print(json.dumps(tune_gemm(x, prepare_weights(p, s), xs, cache_policy='hot'), sort_keys=True))
-"""
-    root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=root,
-        env=dict(os.environ, PYTHONPATH=str(root)),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert "[autotune]" not in result.stdout
-    assert json.loads(result.stdout.strip().splitlines()[-1]) == choice
-    assert cache.stat().st_mtime_ns == timestamp

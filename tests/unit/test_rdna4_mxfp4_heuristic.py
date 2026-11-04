@@ -10,18 +10,15 @@ import sys
 import pytest
 
 from kernels.gemm.rdna4_mxfp4.heuristic import (
-    _candidates,
     _legal_config,
-    _model,
     _selected,
-    _tuning_candidates,
     choose_config,
 )
 
 pytestmark = pytest.mark.l0_backend_agnostic
 
 
-@pytest.mark.parametrize("first_module", ["entrypoint", "tuning"])
+@pytest.mark.parametrize("first_module", ["entrypoint", "heuristic"])
 def test_public_gemm_is_callable_after_importing_support_modules(first_module):
     """Internal imports must not shadow the package's public GEMM function."""
     subprocess.run(
@@ -71,14 +68,6 @@ def test_unseen_shapes_select_legal_tiles(shape, cache_policy):
         assert 0 <= cfg["operand_prefetch"] < cfg["tile_k"] // 16
 
 
-@pytest.mark.parametrize("shape", [(1, 17, 32), (73, 4099, 1568), (257, 1536, 544)])
-def test_all_candidates_obey_factory_requirements(shape):
-    candidates = list(_candidates(*shape))
-    assert candidates
-    assert {c["engine"] for c in candidates} <= {"register", "hybrid"}
-    assert all(_legal_config(c, *shape) for c in candidates)
-
-
 @pytest.mark.parametrize("shape", [(17, 513, 544), (192, 3840, 3840), (8193, 4097, 1568)])
 def test_grouped_fallback_preserves_k32_scaling(shape):
     cfg = choose_config(*shape, "grouped")
@@ -103,7 +92,6 @@ def test_selector_has_no_gpu_or_machine_learning_dependency(monkeypatch):
             raise AssertionError("runtime selector imported " + name)
         return ordinary_import(name, *args, **kwargs)
 
-    _model.cache_clear()
     _selected.cache_clear()
     monkeypatch.setattr(builtins, "__import__", checked_import)
     assert choose_config(57, 6913, 2112)["engine"] in ("register", "hybrid")
@@ -122,114 +110,49 @@ def test_unknown_policy_or_mode_rejected():
         choose_config(1, 64, 256, "unknown")
 
 
-@pytest.mark.parametrize("shape", [(7, 6147, 2464), (40, 5120, 8704), (80, 17408, 5120), (1, 17, 32)])
-@pytest.mark.parametrize("cache_policy", ["auto", "hot", "rotating"])
-def test_calibration_shortlist_is_bounded_legal_and_contains_proposal(shape, cache_policy):
-    candidates = _tuning_candidates(*shape, cache_policy=cache_policy)
-    assert 1 <= len(candidates) <= 64
-    assert len({tuple(sorted(c.items())) for c in candidates}) == len(candidates)
-    assert all(_legal_config(c, *shape) for c in candidates)
-    assert choose_config(*shape, cache_policy=cache_policy) in candidates
-    assert {c["engine"] for c in candidates} == {"register", "hybrid"}
+@pytest.mark.parametrize(
+    "hardware",
+    [
+        dict(num_processors=8, cache_size_bytes=0, lds_size_bytes=16384),
+        dict(num_processors=64, cache_size_bytes=8 * 1024**2, lds_size_bytes=32768),
+        dict(num_processors=32, cache_size_bytes=64 * 1024**2, lds_size_bytes=65536),
+    ],
+)
+def test_unseen_shapes_respect_explicit_hardware_budgets(hardware):
+    from kernels.gemm.rdna4_mxfp4.heuristic import _geometry
+
+    for shape in ((17, 291, 1376), (97, 12345, 8320), (8193, 7011, 2080)):
+        config = choose_config(*shape, **hardware)
+        assert _legal_config(config, *shape)
+        assert _geometry(config)[-1] <= hardware["lds_size_bytes"]
 
 
-def test_calibration_can_explore_odd_k_factors_beyond_static_tail_guard():
-    candidates = _tuning_candidates(7, 6147, 2464)
-    assert any(c["engine"] == "register" and c["k_unroll"] == 7 for c in candidates)
-    assert any(c["engine"] == "register" and c["k_unroll"] == 11 for c in candidates)
-
-
-def _one_profile(m, n, k, config):
-    return {
-        "candidates": [config],
-        "families": {f"{n}:{k}": [[m, 0, 0, 0]]},
-        "neighbors": 2,
-        "grid_weight": 0.2,
-    }
-
-
-def test_profile_cannot_extrapolate_a_small_launch_to_large_prefill():
-    """The old M129 -> M17021 transfer caused a measured skinny-GEMM cliff."""
-    from kernels.gemm.rdna4_mxfp4.heuristic import REGISTER_DEFAULTS, _adapt, _profile_choice
-
-    config = dict(REGISTER_DEFAULTS, waves_m=1, waves_n=1, repeat_m=1,
-                  repeat_n=1, k_unroll=1)
-    model = _one_profile(129, 23, 992, config)
-    assert _profile_choice(model, 257, 23, 992, "hot", _adapt) is not None
-    assert _profile_choice(model, 17021, 23, 992, "hot", _adapt) is None
-
-
-@pytest.mark.parametrize("query", [(40, 192), (64, 256)])
-def test_profile_transfer_rejects_changed_register_tail_or_k_loop(query):
-    """Nearby dimensions alone do not preserve a measured register strategy."""
-    from kernels.gemm.rdna4_mxfp4.heuristic import REGISTER_DEFAULTS, _adapt, _transferred_choice
-
-    config = dict(REGISTER_DEFAULTS, waves_m=1, waves_n=4, repeat_m=1,
-                  repeat_n=1, k_unroll=3)
-    model = _one_profile(17, 64, 192, config)
-    assert _transferred_choice(model, 17, 128, 192, "hot", _adapt, _legal_config)
-    assert _transferred_choice(model, 17, *query, "hot", _adapt, _legal_config) is None
-
-
-def test_profile_transfer_rejects_crossing_the_footprint_guard():
-    from kernels.gemm.rdna4_mxfp4.heuristic import REGISTER_DEFAULTS, _adapt, _transferred_choice
-
-    config = dict(REGISTER_DEFAULTS, waves_m=1, waves_n=4, repeat_m=1,
-                  repeat_n=1, k_unroll=1)
-    model = _one_profile(129, 8192, 8192, config)
-    assert _transferred_choice(model, 129, 16384, 8192, "hot", _adapt, _legal_config) is None
-
-
-def test_profile_transfer_checks_new_unroll_opportunities():
-    """Unroll1 remaining legal does not justify ignoring a newly available13."""
-    from kernels.gemm.rdna4_mxfp4.heuristic import REGISTER_DEFAULTS, _adapt, _transferred_choice
-
-    config = dict(REGISTER_DEFAULTS, waves_m=1, waves_n=4, repeat_m=1,
-                  repeat_n=1, k_unroll=1)
-    model = _one_profile(17, 64, 1184, config)
-    assert _transferred_choice(model, 17, 64, 1312, "hot", _adapt, _legal_config)
-    assert _transferred_choice(model, 17, 64, 1248, "hot", _adapt, _legal_config) is None
-
-
-@pytest.mark.parametrize("n", [24, 96, 128])
-def test_skinny_aligned_query_uses_aligned_profile_source(n):
-    """A nearby odd M can hide the register winner at an aligned prefill."""
-    from kernels.gemm.rdna4_mxfp4.heuristic import HYBRID_DEFAULTS, _adapt, _profile_choice
-
-    config = dict(HYBRID_DEFAULTS, tile_m=128, tile_n=32, tile_k=256,
-                  waves_m=4, waves_n=1, schedule="groups")
-    model = _one_profile(1345, n, 5120, config)
-    # Both inputs use the same ragged-M executable, so specialization alone
-    # does not detect this bad source for the profile's measured strategy.
-    assert _profile_choice(model, 1344, n, 5120, "hot", _adapt) is None
-    model["families"][f"{n}:5120"].insert(0, [1328, 0, 0, 0])
-    assert _profile_choice(model, 1344, n, 5120, "hot", _adapt)[0] == 1328
-
-
-@pytest.mark.parametrize("m,n", [(1343, 24), (1344, 129), (1345, 24)])
-def test_alignment_source_guard_preserves_other_profile_queries(m, n):
-    from kernels.gemm.rdna4_mxfp4.heuristic import HYBRID_DEFAULTS, _adapt, _profile_choice
-
-    config = dict(HYBRID_DEFAULTS, tile_m=128, tile_n=32, tile_k=256,
-                  waves_m=4, waves_n=1, schedule="groups")
-    model = _one_profile(1345, n, 5120, config)
-    assert _profile_choice(model, m, n, 5120, "hot", _adapt)[0] == 1345
-
-
-@pytest.mark.parametrize("m", [17, 31, 47, 63])
-def test_cost_pool_retains_measured_repeat_one_odd_divisor_winner(m):
-    """The KU5/RM1 family was missing despite beating the selected tile."""
-    from kernels.gemm.rdna4_mxfp4.heuristic import (
-        HYBRID_DEFAULTS,
-        REGISTER_DEFAULTS,
-        _adapt,
-        _expanded_candidates,
-        _proposal_regional,
+def test_compile_only_warmup_matches_shape_selection_without_gpu_initialization():
+    """Nondefault capacities must survive transfer to compile-only workers."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import torch
+from kernels.gemm.rdna4_mxfp4 import choose_config, get_warmup_keys
+from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
+assert not torch.cuda.is_initialized()
+hardware = dict(num_processors=12, cache_size_bytes=8 * 1024**2, lds_size_bytes=32768)
+keys = get_warmup_keys(2053, 1120, 257, cache_policy="rotating", **hardware)
+for m in range(1, 258):
+    config = choose_config(m, 2053, 1120, cache_policy="rotating", **hardware)
+    assert specialization_key(m, 2053, 1120, config=config) in keys
+assert not torch.cuda.is_initialized()
+""",
+        ],
+        check=True,
     )
 
-    shape = (m, 4091, 1760)
-    pool = _expanded_candidates(*shape, lambda hint: _proposal_regional(*shape, hint),
-                               _adapt, _legal_config, REGISTER_DEFAULTS, HYBRID_DEFAULTS)
-    for table in ("alu", "lut"):
-        assert dict(REGISTER_DEFAULTS, waves_m=1, waves_n=4, repeat_m=1,
-                    repeat_n=1, k_unroll=5, table_mode=table) in pool
+
+def test_explicit_hybrid_rejects_unsupported_copy_layout_before_compilation():
+    """A K160 copy layout compiled but returned incorrect values at K640."""
+    from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
+
+    with pytest.raises(ValueError, match="power-of-two K tile"):
+        specialization_key(33, 3840, 640, config=dict(engine="hybrid", tile_k=160))

@@ -11,7 +11,7 @@ _TENSOR_API = (
     "PreparedMXFP4",
     "prepare_weights",
     "gemm",
-    "tune_gemm",
+    "get_device_capabilities",
     "get_warmup_keys",
     "compile_gemm",
 )

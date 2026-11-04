@@ -24,9 +24,54 @@ from .register import build_register
 def _check_device(index):
     if not torch.version.hip:
         raise ValueError("RDNA4 MXFP4 requires ROCm and gfx1200/gfx1201")
-    arch = torch.cuda.get_device_properties(index).gcnArchName.split(":")[0]
+    properties = torch.cuda.get_device_properties(index)
+    arch = properties.gcnArchName.split(":")[0]
     if arch not in ("gfx1200", "gfx1201"):
         raise ValueError(f"RDNA4 MXFP4 requires gfx1200/gfx1201, got {arch}")
+    return properties
+
+
+@lru_cache(maxsize=None)
+def _device_capacities(index):
+    properties = _check_device(index)
+    cache_bytes = getattr(properties, "L2_cache_size", 0)
+    try:
+        import amdsmi
+
+        # Torch maps logical HIP ordinals, including visible-device remapping,
+        # to AMD SMI handles. Discovery runs once at weight preparation.
+        handle = torch.cuda._get_amdsmi_handler(index)
+        entries = [
+            entry
+            for entry in amdsmi.amdsmi_get_gpu_cache_info(handle)["cache"]
+            if "DATA_CACHE" in entry["cache_properties"]
+            and "CPU_CACHE" not in entry["cache_properties"]
+            and 2 <= entry["cache_level"] < 2**32 - 1
+            and 0 < entry["cache_size"] < 2**32 - 1
+            and 0 < entry["num_cache_instance"] < 2**32 - 1
+        ]
+        level = max((entry["cache_level"] for entry in entries), default=0)
+        size = sum(
+            entry["cache_size"] * entry["num_cache_instance"] * 1024
+            for entry in entries
+            if entry["cache_level"] == level
+        )
+        if size > 0:
+            cache_bytes = size
+    except Exception:
+        pass
+    return properties.multi_processor_count, cache_bytes, properties.shared_memory_per_block
+
+
+def get_device_capabilities(device_id=0):
+    """Read and cache launch capacities during initialization on the owning GPU.
+
+    Pass these values to ``get_warmup_keys`` in compile-only worker processes.
+    Last-level data cache uses AMD SMI where available, then Torch's L2 size.
+    This function may initialize HIP; the pure selector and warmup do not.
+    """
+    processors, cache_bytes, lds_bytes = _device_capacities(device_id)
+    return dict(num_processors=processors, cache_size_bytes=cache_bytes, lds_size_bytes=lds_bytes)
 
 
 @dataclass(frozen=True)
@@ -88,7 +133,7 @@ def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
     """
     if packed.ndim != 2 or packed.dtype != torch.uint8 or not packed.is_cuda:
         raise ValueError("packed weights must be CUDA uint8 [N,K/2]")
-    _check_device(packed.device.index)
+    get_device_capabilities(packed.device.index)
     n, kp = packed.shape
     k = kp * 2
     if n <= 0 or k <= 0 or k % 32:
@@ -161,9 +206,25 @@ def specialization_key(
     device_id=0,
     config=None,
     cache_policy="auto",
+    num_processors=32,
+    cache_size_bytes=64 * 1024**2,
+    lds_size_bytes=65536,
 ):
     """Return the exact executable identity used by runtime and startup warmup."""
-    options = dict(config) if config else choose_config(m, n, k, mode, cache_policy=cache_policy)
+    options = (
+        dict(config)
+        if config
+        else choose_config(
+            m,
+            n,
+            k,
+            mode,
+            cache_policy=cache_policy,
+            num_processors=num_processors,
+            cache_size_bytes=cache_size_bytes,
+            lds_size_bytes=lds_size_bytes,
+        )
+    )
     if options.get("weight_bits", 4) != 4:
         raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
     options.update(
@@ -180,6 +241,8 @@ def specialization_key(
         raise ValueError("engine must be register or hybrid")
     if engine == "hybrid" and mode == "grouped":
         raise ValueError("hybrid requires losslessly folded FP8 weights")
+    if engine == "hybrid" and (options.get("tile_k", 64) not in (32, 64, 128, 256) or k % options.get("tile_k", 64)):
+        raise ValueError("hybrid requires a complete power-of-two K tile (32, 64, 128 or 256)")
     kernel_m = m if m in (1, 2, 4, 8, 16) else 0
     if kernel_m == 0:
         bm = (
@@ -236,9 +299,8 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         x_scale: Contiguous FP32 tensor [M] or [M, 1].
         out: Optional contiguous output tensor [M, N].
         dtype: BF16 (default) or FP16, matching ``out`` when supplied.
-        config: Optional register/hybrid factory parameters. Otherwise use a
-            measured FlyDSL cache entry or the CPU shape policy. Device timing
-            requires explicit calibration or ``FLYDSL_AUTOTUNE=1``.
+        config: Optional register/hybrid factory parameters. Otherwise use
+            analytical host rules with cached device capacities.
         cache_policy: ``auto`` balances hot and rotating weights; ``hot`` is
             for repeated reuse, ``rotating`` for weights cycled between layers.
 
@@ -277,9 +339,9 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
     if config:
         options = dict(config)
     else:
-        from .tuning import resolve_config
-
-        options = resolve_config(gemm, x, weights, x_scale, out, cache_policy)
+        options = choose_config(
+            m, n, k, weights.mode, cache_policy=cache_policy, **get_device_capabilities(x.device.index)
+        )
     if options.get("weight_bits", 4) != 4:
         raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
     key = specialization_key(
@@ -323,24 +385,6 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
     return out
 
 
-def tune_gemm(x, weights, x_scale, *, dtype=torch.bfloat16, cache_policy="auto"):
-    """Calibrate at most 64 legal configurations before graph capture.
-
-    Returns the selected configuration. FlyDSL persists the measured choice;
-    subsequent ordinary GEMM calls reuse it without device benchmarking.
-    Grouped-scale plans retain the conservative register fallback.
-    """
-    if x.is_cuda:
-        with torch.cuda.device(x.device):
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("calibrate MXFP4 before graph capture")
-    config = choose_config(x.shape[0], weights.n, weights.k, weights.mode, cache_policy=cache_policy)
-    out = gemm(x, weights, x_scale, dtype=dtype, config=config)
-    from .tuning import resolve_config
-
-    return resolve_config(gemm, x, weights, x_scale, out, cache_policy, calibrate=True)
-
-
 _compile_lock = threading.RLock()
 
 
@@ -355,9 +399,15 @@ def get_warmup_keys(
     dtype=torch.bfloat16,
     device_id=0,
     cache_policy="auto",
+    num_processors=32,
+    cache_size_bytes=64 * 1024**2,
+    lds_size_bytes=65536,
 ):
-    """Enumerate heuristic and cached measured keys, without GPU work."""
-    from .tuning import cached_configurations
+    """Enumerate analytical launch keys without querying or initializing a GPU.
+
+    Capacity defaults describe R9700. Pass ``get_device_capabilities`` values
+    from initialization to match runtime selection on the target device.
+    """
 
     if max_m < 1:
         raise ValueError("max_m must be positive")
@@ -372,34 +422,12 @@ def get_warmup_keys(
             dtype=dtype,
             device_id=device_id,
             cache_policy=cache_policy,
+            num_processors=num_processors,
+            cache_size_bytes=cache_size_bytes,
+            lds_size_bytes=lds_size_bytes,
         )
         for m in range(1, max_m + 1)
     )
-    for m, config in cached_configurations(
-        n,
-        k,
-        max_m,
-        mode=mode,
-        normal_only=normal_only,
-        nibble_layout=nibble_layout,
-        dtype=dtype,
-        device_id=device_id,
-        cache_policy=cache_policy,
-    ):
-        keys[
-            specialization_key(
-                m,
-                n,
-                k,
-                mode=mode,
-                normal_only=normal_only,
-                nibble_layout=nibble_layout,
-                dtype=dtype,
-                device_id=device_id,
-                config=config,
-                cache_policy=cache_policy,
-            )
-        ] = None
     return list(keys)
 
 
