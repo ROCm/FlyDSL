@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-04T14:07:12Z",
+ "updated": "2026-11-04T14:31:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41847460842,
+   "pr": 1361,
+   "commit": "f744123611691ec07902fe4a90ba6d0d7b4366cf",
+   "branch": "faster-trace-locations",
+   "event": "pull_request",
+   "title": "[DSL] Speed up tracing by caching op source positions",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41847460842",
+   "created_at": "2026-11-04T14:25:47Z",
+   "updated_at": "2026-11-04T14:29:09Z",
+   "actor": "RElbers",
+   "jobs": []
+  },
   {
    "run_id": 41843924231,
    "pr": 1368,
@@ -10,13 +25,41 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843924231",
    "created_at": "2026-11-04T14:04:20Z",
-   "updated_at": "2026-11-04T14:05:14Z",
+   "updated_at": "2026-11-04T14:28:53Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-04T14:28:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843924231/job/126636386211"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-04T14:28:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843924231/job/126636386268"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-04T14:28:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41843924231/job/126636386550"
+    }
+   ]
   },
   {
    "run_id": 41843344152,
@@ -1887,21 +1930,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 41024656082,
-   "pr": null,
-   "commit": "becb97213fc105916486e1c00e03a0e916cf6cdf",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] Merge-back gfx950 two-stage MegaMoEV2 (A8W4/A4W4) from aiter\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41024656082",
-   "created_at": "2026-10-30T08:10:17Z",
-   "updated_at": "2026-10-30T08:18:57Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
