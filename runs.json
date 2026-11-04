@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-04T16:14:51Z",
+ "updated": "2026-11-04T18:20:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41869616793,
+   "pr": 1361,
+   "commit": "d48f686ace3918e45bd88daae16981d26b642cdf",
+   "branch": "faster-trace-locations",
+   "event": "pull_request",
+   "title": "[DSL] Speed up tracing by caching op source positions",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41869616793",
+   "created_at": "2026-11-04T16:39:52Z",
+   "updated_at": "2026-11-04T18:16:25Z",
+   "actor": "RElbers",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T16:56:41Z",
+     "completed_at": "2026-11-04T17:16:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41869616793/job/126723207200"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T17:08:10Z",
+     "completed_at": "2026-11-04T18:16:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41869616793/job/126723207312"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-04T16:57:08Z",
+     "completed_at": "2026-11-04T17:21:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41869616793/job/126723207404",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 41847460842,
    "pr": 1361,
@@ -1885,52 +1931,6 @@
      "started_at": "2026-10-30T08:52:42Z",
      "completed_at": "2026-10-30T13:50:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244379"
-    }
-   ]
-  },
-  {
-   "run_id": 41025557359,
-   "pr": null,
-   "commit": "06b241564b6a3b6e3360e07fc24ebba2b8b44636",
-   "branch": "main",
-   "event": "push",
-   "title": "[Misc] Bump version to 0.4.2 (#1354)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359",
-   "created_at": "2026-10-30T08:18:27Z",
-   "updated_at": "2026-10-30T13:47:08Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T08:41:36Z",
-     "completed_at": "2026-10-30T13:47:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162622"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T08:41:36Z",
-     "completed_at": "2026-10-30T13:47:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162647"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T09:32:35Z",
-     "completed_at": "2026-10-30T10:04:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025557359/job/123971162685",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
