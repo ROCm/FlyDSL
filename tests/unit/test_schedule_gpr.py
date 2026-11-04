@@ -54,7 +54,7 @@ def _build_module(build_fn, arg_types=None):
 class TestSchedVGPR:
     def test_strict(self):
         """Default (strict) sched_vgpr emits the op without the soft keyword."""
-        from flydsl.expr.rocdl import sched_vgpr
+        from flydsl.expr.rocdl.experimental import sched_vgpr
 
         def build(x):
             return sched_vgpr(x, regnum=42)
@@ -65,7 +65,7 @@ class TestSchedVGPR:
 
     def test_soft(self):
         """soft=True emits the soft keyword in the printed op."""
-        from flydsl.expr.rocdl import sched_vgpr
+        from flydsl.expr.rocdl.experimental import sched_vgpr
 
         def build(x):
             return sched_vgpr(x, regnum=42, soft=True)
@@ -76,7 +76,7 @@ class TestSchedVGPR:
 
     def test_identity_type(self):
         """Result type must match the input value type (identity semantics)."""
-        from flydsl.expr.rocdl import sched_vgpr
+        from flydsl.expr.rocdl.experimental import sched_vgpr
 
         def build(x):
             return sched_vgpr(x, regnum=100)
@@ -86,7 +86,7 @@ class TestSchedVGPR:
 
     def test_regnum_values(self):
         """Various register numbers are accepted."""
-        from flydsl.expr.rocdl import sched_vgpr
+        from flydsl.expr.rocdl.experimental import sched_vgpr
 
         for regnum in [0, 42, 100, 512]:
 
@@ -98,7 +98,7 @@ class TestSchedVGPR:
 
     def test_integer_input(self):
         """sched_vgpr on an integer-typed value preserves the type."""
-        from flydsl.expr.rocdl import sched_vgpr
+        from flydsl.expr.rocdl.experimental import sched_vgpr
 
         def build(x):
             return sched_vgpr(x, regnum=0)
@@ -114,7 +114,7 @@ class TestSchedVGPR:
 @pytest.mark.skipif(not _has_sched_sgpr, reason="rocdl.sched.sgpr op not available (needs custom LLVM)")
 class TestSchedSGPR:
     def test_strict(self):
-        from flydsl.expr.rocdl import sched_sgpr
+        from flydsl.expr.rocdl.experimental import sched_sgpr
 
         def build(x):
             return sched_sgpr(x, regnum=10)
@@ -124,7 +124,7 @@ class TestSchedSGPR:
         assert "soft" not in ir_text
 
     def test_soft(self):
-        from flydsl.expr.rocdl import sched_sgpr
+        from flydsl.expr.rocdl.experimental import sched_sgpr
 
         def build(x):
             return sched_sgpr(x, regnum=10, soft=True)
@@ -134,7 +134,7 @@ class TestSchedSGPR:
         assert "soft" in ir_text
 
     def test_identity_type(self):
-        from flydsl.expr.rocdl import sched_sgpr
+        from flydsl.expr.rocdl.experimental import sched_sgpr
 
         def build(x):
             return sched_sgpr(x, regnum=4)
@@ -143,7 +143,7 @@ class TestSchedSGPR:
         assert "-> i32" in ir_text
 
     def test_regnum_values(self):
-        from flydsl.expr.rocdl import sched_sgpr
+        from flydsl.expr.rocdl.experimental import sched_sgpr
 
         for regnum in [0, 10, 50, 105]:
 
@@ -160,7 +160,7 @@ class TestSchedSGPR:
 @pytest.mark.skipif(not _has_sched_agpr, reason="rocdl.sched.agpr op not available (needs custom LLVM)")
 class TestSchedAGPR:
     def test_strict(self):
-        from flydsl.expr.rocdl import sched_agpr
+        from flydsl.expr.rocdl.experimental import sched_agpr
 
         def build(x):
             return sched_agpr(x, regnum=8)
@@ -170,7 +170,7 @@ class TestSchedAGPR:
         assert "soft" not in ir_text
 
     def test_soft(self):
-        from flydsl.expr.rocdl import sched_agpr
+        from flydsl.expr.rocdl.experimental import sched_agpr
 
         def build(x):
             return sched_agpr(x, regnum=8, soft=True)
@@ -180,7 +180,7 @@ class TestSchedAGPR:
         assert "soft" in ir_text
 
     def test_identity_type(self):
-        from flydsl.expr.rocdl import sched_agpr
+        from flydsl.expr.rocdl.experimental import sched_agpr
 
         def build(x):
             return sched_agpr(x, regnum=0)
@@ -189,7 +189,7 @@ class TestSchedAGPR:
         assert "-> f32" in ir_text
 
     def test_regnum_values(self):
-        from flydsl.expr.rocdl import sched_agpr
+        from flydsl.expr.rocdl.experimental import sched_agpr
 
         for regnum in [0, 8, 128, 255]:
 

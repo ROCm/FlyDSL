@@ -19,11 +19,18 @@ from ..meta import dsl_loc_tracing
 from . import cdna3 as cdna3
 from . import cdna4 as cdna4
 from . import cdna5 as cdna5
+from . import experimental as experimental
 from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
 from .utils import require_lds_dma_support
+
+# These ODS builders come from a not-yet-upstreamed LLVM patch. The DSL wrappers
+# live in .experimental; do not leave the raw callables on this module.
+for _unaccepted_sched in ("sched_bank", "sched_vgpr", "sched_sgpr", "sched_agpr"):
+    globals().pop(_unaccepted_sched, None)
+del _unaccepted_sched
 
 __all__ = [
     # Targets
@@ -32,6 +39,8 @@ __all__ = [
     # "cdna5", unstable for now
     "rdna3",
     "rdna4",
+    # Unstable: path contains an ``experimental`` segment.
+    "experimental",
     # Enums
     "SyncScope",
     # Re-exported from .universal
@@ -64,10 +73,6 @@ __all__ = [
     "sched_vmem",
     "sched_dsrd",
     "sched_dswr",
-    "sched_bank",
-    "sched_vgpr",
-    "sched_sgpr",
-    "sched_agpr",
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -109,10 +114,6 @@ mask_dswr = 0x200
 
 _ods_sched_barrier = globals().get("sched_barrier")
 _ods_sched_group_barrier = globals().get("sched_group_barrier")
-_ods_sched_bank = globals().get("sched_bank")
-_ods_sched_vgpr = globals().get("sched_vgpr")
-_ods_sched_sgpr = globals().get("sched_sgpr")
-_ods_sched_agpr = globals().get("sched_agpr")
 
 _SCHED_MASK_INT_TO_KW = {
     0x000: "none",
@@ -176,58 +177,6 @@ def sched_dsrd(cnt):
 @dsl_loc_tracing
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
-
-
-@dsl_loc_tracing
-def sched_bank(value, bank, soft=False, **kw):
-    """VGPR bank scheduling hint (gfx1250).
-
-    Returns *value* unchanged (identity at IR level).  Guides the register
-    allocator to place *value* in the requested 256-register bank (0-3).
-    Default is strict; pass ``soft=True`` for an advisory hint.
-    """
-    val_ir = _to_ir(value)
-    return _ods_sched_bank(res=val_ir.type, value=val_ir, bank=bank, soft=soft or None, **kw)
-
-
-@dsl_loc_tracing
-def sched_vgpr(value, regnum, soft=False, **kw):
-    """VGPR exact-register scheduling hint.
-
-    Returns *value* unchanged (identity at IR level).  Guides the register
-    allocator to place *value* in the specified VGPR number (0-1023).
-    For wide values (64/128/256-bit), *regnum* is the starting register.
-    Default is strict; pass ``soft=True`` for an advisory hint.
-    """
-    val_ir = _to_ir(value)
-    return _ods_sched_vgpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
-
-
-@dsl_loc_tracing
-def sched_sgpr(value, regnum, soft=False, **kw):
-    """SGPR exact-register scheduling hint.
-
-    Returns *value* unchanged (identity at IR level).  Guides the register
-    allocator to place *value* in the specified SGPR number (0-105).
-    For wide values (64/128/256-bit), *regnum* is the starting register.
-    Default is strict; pass ``soft=True`` for an advisory hint.
-    """
-    val_ir = _to_ir(value)
-    return _ods_sched_sgpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
-
-
-@dsl_loc_tracing
-def sched_agpr(value, regnum, soft=False, **kw):
-    """AGPR exact-register scheduling hint (gfx90a/gfx940).
-
-    Returns *value* unchanged (identity at IR level).  Guides the register
-    allocator to place *value* in the specified AGPR number (0-255).
-    For wide values (64/128/256-bit), *regnum* is the starting register.
-    Default is strict; pass ``soft=True`` for an advisory hint.
-    Only valid on targets with MAI instructions.
-    """
-    val_ir = _to_ir(value)
-    return _ods_sched_agpr(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
 
 
 def _unwrap_mfma_operand(v):
