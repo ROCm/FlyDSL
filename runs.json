@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-04T22:54:51Z",
+ "updated": "2026-11-04T22:59:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -683,7 +683,8 @@
      "conclusion": "success",
      "started_at": "2026-11-03T06:23:30Z",
      "completed_at": "2026-11-03T06:59:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807565"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807565",
+     "log_fetch_failed": true
     }
    ]
   },
