@@ -270,6 +270,51 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp b/llvm/lib/Target/AMD
    case Intrinsic::amdgcn_permlane16_swap:
    case Intrinsic::amdgcn_permlane32_swap: {
      if ((IntrID == Intrinsic::amdgcn_permlane16_swap &&
+@@ -4701,6 +4783,44 @@ SDValue AMDGPUDAGToDAGISel::getHi16Elt(SDValue In) const {
+   return SDValue();
+ }
+ 
++/// Return true if \p N is a strict llvm.amdgcn.sched.agpr, either still as the
++/// intrinsic or already selected to A_SCHEDULE_AGPR_B*.
++static bool isStrictSchedAGPR(const SDNode *N) {
++  if (N->isMachineOpcode()) {
++    switch (N->getMachineOpcode()) {
++    case AMDGPU::A_SCHEDULE_AGPR_B32:
++    case AMDGPU::A_SCHEDULE_AGPR_B64:
++    case AMDGPU::A_SCHEDULE_AGPR_B128:
++    case AMDGPU::A_SCHEDULE_AGPR_B256:
++    case AMDGPU::A_SCHEDULE_AGPR_B512:
++      // Operands: src, regnum, strict.
++      return N->getConstantOperandVal(2) != 0;
++    default:
++      return false;
++    }
++  }
++  if (N->getOpcode() != ISD::INTRINSIC_WO_CHAIN ||
++      N->getConstantOperandVal(0) != Intrinsic::amdgcn_sched_agpr)
++    return false;
++  // Operands: intrinsic id, src, regnum, strict.
++  auto *StrictC = dyn_cast<ConstantSDNode>(N->getOperand(3));
++  return StrictC && !StrictC->isZero();
++}
++
++/// An MFMA whose src2 or result is strictly pinned to AGPRs gains nothing from
++/// the VGPR form: selecting it would only add AGPR<->VGPR copies around the
++/// MFMA for AMDGPURewriteAGPRCopyMFMA to undo after RA, and that rewrite may
++/// leave src2 in a different AGPR than dst.
++bool AMDGPUDAGToDAGISel::isStrictAGPRPinnedMFMA(const SDNode *N) const {
++  // MFMA intrinsic operands: intrinsic id, src0, src1, src2, ...
++  if (N->getNumOperands() > 3 && isStrictSchedAGPR(N->getOperand(3).getNode()))
++    return true;
++  for (const SDNode *U : N->users())
++    if (isStrictSchedAGPR(U))
++      return true;
++  return false;
++}
++
+ bool AMDGPUDAGToDAGISel::isVGPRImm(const SDNode * N) const {
+   assert(CurDAG->getTarget().getTargetTriple().isAMDGCN());
+ 
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
 --- a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
@@ -1602,3 +1647,80 @@ new file mode 100644
 +}
 +
 +attributes #0 = { "amdgpu-flat-work-group-size"="64,64" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
+--- a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
++++ b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
+@@ -90,6 +90,7 @@ private:
+   }
+ 
+   bool isVGPRImm(const SDNode *N) const;
++  bool isStrictAGPRPinnedMFMA(const SDNode *N) const;
+   bool isUniformLoad(const SDNode *N) const;
+   bool isUniformBr(const SDNode *N) const;
+ 
+diff --git a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+--- a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
++++ b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+@@ -1137,7 +1137,7 @@ class MAIFrag<SDPatternOperator Op, bit HasAbid = true, bit Scaled = false> : Pa
+ 
+ class CanUseAGPR_MAI<ValueType vt> {
+   code PredicateCode = [{
+-    return !Subtarget->hasGFX90AInsts() ||
++    return !Subtarget->hasGFX90AInsts() || isStrictAGPRPinnedMFMA(N) ||
+       MF->getInfo<SIMachineFunctionInfo>()->selectAGPRFormMFMA(
+         }] # !srl(vt.Size, 5) # ");";
+ 
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll b/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll
+@@ -0,0 +1,49 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 -stop-after=finalize-isel < %s | FileCheck -check-prefix=ISEL %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
++
++; An MFMA whose src2 or result is strictly pinned by sched.agpr is selected in
++; the AGPR form even when the function is not known to need AGPRs, so the
++; accumulator stays in place instead of being copied to and from VGPRs around
++; the MFMA. Soft pins and unpinned MFMAs keep the default VGPR form.
++
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half>, <4 x half>, <4 x float>, i32, i32, i32)
++
++; ISEL-LABEL: name: strict_pin
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL-NOT: V_MFMA_F32_16X16X16F16_vgprcd_e64
++; GCN-LABEL: {{^}}strict_pin:
++; GCN-NOT: v_accvgpr_read
++; GCN: v_mfma_f32_16x16x16_f16 a[8:11], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[8:11]
++; GCN-NOT: v_accvgpr_read
++; GCN: v_mfma_f32_16x16x16_f16 a[8:11], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[8:11]
++define amdgpu_kernel void @strict_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 8, i32 1)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  %rp = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 8, i32 1)
++  %cin2 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %rp, i32 8, i32 1)
++  %r2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %b, <4 x half> %a, <4 x float> %cin2, i32 0, i32 0, i32 0)
++  %rp2 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r2, i32 8, i32 1)
++  store <4 x float> %rp2, ptr addrspace(1) %out
++  ret void
++}
++
++; ISEL-LABEL: name: soft_pin
++; ISEL: V_MFMA_F32_16X16X16F16_vgprcd_e64
++define amdgpu_kernel void @soft_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 8, i32 0)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  store <4 x float> %r, ptr addrspace(1) %out
++  ret void
++}
++
++; ISEL-LABEL: name: unpinned
++; ISEL: V_MFMA_F32_16X16X16F16_vgprcd_e64
++define amdgpu_kernel void @unpinned(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %c, i32 0, i32 0, i32 0)
++  store <4 x float> %r, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-agpr-alloc"="0" "amdgpu-flat-work-group-size"="256,256" "amdgpu-waves-per-eu"="1" }
