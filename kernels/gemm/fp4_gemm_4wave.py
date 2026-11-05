@@ -33,6 +33,7 @@ from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import rocdl as _rocdl
+from flydsl.expr.rocdl.experimental import sched_agpr
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops as _buffer_ops
@@ -350,9 +351,6 @@ _FP4_BLGP = 4
 _FP4_PACK = 2  # pack_M = pack_N = pack_K = 2
 _ACC_AGPRS = 4  # one f32x4 accumulator
 _NUM_AGPRS = 256
-_AGPR_PIN_IMPL = os.environ.get("FP4_AGPR_PIN_IMPL", "asm")
-if _AGPR_PIN_IMPL not in ("asm", "sched"):
-    raise ValueError(f"FP4_AGPR_PIN_IMPL must be 'asm' or 'sched', got {_AGPR_PIN_IMPL!r}")
 
 
 def _split_i32x8(v):
@@ -406,16 +404,15 @@ class Mfma16x16x128Fp4:
         """``sa`` / ``sb`` are lists (len n_groups) of packed-E8M0 i32 scales
         (4 sub-fields each, one full K=256 step for a 32-row pack-group).
 
-        The accumulator is PINNED IN AGPR via inline asm (constraint ``=a,...,0``),
-        mirroring fp8's Mfma16x16x128AGPR. The plain ssa-lowered mfma_scale let the
-        compiler spill accumulators to arch VGPR and shuffle them with
-        v_accvgpr_mov/read (ISA: 1679 such ops, arch VGPR -> 256, scale spilled).
-        Pinning keeps the f32x4 acc in-place in AGPR -> arch VGPR drops, no spill.
+        The accumulator is PINNED IN AGPR with strict ``sched_agpr`` at
+        ``agpr_regnum(agpr_base, i, j)``, mirroring fp8's Mfma16x16x128AGPR. The plain
+        ssa-lowered mfma_scale let the compiler spill accumulators to arch VGPR and
+        shuffle them with v_accvgpr_mov/read (ISA: 1679 such ops, arch VGPR -> 256,
+        scale spilled). Pinning keeps the f32x4 acc in-place in AGPR -> arch VGPR
+        drops, no spill.
 
-        opsel is a COMPILE-TIME byte-select baked into the asm string:
-          opsel_a = ksub*2 + (i%2), opsel_b = ksub*2 + (j%2).
-        AMD encoding: low bit -> op_sel[lane], high bit (=ksub) -> op_sel_hi[lane].
-        So op_sel=[i%2, j%2, 0], op_sel_hi=[ksub, ksub, 0]."""
+        opsel is a COMPILE-TIME byte-select:
+          opsel_a = ksub*2 + (i%2), opsel_b = ksub*2 + (j%2)."""
         # a[i] / b[j] are [i32x4_ksub0, i32x4_ksub1] from S2RLoaderFp4.
         # ``interleave`` is an optional list of zero-arg thunks (ds_read / buffer_load
         # for the NEXT quad); one is issued after each MFMA so the load co-issues in
@@ -448,10 +445,9 @@ class Mfma16x16x128Fp4:
                 if nth[0] < len(thunks) and mth[0] in slots:
                     thunks[nth[0]]()
                     nth[0] += 1
-                if const_expr(_AGPR_PIN_IMPL == "sched"):
-                    # Inline asm is opaque to the machine scheduler; freeze the same
-                    # MFMA/load interleave for the intrinsic path.
-                    _rocdl.sched_barrier(0)
+                # The MFMA intrinsic has no side effects, so without this the scheduler
+                # reorders MFMAs and the interleaved loads across each other.
+                _rocdl.sched_barrier(0)
                 mth[0] += 1
         while nth[0] < len(thunks):
             thunks[nth[0]]()
@@ -459,37 +455,17 @@ class Mfma16x16x128Fp4:
         return c
 
     def _mfma_agpr(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb, agpr_regnum):
-        # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
-        #
         # feeds (B, A) instead of (A, B). Since C^T = B^T A^T,
         a_op, b_op = b_op, a_op
         sa_v, sb_v = sb_v, sa_v
         ia, jb = jb, ia
-        opsel = f"op_sel:[{ia},{jb},0]"
-        opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        if const_expr(_AGPR_PIN_IMPL == "sched"):
-            from flydsl.expr.rocdl.experimental import sched_agpr
-
-            # Same regnum on the source and the result asks RA to tie src2 and dst.
-            pinned_acc = self.zero_value if acc is None else sched_agpr(acc, regnum=agpr_regnum)
-            result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                self.res_ty,
-                [a_op, b_op, pinned_acc, _FP4_CBSZ, _FP4_BLGP, ia + 2 * ksub, sa_v, jb + 2 * ksub, sb_v],
-            )
-            return sched_agpr(result, regnum=agpr_regnum)
-        src2 = "$0" if acc is not None else "0"
-        asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, {src2}, $3, $4 {opsel} {opsel_hi} cbsz:4 blgp:4"
-        ops = [
-            fx.as_ir_value(a_op),
-            fx.as_ir_value(b_op),
-            fx.as_ir_value(sa_v),
-            fx.as_ir_value(sb_v),
-        ]
-        cons = "=a,v,v,v,v"
-        if acc is not None:
-            ops.append(fx.as_ir_value(acc))
-            cons += ",0"
-        return _llvm.inline_asm(self.res_ty, ops, asm, cons, has_side_effects=True)
+        # Same regnum on the source and the result asks RA to tie src2 and dst.
+        pinned_acc = self.zero_value if acc is None else sched_agpr(acc, regnum=agpr_regnum)
+        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+            self.res_ty,
+            [a_op, b_op, pinned_acc, _FP4_CBSZ, _FP4_BLGP, ia + 2 * ksub, sa_v, jb + 2 * ksub, sb_v],
+        )
+        return sched_agpr(result, regnum=agpr_regnum)
 
 
 _SCALE_QUARTER_BYTES = 1024  # one gather = 4 blocks = one wave's share of one operand

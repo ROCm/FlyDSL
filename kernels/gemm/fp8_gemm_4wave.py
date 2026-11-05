@@ -17,13 +17,11 @@ Optional B preshuffle uses the same on-disk layout as
 ``preshuffle_gemm`` / ``shuffle_weight((16, 16))``.
 """
 
-import os
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import as_ir_value, const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import rocdl as _rocdl
+from flydsl.expr.rocdl.experimental import sched_agpr
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -40,22 +38,16 @@ from kernels.gemm.fp8_gemm_utils import (
     xcd_remap_pid,
 )
 
-_AGPR_PIN_IMPL = os.environ.get("FP8_AGPR_PIN_IMPL", "asm")
-if _AGPR_PIN_IMPL not in ("asm", "sched"):
-    raise ValueError(f"FP8_AGPR_PIN_IMPL must be 'asm' or 'sched', got {_AGPR_PIN_IMPL!r}")
 _ACC_AGPRS = 4  # one f32x4 accumulator
 _NUM_AGPRS = 256
 
 
 class Mfma16x16x128AGPR(Mfma16x16x128):
-    """fp8 16x16x128 MFMA that pins the accumulator in AGPR via inline asm
-    (constraint `=a,v,v,0`), so the f32x4 accumulator accumulates in-place and
+    """fp8 16x16x128 MFMA that pins the accumulator with strict ``sched_agpr`` at
+    ``agpr_regnum(agpr_base, i, j)``, so the f32x4 accumulator accumulates in-place and
     the compiler does not insert v_accvgpr_mov/read + s_nop to shuffle the
     accumulator between AGPR slots (the dominant stall in the ssa-lowered path).
-    scale is left default (=0); the real per-token scale is applied in StoreC.
-
-    ``FP8_AGPR_PIN_IMPL=sched`` pins the same accumulator with strict
-    ``sched_agpr`` on the MFMA intrinsic instead, at ``agpr_regnum(agpr_base, i, j)``."""
+    scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def agpr_base(self, group):
         """First AGPR of accumulator group ``group`` (0..3 = c00, c01, c10, c11)."""
@@ -68,14 +60,9 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
 
     def call_one(self, a, b, c, i, j, agpr_base=0):
         assert i < self.n_tiles_a and j < self.n_tiles_b
-        acc = c[self.idx(i, j)]
-        if const_expr(_AGPR_PIN_IMPL == "sched"):
-            return self._do_mma_sched(a[i], b[j], acc, self.agpr_regnum(agpr_base, i, j))
-        return self._do_mma(a[i], b[j], acc)
+        return self._do_mma_sched(a[i], b[j], c[self.idx(i, j)], self.agpr_regnum(agpr_base, i, j))
 
     def _do_mma_sched(self, a, b, c, agpr_regnum):
-        from flydsl.expr.rocdl.experimental import sched_agpr
-
         a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
         b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
         # The first K-step accumulates into the shared zero vector: feed it unpinned
@@ -85,22 +72,10 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
             _T.vec(4, _T.f32), [a_i32x8, b_i32x8, pinned_acc, 0, 0, 0, 0, 0, 0]
         )
         result = sched_agpr(result, regnum=agpr_regnum)
-        # Inline asm is opaque to the machine scheduler; freeze the same
-        # MFMA/load interleave for the intrinsic path.
+        # The MFMA intrinsic has no side effects, so without this the scheduler moves
+        # MFMAs across wait_barrier and bunches the interleaved loads at segment ends.
         _rocdl.sched_barrier(0)
         return result
-
-    def _do_mma(self, a, b, c):
-        a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
-        b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
-        res_ty = _T.vec(4, _T.f32)
-        return _llvm.inline_asm(
-            res_ty,
-            [a_i32x8.ir_value(), b_i32x8.ir_value(), as_ir_value(c)],
-            "v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0",
-            "=a,v,v,0",
-            has_side_effects=True,
-        )
 
 
 def _make_swz_layout():
