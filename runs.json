@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T03:25:18Z",
+ "updated": "2026-11-05T04:03:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,38 +25,41 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297",
    "created_at": "2026-11-05T02:36:03Z",
-   "updated_at": "2026-11-05T03:10:25Z",
+   "updated_at": "2026-11-05T04:01:22Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T03:10:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297/job/127023546605"
+     "completed_at": "2026-11-05T03:36:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297/job/127023546605",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-05T03:10:25Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-05T03:25:49Z",
+     "completed_at": "2026-11-05T04:01:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297/job/127023546628"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-05T03:10:25Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-05T03:29:26Z",
+     "completed_at": "2026-11-05T03:55:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297/job/127023546801"
     }
    ]
