@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T06:48:29Z",
+ "updated": "2026-11-05T06:50:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Misc] Bump version to 0.5.0 (#1370)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982598023",
    "created_at": "2026-11-05T06:45:44Z",
-   "updated_at": "2026-11-05T06:47:10Z",
+   "updated_at": "2026-11-05T06:47:16Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "bump-version-0.5.0",
    "event": "pull_request",
    "title": "[Misc] Bump version to 0.5.0",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982351814",
    "created_at": "2026-11-05T06:43:38Z",
-   "updated_at": "2026-11-05T06:45:00Z",
+   "updated_at": "2026-11-05T06:48:45Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -74,9 +74,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-05T06:43:10Z",
+     "started_at": "2026-11-05T06:48:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960161"
     },
