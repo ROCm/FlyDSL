@@ -277,7 +277,9 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
             contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Native libraries (C++ passes, runtime wrappers, bindings).
-    contents.extend(_native_library_digests(flydsl_root / "_mlir" / "_mlir_libs"))
+    mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
+    if mlir_libs_dir.is_dir():
+        contents.extend(_native_library_digests(mlir_libs_dir))
 
     # 3) Hash .py files in extra source directories (downstream fingerprint).
     for src_dir in extra_source_dirs:
