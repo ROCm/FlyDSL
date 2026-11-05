@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T10:54:22Z",
+ "updated": "2026-11-05T11:26:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,29 +40,29 @@
    "branch": "fix/gfx1250-fp8-tile-check",
    "event": "pull_request",
    "title": "[Bugfix][gfx1250] Reject FP8 and A8W4 GEMM tiles that issue no WMMA, and test that stores stay inside N",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42003421219",
    "created_at": "2026-11-05T09:33:59Z",
-   "updated_at": "2026-11-05T09:55:47Z",
+   "updated_at": "2026-11-05T11:24:11Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T09:56:13Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T10:52:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42003421219/job/127174225722"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-05T09:55:47Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-05T11:05:34Z",
+     "completed_at": "2026-11-05T11:24:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42003421219/job/127174226000"
     },
     {
@@ -193,13 +193,41 @@
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312",
    "created_at": "2026-11-05T07:14:25Z",
-   "updated_at": "2026-11-05T10:49:13Z",
+   "updated_at": "2026-11-05T11:06:46Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-05T11:11:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434614"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-05T11:07:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434672"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-05T11:06:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434760"
+    }
+   ]
   },
   {
    "run_id": 41983760306,
