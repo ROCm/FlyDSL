@@ -4,8 +4,10 @@
 """CDNA5 TDM indexed addressing: what the gather / scatter ops accept and refuse.
 
 The mode is chosen by the copy op -- ``TensorLoadGather`` / ``TensorStoreScatter``
-rather than ``TensorLoad`` / ``TensorStore`` -- and the op carries ``index_bits``.
-Both forms issue the same TDM instruction; only the descriptor differs.
+rather than ``TensorLoad`` / ``TensorStore``. Both forms issue the same TDM
+instruction; only the descriptor differs. The index width is not an op parameter: it
+is the element width of the row list, so a list and the width it is read at can never
+disagree. The atom sets the list up and a ``copy`` may hand over a different one.
 
 The limits come from where the row list lives. It occupies the two descriptor groups
 a linear tile would spend on dims 2..4, which is why an indexed tile is 2D only and
@@ -41,13 +43,13 @@ WIDTH = 128
 N = 256
 
 
-def _build(rows, width=WIDTH, op=None, tiler=None, index_dtype=torch.int32, index_tensor=True):
+def _build(rows, width=WIDTH, op=None, tiler=None, index_dtype=torch.int32, index_tensor=True, copy_dtype=None):
     """Trace a one-issue indexed load; return nothing, raise whatever it raises."""
     tile = tiler if tiler is not None else (rows, width)
     make_op = op if op is not None else fx.rocdl.TensorLoadGather
 
     @flyc.kernel
-    def k(src: fx.Tensor, idx: fx.Tensor):
+    def k(src: fx.Tensor, idx: fx.Tensor, idx2: fx.Tensor):
         lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, rows * width]).peek()
         box = fx.make_layout((rows, width), (width, 1))
         smem = fx.make_view(lds.ptr, fx.make_layout(((rows, width), 1), ((width, 1), rows * width)))
@@ -56,22 +58,25 @@ def _build(rows, width=WIDTH, op=None, tiler=None, index_dtype=torch.int32, inde
         )
         blk = fx.zipped_divide(coord, (rows, width))[None, (0, None)]
         tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx])
-        fx.copy(atom, [tAg[None, 0], tAi], tAs[None, 0])
+        # The atom set the list up; the call site may replace it.
+        fx.copy(atom, [tAg[None, 0], idx2 if copy_dtype is not None else tAi], tAs[None, 0])
         fx.rocdl.s_wait_tensorcnt(0)
 
     @flyc.jit
-    def j(src: fx.Tensor, idx: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        k(src, idx).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+    def j(src: fx.Tensor, idx: fx.Tensor, idx2: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        k(src, idx, idx2).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
 
+    n = rows if rows > 0 else 1
     j(
         torch.zeros(64, N, dtype=torch.float16, device="cuda"),
-        torch.zeros(rows if rows > 0 else 1, dtype=index_dtype, device="cuda"),
+        torch.zeros(n, dtype=index_dtype, device="cuda"),
+        torch.zeros(n, dtype=copy_dtype or index_dtype, device="cuda"),
     )
 
 
-def _bits(n):
-    """A gather op fixed to ``n``-bit indices, as ``_build`` wants it."""
-    return lambda: fx.rocdl.TensorLoadGather(index_bits=n)
+def _idx(bits):
+    """Index dtype of a given width, as ``_build`` wants it."""
+    return torch.int16 if bits == 16 else torch.int32
 
 
 # -- the op struct is what selects the mode -------------------------------------
@@ -83,24 +88,17 @@ def test_linear_op_refuses_an_index_tensor():
         _build(rows=8, op=fx.rocdl.TensorLoad)
 
 
-def test_indexed_op_requires_an_index_tensor():
-    """The mode is on, so the row list is not optional."""
-    with pytest.raises(Exception, match="needs an index_tensor"):
-        _build(rows=8, index_tensor=False)
+@_needs_target
+def test_atom_without_a_list_defaults_to_16_bit():
+    """The atom may leave the list to the call site; the default width is 16-bit,
+    which is why 16 rows are allowed here with no list to read it from."""
+    _build(rows=16, index_tensor=False, index_dtype=_idx(16))
 
 
-def test_index_width_must_be_16_or_32():
-    """The width is a descriptor bit, so the op rejects anything else up front."""
-    with pytest.raises(Exception, match="index_bits must be 16 or 32"):
-        fx.rocdl.TensorLoadGather(index_bits=8)
-
-
-def test_gather_and_scatter_report_their_row_budget():
-    """``max_rows`` is what the two descriptor groups hold at that width."""
-    assert fx.rocdl.TensorLoadGather().max_rows == 8
-    assert fx.rocdl.TensorLoadGather(index_bits=16).max_rows == 16
-    assert fx.rocdl.TensorStoreScatter().max_rows == 8
-    assert fx.rocdl.TensorStoreScatter(index_bits=16).max_rows == 16
+def test_index_width_comes_from_the_element_type():
+    """A 16-bit list doubles the row budget a 32-bit one allows, with no op change."""
+    assert fx.rocdl.cdna5.index_rows_limit(16) == 16
+    assert fx.rocdl.cdna5.index_rows_limit(32) == 8
 
 
 def test_indexed_ops_keep_their_direction():
@@ -122,7 +120,19 @@ def test_gather_builds():
 @_needs_target
 def test_gather_builds_16bit():
     """Halving the index width doubles the rows one issue can name."""
-    _build(rows=16, op=_bits(16))
+    _build(rows=16, index_dtype=_idx(16))
+
+
+@_needs_target
+def test_copy_may_replace_the_row_list():
+    """The atom initialises the list; a call site hands over a different one."""
+    _build(rows=8, copy_dtype=torch.int32)
+
+
+@_needs_target
+def test_copy_may_narrow_the_index_width():
+    """The replacement carries its own width, so the descriptor follows the operand."""
+    _build(rows=8, index_dtype=_idx(32), copy_dtype=_idx(16))
 
 
 @_needs_target
@@ -137,17 +147,17 @@ def test_any_row_count_up_to_the_budget_builds(rows):
 @pytest.mark.parametrize("rows", [1, 7, 16])
 def test_any_row_count_up_to_the_budget_builds_16bit(rows):
     """The same at 16-bit indices, where two share a descriptor word."""
-    _build(rows=rows, op=_bits(16))
+    _build(rows=rows, index_dtype=_idx(16))
 
 
 def test_too_many_rows_for_32bit():
     with pytest.raises(Exception, match="1 to 8 rows"):
-        _build(rows=16, op=_bits(32))
+        _build(rows=16, index_dtype=_idx(32))
 
 
 def test_too_many_rows_for_16bit():
     with pytest.raises(Exception, match="1 to 16 rows"):
-        _build(rows=32, op=_bits(16))
+        _build(rows=32, index_dtype=_idx(16))
 
 
 # -- descriptor shape ------------------------------------------------------------
@@ -164,9 +174,10 @@ def test_rank_must_be_two():
         _build(rows=8, tiler=(2, 4, WIDTH))
 
 
-def test_index_tensor_must_be_i32():
-    with pytest.raises(Exception, match="Int32 row indices"):
-        _build(rows=8, index_dtype=torch.int16)
+def test_index_element_type_must_be_16_or_32_bit():
+    """The width is a descriptor bit, so anything else has no encoding."""
+    with pytest.raises(Exception, match="16- or 32-bit integer row indices"):
+        _build(rows=8, index_dtype=torch.int8)
 
 
 def test_row_shorter_than_a_dword_is_rejected():

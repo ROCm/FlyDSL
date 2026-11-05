@@ -6,7 +6,7 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAScaleType
 from ..._mlir.dialects import fly_rocdl
-from ..typing import Int32, Int64, Tensor
+from ..typing import Int16, Int32, Int64, Tensor, Uint16, Uint32
 
 __all__ = [
     "WMMAScale",
@@ -113,43 +113,66 @@ class TensorStore:
 # hold the row list instead of dims 2..4). That is why these subclass the linear ops
 # rather than standing beside them: the direction, the atom state and the lowering
 # path are all shared, and only the descriptor build forks.
-class _IndexedMixin:
-    """Row-indexed addressing shared by the gather load and the scatter store.
-
-    ``index_bits`` is 16 or 32 and bounds how many rows one issue carries, because the
-    row list occupies fixed descriptor storage: up to 16 rows at 16 bits, up to 8 at
-    32. Any count in ``[1, max]`` is legal -- the descriptor's ``tile_dim1`` field says
-    how many of the listed indices the engine consumes -- so a short tile needs no
-    padding entries.
-    """
-
-    def __init__(self, index_bits=32, cache_modifier=0):
-        if index_bits not in (16, 32):
-            raise ValueError(f"index_bits must be 16 or 32, got {index_bits}")
-        self.cache_modifier = cache_modifier
-        self.index_bits = index_bits
-
-    @property
-    def max_rows(self):
-        return 16 if self.index_bits == 16 else 8
-
-    def __repr__(self):
-        return f"{type(self).__name__}(index_bits={self.index_bits}, cache_modifier={self.cache_modifier})"
+#
+# The index width is not a parameter of the op. It is read off the row list's element
+# type, so the list and the width it implies cannot disagree. Only the width reaches
+# the descriptor -- an index is a row number, never negative -- and signedness does not
+# survive into the memref type either, so the signed spellings are accepted beside the
+# unsigned ones rather than rejected for a distinction nothing downstream can see.
+INDEX_WIDTHS = {Uint16: 16, Int16: 16, Uint32: 32, Int32: 32}
+DEFAULT_INDEX_BITS = 16
 
 
-class TensorLoadGather(_IndexedMixin, TensorLoad):
+def index_rows_limit(index_bits):
+    """How many rows one issue carries: the row list has fixed descriptor storage."""
+    return 16 if index_bits == 16 else 8
+
+
+def index_bits_of(index_tensor, what):
+    """Index width implied by a row list's element type, or None if no list is given."""
+    if index_tensor is None:
+        return None
+    elem = getattr(index_tensor, "element_type", None)
+    bits = INDEX_WIDTHS.get(elem)
+    if bits is None:
+        raise TypeError(f"{what} must hold 16- or 32-bit integer row indices, got {elem}")
+    return bits
+
+
+def check_index_rows(index_bits, count, what):
+    """Reject a row count the descriptor cannot hold. A dynamic count is left alone."""
+    if count is None:
+        return
+    limit = index_rows_limit(index_bits)
+    if not 1 <= count <= limit:
+        raise ValueError(f"{what} carries 1 to {limit} rows at {index_bits}-bit indices, got {count}")
+
+
+def static_length(tensor):
+    """Element count of a tensor whose shape is static, else None."""
+    from ..primitive import size
+
+    try:
+        value = size(tensor.layout).unpack()
+    except Exception:
+        return None
+    return value if isinstance(value, int) else None
+
+
+class TensorLoadGather(TensorLoad):
     """CDNA5 TDM Global -> LDS gather (``TENSOR_LOAD_TO_LDS``, indexed descriptor).
 
     The outer dimension is not walked, it is listed: the atom is handed one row index
     per row of the tile and collects exactly those rows. Pass the row list to
-    :func:`make_tiled_tdm_atom` as ``index_tensor``.
+    :func:`make_tiled_tdm_atom` as ``index_tensor``; its element type picks the index
+    width, and a call site may hand :func:`copy` a different list.
 
     Atom state is ``TensorLoad``'s. A row index at or past the tensor's row count
     reads as zero, which is how a tile masks rows it does not want.
     """
 
 
-class TensorStoreScatter(_IndexedMixin, TensorStore):
+class TensorStoreScatter(TensorStore):
     """CDNA5 TDM LDS -> Global scatter (``TENSOR_STORE_FROM_LDS``, indexed descriptor).
 
     The mirror of :class:`TensorLoadGather`: the row list names where each row of the
@@ -300,11 +323,16 @@ def make_tiled_tdm_atom(
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
     * ``internal_type`` — reserved; currently must be ``None``.
-    * ``index_tensor`` — the row list an indexed ``op`` reads, holding one ``Int32``
-      index per row of the tile. Required by an indexed op and refused by a linear one.
+    * ``index_tensor`` — the row list an indexed ``op`` starts with, holding one
+      16- or 32-bit integer index per row of the tile. Its element *width* picks the
+      index width; leaving it out keeps the 16-bit default and leaves the list to the
+      call site. A linear op refuses it.
+
+    The atom sets the row list up; a :func:`copy` may hand over a different one, whose
+    element type then decides the width for that call.
 
     Indexed addressing is 2D only, and the per-row span must be a whole multiple of
-    4 bytes. One issue carries any row count in ``[1, op.max_rows]``: 8 rows at 32-bit
+    4 bytes. One issue carries any row count in ``[1, limit]``: 8 rows at 32-bit
     indices, 16 at 16-bit. A row index at or past the tensor's row count reads zero on
     a load and is dropped on a store, which is how a short tile masks its unused rows.
 
@@ -353,31 +381,24 @@ def make_tiled_tdm_atom(
     if internal_type is not None:
         raise ValueError("internal_type must be None for now")
 
-    # The op decides the addressing mode; `index_tensor` only supplies its data, so the
-    # two have to agree or the atom would describe one thing and be handed another.
-    indexed = isinstance(op, _IndexedMixin)
-    if indexed and index_tensor is None:
-        raise ValueError(f"{type(op).__name__} needs an index_tensor holding its row list")
+    # The op picks the addressing mode; the row list only supplies its data. The width
+    # follows the list's element type, so the two can never disagree.
+    indexed = isinstance(op, (TensorLoadGather, TensorStoreScatter))
     if not indexed and index_tensor is not None:
         raise ValueError(
             f"index_tensor needs an indexed op (TensorLoadGather / TensorStoreScatter), got {type(op).__name__}"
         )
 
-    index_bits = op.index_bits if indexed else 0
+    index_bits = 0
     if indexed:
-        if getattr(index_tensor, "element_type", None) is not Int32:
-            raise TypeError(
-                f"the index tensor must hold Int32 row indices, got {getattr(index_tensor, 'element_type', None)}"
-            )
+        index_bits = index_bits_of(index_tensor, "index_tensor") or DEFAULT_INDEX_BITS
         tile_rank = len(tdm_tile) if not isinstance(tdm_tile, ir.Value) else None
         if tile_rank is not None and tile_rank != 2:
             raise ValueError(f"indexed addressing is 2D only, got a rank-{tile_rank} tiler")
         if tile_rank is not None:
             rows = tdm_tile[0]
-            if isinstance(rows, int) and not 1 <= rows <= op.max_rows:
-                raise ValueError(
-                    f"one indexed issue carries 1 to {op.max_rows} rows at {index_bits}-bit indices, got {rows}"
-                )
+            check_index_rows(index_bits, rows if isinstance(rows, int) else None, "one indexed issue")
+        check_index_rows(index_bits, static_length(index_tensor) if index_tensor is not None else None, "index_tensor")
 
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the

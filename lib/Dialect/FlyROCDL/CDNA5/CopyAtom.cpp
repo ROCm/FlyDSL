@@ -652,27 +652,38 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // list lives in the two descriptor groups that a linear 3D+ tile would spend on its
   // extra dims, which is why the indexed form is 2D only.
   SmallVector<Value> rowIndex;
-  if (cfg.indexBits) {
+  int32_t indexBits = cfg.indexBits;
+  if (indexBits) {
     auto indexMemTy = dyn_cast_or_null<fly::MemRefType>(indexTyArg);
     if (!index || !indexMemTy)
       return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand, got "
                                   << indexTyArg;
-    if (!indexMemTy.getElemTy().isInteger(32))
-      return mlir::emitError(loc) << "cdna5 TDM: row indices must be i32, got "
+    // The atom sets the row list up and a call site may hand over a different one, so
+    // the width that counts is this operand's. Reading it off the element type is what
+    // keeps a list and the width it is read at from ever disagreeing.
+    unsigned elemBitsIdx =
+        indexMemTy.getElemTy().isIntOrFloat() ? indexMemTy.getElemTy().getIntOrFloatBitWidth() : 0;
+    if (elemBitsIdx != 16 && elemBitsIdx != 32)
+      return mlir::emitError(loc) << "cdna5 TDM: row indices must be 16- or 32-bit, got "
                                   << indexMemTy.getElemTy();
+    indexBits = static_cast<int32_t>(elemBitsIdx);
     // `tileShape` is outermost-first, so its leading dim is the row count.
     int32_t rows = tileShape.front();
-    if (rows > tdm::maxIndexedRows(cfg.indexBits))
+    if (rows > tdm::maxIndexedRows(indexBits))
       return mlir::emitError(loc) << "cdna5 TDM: " << rows << " rows exceed the "
-                                  << tdm::maxIndexedRows(cfg.indexBits) << " that " << cfg.indexBits
+                                  << tdm::maxIndexedRows(indexBits) << " that " << indexBits
                                   << "-bit indices carry";
     // The descriptor is scalar state, so every index has to reach an SGPR. The loads
-    // are uniform across the wave; readfirstlane is what tells the backend so.
+    // are uniform across the wave; readfirstlane is what tells the backend so. A narrow
+    // index is widened on the way, because the groups are packed as whole words below.
+    Type idxElemTy = builder.getIntegerType(indexBits);
     Type idxPtrTy = index.getType();
     for (int32_t i = 0; i < rows; ++i) {
       Value slot =
-          LLVM::GEPOp::create(builder, loc, idxPtrTy, i32Ty, index, ArrayRef<LLVM::GEPArg>{i});
-      Value raw = LLVM::LoadOp::create(builder, loc, i32Ty, slot);
+          LLVM::GEPOp::create(builder, loc, idxPtrTy, idxElemTy, index, ArrayRef<LLVM::GEPArg>{i});
+      Value raw = LLVM::LoadOp::create(builder, loc, idxElemTy, slot);
+      if (indexBits != 32)
+        raw = LLVM::ZExtOp::create(builder, loc, i32Ty, raw);
       rowIndex.push_back(ROCDL::ReadfirstlaneOp::create(builder, loc, i32Ty, raw));
     }
   }
@@ -767,8 +778,8 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // count = 1 is "valid tensor"; bit 31 turns on indexed addressing and bit 30 selects
   // the index width, which is why both live beside it in the same word.
   int32_t g0Config = 1;
-  if (cfg.indexBits)
-    g0Config |= (cfg.indexBits == 32 ? 1 << 30 : 0) | (1 << 31);
+  if (indexBits)
+    g0Config |= (indexBits == 32 ? 1 << 30 : 0) | (1 << 31);
   Value g0s2 = LLVM::TruncOp::create(builder, loc, i32Ty, glbAddr);
   Value glbHiRaw = LLVM::LShrOp::create(builder, loc, glbAddr,
                                         arith::ConstantIntOp::create(builder, loc, 32, 64));
@@ -902,9 +913,9 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // descriptor iterates, the same three slots redefined as lds_addr_increment,
   // global_addr_increment and iterate_count. That is why iteration costs the fourth dim.
   Value g2s0 = zeroC, g2s1 = zeroC, g2s2 = zeroC, g2s3 = zeroC;
-  if (cfg.indexBits) {
+  if (indexBits) {
     SmallVector<Value> words;
-    if (cfg.indexBits == 32) {
+    if (indexBits == 32) {
       words.assign(rowIndex.begin(), rowIndex.end());
     } else {
       // Two 16-bit indices per word, even index low.
