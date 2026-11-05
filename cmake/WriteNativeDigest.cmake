@@ -12,7 +12,7 @@ if(NOT IS_DIRECTORY "${LIBS_DIR}")
 endif()
 
 file(GLOB _names LIST_DIRECTORIES false RELATIVE "${LIBS_DIR}"
-  "${LIBS_DIR}/*.so" "${LIBS_DIR}/*.so.*" "${LIBS_DIR}/*.a")
+  "${LIBS_DIR}/*.so" "${LIBS_DIR}/*.so.*" "${LIBS_DIR}/*.a" "${LIBS_DIR}/*.pyd" "${LIBS_DIR}/*.dll")
 list(REMOVE_DUPLICATES _names)
 list(SORT _names)
 

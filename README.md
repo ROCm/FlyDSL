@@ -38,6 +38,7 @@ FlyDSL/
 │   ├── build_llvm.sh          # build LLVM/MLIR from source (applies thirdparty/llvm-extensions)
 │   ├── llvm_extension.sh      # create/rebase an LLVM extension
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
+│   ├── windows/               # build_llvm_windows.ps1, build_windows.ps1: the same on Windows
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
 ├── include/flydsl/            # C++ Fly/FlyROCDL dialect headers
@@ -127,6 +128,27 @@ Both CMake Python detection passes are pinned to it. Builds launched by
 `PATH` or an inherited `PYTHON_EXECUTABLE`, so newly built bindings match the wheel ABI.
 Use a separate `FLY_BUILD_DIR` for each Python version to avoid reusing old bindings.
 
+### Build on Windows
+
+Prerequisites:
+
+- Visual Studio 2022 with the C++ tools and the C++ Clang tools, or pass
+  `-ClangCl <path to clang-cl.exe>` to both scripts.
+- CMake 3.20+, Ninja and Git on `PATH`.
+- 64-bit Python 3.10+ in a venv with `setuptools` and `wheel`.
+- In that venv, TheRock wheels for your GPU family
+  (`--index-url https://rocm.nightlies.amd.com/v2/gfx120X-all/`): `torch` first, then
+  the matching `rocm[libraries,devel]==<rocm_sdk.__version__>`, then `rocm-sdk init`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_llvm_windows.ps1 -Python .venv\Scripts\python.exe
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_windows.ps1 -Python .venv\Scripts\python.exe
+$env:FLY_BUILD_DIR = "$PWD\build-fly"; .venv\Scripts\python setup.py bdist_wheel
+```
+
+Without a torch that sees the GPU, set `FLYDSL_GPU_ARCH` (for example `gfx1201`).
+AOT export (`export_to_c`) is Linux-only.
+
 ### Run tests
 
 Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
@@ -178,6 +200,16 @@ bash scripts/build.sh -j64
     ```bash
     export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
     ```
+
+## Claude Code plugin
+
+The skills under [`.claude/skills/`](.claude/skills) for authoring, debugging, profiling and optimizing FlyDSL kernels are also published as a [Claude Code](https://claude.com/claude-code) plugin, so you can use them outside this checkout:
+
+```
+/plugin install flydsl --marketplace ROCm/FlyDSL
+```
+
+Or from the shell: `claude plugin marketplace add ROCm/FlyDSL && claude plugin install flydsl@flydsl`. Skills are invoked as `/flydsl:<skill>` (e.g. `/flydsl:debug-flydsl-kernel`); update with `claude plugin update flydsl@flydsl`.
 
 ## Documentation
 

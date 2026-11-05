@@ -47,7 +47,24 @@ NETWORKS = {
     "r1_v3": dict(model_dim=7168, inter_dim=2048, experts=256, topk=8),
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
     "v4_pro": dict(model_dim=7168, inter_dim=3072, experts=384, topk=6, swiglu_limit=10.0),
+    # Kimi-K3: SiTUv2 activation (topk16, 896 experts); situ_beta/linear_beta are K3 checkpoint constants.
+    "kimi_k3_route": dict(
+        model_dim=3584,
+        inter_dim=3072,
+        experts=896,
+        topk=16,
+        swiglu_limit=0.0,
+        act="situv2",
+        situ_beta=4.0,
+        situ_linear_beta=25.0,
+    ),
 }
+
+
+def _full_e2e_supports(network):
+    """The full-e2e path compares against the ATOM GEMM1 pipeline, which only implements SiLU."""
+    return NETWORKS[network].get("act", "silu") == "silu"
+
 
 # batch-size sweeps for --matrix / --full-bs.
 CLASSIC_BS = [1, 8, 64, 512, 8192, 32768]
@@ -63,6 +80,19 @@ def _per_1x32_fp4_quant(x):
     return quantized.view(*shape[:-1], -1), scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
 
 
+def _per_1x32_fp4_quant_rceil(x):
+    """MX-FP4 with the RoundUp E8M0 scale ceil_pow2(amax / 6), bit-identical to aiter's default per_1x32 quant."""
+    shape = x.shape
+    rows = x.reshape(-1, 32).float()
+    u32 = (rows.abs().amax(dim=1) / 6.0).view(torch.int32)
+    exponent = ((u32 >> 23) & 0xFF).to(torch.uint8)
+    bump = ((u32 & 0x7FFFFF) != 0) & (exponent < 0xFF)
+    scale_e8m0 = torch.where(bump, exponent + 1, exponent)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0)
+    quantized = gemm_common_utils.f32_to_mxfp4(rows / scale_f32[:, None])
+    return quantized.view(*shape[:-1], -1), scale_e8m0.view(*shape[:-1], shape[-1] // 32)
+
+
 def _per_1x32_mxfp8_quant(x):
     fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
     shape = x.shape
@@ -74,8 +104,21 @@ def _per_1x32_mxfp8_quant(x):
     return quantized.view(shape).contiguous(), scales.contiguous()
 
 
-# Chained A8W4 accuracy gate for 61 residual layers.
-_CHAIN_TOL = 0.10
+# Chained accuracy budget, the one aiter's op_tests/multigpu_tests/bench_mega_moe.py gates its
+# N-layer residual chain with: 1 - cosine grows about linearly in the layer count and then
+# saturates, so tol = safety * slope * L / (1 + sat * L). (slope, sat) are aiter's mxfp8-wire
+# rows; the MegaMoEV2 combine wire is bf16 or fp8 with 1x32 e8m0 scales, which aiter also
+# books under mxfp8.
+_CHAIN_ACC_TOL = {
+    "a4w4": (0.0225, 0.031),
+    "a8w4": (0.00143, 0.0012),
+}
+_CHAIN_ACC_TOL_SAFETY = 1.5
+
+
+def _chain_tol(quant, n_layers):
+    slope, sat = _CHAIN_ACC_TOL[quant]
+    return _CHAIN_ACC_TOL_SAFETY * slope * n_layers / (1.0 + sat * n_layers)
 
 
 def _info(rank, msg):
@@ -233,19 +276,19 @@ def _profile_body(body, op_tag, args, rank, world, dev, out_dir, meta):
     return {"e2e_us_avg": s.item() / world}
 
 
-def _chunked_fp4_quant(x):
+def _chunked_fp4_quant(x, quant=_per_1x32_fp4_quant):
     """Row-chunked MX-FP4 quant (identical result; bounds the f32 temp)."""
     n = int(x.shape[1])
     chunk_rows = max(4096, ((2 << 30) // max(1, n * 4 * 8)) // 4096 * 4096)
     if x.ndim != 2 or x.shape[0] <= chunk_rows:
-        return _per_1x32_fp4_quant(x)
+        return quant(x)
     m = int(x.shape[0])
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
     y = torch.empty((m, n // 2), device=x.device, dtype=fp4_dtype)
     s = torch.empty((m, n // 32), device=x.device, dtype=torch.uint8)
     for st in range(0, m, chunk_rows):
         en = min(st + chunk_rows, m)
-        yc, sc = _per_1x32_fp4_quant(x[st:en])
+        yc, sc = quant(x[st:en])
         y[st:en].copy_(yc)
         s[st:en].copy_(sc)
         del yc, sc
@@ -253,7 +296,7 @@ def _chunked_fp4_quant(x):
     return y, s
 
 
-def _dequant_mx_to_f32(t_f32, quant_mode):
+def _dequant_mx_to_f32(t_f32, quant_mode, fp4_quant=_per_1x32_fp4_quant):
     """Round-trip a tensor through per-1x32 MX quantization for the accuracy oracle."""
     orig = tuple(t_f32.shape)
     t2d = t_f32.reshape(-1, orig[-1])
@@ -261,7 +304,7 @@ def _dequant_mx_to_f32(t_f32, quant_mode):
         q, s = _per_1x32_mxfp8_quant(t2d)  # q: fp8_e4m3fn [., K]; s: e8m0 u8 [., K//32]
         vf = q.float()
     else:
-        q, s = _chunked_fp4_quant(t2d)  # q: fp4x2 [., K//2]; s: e8m0 u8 [., K//32]
+        q, s = _chunked_fp4_quant(t2d, fp4_quant)  # q: fp4x2 [., K//2]; s: e8m0 u8 [., K//32]
         vf = gemm_common_utils.mxfp4_to_f32(q)  # [., K] f32 via the E2M1 LUT
     sf = gemm_common_utils.e8m0_to_f32(s).unsqueeze(-1).expand(-1, -1, 32).reshape(t2d.shape)
     return (vf * sf).reshape(orig).to(torch.float32)
@@ -279,6 +322,15 @@ def _swiglu(gate, up, limit):
         gate = gate.clamp(max=limit)
         up = up.clamp(-limit, limit)
     return torch.nn.functional.silu(gate) * up
+
+
+def _act_hidden(gate, up, *, act="silu", swiglu_limit=0.0, situ_beta=1.0, situ_linear_beta=1.0):
+    """Oracle activation: swiglu (silu(gate)*up) or SiTUv2 (Kimi-K3), matching the kernel epilogue."""
+    if act == "situv2":
+        gate = situ_beta * torch.tanh(gate / situ_beta) * torch.sigmoid(gate)
+        up = situ_linear_beta * torch.tanh(up / situ_linear_beta)
+        return gate * up
+    return _swiglu(gate, up, swiglu_limit)
 
 
 def _calc_diff(x, y):
@@ -315,10 +367,28 @@ def _make_layer_routings(n_layers, tokens, experts, topk, dev, seed, rank):
 class RefModel:
     """Pure PyTorch FP32 reference for chained MoE residual layers."""
 
-    def __init__(self, w1_f32, w2_f32, inter_dim, dev, swiglu_limit=0.0, sw1=None, sw2=None):
+    def __init__(
+        self,
+        w1_f32,
+        w2_f32,
+        inter_dim,
+        dev,
+        swiglu_limit=0.0,
+        sw1=None,
+        sw2=None,
+        *,
+        act="silu",
+        situ_beta=1.0,
+        situ_linear_beta=1.0,
+    ):
         self.w1_f32, self.w2_f32 = w1_f32, w2_f32  # full-precision [E, 2I, H], [E, H, I]
         self.inter_dim = inter_dim
-        self.swiglu_limit = float(swiglu_limit)
+        self.act_kw = dict(
+            act=act,
+            swiglu_limit=float(swiglu_limit),
+            situ_beta=float(situ_beta),
+            situ_linear_beta=float(situ_linear_beta),
+        )
         self.sw1, self.sw2 = sw1, sw2  # optional dense shared experts (None here)
         self._cache = {}
 
@@ -334,7 +404,7 @@ class RefModel:
 
     def _ffn(self, x, w1d, w2d):
         gate, up = (x @ w1d.t()).chunk(2, dim=-1)
-        return _swiglu(gate, up, self.swiglu_limit) @ w2d.t()
+        return _act_hidden(gate, up, **self.act_kw) @ w2d.t()
 
     def _shared(self, x):
         if self.sw1 is None:
@@ -380,8 +450,25 @@ def _prepare(
     world=1,
     keep_ref=False,
     local_experts_only=False,
+    input_gen="flydsl",
 ):
     """Generate inputs and packed weights for A8W4 or A4W4."""
+    if input_gen == "aiter":
+        if not local_experts_only:
+            raise SystemExit("--input-gen aiter generates rank-local experts only (no full-expert oracle)")
+        return _prepare_aiter(
+            dev,
+            quant=quant,
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            seed=seed,
+            rank=rank,
+            world=world,
+            keep_ref=keep_ref,
+        )
     torch.manual_seed(seed)
     # Scale inputs and weights by model_dim**-0.25 to keep pre-activations O(1).
     init_scale = float(model_dim) ** -0.25
@@ -441,6 +528,64 @@ def _prepare(
         wts=wts,
         a_dtype=a_dtype,
         x_bf16=x_fp32.to(torch.bfloat16).contiguous(),
+    )
+
+
+def _prepare_aiter(dev, *, quant, tokens, model_dim, inter_dim, experts, topk, seed, rank, world, keep_ref):
+    """Inputs, routing and rank-local weights bit-identical to aiter's op_tests/multigpu_tests/test_mega_moe_v2.py."""
+    if quant not in ("a4w4", "a8w4"):
+        raise SystemExit(f"unknown quant {quant!r} (use a8w4|a4w4)")
+    epr = experts // world
+    gen = torch.Generator(device=dev).manual_seed(seed + rank)
+    x_bf16 = torch.randn((tokens, model_dim), dtype=torch.bfloat16, device=dev, generator=gen)
+    scores = torch.randn((tokens, experts), dtype=torch.float32, device=dev, generator=gen)
+    values, ids = torch.topk(scores, topk, dim=-1)
+    del scores
+
+    wgen = torch.Generator(device=dev).manual_seed(seed + 1000 + rank)
+    w1 = torch.randn((epr, 2 * inter_dim, model_dim), dtype=torch.bfloat16, device=dev, generator=wgen)
+    w1.mul_(model_dim**-0.25)
+    w1_fp4, w1_scale = _chunked_fp4_quant(w1.view(epr * 2 * inter_dim, model_dim), _per_1x32_fp4_quant_rceil)
+    w_kernel_gui = (
+        gemm_common_utils.shuffle_weight_w4(
+            w1_fp4.view(epr, 2 * inter_dim, model_dim // 2), NLane=16, gate_up=True, moe_gemm=True
+        )
+        .view(torch.uint8)
+        .contiguous()
+    )
+    scale_gui = (
+        gemm_common_utils.shuffle_scale_w4(w1_scale, experts_cnt=epr, gate_up=True).view(torch.uint8).contiguous()
+    )
+    w_ref_local = w1.float() if keep_ref else None
+    del w1
+
+    w2 = torch.randn((epr, model_dim, inter_dim), dtype=torch.bfloat16, device=dev, generator=wgen)
+    w2.mul_(inter_dim**-0.25)
+    w2 = w2.view(epr * model_dim, inter_dim)
+    w2_ref = w2.float() if keep_ref else None
+    w2_fp4, w2_scale = _chunked_fp4_quant(w2, _per_1x32_fp4_quant_rceil)
+    del w2
+    w2_kernel = shuffle_weight(w2_fp4).view(torch.uint8).contiguous().view(-1)
+    w2_scale_1d = gemm_common_utils.e8m0_shuffle(w2_scale).view(torch.uint8).contiguous().view(-1)
+    del w2_fp4, w2_scale
+    torch.cuda.empty_cache()
+
+    return dict(
+        # _run_mega_only only needs the per-expert element counts of the unshuffled W1 pair.
+        w_kernel=w1_fp4.view(torch.uint8),
+        scale_w1_1d=w1_scale.view(torch.uint8),
+        w_kernel_gui=w_kernel_gui,
+        scale_gui=scale_gui,
+        w_ref_local=w_ref_local,
+        local_experts_only=True,
+        w2_kernel=w2_kernel,
+        w2_scale_1d=w2_scale_1d,
+        w2_ref=w2_ref,
+        fp4_quant=_per_1x32_fp4_quant_rceil,
+        topk_ids=ids.to(torch.int32).contiguous(),
+        wts=values.softmax(dim=-1).contiguous(),
+        a_dtype="fp4" if quant == "a4w4" else "fp8",
+        x_bf16=x_bf16.contiguous(),
     )
 
 
@@ -928,6 +1073,9 @@ _MEGA_PERF_BASELINE = {
     "v4_pro:a4w4:8192": 3.5759,
 }
 
+# (key, w_kernel_gui, MegaMoEV2) reused across batch sizes under a fixed --mtpr.
+_SHARED_MEGA = {}
+
 
 def _perf_key(network, quant, tokens, mtpr=0):
     key = f"{network}:{quant}:{tokens}"
@@ -977,6 +1125,14 @@ def _run_mega_only(
     check_acc=True,
     measure_perf=False,
     stage1_only=False,
+    act="silu",
+    situ_beta=1.0,
+    situ_linear_beta=1.0,
+    shared_moe=False,
+    w2_kernel=None,
+    w2_scale_1d=None,
+    w2_ref=None,
+    fp4_quant=_per_1x32_fp4_quant,
 ):
     """Run the aiter-free MegaMoEV2 accuracy and performance CI path."""
 
@@ -987,11 +1143,22 @@ def _run_mega_only(
     # The dequantized-weight oracle isolates kernel and activation-quantization error.
     _floor = 0.25 if quant == "a4w4" else 0.10
 
+    # mori never frees symmetric buffers, so a fresh MegaMoEV2 per batch size
+    # exhausts MORI_SHMEM_HEAP_SIZE; reuse requires the same prepared weights.
+    _shared_key = (
+        args.network, quant, mtpr, model_dim, inter_dim, experts, topk, swiglu_limit, act, situ_beta,
+        situ_linear_beta, args.stage2_p2p_quant, stage1_only, local_experts_only, args.seed,
+    )  # fmt: skip
+    _entry = _SHARED_MEGA.get("entry") if shared_moe else None
+    moe = _entry[2] if _entry is not None and _entry[0] == _shared_key and _entry[1] is w_kernel_gui else None
+
     if stage1_only:
         w2_f32 = None
         w2_kernel = torch.empty(1, dtype=torch.uint8, device=dev)
         w2_scale_1d = torch.empty(1, dtype=torch.uint8, device=dev)
-    else:
+    elif w2_kernel is not None:
+        w2_f32 = w2_ref  # prepared together with W1 (--input-gen aiter)
+    elif moe is None or check_acc:
         torch.manual_seed(args.seed + 4242 + (rank if local_experts_only else 0))
         w2_experts = epr if local_experts_only else experts
         w2_f32 = torch.randn((w2_experts * model_dim, inter_dim), device=dev, dtype=torch.float32)
@@ -1007,32 +1174,38 @@ def _run_mega_only(
         del w2_fp4, w2_sr
         torch.cuda.empty_cache()
 
-    # MegaMoEV2 local weights: this rank's epr experts.
-    _weight_experts = epr if local_experts_only else experts
-    _wpe = w_kernel.numel() // _weight_experts
-    _spe = scale_w1_1d.numel() // _weight_experts
-    _w1sl = slice(0, epr * _wpe) if local_experts_only else slice(rank * epr * _wpe, (rank + 1) * epr * _wpe)
-    _w1ssl = slice(0, epr * _spe) if local_experts_only else slice(rank * epr * _spe, (rank + 1) * epr * _spe)
-    assert w_kernel_gui is not None and scale_gui is not None
-    _w1 = w_kernel_gui.reshape(-1)[_w1sl].contiguous()
-    _w1s = scale_gui.reshape(-1)[_w1ssl].contiguous()
+    if moe is None:
+        # MegaMoEV2 local weights: this rank's epr experts.
+        _weight_experts = epr if local_experts_only else experts
+        _wpe = w_kernel.numel() // _weight_experts
+        _spe = scale_w1_1d.numel() // _weight_experts
+        _w1sl = slice(0, epr * _wpe) if local_experts_only else slice(rank * epr * _wpe, (rank + 1) * epr * _wpe)
+        _w1ssl = slice(0, epr * _spe) if local_experts_only else slice(rank * epr * _spe, (rank + 1) * epr * _spe)
+        assert w_kernel_gui is not None and scale_gui is not None
+        _w1 = w_kernel_gui.reshape(-1)[_w1sl].contiguous()
+        _w1s = scale_gui.reshape(-1)[_w1ssl].contiguous()
 
-    moe = MegaMoEV2(
-        rank=rank,
-        world_size=world,
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        quant=quant,
-        w1=_w1,
-        w1_scale=_w1s,
-        w2=w2_kernel,
-        w2_scale=w2_scale_1d,
-        max_tok_per_rank=mtpr,
-        stage2_p2p_quant=args.stage2_p2p_quant,
-        swiglu_limit=swiglu_limit,
-    )
+        moe = MegaMoEV2(
+            rank=rank,
+            world_size=world,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            quant=quant,
+            w1=_w1,
+            w1_scale=_w1s,
+            w2=w2_kernel,
+            w2_scale=w2_scale_1d,
+            max_tok_per_rank=mtpr,
+            stage2_p2p_quant=args.stage2_p2p_quant,
+            swiglu_limit=swiglu_limit,
+            act=act,
+            situ_beta=situ_beta,
+            situ_linear_beta=situ_linear_beta,
+        )
+        if shared_moe:
+            _SHARED_MEGA["entry"] = (_shared_key, w_kernel_gui, moe)
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
     skew_ms = float(getattr(args, "rank_skew_ms", 0.0))
@@ -1106,11 +1279,13 @@ def _run_mega_only(
         ref_s1 = torch.empty_like(got_s1)
         for expert in torch.unique(eids_s1).tolist():
             rows = torch.nonzero(eids_s1 == int(expert), as_tuple=False).flatten()
-            w1e = _dequant_mx_to_f32(w_ref_local[expert - rank * epr], "fp4")
+            w1e = _dequant_mx_to_f32(w_ref_local[expert - rank * epr], "fp4", fp4_quant)
             xr = inp_s1[rows]
             gate = xr @ w1e[:inter_dim].t()
             up = xr @ w1e[inter_dim:].t()
-            ref_s1[rows] = _swiglu(gate, up, swiglu_limit)
+            ref_s1[rows] = _act_hidden(
+                gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta
+            )
         if not torch.isfinite(got_s1).all() or not torch.isfinite(ref_s1).all():
             got_bad = int((~torch.isfinite(got_s1)).sum().item())
             ref_bad = int((~torch.isfinite(ref_s1)).sum().item())
@@ -1158,7 +1333,7 @@ def _run_mega_only(
         else:
             _init = float(model_dim) ** -0.25
             torch.manual_seed(args.seed)
-            _ = torch.randn((run_tokens, model_dim), device=dev, dtype=torch.float32)
+            _ = torch.randn((x_bf16.shape[0], model_dim), device=dev, dtype=torch.float32)
             w1_all = torch.randn((experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32) * _init
             w2_all = w2_f32.view(experts, model_dim, inter_dim)
         if n_layers > 1:
@@ -1172,9 +1347,22 @@ def _run_mega_only(
             torch.cuda.synchronize()
             ms.shmem_barrier_all()
             out_dev = xd[:run_tokens].float()
-            out_ref = RefModel(w1_all, w2_all, inter_dim, dev, swiglu_limit).run(x_in, routings).float()
+            out_ref = (
+                RefModel(
+                    w1_all,
+                    w2_all,
+                    inter_dim,
+                    dev,
+                    swiglu_limit,
+                    act=act,
+                    situ_beta=situ_beta,
+                    situ_linear_beta=situ_linear_beta,
+                )
+                .run(x_in, routings)
+                .float()
+            )
             _acc_metric = _calc_diff(out_ref, out_dev)  # 1 - cosine (fp64), end-to-end accumulated
-            _acc_floor = _CHAIN_TOL
+            _acc_floor = _chain_tol(quant, n_layers)
             _acc_label = f"cos_diff(chain x{n_layers})"
             acc_ok = _acc_metric < _acc_floor
         else:
@@ -1199,12 +1387,14 @@ def _run_mega_only(
                 rows = sel.any(dim=1).nonzero().flatten()
                 w_e = (wv * sel).sum(dim=1)[rows]  # per-token routing weight (summed over slots) for e
                 local_e = e - expert_begin
-                w1e = _dequant_mx_to_f32(w1_all[local_e], "fp4")
-                w2e = _dequant_mx_to_f32(w2_all[local_e], "fp4")
+                w1e = _dequant_mx_to_f32(w1_all[local_e], "fp4", fp4_quant)
+                w2e = _dequant_mx_to_f32(w2_all[local_e], "fp4", fp4_quant)
                 xr = x32[rows]
                 gate = xr @ w1e[:inter_dim].t()
                 up = xr @ w1e[inter_dim : 2 * inter_dim].t()
-                _a1 = _swiglu(gate, up, swiglu_limit)
+                _a1 = _act_hidden(
+                    gate, up, act=act, swiglu_limit=swiglu_limit, situ_beta=situ_beta, situ_linear_beta=situ_linear_beta
+                )
                 oracle[rows] += w_e[:, None] * (_a1 @ w2e.t())
                 del w1e, w2e
             if local_experts_only:
@@ -1303,7 +1493,7 @@ def _run_mega_only(
     _active_g2_bm = int(moe._g2_active_block_m) if not stage1_only else -1
     _active_grid_mult = int(moe._active_config.stage1.grid_mult)
     if rank == 0:
-        _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor})" if check_acc else "acc:skip"
+        _acc_s = f"{_acc_label}={_relL2_max:.3e} (floor~{_acc_floor:.3g})" if check_acc else "acc:skip"
         _perf_s = (
             f"SBM={_active_sbm} G2_BM={_active_g2_bm} "
             f"GRID={_active_grid_mult} "
@@ -1343,12 +1533,21 @@ def _run_mega_only(
     )
 
 
-def run_one(args, rank, world, dev):
+def run_one(args, rank, world, dev, prepare_tokens=0):
+    """``prepare_tokens`` > 0 shares inputs/weights sized for that many tokens (fixed --mtpr)."""
     net = NETWORKS[args.network]
     model_dim, inter_dim, experts = net["model_dim"], net["inter_dim"], net["experts"]
     if int(args.experts_per_rank) > 0:
         experts = int(args.experts_per_rank) * world
     swiglu_limit = float(net.get("swiglu_limit", 0.0))
+    if getattr(args, "mega_only", False) and int(args.layers) > 1:
+        # The chain budget (_CHAIN_ACC_TOL) is aiter's, calibrated on an unclamped SwiGLU. With
+        # this init the preactivations sit near the clamp, which roughly doubles the chain's
+        # error amplification; the single-layer accuracy tests cover the clamp itself.
+        swiglu_limit = 0.0
+    act = str(net.get("act", "silu"))
+    situ_beta = float(net.get("situ_beta", 1.0))
+    situ_linear_beta = float(net.get("situ_linear_beta", 1.0))
     # topk: --topk>0 overrides; else use the network's native topk (r1_v3=8, v4_*=6).
     topk = int(args.topk) if int(args.topk) > 0 else int(net["topk"])
     run_tokens = max(int(args.tokens), 1)  # allow bs=1 (1 token/rank); routing still reaches all ranks
@@ -1360,10 +1559,9 @@ def run_one(args, rank, world, dev):
     mega_only = bool(getattr(args, "mega_only", False))
     local_experts_only = mega_only and (args.skip_acc or args.stage1_only or int(args.layers) == 1)
     keep_ref = bool(args.stage1_only or (mega_only and not args.skip_acc and int(args.layers) == 1))
-    T = _prepare(
-        dev,
+    prep_kw = dict(
         quant=args.quant,
-        tokens=run_tokens,
+        tokens=max(run_tokens, int(prepare_tokens)),
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -1373,7 +1571,17 @@ def run_one(args, rank, world, dev):
         world=world,
         keep_ref=keep_ref,
         local_experts_only=local_experts_only,
+        input_gen=args.input_gen,
     )
+    if prepare_tokens > 0:
+        prep_key = (args.network, tuple(sorted(prep_kw.items())))
+        cached = _SHARED_MEGA.get("prepared")
+        if cached is None or cached[0] != prep_key:
+            _SHARED_MEGA.clear()
+            _SHARED_MEGA["prepared"] = (prep_key, _prepare(dev, **prep_kw))
+        T = _SHARED_MEGA["prepared"][1]
+    else:
+        T = _prepare(dev, **prep_kw)
     w_kernel, scale_w1_1d = T["w_kernel"], T["scale_w1_1d"]
     topk_ids, wts = T["topk_ids"], T["wts"]
     a_dtype = T["a_dtype"]
@@ -1392,6 +1600,9 @@ def run_one(args, rank, world, dev):
             epr=epr,
             topk=topk,
             swiglu_limit=swiglu_limit,
+            act=act,
+            situ_beta=situ_beta,
+            situ_linear_beta=situ_linear_beta,
             run_tokens=run_tokens,
             mtpr=mtpr,
             quant=args.quant,
@@ -1407,6 +1618,11 @@ def run_one(args, rank, world, dev):
             check_acc=not bool(args.skip_acc),
             measure_perf=bool(args.measure_perf),
             stage1_only=bool(args.stage1_only),
+            shared_moe=prepare_tokens > 0,
+            w2_kernel=T.get("w2_kernel"),
+            w2_scale_1d=T.get("w2_scale_1d"),
+            w2_ref=T.get("w2_ref"),
+            fp4_quant=T.get("fp4_quant", _per_1x32_fp4_quant),
         )
 
     # The manual path compares MegaMoEV2 with the FlyDSL ATOM pipeline.
@@ -1463,7 +1679,15 @@ def main():
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--iters", type=int, default=30)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None, help="default 0 (flydsl inputs) / 123 (aiter inputs)")
+    p.add_argument(
+        "--input-gen",
+        choices=("flydsl", "aiter"),
+        default="flydsl",
+        help="(--mega-only, single layer) 'aiter' generates x, routing (softmax top-k of random scores) and "
+        "rank-local weights bit-identically to aiter's op_tests/multigpu_tests/test_mega_moe_v2.py for the "
+        "same --seed, so results compare point-for-point with aiter.",
+    )
     p.add_argument("--rank-skew-ms", type=float, default=0.0, help="delay rank r by r*N ms before first forward")
     p.add_argument(
         "--layers",
@@ -1471,7 +1695,8 @@ def main():
         default=1,
         help="(--mega-only) N>1 runs the chained N-layer accumulation ACCURACY check (device "
         "moe.forward per layer + RMSNorm + residual vs the pure-torch dequant-weights RefModel over "
-        "shared weights + per-layer routing; 1-cosine gate). Real DeepSeek-V4 depth is ~61.",
+        "shared weights + per-layer routing; 1-cosine gate; SwiGLU clamp disabled). Real DeepSeek-V4 "
+        "depth is ~61.",
     )
     p.add_argument(
         "--n-seeds",
@@ -1568,6 +1793,17 @@ def main():
     args = p.parse_args()
     if args.stage1_only and not args.mega_only:
         p.error("--stage1-only requires --mega-only")
+    if args.input_gen == "aiter" and (
+        not args.mega_only or (int(args.layers) > 1 and not (args.skip_acc or args.stage1_only))
+    ):
+        p.error("--input-gen aiter requires --mega-only and a single-layer accuracy check")
+    if not args.mega_only and (args.bs_list or not args.matrix) and not _full_e2e_supports(args.network):
+        p.error(
+            f"--network {args.network} uses act={NETWORKS[args.network]['act']!r}; the full-e2e ATOM "
+            "baseline only implements SiLU, so run it with --mega-only"
+        )
+    if args.seed is None:
+        args.seed = 123 if args.input_gen == "aiter" else 0
 
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -1578,7 +1814,8 @@ def main():
     if args.bs_list:
         combos = [(args.network, int(b)) for b in args.bs_list.split(",") if b.strip()]
     elif args.matrix:
-        combos = [(net, bs) for net in NETWORKS for bs in bs_set]
+        nets = [net for net in NETWORKS if args.mega_only or _full_e2e_supports(net)]
+        combos = [(net, bs) for net in nets for bs in bs_set]
     elif args.full_bs:
         combos = [(args.network, bs) for bs in bs_set]
     else:
@@ -1588,13 +1825,19 @@ def main():
     _base_seed = int(args.seed)
     _n_seeds = max(1, int(args.n_seeds))
     _strict_fail = 0  # local count of failing cases (correctness or, with --min-speedup, perf/ERROR)
+    # Like aiter's --max-tok-per-rank: a fixed --mtpr builds one MegaMoEV2 and one input/weight set
+    # (sized for the largest bs) per network and slices it per bs.
+    _prepare_tokens = {}
+    if args.mega_only and int(args.mtpr) > 0:
+        for net, bs in combos:
+            _prepare_tokens[net] = max(_prepare_tokens.get(net, 1), int(bs))
     for net, bs in combos:
         args.network = net
         args.tokens = bs
         for _si in range(_n_seeds):
             args.seed = _base_seed + _si
             try:
-                r = run_one(args, rank, world, dev)
+                r = run_one(args, rank, world, dev, prepare_tokens=_prepare_tokens.get(net, 0))
                 if r is not None:
                     results.append(r)
                     if not r.get("full_e2e_pass", False):
@@ -1716,7 +1959,17 @@ def _skip_unless_mega_8gpu() -> None:
 
 
 def _run_mega_8gpu(
-    *, network, quant, bs_list, iters, measure_perf=False, skip_acc=False, layers=1, mtpr=0, timeout=2400
+    *,
+    network,
+    quant,
+    bs_list,
+    iters,
+    measure_perf=False,
+    skip_acc=False,
+    layers=1,
+    mtpr=0,
+    experts_per_rank=0,
+    timeout=2400,
 ):
     """Run this file under eight-GPU torchrun and require a clean strict exit."""
     import subprocess as _sp
@@ -1751,6 +2004,8 @@ def _run_mega_8gpu(
         cmd += ["--mtpr", str(mtpr)]
     if layers > 1:
         cmd += ["--layers", str(layers)]
+    if experts_per_rank > 0:
+        cmd += ["--experts-per-rank", str(experts_per_rank)]
     if measure_perf:
         cmd += ["--measure-perf", "--perf-tol", str(_MEGA_PERF_TOL)]
     if skip_acc:
@@ -1821,9 +2076,13 @@ def test_mega_moe_8gpu_a4w4_fixed_mtpr_accuracy():
     )
 
 
-# A8W4 alone supports the chained-accumulation accuracy safeguard.
+# (network, quant, experts_per_rank) chained-accumulation accuracy safeguard.
+# Kimi-K3 keeps its dims, topk and SiTUv2 but runs 32 experts/rank: its full 896-expert FP32 oracle
+# does not fit in device memory next to the MegaMoEV2 weights.
 _MEGA_CHAIN_PARAMS = [
-    ("v4_pro", "a8w4"),
+    (network, quant, experts_per_rank)
+    for quant in ("a8w4", "a4w4")
+    for network, experts_per_rank in (("r1_v3", 0), ("v4_pro", 0), ("kimi_k3_route", 32))
 ]
 
 # Number of chained MoE layers (real DeepSeek-V4 depth).
@@ -1831,11 +2090,20 @@ _MEGA_CHAIN_LAYERS = 61
 
 
 @pytest.mark.multi_gpu
-@pytest.mark.parametrize("network,quant", _MEGA_CHAIN_PARAMS, ids=[f"{n}-{q}" for n, q in _MEGA_CHAIN_PARAMS])
-def test_mega_moe_8gpu_accuracy_chained(network, quant):
+@pytest.mark.parametrize(
+    "network,quant,experts_per_rank", _MEGA_CHAIN_PARAMS, ids=[f"{n}-{q}" for n, q, _ in _MEGA_CHAIN_PARAMS]
+)
+def test_mega_moe_8gpu_accuracy_chained(network, quant, experts_per_rank):
     """Gate the 61-layer residual chain against the dequantized-weight reference."""
     _skip_unless_mega_8gpu()
-    _run_mega_8gpu(network=network, quant=quant, bs_list="128", iters=1, layers=_MEGA_CHAIN_LAYERS)
+    _run_mega_8gpu(
+        network=network,
+        quant=quant,
+        bs_list="128",
+        iters=1,
+        layers=_MEGA_CHAIN_LAYERS,
+        experts_per_rank=experts_per_rank,
+    )
 
 
 if __name__ == "__main__":

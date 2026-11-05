@@ -2,7 +2,6 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
-import fcntl
 import hashlib
 import inspect
 import json
@@ -10,6 +9,7 @@ import os
 import pickle
 import threading
 import time
+import types
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -60,13 +60,28 @@ from .protocol import (
     get_ir_types,
 )
 
+if os.name == "nt":
+    import msvcrt
+
+    def _flock(fd, operation):
+        # msvcrt.locking starts at the current position: pin every holder to byte 0.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & fcntl.LOCK_UN else msvcrt.LK_NBLCK, 1)
+
+    # The part of fcntl FileLock uses. LOCK_SH locks exclusively (readers take turns),
+    # no call blocks (FileLock retries until its timeout), and the OS drops the lock
+    # when the process dies.
+    fcntl = types.SimpleNamespace(LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=_flock)
+else:
+    import fcntl
+
 EXTRA_SOURCE_DIRS: List[str] = []
 
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
 
 
 class FileLock:
-    """fcntl-based file lock supporting shared and exclusive modes."""
+    """fcntl-based file lock supporting shared and exclusive modes (msvcrt on Windows, where shared is exclusive)."""
 
     def __init__(self, path, *, exclusive=True, timeout=30):
         self._path = str(path)
@@ -131,7 +146,6 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_OPT_LEVEL",
     "FLYDSL_COMPILE_BACKEND",
     "FLYDSL_COMPILE_LLVM_DIR",
-    "LLVM_GFX1250_ANY_XNACK_CODEGEN",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
     "FLYDSL_KTRACE_ENABLE",
@@ -139,29 +153,46 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_KTRACE_BUFFER_BYTES",
 )
 
+# Env vars that change codegen for one arch only. They enter the cache key
+# when the resolved target arch matches, and stay out of every other arch's key.
+_TARGET_CACHE_INVALIDATING_ENV_VARS = {
+    "gfx1250": ("LLVM_GFX1250_ANY_XNACK_CODEGEN",),
+}
+
 
 # os._Environ keeps the live mapping in a plain dict (``_data``) keyed by the
 # OS-encoded bytes of each name; mutations to os.environ update it in place.
 # Reading it with pre-encoded keys skips os.environ.get's per-call key encoding,
-# which is ~5x faster on this hot path. Guarded: if the internal layout is
-# absent (non-posix / future CPython) we fall back to the public API. Values go
+# which is ~5x faster on this hot path. Guarded: where names are not bytes
+# (Windows keys ``_data`` by upper-cased str) or the internal layout is absent
+# (future CPython) we fall back to the public API. Values go
 # through os.fsdecode so the fast and slow paths — and thus two processes
 # sharing a cache dir — produce byte-for-byte identical keys.
 try:
-    _ENABLE_ENV_FAST_READ = isinstance(os.environ._data, dict)
+    _ENABLE_ENV_FAST_READ = os.supports_bytes_environ and isinstance(os.environ._data, dict)
 except Exception:
     _ENABLE_ENV_FAST_READ = False
 _CACHE_INVALIDATING_ENV_VARS_ENCODED = tuple((n, os.fsencode(n)) for n in _CACHE_INVALIDATING_ENV_VARS)
+_TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED = {
+    arch: tuple((n, os.fsencode(n)) for n in names) for arch, names in _TARGET_CACHE_INVALIDATING_ENV_VARS.items()
+}
 
 
-def _cache_invalidating_env_values() -> tuple:
+def _cache_invalidating_env_values(target=None) -> tuple:
     # Re-read on every call: users may mutate os.environ mid-process (e.g.
     # toggling FLYDSL_COMPILE_OPT_LEVEL between runs) and any caching here
     # would freeze the first observed values into every subsequent cache key.
+    # ``target`` is a GPUTarget or an arch string. Target-specific vars are
+    # appended only when that arch is the one they affect.
+    arch = getattr(target, "arch", target)
+    encoded = _CACHE_INVALIDATING_ENV_VARS_ENCODED
+    extra = _TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED.get(arch)
+    if extra:
+        encoded = encoded + extra
     if _ENABLE_ENV_FAST_READ:
         data = os.environ._data
-        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in _CACHE_INVALIDATING_ENV_VARS_ENCODED)
-    return tuple((n, os.environ.get(n, "")) for n in _CACHE_INVALIDATING_ENV_VARS)
+        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in encoded)
+    return tuple((n, os.environ.get(n, "")) for n, _b in encoded)
 
 
 def _flydsl_key() -> str:
@@ -173,8 +204,8 @@ def _flydsl_key() -> str:
 
 
 def _is_native_library(name: str) -> bool:
-    # Same selection as cmake/WriteNativeDigest.cmake: *.so, *.so.*, *.a.
-    return name.endswith((".so", ".a")) or ".so." in name
+    # Same selection as cmake/WriteNativeDigest.cmake: *.so, *.so.*, *.a, *.pyd, *.dll.
+    return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
 
 
 def _native_library_digests(libs_dir: Path) -> List[str]:
@@ -478,7 +509,7 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, post_load_pro
         "backend": backend.hash(),
         "pipeline": cfg.fragments,
         "llvm_options": cfg.llvm_opts,
-        "env": _cache_invalidating_env_values(),
+        "env": _cache_invalidating_env_values(target),
     }
     if post_load_processors:
         # An artifact owns the initialized module, not just the binary. Callbacks
@@ -1354,6 +1385,8 @@ class CompiledFunction:
         Host export currently requires 64-bit little-endian Linux ELF tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
+        if os.name == "nt":
+            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):

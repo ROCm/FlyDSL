@@ -3,10 +3,11 @@
 
 import contextlib
 import inspect
+import itertools
 import os
 import threading
+import types
 from functools import lru_cache, wraps
-from importlib.machinery import BYTECODE_SUFFIXES
 from typing import TYPE_CHECKING, overload
 
 from .._mlir import ir
@@ -30,7 +31,9 @@ __all__ = [
 # Any frame whose file lives under this prefix is treated as DSL library code
 # and skipped when locating the user's source position.
 _FLYDSL_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BYTECODE_SUFFIXES = tuple(BYTECODE_SUFFIXES)
+
+# Python 3.10 has no column positions.
+_HAS_CO_POSITIONS = hasattr(types.CodeType, "co_positions")
 
 
 @lru_cache(maxsize=1024)
@@ -56,6 +59,48 @@ def _stack():
     return s
 
 
+def _source_path_and_positions(code) -> tuple:
+    """Absolute source path and co_positions() of *code*. Positions are None unless a frame with a func is open."""
+    cache = getattr(_tls, "source_position_cache", None)
+
+    # Keyed by id, since code objects from different files can compare equal.
+    entry = cache.get(id(code)) if cache is not None else None
+    if entry is not None:
+        return entry[1], entry[2]
+
+    file = inspect.getsourcefile(code) or inspect.getfile(code)
+    source_path = os.path.abspath(file)
+    if cache is None:
+        return source_path, None
+
+    positions = tuple(code.co_positions()) if _HAS_CO_POSITIONS else ()
+    # code is part of cache value to keep it alive
+    cache[id(code)] = (code, source_path, positions)
+    return source_path, positions
+
+
+def _frame_position(frame) -> tuple:
+    """Source path, line and column of *frame*'s current instruction, as inspect.getframeinfo reports them."""
+    code = frame.f_code
+    path, positions = _source_path_and_positions(code)
+
+    line = None
+    col = None
+    # co_positions() has one (line, end_line, col, end_col) entry per 2-byte code unit; Python 3.10 has none.
+    if _HAS_CO_POSITIONS and frame.f_lasti >= 0:
+        index = frame.f_lasti // 2
+        if positions is None:
+            line, _, col, _ = next(itertools.islice(code.co_positions(), index, None))
+        else:
+            line, _, col, _ = positions[index]
+
+    return (
+        path,
+        frame.f_lineno if line is None else line,
+        0 if col is None else col,
+    )
+
+
 @contextlib.contextmanager
 def tracing_context(func=None, **options):
     """Push a tracing frame for the duration of the ``with`` block.
@@ -67,6 +112,10 @@ def tracing_context(func=None, **options):
     -- an explicit ``None`` shadows an enclosing setting.
     """
     stack = _stack()
+    # Only the outermost trace owns the cache; a fastmath scope can span traces and would pin their code objects.
+    owns_cache = func is not None and getattr(_tls, "source_position_cache", None) is None
+    if owns_cache:
+        _tls.source_position_cache = {}
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
         boundary = stack[-1][0]
@@ -77,6 +126,8 @@ def tracing_context(func=None, **options):
         stack = _stack()
         if stack:
             stack.pop()
+        if owns_cache:
+            _tls.source_position_cache = None
 
 
 def tracing_option(key, default=None):
@@ -89,50 +140,11 @@ def tracing_option(key, default=None):
     return default
 
 
-_normalized_path = lru_cache(maxsize=1024)(os.path.normpath)
-_code_positions_cache = {}
-
-
 def file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
     ctx = context or ir.Context.current
     if filename and not filename.startswith("<"):
-        # Same as os.path.abspath(); only the cwd-independent case is memoized.
-        filename = _normalized_path(filename) if os.path.isabs(filename) else os.path.abspath(filename)
+        filename = os.path.abspath(filename)
     return ir.Location.file(filename, line, col, context=ctx)
-
-
-def _code_positions(code):
-    # Cache only immutable code metadata, never frames or context-owned MLIR
-    # objects. Key by identity: distinct code objects can compare equal, and
-    # hashing one rehashes its constants and nested code on every query. The
-    # entry retains the code object, so its id cannot be reused while cached.
-    entry = _code_positions_cache.get(id(code))
-    if entry is None or entry[0] is not code:
-        if len(_code_positions_cache) >= 4096:
-            _code_positions_cache.clear()
-        # Python 3.8-3.10 have line numbers but no column information.
-        positions = (
-            tuple((line, col) for line, _end_line, col, _end_col in code.co_positions())
-            if hasattr(code, "co_positions")
-            else ()
-        )
-        entry = _code_positions_cache[id(code)] = (code, positions)
-    return entry[1]
-
-
-def _frame_source_position(frame):
-    code = frame.f_code
-    filename = code.co_filename
-    if filename.endswith(_BYTECODE_SUFFIXES):
-        # inspect can map a bytecode filename to a source file. Resolve these
-        # rare paths on each query: source/loader availability can change.
-        filename = inspect.getsourcefile(frame) or filename
-
-    positions = _code_positions(code)
-    # Like inspect.getframeinfo(), index co_positions by the two-byte code unit.
-    index = frame.f_lasti // 2
-    line, col = positions[index] if 0 <= index < len(positions) else (None, None)
-    return filename, frame.f_lineno if line is None else line, 0 if col is None else col
 
 
 def capture_user_location() -> ir.Location:
@@ -158,8 +170,8 @@ def capture_user_location() -> ir.Location:
             if not _is_framework_file(code.co_filename):
                 keep = len(locs) < max_depth
                 if keep or is_boundary:
-                    filename, line, col = _frame_source_position(frame)
-                    floc = file_location(filename, line, col, context=ctx)
+                    path, line, col = _frame_position(frame)
+                    floc = ir.Location.file(path, line, col, context=ctx)
                     if keep:
                         locs.append(floc)
                     else:

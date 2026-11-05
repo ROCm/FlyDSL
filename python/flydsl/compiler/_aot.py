@@ -5,7 +5,6 @@
 
 import ctypes
 import dataclasses
-import fcntl
 import json
 import os
 import re
@@ -521,6 +520,8 @@ def _write_atomically(path: Path, data: bytes) -> None:
 
 @contextmanager
 def _output_directory_lock(directory: Path):
+    import fcntl  # not at module level: Windows has none, and export is Linux-only
+
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)

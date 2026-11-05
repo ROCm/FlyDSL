@@ -1,0 +1,42 @@
+Windows-only LLVM fix. scripts/windows/build_llvm_windows.ps1 applies it after
+the series in thirdparty/llvm-build-info.json; build_llvm.sh and the CI MLIR
+cache key never read thirdparty/llvm-windows/, so Linux builds are unchanged.
+
+MLIR's ExecutionEngine reserves one contiguous block per JIT object
+(SectionMemoryManager's reserveAllocationSpace) only on AArch64. On COFF x86-64,
+RuntimeDyld aborts with "IMAGE_REL_AMD64_ADDR32NB relocation requires an ordered
+section layout" whenever an object's sections land more than 4GB apart, which
+happens at random once a process has loaded many kernels (llvm/llvm-project#55386,
+#65641).
+
+Upstream status: under review as llvm/llvm-project#233658.
+
+diff --git a/mlir/lib/ExecutionEngine/ExecutionEngine.cpp b/mlir/lib/ExecutionEngine/ExecutionEngine.cpp
+index 49a88e000..eaed6a694 100644
+--- a/mlir/lib/ExecutionEngine/ExecutionEngine.cpp
++++ b/mlir/lib/ExecutionEngine/ExecutionEngine.cpp
+@@ -314,9 +314,13 @@ ExecutionEngine::create(Operation *m, const ExecutionEngineOptions &options,
+   auto objectLinkingLayerCreator = [&](ExecutionSession &session,
+                                        llvm::jitlink::JITLinkMemoryManager
+                                            &IgnoredMemMgr) {
+-    // Needed to respect AArch64 ABI requirements on the distance between
+-    // TEXT and GOT sections.
+-    bool reserveAlloc = llvmModule->getTargetTriple().isAArch64();
++    const llvm::Triple &targetTriple = llvmModule->getTargetTriple();
++    // Allocate each object's sections from one reserved block. AArch64 limits
++    // the distance between the TEXT and GOT sections. COFF's image-relative
++    // relocations, such as those in .pdata, need every section within 4GB
++    // above the lowest one, and RuntimeDyld aborts when they are not.
++    bool reserveAlloc =
++        targetTriple.isAArch64() || targetTriple.isOSBinFormatCOFF();
+     auto objectLayer = std::make_unique<RTDyldObjectLinkingLayer>(
+         session, [sectionMemoryMapper = options.sectionMemoryMapper,
+                   reserveAlloc](const MemoryBuffer &) {
+@@ -333,7 +337,6 @@ ExecutionEngine::create(Operation *m, const ExecutionEngineOptions &options,
+     // COFF format binaries (Windows) need special handling to deal with
+     // exported symbol visibility.
+     // cf llvm/lib/ExecutionEngine/Orc/LLJIT.cpp LLJIT::createObjectLinkingLayer
+-    const llvm::Triple &targetTriple = llvmModule->getTargetTriple();
+     if (targetTriple.isOSBinFormatCOFF()) {
+       objectLayer->setOverrideObjectFlagsWithResponsibilityFlags(true);
+       objectLayer->setAutoClaimResponsibilityForObjectSymbols(true);

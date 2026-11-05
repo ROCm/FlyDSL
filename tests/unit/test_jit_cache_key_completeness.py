@@ -305,6 +305,9 @@ def test_lowering_inputs_outside_the_ir_split_artifacts(frontend, monkeypatch):
         monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", xnack)
         keys.append(_compile(launch, 3)[0])
     assert len(set(keys)) == len(keys) == len(frontend)
+    # The xnack variable only affects gfx1250 codegen.
+    monkeypatch.setenv("ARCH", "gfx942")
+    assert _compile(launch, 3)[0] == keys[3]
 
     # The loaded toolchain cannot change in-process; it namespaces disk entries.
     disk = jf._disk_cache_key(keys[0])
