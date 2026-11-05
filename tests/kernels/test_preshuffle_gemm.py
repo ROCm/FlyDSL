@@ -61,10 +61,13 @@ def _mxfp4_launcher(
     blockscale="none",
 ):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
-    the tests use. launch_gemm is a thin @flyc.jit that caches per Constexpr config."""
+    the tests use. This closure fixes every Constexpr, so it reuses one compiled handle:
+    a direct @flyc.jit call would retrace launch_gemm on every launch."""
+    compiled = None
 
     def _launch(c, a, b, sa, sb, bias, M, N_, stream):
-        launch_gemm(
+        nonlocal compiled
+        args = (
             _ptr(c),
             _ptr(a),
             _ptr(b),
@@ -93,6 +96,10 @@ def _mxfp4_launcher(
             k_batch,
             blockscale,
         )
+        if compiled is None:
+            compiled = flyc.compile(launch_gemm, *args)  # Compiles and launches once.
+        else:
+            compiled(*args)
 
     return _launch
 

@@ -3,13 +3,11 @@
 
 from __future__ import annotations
 
-import dis
 import hashlib
-import inspect
 from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from itertools import chain
-from types import CodeType, FunctionType
+from types import FunctionType
 from typing import Any, List
 
 from .._mlir import ir
@@ -99,16 +97,8 @@ def _field_type_signature(dtype):
     return (dtype.__module__, dtype.__qualname__)
 
 
-def _has_member_behavior(dtype):
-    if not isinstance(dtype, type):
-        return False
-    if is_composite_type(dtype):
-        return dtype.__dsl_member_behavior__
-    return any(_has_member_behavior(getattr(dtype, name, None)) for name in ("dtype", "_target_type"))
-
-
-def _make_cache_signature(definition, fields, has_members):
-    """Capture a concrete schema's definition once; instances add field metadata."""
+def _make_cache_signature(definition, fields):
+    """Schema signature for the type; an instance adds its exact type and runtime fields."""
     field_keys = tuple((name, _field_type_signature(dtype)) for name, dtype in fields)
     signature = ("composite", hashlib.sha256(repr((definition, field_keys)).encode()).hexdigest())
     runtime_fields = tuple(name for name, dtype in fields if not _is_constexpr_type(dtype))
@@ -116,52 +106,23 @@ def _make_cache_signature(definition, fields, has_members):
     def __cache_signature__(self=None):
         if self is None:
             return signature
-        parts = [type(self), signature] if has_members else [type(self)]
-        for name in runtime_fields:
-            parts.append((name, cache_signature(getattr(self, name))))
-        return tuple(parts)
+        return (type(self), *((name, cache_signature(getattr(self, name))) for name in runtime_fields))
 
     return __cache_signature__
 
 
-def _member_dependencies(function):
-    """Snapshot directly named Structs, preserving each name's type binding."""
-    refs = {
-        ("closure", name): cell.cell_contents
-        for name, cell in zip(function.__code__.co_freevars, function.__closure__ or ())
-    }
-    pending = [function.__code__]
-    while pending:
-        code = pending.pop()
-        for instruction in dis.get_instructions(code):
-            if instruction.opname == "LOAD_GLOBAL":
-                refs[("global", instruction.argval)] = function.__globals__.get(instruction.argval)
-        pending.extend(constant for constant in code.co_consts if isinstance(constant, CodeType))
-    return tuple(
-        (scope, name, value.__cache_signature__())
-        for (scope, name), value in sorted(refs.items())
-        if is_composite_type(value)
-    )
-
-
 def _normalize_members(klass):
-    """Install native descriptors and snapshot source/type dependencies once.
-
-    Definitions and external constants should be immutable by contract. Only directly
-    referenced Struct types are tracked; other globals/closures are ignored.
-    """
-    members, sources = {}, []
+    """Collect the class body's methods and properties to install natively."""
+    members = {}
     for name, member in vars(klass).items():
         function = member.fget if isinstance(member, property) else getattr(member, "__func__", member)
-        original = getattr(function, "_original_func", function)
-        if not isinstance(original, FunctionType):
-            continue
-        sources.append((name, type(member).__name__, inspect.getsource(original), _member_dependencies(original)))
-        members[name] = member
+        # @flyc.jit / @flyc.kernel members wrap the function they rewrote in place.
+        function = getattr(function, "func", None) or getattr(function, "_func", None) or function
+        if isinstance(function, FunctionType):
+            members[name] = member
     if "__eq__" in members and vars(klass).get("__hash__") is None:
         members["__hash__"] = None
-    digest = hashlib.sha256(repr(sources).encode()).hexdigest() if sources else None
-    return members, digest
+    return members
 
 
 def _validate_field_name(name: str, context: str):
@@ -345,13 +306,11 @@ def _specialize_type(base_cls: type, fields: tuple[FieldDef, ...], values: dict[
         if isinstance(eff_type, type) and issubclass(eff_type, Constexpr) and eff_type.is_specialized:
             suffix_parts.append(f"{name}={eff_type.value!r}")
     suffix = f"[{', '.join(suffix_parts)}]" if suffix_parts else ""
-    has_members = base_cls.__dsl_member_behavior__ or any(_has_member_behavior(dtype) for _, dtype in effective)
     namespace: dict[str, Any] = {
         "__dsl_effective_field_defs__": tuple(effective),
         "__dsl_base_type__": base_cls,
         "__dsl_display_name__": _display_name(base_cls) + suffix,
-        "__dsl_member_behavior__": has_members,
-        "__cache_signature__": _make_cache_signature(base_cls.__cache_signature__(), effective, has_members),
+        "__cache_signature__": _make_cache_signature(base_cls.__cache_signature__(), effective),
     }
     specialized = type(base_cls.__name__ + suffix, (base_cls,), namespace)
     _specialization_cache[cache_key] = specialized
@@ -458,7 +417,6 @@ def _make_composite_class(
     policy: CompositeKind,
     display_name: str,
     members=None,
-    member_digest=None,
     qualname=None,
     doc=None,
 ):
@@ -467,7 +425,6 @@ def _make_composite_class(
     if conflicts:
         raise ValueError(f"{name}: members conflict with fields: {sorted(conflicts)}")
     identity = _make_type_identity(policy, fields)
-    has_members = bool(members) or any(_has_member_behavior(field.type_spec) for field in fields)
 
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
@@ -617,7 +574,6 @@ def _make_composite_class(
         "__dsl_composite_kind__": policy,
         "__dsl_field_defs__": fields,
         "__dsl_type_identity__": identity,
-        "__dsl_member_behavior__": has_members,
         "__dsl_display_name__": display_name,
         "__init__": __init__,
         "__setattr__": __setattr__,
@@ -628,9 +584,7 @@ def _make_composite_class(
         "__extract_to_ir_values__": __extract_to_ir_values__,
         "__construct_from_ir_values__": __construct_from_ir_values__,
         "__cache_signature__": _make_cache_signature(
-            (module, qualname, policy.name, member_digest),
-            tuple((field.name, field.type_spec) for field in fields),
-            has_members,
+            (module, qualname, policy.name), tuple((field.name, field.type_spec) for field in fields)
         ),
         "__get_ir_types__": __get_ir_types__,
         "__c_abi_spec__": __c_abi_spec__,
@@ -659,7 +613,7 @@ class CompositeMeta(type):
 
         def wrap(wrapped):
             fields = _normalize_decorator_fields(wrapped)
-            members, member_digest = _normalize_members(wrapped)
+            members = _normalize_members(wrapped)
             return _make_composite_class(
                 name=wrapped.__name__,
                 module=wrapped.__module__,
@@ -667,7 +621,6 @@ class CompositeMeta(type):
                 policy=policy,
                 display_name=wrapped.__name__,
                 members=members,
-                member_digest=member_digest,
                 qualname=wrapped.__qualname__,
                 doc=wrapped.__doc__,
             )
