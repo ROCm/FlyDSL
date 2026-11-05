@@ -4,18 +4,21 @@
 
 from __future__ import annotations
 
+import csv
+import functools
+import os
+
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import rocdl as _rocdl
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import Int32 as i32
+from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common.act import sigmoid_batch, sigmoid_f32, silu_mul_batch, tanh_f32
 from kernels.moe.mxfp_moe.mxfp4_gemm_common import _fabs_f32
-
-traced = ASTRewriter.transform
 
 MAX_TP = 8
 DEADLINE = 200_000_000
@@ -355,7 +358,7 @@ def alive(t0):
     return (now() - t0) < fx.Int64(DEADLINE)
 
 
-@traced
+@flyc.jit
 def spin_lds_ge(L, off, target):
     cur = lds_ld_acq(L, off)
     while cur < target:
@@ -363,14 +366,14 @@ def spin_lds_ge(L, off, target):
         cur = lds_ld_acq(L, off)
 
 
-@traced
+@flyc.jit
 def spin0(L, lane, off, target):
     if lane == i32(0):
         spin_lds_ge(L, off, target)
     rocdl.sched_barrier(0)
 
 
-@traced
+@flyc.jit
 def poll_sys_ge(addr, target, nap=2):
     cur = g_ld_sys(addr)
     t0 = now()
@@ -410,3 +413,86 @@ def activation_mul_batch(gate_values, up_values, act="silu", situ_beta=1.0, situ
         ]
     gates, ups = _clamp_gate_up(gate_values, up_values, swiglu_limit)
     return silu_mul_batch(gates, ups)
+
+
+def i8x4_pack(f, inv):
+    """4 f32 * inv -> int8 (round to even, clamped to +-127) packed in an i32"""
+    w = i32(0)
+    for k in range_constexpr(4):
+        q = fx.Int32(fmath.roundeven(f[k] * inv))
+        q = fx.max(fx.min(q, i32(127)), i32(-127))
+        w = w | ((q & i32(0xFF)) << i32(8 * k))
+    return w
+
+
+def i8x4_unpack(d, sc):
+    out = []
+    for k in range_constexpr(4):
+        b = (fx.Int32(d) << i32(24 - 8 * k)) >> i32(24)
+        out.append(b.to(fx.Float32) * sc)
+    return out
+
+
+def f32_bits_add(x, y):
+    """f32 add on i32 bit patterns (block reductions over i32 LDS words)"""
+    return (x.bitcast(fx.Float32) + y.bitcast(fx.Float32)).bitcast(fx.Int32)
+
+
+def f32_bits_max(x, y):
+    return fx.max(x.bitcast(fx.Float32), y.bitcast(fx.Float32)).bitcast(fx.Int32)
+
+
+def i4x8_pack(f, inv):
+    w = i32(0)
+    for k in range_constexpr(8):
+        q = fx.Int32(fmath.roundeven(f[k] * inv))
+        q = fx.max(fx.min(q, i32(7)), i32(-8))
+        w = w | ((q & i32(0xF)) << i32(4 * k))
+    return w
+
+
+def i4x8_unpack(d, sc):
+    out = []
+    for k in range_constexpr(8):
+        b = (fx.Int32(d) << i32(28 - 4 * k)) >> i32(28)
+        out.append(b.to(fx.Float32) * sc)
+    return out
+
+
+# ---- tuned-config CSVs ----
+@functools.cache
+def _read(path: str, mtime: float) -> tuple:
+    if not os.path.isfile(path):
+        return ()
+    with open(path) as f:
+        return tuple(csv.DictReader(f))
+
+
+def tuned_rows(path: str, key: dict, tokens_col: str) -> dict:
+    """{tokens: row} of the rows of path matching every key column (compared as str)."""
+    path = os.path.abspath(path)
+    mtime = os.path.getmtime(path) if os.path.isfile(path) else 0.0
+    want = {k: str(v) for k, v in key.items()}
+    return {int(r[tokens_col]): r for r in _read(path, mtime) if all(r.get(k) == v for k, v in want.items())}
+
+
+def nearest(rows: dict, tokens: int, clamp: bool = False):
+    """The row of the nearest tuned count <= tokens inside [min, max] of rows; outside it
+    None, or (clamp) the row of the nearer end."""
+    if not rows:
+        return None
+    if not min(rows) <= tokens <= max(rows):
+        if not clamp:
+            return None
+        tokens = min(max(tokens, min(rows)), max(rows))
+    return rows[max(t for t in rows if t <= tokens)]
+
+
+def device_key(device=None) -> dict:
+    """gfx / cu_num of a device (the CSVs' leading key columns)."""
+    import torch
+
+    from flydsl.runtime.device import get_rocm_arch
+
+    props = torch.cuda.get_device_properties(device or torch.cuda.current_device())
+    return {"gfx": get_rocm_arch(), "cu_num": int(props.multi_processor_count)}

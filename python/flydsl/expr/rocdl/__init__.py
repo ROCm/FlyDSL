@@ -19,11 +19,18 @@ from ..meta import dsl_loc_tracing
 from . import cdna3 as cdna3
 from . import cdna4 as cdna4
 from . import cdna5 as cdna5
+from . import experimental as experimental
 from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
 from .utils import require_lds_dma_support
+
+# These ODS builders come from a not-yet-upstreamed LLVM patch. The DSL wrappers
+# live in .experimental; do not leave the raw callables on this module.
+for _unaccepted_sched in ("sched_bank", "sched_vgpr", "sched_sgpr", "sched_agpr"):
+    globals().pop(_unaccepted_sched, None)
+del _unaccepted_sched
 
 __all__ = [
     # Targets
@@ -32,6 +39,8 @@ __all__ = [
     # "cdna5", unstable for now
     "rdna3",
     "rdna4",
+    # Unstable: path contains an ``experimental`` segment.
+    "experimental",
     # Enums
     "SyncScope",
     # Re-exported from .universal

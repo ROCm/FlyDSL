@@ -244,7 +244,7 @@ def _expand_int_tuple_leaves(value):
     if isinstance(value, Numeric):
         if isinstance(value.value, ir.Value) and type(value).width < 32:
             return Int32(value).value
-        return value.value
+        return _expand_int_tuple_leaves(value.value)
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IntegerType) and value.type.width < 32:
         return Int32(value).value
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IndexType):

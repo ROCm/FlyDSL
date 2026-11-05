@@ -31,6 +31,15 @@ suite duplicates work (and can accidentally consume every GPU on a multi-GPU
 host). CI can still opt into the full suite, including `large_shape` tests, with
 `RUN_TESTS_FULL=1`; the exclusions apply in both modes.
 
+The test script reports the 20 slowest tests to help track runtime regressions.
+
+The `Fly DSL test` workflow runs correctness and benchmarks in separate jobs
+after the shared wheel build. The `test` job runs pytest, examples and MLIR
+FileCheck. The `benchmark` job runs the current benchmark and comparisons
+against the exact PR base (or the previous commit on main pushes) and the latest
+PyPI tag. Both jobs cover the same single-GPU runners and can run in parallel
+when runner capacity is available; benchmarks do not wait for correctness.
+
 ### Rollout status
 
 First-pass annotations now cover `tests/unit` and `tests/kernels` for clearly classified files (L0/L1a/L1b/L2).

@@ -12,6 +12,7 @@ add_mlir_conversion_library(MLIRFlyKtraceToROCDL
   MLIRArithDialect
   MLIRROCDLDialect
   MLIRGPUDialect
+  MLIRUBDialect
   MLIRPass
   MLIRTransforms
 )

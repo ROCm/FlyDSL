@@ -13,6 +13,7 @@ import sys
 import pytest
 
 import flydsl.compiler.diagnostics as diagnostics
+from flydsl._mlir import ir
 from flydsl.compiler.diagnostics import DiagRecord, DSLCompileError, SourceFrame, install_excepthook
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
@@ -140,3 +141,42 @@ def test_excepthook_passes_through_non_dsl_errors(monkeypatch, capsys, fresh_exc
 
     assert previous_called  # non-DSL errors delegate to the original hook
     assert capsys.readouterr().err == ""
+
+
+# --------------------------------------------------------------------------- #
+# location_chain: MLIR locations -> source frames
+# --------------------------------------------------------------------------- #
+def test_location_chain_resolves_callsite_name_and_fused_locations():
+    with ir.Context():
+        user = ir.Location.file("user_kernel.py", 7, 4)
+        caller = ir.Location.file("caller.py", 3, 1)
+        user_frame = SourceFrame("user_kernel.py", 7, 4, 4)
+        caller_frame = SourceFrame("caller.py", 3, 1, 1)
+
+        assert diagnostics.location_chain(ir.Location.callsite(user, [caller])) == [user_frame, caller_frame]
+        assert diagnostics.location_chain(ir.Location.name("op", user)) == [user_frame]
+        assert diagnostics.location_chain(ir.Location.fused([user, caller])) == [user_frame, caller_frame]
+
+
+def test_location_chain_skips_synthetic_sources():
+    with ir.Context():
+        assert diagnostics.location_chain(ir.Location.file("<string>", 20, 1)) == []
+
+
+def test_location_chain_skips_unknown_locations():
+    with ir.Context():
+        assert diagnostics.location_chain(ir.Location.unknown()) == []
+
+
+def test_verifier_error_keeps_the_source_chain():
+    # An MLIRError's diagnostics carry plain Locations, not the typed subclasses the bindings build.
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.parse("func.func @f() { return }")
+        loc = ir.Location.callsite(ir.Location.file("a.py", 7, 4), [ir.Location.file("b.py", 3, 1)])
+        with ir.InsertionPoint.at_block_begin(module.body.operations[0].regions[0].blocks[0]):
+            ir.Operation.create("arith.addi", results=[ir.IntegerType.get_signless(32)], loc=loc)
+        with pytest.raises(ir.MLIRError) as raised:
+            module.operation.verify()
+
+    records = diagnostics.diag_records_from_mlir_error(raised.value)
+    assert records[0].chain == [SourceFrame("a.py", 7, 4, 4), SourceFrame("b.py", 3, 1, 1)]

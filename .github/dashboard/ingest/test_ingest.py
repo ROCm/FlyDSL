@@ -16,6 +16,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # importable from repo root
 
 import ingest  # noqa: E402
@@ -237,12 +239,65 @@ def test_merge_history_sorted_by_ts_then_runner_op_shape():
 # runner_of
 # --------------------------------------------------------------------------- #
 def test_runner_of_matches_known_box_and_rejects_unknown():
+    assert ingest.runner_of("benchmark (linux-flydsl-mi35x-1)") == "linux-flydsl-mi35x-1"
     assert ingest.runner_of("test (linux-flydsl-mi355-1)") == "linux-flydsl-mi355-1"
     assert ingest.runner_of("test (linux-flydsl-mi35x-1)") == "linux-flydsl-mi35x-1"
     assert ingest.runner_of("test (linux-flydsl-mi35x-8)") == "linux-flydsl-mi35x-8"
     assert ingest.runner_of("test (linux-flydsl-unknown-9)") is None  # not in RUNNER_ARCH
     assert ingest.runner_of("build") is None
     assert ingest.runner_of("") is None
+
+
+@pytest.mark.parametrize("benchmark_first", [False, True])
+@pytest.mark.parametrize("status,conclusion", [("completed", "success"), ("completed", "failure"), ("queued", None)])
+@pytest.mark.parametrize("runner", ["linux-flydsl-mi325-1", "linux-flydsl-mi35x-1", "linux-flydsl-navi-2"])
+def test_split_run_uses_benchmark_logs_and_status(monkeypatch, benchmark_first, status, conclusion, runner):
+    correctness = {
+        "id": 1,
+        "name": f"test ({runner})",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://example.com/correctness",
+    }
+    benchmark = {
+        "id": 2,
+        "name": f"benchmark ({runner})",
+        "status": status,
+        "conclusion": conclusion,
+        "html_url": "https://example.com/benchmark",
+    }
+    jobs = [benchmark, correctness] if benchmark_first else [correctness, benchmark]
+    fetched = []
+
+    def fetch_log(path):
+        fetched.append(path)
+        return SETUP_BANNER.format(machine="gbt355-odcdh1-b13-1") + "benchmark output"
+
+    monkeypatch.setattr(ingest, "run_jobs", lambda repo, run_id: jobs)
+    monkeypatch.setattr(ingest, "resolve_pr", lambda repo, run: None)
+    monkeypatch.setattr(ingest, "gh_text", fetch_log)
+    monkeypatch.setattr(
+        ingest.parse_bench,
+        "parse_log",
+        lambda text, regression_pct: [
+            ingest.parse_bench.Record(op="softmax", shape="8x64", dtype="bf16", metric="TB/s", value=1.0, status="ok")
+        ],
+    )
+    monkeypatch.setattr(ingest.parse_bench, "parse_aiter_compare", lambda text: [])
+
+    records, summary = ingest.ingest_run("ROCm/FlyDSL", {"id": 10, "head_sha": "abc"}, regression_pct=-3.0)
+    assert len(summary["jobs"]) == 1
+    assert summary["jobs"][0]["runner"] == runner
+    assert summary["jobs"][0]["url"] == benchmark["html_url"]
+    assert summary["jobs"][0]["status"] == status
+    assert summary["jobs"][0]["conclusion"] == conclusion
+    if status == "completed" and conclusion == "success":
+        assert fetched == ["repos/ROCm/FlyDSL/actions/jobs/2/logs"]
+        assert len(records) == 1
+        assert records[0]["runner"] == runner
+    else:
+        assert fetched == []
+        assert records == []
 
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +424,4 @@ def test_list_runs_explicit_branch_filters(monkeypatch):
 
 
 if __name__ == "__main__":
-    import pytest
-
     raise SystemExit(pytest.main([__file__, "-v"]))

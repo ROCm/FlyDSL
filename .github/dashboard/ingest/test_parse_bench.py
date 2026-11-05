@@ -6,7 +6,11 @@ Run:  python3 -m pytest .github/dashboard/ingest/test_parse_bench.py
 """
 
 import os
+import subprocess
 import sys
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # importable under pytest from repo root
 
@@ -77,6 +81,44 @@ def test_main_fallback_label_is_treated_as_main():
     assert sm.vs_main["delta_pct"] == -7.1 and sm.regression is True
 
 
+@pytest.mark.parametrize("label", ["main", "main~2", "main@12345678", "main@12345678 (llvm abcdef12)"])
+def test_actual_compare_output_retains_main_metadata(tmp_path, label):
+    # Exercise the real emitter so changes in CI labels/format cannot silently
+    # discard comparisons while tests using hand-written logs still pass.
+    columns = "op,shape,dtype,tbps,tflops,status\n"
+    baseline = tmp_path / "baseline.csv"
+    current = tmp_path / "current.csv"
+    baseline.write_text(columns + "softmax,32768x8192,bf16,4.0,-,ok\n")
+    current.write_text(columns + "softmax,32768x8192,bf16,3.0,-,ok\n")
+    compare = Path(__file__).resolve().parents[3] / "scripts/compare_benchmark.py"
+    output = []
+    for baseline_label in (label, "v0.2.0"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(compare),
+                str(baseline),
+                str(current),
+                "--baseline-label",
+                baseline_label,
+                "--current-label",
+                "current",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        output.append(result.stdout)
+    log = "op shape dtype TB/s TFLOPS\nsoftmax 32768x8192 bf16 3.000 -\n" + "".join(output)
+    # Include the timestamp and ANSI formatting present in Actions logs.
+    log = "".join(P + "\x1b[32m" + line + "\x1b[0m\n" for line in log.splitlines())
+    sm = _by_key(pb.parse_log(log))[("softmax", "32768x8192", "bf16", "TB/s")]
+    assert sm.vs_main == {"label": label, "baseline": 4.0, "ratio": 0.75, "delta_pct": -25.0}
+    assert sm.regression is True
+    assert sm.value == 3.0
+    assert sm.vs_tag == {"tag": "v0.2.0", "baseline": 4.0, "ratio": 0.75, "delta_pct": -25.0}
+
+
 def test_aiter_speedup_with_commas():
     sp = _by_key(pb.parse_aiter_compare(LOG))
     w = sp[("wmma_gemm", "4096x4096x4096", "bf16", "speedup")]
@@ -91,8 +133,4 @@ def test_attach_meta_infers_arch():
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("all parser tests passed")
+    raise SystemExit(pytest.main([__file__, "-v"]))

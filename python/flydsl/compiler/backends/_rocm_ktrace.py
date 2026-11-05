@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 
 from ...expr.rocdl import ktrace_emit
+from ...expr.rocdl import ktrace_format as _format
 from ...runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
 from . import _rocm_ktrace_trace as ktrace_trace
 
@@ -41,7 +42,9 @@ class RocmKtraceBackend:
 
         i32 = ir.IntegerType.get_signless(32)
         attrs = module.operation.attributes
-        attrs["fly_ktrace.capacity_slots"] = ir.IntegerAttr.get(i32, self.buffer_config())
+        capacity_slots = self.buffer_config()
+        attrs["fly_ktrace.capacity_slots"] = ir.IntegerAttr.get(i32, capacity_slots)
+        attrs["fly_ktrace.partitions"] = ir.IntegerAttr.get(i32, _format.layout(capacity_slots).partitions)
         attrs["fly_ktrace.chip"] = ir.StringAttr.get(target_arch)
         if known_names:
             attrs["fly_ktrace.known_event_names"] = ir.DictAttr.get(

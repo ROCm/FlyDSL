@@ -1020,6 +1020,45 @@ def test_gemm_a16w16_split_k_uses_stream_local_sync_buffers():
     torch.testing.assert_close(out1, ref, atol=2e-1, rtol=2e-1)
 
 
+def test_gemm_a16w16_hti_two_k_tiles_with_concurrent_copy():
+    # The HTI tail LDS race shows only with exactly two K tiles (no main loop) and memory traffic from another stream.
+    # Without split-K the output is deterministic, so every launch must match the idle-GPU output bitwise.
+    kwargs = {
+        "block_m": 256,
+        "block_n": 256,
+        "block_k": 64,
+        "stages": 2,
+        "m_waves": 2,
+        "n_waves": 4,
+        "group_m": 0,
+        "use_half_tile_interleaved": True,
+    }
+    m = n = 8192
+    k = 2 * kwargs["block_k"]
+    dtype = torch.bfloat16
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = empty_layout_matrix(k, n, dtype, is_t=True)
+    b.normal_()
+
+    golden = gemm_a16w16(a, b, user_kwargs=kwargs, layout="nt")
+    torch.testing.assert_close(golden, torch.mm(a, b), atol=3e-2, rtol=2e-1)
+
+    side_stream = torch.cuda.Stream()
+    src = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
+    dst = torch.empty_like(src)
+    out = torch.empty_like(golden)
+    launches = 1000
+    bad_launches = torch.zeros((), dtype=torch.int64, device="cuda")
+    for _ in range(launches):
+        with torch.cuda.stream(side_stream):
+            dst.copy_(src)
+        out.fill_(float("nan"))
+        gemm_a16w16(a, b, out, user_kwargs=kwargs, layout="nt")
+        bad_launches += (out != golden).any()
+    torch.cuda.synchronize()
+    assert bad_launches.item() == 0, f"{bad_launches.item()} of {launches} launches differ from the idle-GPU output"
+
+
 @pytest.mark.parametrize(
     "k, use_half_tile_interleaved, message",
     [

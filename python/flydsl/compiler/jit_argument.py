@@ -487,6 +487,8 @@ class DLTensorJitArg(MemRefJitArg):
         # for this arg, so they share a single ``__dlpack__()`` per launch. The
         # pointer fill opens the live tensor once and hands the dladaptor to the
         # layout fill through a thread-local (thread-safe; never mutates the arg).
+        # The layout fill drops it again: the adaptor keeps the tensor alive, and
+        # the thread-local lives as long as the cached CallState.
         plan = _LayoutPlan(self.shape_dyn_indices, self.stride_dyn_indices, bool(self.use_32bit_stride))
         shared = threading.local()
 
@@ -495,7 +497,7 @@ class DLTensorJitArg(MemRefJitArg):
             _shared.dladaptor = ad
             s.value = ad.data_ptr
 
-        body = ["    _ad = _shared.dladaptor"]
+        body = ["    _ad = _shared.dladaptor", "    _shared.dladaptor = None"]
         terms = []
         if plan.shape:
             body.append("    sh = _ad.shape")

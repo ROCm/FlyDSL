@@ -7,11 +7,13 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "flydsl/Conversion/FlyKtraceToROCDL/FlyKtraceToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -28,12 +30,6 @@ using namespace mlir::fly_ktrace;
 namespace {
 
 constexpr int64_t kRecordBytes = 32;
-constexpr int64_t kOffTimestamp = 0;
-constexpr int64_t kOffPayload = 8;
-constexpr int64_t kOffHwId = 16;
-constexpr int64_t kOffXccId = 20;
-constexpr int64_t kOffPacked = 24;
-constexpr int64_t kOffStartSlot = 28;
 
 constexpr uint32_t kKindMark = 0;
 constexpr uint32_t kKindRangePush = 1;
@@ -41,31 +37,59 @@ constexpr uint32_t kKindRangePop = 2;
 constexpr uint32_t kKindRangeStart = 3;
 constexpr uint32_t kKindRangeStop = 4;
 
-constexpr int64_t kUnpairedSlot = 0xFFFFFFFF;
+// No slot is 0, because the buffer header comes first, so the highest token the lanes of a wave
+// hold is the latest range any of them started, and it is this one only if none did.
+constexpr int64_t kInactiveToken = 0;
 
 constexpr int64_t kDefaultCapacitySlots = (64 << 20) / kRecordBytes - 1;
 
+// A wave owns kEventsPerWave consecutive slots: its header, then its events.
+constexpr int64_t kEventsPerWave = 256;
+// Partition p's wave counter is at slot kCursorStrideSlots * (p + 1); keeping the counters 256
+// bytes apart keeps their atomics from serializing on a shared line.
+constexpr int64_t kCursorStrideSlots = 8;
+constexpr int64_t kLaunchCountByte = 4;
+// Raw-buffer descriptor word 3 on CDNA: 32-bit data format.
+constexpr int64_t kRawBufferFlags = (7 << 12) | (4 << 15);
+
+struct BufferLayout {
+  int64_t partitions;
+  int64_t headerSlots;
+  // Slots after the header, cut into kEventsPerWave-slot wave regions; the last may be short.
+  int64_t waveSlots;
+};
+
 struct KernelTraceState {
-  Value base;
-  Value bufPtr;
+  // Buffer descriptor (four i32) for the wave's own slots. Its record count is 0 when the wave
+  // does not record, so every store through it is dropped by the hardware bounds check instead
+  // of being branched around.
+  Value rsrc;
+  // Absolute slot of the wave's header; a record's slot is this plus its index in the region.
+  Value regionSlot;
+  // Private i32 holding the number of events the wave has issued. LLVM promotes it to a
+  // register, so events need no memory round trip to find their slot.
+  Value counter;
   Value hwId;
   Value xccId;
-  Value recording;
 };
 
 Value i32Const(OpBuilder &b, Location loc, int64_t v) {
-  return b.create<LLVM::ConstantOp>(loc, b.getI32Type(), b.getI32IntegerAttr(v));
+  return LLVM::ConstantOp::create(b, loc, b.getI32Type(), b.getI32IntegerAttr(v));
+}
+
+Value i64Const(OpBuilder &b, Location loc, int64_t v) {
+  return LLVM::ConstantOp::create(b, loc, b.getI64Type(), b.getI64IntegerAttr(v));
 }
 
 Value gepBytes(OpBuilder &b, Location loc, Value ptr, Value byteOffset) {
   auto ptrTy = LLVM::LLVMPointerType::get(b.getContext(), 1);
-  return b.create<LLVM::GEPOp>(loc, ptrTy, b.getI8Type(), ptr, ValueRange{byteOffset},
-                               LLVM::GEPNoWrapFlags::none);
+  return LLVM::GEPOp::create(b, loc, ptrTy, b.getI8Type(), ptr, ValueRange{byteOffset},
+                             LLVM::GEPNoWrapFlags::none);
 }
 
 Value callIntrinsic(OpBuilder &b, Location loc, StringRef name, Type resultTy,
                     ValueRange args = {}) {
-  auto op = b.create<LLVM::CallIntrinsicOp>(loc, resultTy, b.getStringAttr(name), args);
+  auto op = LLVM::CallIntrinsicOp::create(b, loc, resultTy, b.getStringAttr(name), args);
   return op.getResult(0);
 }
 
@@ -75,10 +99,63 @@ Value hwregImmarg(OpBuilder &b, Location loc, int64_t regId, int64_t size) {
 
 Value firstActiveLane(OpBuilder &b, Location loc) {
   Type i64 = b.getI64Type();
-  Value one = b.create<LLVM::ConstantOp>(loc, b.getI1Type(), b.getIntegerAttr(b.getI1Type(), 1));
-  Value mask = b.create<ROCDL::BallotOp>(loc, i64, one);
-  Value cttz = b.create<LLVM::CountTrailingZerosOp>(loc, i64, mask, true);
-  return b.create<LLVM::TruncOp>(loc, b.getI32Type(), cttz);
+  Value one = LLVM::ConstantOp::create(b, loc, b.getI1Type(), b.getIntegerAttr(b.getI1Type(), 1));
+  Value mask = ROCDL::BallotOp::create(b, loc, i64, one);
+  Value cttz = LLVM::CountTrailingZerosOp::create(b, loc, i64, mask, true);
+  return LLVM::TruncOp::create(b, loc, b.getI32Type(), cttz);
+}
+
+// The highest value any active lane holds. For a wave-uniform value this is a copy.
+Value waveMax(OpBuilder &b, Location loc, Value value) {
+  Type i32 = b.getI32Type();
+  Value max =
+      callIntrinsic(b, loc, "llvm.amdgcn.wave.reduce.umax", i32, {value, i32Const(b, loc, 0)});
+  return ROCDL::ReadfirstlaneOp::create(b, loc, i32, max);
+}
+
+std::pair<Value, Value> splitI64(OpBuilder &b, Location loc, Value v) {
+  Type i32 = b.getI32Type();
+  Value lo = arith::TruncIOp::create(b, loc, i32, v);
+  Value hi =
+      arith::TruncIOp::create(b, loc, i32, arith::ShRUIOp::create(b, loc, v, i64Const(b, loc, 32)));
+  return {lo, hi};
+}
+
+Value packI32(OpBuilder &b, Location loc, ArrayRef<Value> elems) {
+  auto vecTy = VectorType::get({static_cast<int64_t>(elems.size())}, b.getI32Type());
+  Value vec = LLVM::PoisonOp::create(b, loc, vecTy);
+  for (auto [i, elem] : llvm::enumerate(elems))
+    vec = LLVM::InsertElementOp::create(b, loc, vec, elem, i32Const(b, loc, i));
+  return vec;
+}
+
+// Every record word is wave-uniform, so records go out as scalar buffer stores: they hold no
+// VGPRs, add nothing to vmcnt, and are bounds-checked like vector buffer stores. LLVM cannot
+// emit scalar stores, hence the inline assembly; the wave must run s_dcache_wb before it ends.
+void storeToRegion(OpBuilder &b, Location loc, const KernelTraceState &st, Value data,
+                   Value byteOffset) {
+  auto vecTy = dyn_cast<VectorType>(data.getType());
+  int64_t dwords = vecTy ? vecTy.getNumElements() : 1;
+  StringRef op = dwords == 4 ? "s_buffer_store_dwordx4" : "s_buffer_store_dword";
+  assert((dwords == 4 || dwords == 1) && "ktrace stores one or four dwords");
+  LLVM::InlineAsmOp::create(b, loc, Type(), ValueRange{data, st.rsrc, byteOffset},
+                            (op + " $0, $1, $2").str(), "s,s,s", /*has_side_effects=*/true,
+                            /*is_align_stack=*/false, LLVM::tailcallkind::TailCallKind::None,
+                            LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
+                            ArrayAttr());
+}
+
+FailureOr<BufferLayout> bufferLayout(Operation *root, int64_t capacitySlots, int64_t partitions) {
+  if (partitions < 1 || !llvm::isPowerOf2_64(partitions))
+    return root->emitError("ktrace: fly_ktrace.partitions must be a power of two, got ")
+           << partitions;
+  int64_t headerSlots = kCursorStrideSlots * (partitions + 1);
+  int64_t waveSlots = capacitySlots + 1 - headerSlots;
+  if (waveSlots < 2)
+    return root->emitError("ktrace: a ")
+           << (capacitySlots + 1) * kRecordBytes << "-byte trace buffer cannot hold " << partitions
+           << " partitions";
+  return BufferLayout{partitions, headerSlots, waveSlots};
 }
 
 FailureOr<Value> blockFilter(OpBuilder &b, Location loc, StringRef spec, Value xccId,
@@ -93,7 +170,7 @@ FailureOr<Value> blockFilter(OpBuilder &b, Location loc, StringRef spec, Value x
       return diagOp->emitError("ktrace: FLYDSL_KTRACE_BLOCKS 'xcc:N' needs an "
                                "integer N, got ")
              << spec;
-    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, xccId, i32Const(b, loc, want))
+    return arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, xccId, i32Const(b, loc, want))
         .getResult();
   }
 
@@ -114,17 +191,52 @@ FailureOr<Value> blockFilter(OpBuilder &b, Location loc, StringRef spec, Value x
       return diagOp->emitError("ktrace: FLYDSL_KTRACE_BLOCKS 'x,y,z' needs "
                                "integer coordinates, got ")
              << spec;
-    Value got = b.create<gpu::BlockIdOp>(loc, dim);
-    got = b.create<arith::IndexCastOp>(loc, i32, got);
+    Value got = gpu::BlockIdOp::create(b, loc, dim);
+    got = arith::IndexCastOp::create(b, loc, i32, got);
     Value term =
-        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, got, i32Const(b, loc, want));
-    cond = cond ? b.create<arith::AndIOp>(loc, cond, term).getResult() : term;
+        arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, got, i32Const(b, loc, want));
+    cond = cond ? arith::AndIOp::create(b, loc, cond, term).getResult() : term;
   }
   return cond;
 }
 
-FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPerWave,
-                                         int64_t capacitySlots, StringRef blocksSpec) {
+// Consecutive waves of a row of workgroups take consecutive partitions, so a launch fills them
+// evenly; odd multipliers scatter the rows, and the dispatch id rotates successive launches.
+Value partitionOf(OpBuilder &b, Location loc, gpu::GPUFuncOp kernel, Value dispatchId,
+                  int64_t partitions) {
+  if (partitions == 1)
+    return i32Const(b, loc, 0);
+  Type i32 = b.getI32Type();
+  auto toI32 = [&](Value index) -> Value { return arith::IndexCastOp::create(b, loc, i32, index); };
+  Value wavesPerBlock;
+  if (std::optional<ArrayRef<int32_t>> known = kernel.getKnownBlockSize()) {
+    wavesPerBlock = i32Const(b, loc, llvm::divideCeil((*known)[0] * (*known)[1] * (*known)[2], 64));
+  } else {
+    Value threads = toI32(gpu::BlockDimOp::create(b, loc, gpu::Dimension::x));
+    for (gpu::Dimension dim : {gpu::Dimension::y, gpu::Dimension::z})
+      threads = arith::MulIOp::create(b, loc, threads, toI32(gpu::BlockDimOp::create(b, loc, dim)));
+    wavesPerBlock = arith::ShRUIOp::create(
+        b, loc, arith::AddIOp::create(b, loc, threads, i32Const(b, loc, 63)), i32Const(b, loc, 6));
+  }
+  auto blockId = [&](gpu::Dimension dim) -> Value {
+    return toI32(gpu::BlockIdOp::create(b, loc, dim));
+  };
+  Value key = arith::MulIOp::create(b, loc, blockId(gpu::Dimension::z), i32Const(b, loc, 0x85EB));
+  key = arith::AddIOp::create(b, loc, key, blockId(gpu::Dimension::y));
+  key = arith::MulIOp::create(b, loc, key, i32Const(b, loc, 0x9E37));
+  key = arith::AddIOp::create(
+      b, loc, key, arith::MulIOp::create(b, loc, blockId(gpu::Dimension::x), wavesPerBlock));
+  key = arith::AddIOp::create(b, loc, key, toI32(gpu::SubgroupIdOp::create(b, loc, nullptr)));
+  Value dispatchLow = arith::TruncIOp::create(b, loc, i32, dispatchId);
+  key = arith::AddIOp::create(
+      b, loc, key,
+      arith::MulIOp::create(b, loc, dispatchLow,
+                            i32Const(b, loc, static_cast<int32_t>(0x9E3779B1u))));
+  return arith::AndIOp::create(b, loc, key, i32Const(b, loc, partitions - 1));
+}
+
+FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, const BufferLayout &layout,
+                                         StringRef blocksSpec) {
   Block &entry = kernel.getBody().front();
   if (entry.getNumArguments() == 0)
     return kernel.emitError("ktrace: kernel has no arguments, so no trace-buffer parameter; the "
@@ -132,7 +244,9 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPe
 
   OpBuilder b(&entry, entry.begin());
   Location loc = kernel.getLoc();
+  MLIRContext *ctx = b.getContext();
   Type i32Ty = b.getI32Type();
+  Type i64Ty = b.getI64Type();
 
   KernelTraceState st;
   Value rawBuf = entry.getArgument(entry.getNumArguments() - 1);
@@ -142,115 +256,201 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPe
                             "!fly.ptr trace buffer, got ")
            << rawBuf.getType();
 
-  auto llvmPtrTy = LLVM::LLVMPointerType::get(b.getContext(), 1);
-  st.bufPtr = b.create<fly::ToLLVMPtrOp>(loc, llvmPtrTy, rawBuf, b.getI32IntegerAttr(1));
+  auto llvmPtrTy = LLVM::LLVMPointerType::get(ctx, 1);
+  Value bufPtr = fly::ToLLVMPtrOp::create(b, loc, llvmPtrTy, rawBuf, b.getI32IntegerAttr(1));
+
+  st.counter = LLVM::AllocaOp::create(b, loc, LLVM::LLVMPointerType::get(ctx, 5), i32Ty,
+                                      i32Const(b, loc, 1), /*alignment=*/4);
+  LLVM::StoreOp::create(b, loc, i32Const(b, loc, 0), st.counter);
 
   Value firstThread;
   for (gpu::Dimension dim : {gpu::Dimension::x, gpu::Dimension::y, gpu::Dimension::z}) {
-    Value block = b.create<gpu::BlockIdOp>(loc, dim);
-    Value thread = b.create<gpu::ThreadIdOp>(loc, dim);
-    Value blockZero = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, block,
-                                              b.create<arith::ConstantIndexOp>(loc, 0));
-    Value threadZero = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, thread,
-                                               b.create<arith::ConstantIndexOp>(loc, 0));
-    Value dimZero = b.create<arith::AndIOp>(loc, blockZero, threadZero);
+    Value block = gpu::BlockIdOp::create(b, loc, dim);
+    Value thread = gpu::ThreadIdOp::create(b, loc, dim);
+    Value blockZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, block,
+                                            arith::ConstantIndexOp::create(b, loc, 0));
+    Value threadZero = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, thread,
+                                             arith::ConstantIndexOp::create(b, loc, 0));
+    Value dimZero = arith::AndIOp::create(b, loc, blockZero, threadZero);
     firstThread =
-        firstThread ? b.create<arith::AndIOp>(loc, firstThread, dimZero).getResult() : dimZero;
+        firstThread ? arith::AndIOp::create(b, loc, firstThread, dimZero).getResult() : dimZero;
   }
-  auto launchIf = b.create<scf::IfOp>(loc, firstThread, false);
+  auto launchIf = scf::IfOp::create(b, loc, firstThread, false);
   b.setInsertionPointToStart(launchIf.thenBlock());
-  Value launchPtr = gepBytes(b, loc, st.bufPtr, i32Const(b, loc, 4));
-  b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, launchPtr, i32Const(b, loc, 1),
-                              LLVM::AtomicOrdering::monotonic);
+  Value launchPtr = gepBytes(b, loc, bufPtr, i32Const(b, loc, kLaunchCountByte));
+  LLVM::AtomicRMWOp::create(b, loc, LLVM::AtomicBinOp::add, launchPtr, i32Const(b, loc, 1),
+                            LLVM::AtomicOrdering::monotonic);
   b.setInsertionPointAfter(launchIf);
 
-  st.hwId =
-      callIntrinsic(b, loc, "llvm.amdgcn.s.getreg", b.getI32Type(), {hwregImmarg(b, loc, 4, 32)});
-  st.xccId =
-      callIntrinsic(b, loc, "llvm.amdgcn.s.getreg", b.getI32Type(), {hwregImmarg(b, loc, 20, 4)});
-  Value dispatchId = callIntrinsic(b, loc, "llvm.amdgcn.dispatch.id", b.getI64Type());
-  auto queuePtrTy = LLVM::LLVMPointerType::get(b.getContext(), 4);
+  st.hwId = callIntrinsic(b, loc, "llvm.amdgcn.s.getreg", i32Ty, {hwregImmarg(b, loc, 4, 32)});
+  st.xccId = callIntrinsic(b, loc, "llvm.amdgcn.s.getreg", i32Ty, {hwregImmarg(b, loc, 20, 4)});
+  Value dispatchId = callIntrinsic(b, loc, "llvm.amdgcn.dispatch.id", i64Ty);
+  auto queuePtrTy = LLVM::LLVMPointerType::get(ctx, 4);
   Value queuePtr = callIntrinsic(b, loc, "llvm.amdgcn.queue.ptr", queuePtrTy);
-  Value queueId = b.create<LLVM::PtrToIntOp>(loc, b.getI64Type(), queuePtr);
+  Value queueId = LLVM::PtrToIntOp::create(b, loc, i64Ty, queuePtr);
 
   FailureOr<Value> recording = blockFilter(b, loc, blocksSpec, st.xccId, kernel);
   if (failed(recording))
     return failure();
-  st.recording = *recording;
 
-  Value perWave = i32Const(b, loc, eventsPerWave);
-  auto emitClaim = [&]() -> Value {
-    Value lane = b.create<arith::IndexCastOp>(loc, i32Ty, b.create<gpu::LaneIdOp>(loc, nullptr));
-    Value isLeader =
-        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, lane, firstActiveLane(b, loc));
-    auto claimIf = b.create<scf::IfOp>(loc, TypeRange{i32Ty}, isLeader, true);
-    b.setInsertionPointToStart(claimIf.thenBlock());
-    // Stop claiming once the cursor is past the buffer so the 32-bit cursor cannot wrap back
-    // into range on long captures. A claim at exactly capacity still goes through, so the host
-    // sees the cursor exceed capacity and reports the overflow.
-    Value cursor = b.create<LLVM::LoadOp>(loc, i32Ty, st.bufPtr, /*alignment=*/4,
-                                          /*isVolatile=*/false, /*isNonTemporal=*/false,
-                                          /*isInvariant=*/false, /*isInvariantGroup=*/false,
-                                          LLVM::AtomicOrdering::monotonic);
-    Value hasRoom = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, cursor,
-                                            i32Const(b, loc, capacitySlots));
-    auto roomIf = b.create<scf::IfOp>(loc, TypeRange{i32Ty}, hasRoom, true);
-    b.setInsertionPointToStart(roomIf.thenBlock());
-    Value fetched = b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, st.bufPtr, perWave,
-                                                LLVM::AtomicOrdering::monotonic);
-    b.create<scf::YieldOp>(loc, ValueRange{fetched});
-    b.setInsertionPointToStart(roomIf.elseBlock());
-    b.create<scf::YieldOp>(loc, ValueRange{cursor});
-    b.setInsertionPointAfter(roomIf);
-    Value claimed = roomIf.getResult(0);
-    Value base = b.create<arith::AddIOp>(loc, claimed, i32Const(b, loc, 1));
-    Value inBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, base,
-                                             i32Const(b, loc, capacitySlots));
-    auto metadataIf = b.create<scf::IfOp>(loc, inBounds, false);
-    b.setInsertionPointToStart(metadataIf.thenBlock());
-    Value byteOff = b.create<arith::AddIOp>(
-        loc, b.create<arith::MulIOp>(loc, base, i32Const(b, loc, kRecordBytes)),
-        i32Const(b, loc, 8));
-    b.create<LLVM::StoreOp>(loc, dispatchId, gepBytes(b, loc, st.bufPtr, byteOff));
-    Value queueByteOff = b.create<arith::AddIOp>(loc, byteOff, i32Const(b, loc, 8));
-    b.create<LLVM::StoreOp>(loc, queueId, gepBytes(b, loc, st.bufPtr, queueByteOff));
-    // Remaining header words: (block.z << 8 | wave in block) at +4, block.x at +24, block.y
-    // at +28.
-    auto blockId = [&](gpu::Dimension dim) -> Value {
-      return b.create<arith::IndexCastOp>(loc, i32Ty, b.create<gpu::BlockIdOp>(loc, dim));
-    };
-    Value wave =
-        b.create<arith::IndexCastOp>(loc, i32Ty, b.create<gpu::SubgroupIdOp>(loc, nullptr));
-    Value waveWord = b.create<arith::OrIOp>(
-        loc, b.create<arith::ShLIOp>(loc, blockId(gpu::Dimension::z), i32Const(b, loc, 8)), wave);
-    Value headerOff = b.create<arith::SubIOp>(loc, byteOff, i32Const(b, loc, 4));
-    b.create<LLVM::StoreOp>(loc, waveWord, gepBytes(b, loc, st.bufPtr, headerOff));
-    Value blockXOff = b.create<arith::AddIOp>(loc, queueByteOff, i32Const(b, loc, 8));
-    b.create<LLVM::StoreOp>(loc, blockId(gpu::Dimension::x),
-                            gepBytes(b, loc, st.bufPtr, blockXOff));
-    Value blockYOff = b.create<arith::AddIOp>(loc, blockXOff, i32Const(b, loc, 4));
-    b.create<LLVM::StoreOp>(loc, blockId(gpu::Dimension::y),
-                            gepBytes(b, loc, st.bufPtr, blockYOff));
-    b.setInsertionPointAfter(metadataIf);
-    b.create<scf::YieldOp>(loc, ValueRange{base});
-    b.setInsertionPointToStart(claimIf.elseBlock());
-    b.create<scf::YieldOp>(loc, ValueRange{i32Const(b, loc, 0)});
-    b.setInsertionPointAfter(claimIf);
-    return b.create<ROCDL::ReadfirstlaneOp>(loc, i32Ty, claimIf.getResult(0));
-  };
+  Value partition = partitionOf(b, loc, kernel, dispatchId, layout.partitions);
 
-  if (!st.recording) {
-    st.base = emitClaim();
-    return st;
-  }
-
-  auto claimIf = b.create<scf::IfOp>(loc, TypeRange{b.getI32Type()}, st.recording, true);
+  // One returning atomic per wave, on its partition's counter, numbers the wave within that
+  // partition. The counter keeps counting past the partition's capacity, so the host sees the
+  // overflow.
+  Value lane = arith::IndexCastOp::create(b, loc, i32Ty, gpu::LaneIdOp::create(b, loc, nullptr));
+  Value claims =
+      arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, lane, firstActiveLane(b, loc));
+  if (*recording)
+    claims = arith::AndIOp::create(b, loc, claims, *recording);
+  auto claimIf = scf::IfOp::create(b, loc, TypeRange{i32Ty}, claims, true);
   b.setInsertionPointToStart(claimIf.thenBlock());
-  b.create<scf::YieldOp>(loc, ValueRange{emitClaim()});
+  Value cursorByte =
+      arith::MulIOp::create(b, loc, arith::AddIOp::create(b, loc, partition, i32Const(b, loc, 1)),
+                            i32Const(b, loc, kCursorStrideSlots * kRecordBytes));
+  Value claimed = LLVM::AtomicRMWOp::create(b, loc, LLVM::AtomicBinOp::add,
+                                            gepBytes(b, loc, bufPtr, cursorByte),
+                                            i32Const(b, loc, 1), LLVM::AtomicOrdering::monotonic);
+  scf::YieldOp::create(b, loc, ValueRange{claimed});
   b.setInsertionPointToStart(claimIf.elseBlock());
-  b.create<scf::YieldOp>(loc, ValueRange{i32Const(b, loc, 0)});
-  st.base = claimIf.getResult(0);
+  scf::YieldOp::create(b, loc, ValueRange{i32Const(b, loc, 0)});
+  b.setInsertionPointAfter(claimIf);
+  Value wave = ROCDL::ReadfirstlaneOp::create(b, loc, i32Ty, claimIf.getResult(0));
+
+  // Wave k of partition p takes region k * partitions + p: the waves running at the same time
+  // write neighbouring regions, which keeps their stores on few pages. The last region may be
+  // short, and a wave numbered past the regions gets none.
+  int64_t regions = llvm::divideCeil(layout.waveSlots, kEventsPerWave);
+  Value interleaved = arith::AddIOp::create(
+      b, loc,
+      arith::MulIOp::create(b, loc, arith::MinUIOp::create(b, loc, wave, i32Const(b, loc, regions)),
+                            i32Const(b, loc, layout.partitions)),
+      partition);
+  Value region = arith::MinUIOp::create(b, loc, interleaved, i32Const(b, loc, regions));
+  Value regionStart = arith::MulIOp::create(b, loc, region, i32Const(b, loc, kEventsPerWave));
+  Value hasRegion =
+      arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ult, region, i32Const(b, loc, regions));
+  Value regionSlots = arith::SelectOp::create(
+      b, loc, hasRegion,
+      arith::MinUIOp::create(
+          b, loc, arith::SubIOp::create(b, loc, i32Const(b, loc, layout.waveSlots), regionStart),
+          i32Const(b, loc, kEventsPerWave)),
+      i32Const(b, loc, 0));
+  Value regionBytes = arith::MulIOp::create(b, loc, regionSlots, i32Const(b, loc, kRecordBytes));
+  if (*recording)
+    regionBytes = arith::SelectOp::create(b, loc, *recording, regionBytes, i32Const(b, loc, 0));
+  // The scalar stores need every descriptor word in an SGPR.
+  auto uniform = [&](Value v) -> Value { return ROCDL::ReadfirstlaneOp::create(b, loc, i32Ty, v); };
+  st.regionSlot =
+      uniform(arith::AddIOp::create(b, loc, i32Const(b, loc, layout.headerSlots), regionStart));
+  Value regionAddr = LLVM::PtrToIntOp::create(
+      b, loc, i64Ty,
+      gepBytes(b, loc, bufPtr,
+               arith::MulIOp::create(b, loc, arith::ExtUIOp::create(b, loc, i64Ty, st.regionSlot),
+                                     i64Const(b, loc, kRecordBytes))));
+  auto [addrLo, addrHi] = splitI64(b, loc, regionAddr);
+  // Word 1 holds address bits 47:32 and a zero stride.
+  st.rsrc = packI32(b, loc,
+                    {uniform(addrLo),
+                     uniform(arith::AndIOp::create(b, loc, addrHi, i32Const(b, loc, 0xFFFF))),
+                     uniform(regionBytes), i32Const(b, loc, kRawBufferFlags)});
+
+  // Header: the event count at +0, written again when the wave returns, then
+  // (block.z << 8 | wave in block) and the dispatch id; the queue id and block.x, block.y at +16.
+  auto blockId = [&](gpu::Dimension dim) -> Value {
+    return arith::IndexCastOp::create(b, loc, i32Ty, gpu::BlockIdOp::create(b, loc, dim));
+  };
+  Value waveInBlock = uniform(
+      arith::IndexCastOp::create(b, loc, i32Ty, gpu::SubgroupIdOp::create(b, loc, nullptr)));
+  Value waveWord = arith::OrIOp::create(
+      b, loc, arith::ShLIOp::create(b, loc, blockId(gpu::Dimension::z), i32Const(b, loc, 8)),
+      waveInBlock);
+  auto [dispatchLo, dispatchHi] = splitI64(b, loc, dispatchId);
+  auto [queueLo, queueHi] = splitI64(b, loc, queueId);
+  storeToRegion(b, loc, st,
+                packI32(b, loc, {i32Const(b, loc, 0), waveWord, dispatchLo, dispatchHi}),
+                i32Const(b, loc, 0));
+  storeToRegion(
+      b, loc, st,
+      packI32(b, loc, {queueLo, queueHi, blockId(gpu::Dimension::x), blockId(gpu::Dimension::y)}),
+      i32Const(b, loc, 16));
   return st;
+}
+
+// The scalar data cache is write-back, and nothing else flushes it: without the s_dcache_wb a
+// wave's records can stay in it when the kernel completes.
+void emitEventCounts(gpu::GPUFuncOp kernel, const KernelTraceState &st) {
+  kernel.walk([&](gpu::ReturnOp ret) {
+    OpBuilder b(ret);
+    Location loc = ret.getLoc();
+    Value issued = waveMax(b, loc, LLVM::LoadOp::create(b, loc, b.getI32Type(), st.counter));
+    storeToRegion(b, loc, st, issued, i32Const(b, loc, 0));
+    LLVM::CallIntrinsicOp::create(b, loc, b.getStringAttr("llvm.amdgcn.s.dcache.wb"), ValueRange{});
+  });
+}
+
+bool recordsEvents(Region &region) {
+  return region
+      .walk([](Operation *op) {
+        return isa<MarkOp, RangePushOp, RangePopOp, RangeStartOp, RangeStopOp>(op)
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+// The lanes of a wave that diverge at an scf.if run both branches, one after the other, and a
+// lane's count only advances in the branch it takes, so both branches would number their events
+// from the same count. Such an if becomes two: the first runs the then branch, and the second
+// forwards the first's results to those lanes and runs the else branch, so the wave can agree on
+// its count in between (syncCountAfterRegions). The lanes that take the else branch never read
+// the first if's results, so it yields them poison, which every result type has.
+void splitIfsThatRecordOnBothSides(gpu::GPUFuncOp kernel) {
+  SmallVector<scf::IfOp> ifs;
+  kernel.walk([&](scf::IfOp op) {
+    if (op.elseBlock() && recordsEvents(op.getThenRegion()) && recordsEvents(op.getElseRegion()))
+      ifs.push_back(op);
+  });
+  for (scf::IfOp op : ifs) {
+    OpBuilder b(op);
+    Location loc = op.getLoc();
+    auto first = scf::IfOp::create(b, loc, op.getResultTypes(), op.getCondition(),
+                                   /*addThenBlock=*/true, /*addElseBlock=*/true);
+    b.setInsertionPointToStart(first.elseBlock());
+    SmallVector<Value> unread;
+    for (Type type : op.getResultTypes())
+      unread.push_back(ub::PoisonOp::create(b, loc, type));
+    scf::YieldOp::create(b, loc, unread);
+    first.getThenRegion().takeBody(op.getThenRegion());
+
+    b.setInsertionPointAfter(first);
+    auto second = scf::IfOp::create(b, loc, op.getResultTypes(), op.getCondition(),
+                                    /*addThenBlock=*/true, /*addElseBlock=*/false);
+    second.getElseRegion().takeBody(op.getElseRegion());
+    b.setInsertionPointToStart(second.thenBlock());
+    scf::YieldOp::create(b, loc, first.getResults());
+    op.replaceAllUsesWith(second.getResults());
+    op.erase();
+  }
+}
+
+// A lane's count falls behind in a region where only some lanes of the wave record: one side of
+// a divergent branch, or loop iterations that other lanes have left. After every region that
+// records, the wave takes its highest count, so later events of any subset of its lanes start
+// past every slot the region used. Under wave-uniform control flow this is a copy.
+void syncCountAfterRegions(gpu::GPUFuncOp kernel, const KernelTraceState &st) {
+  SmallVector<Operation *> ops;
+  kernel.walk([&](Operation *op) {
+    if (op != kernel.getOperation() && llvm::any_of(op->getRegions(), recordsEvents))
+      ops.push_back(op);
+  });
+  for (Operation *op : ops) {
+    OpBuilder b(op->getContext());
+    b.setInsertionPointAfter(op);
+    Location loc = op->getLoc();
+    Value count = waveMax(b, loc, LLVM::LoadOp::create(b, loc, b.getI32Type(), st.counter));
+    LLVM::StoreOp::create(b, loc, count, st.counter);
+  }
 }
 
 struct EventShape {
@@ -262,106 +462,60 @@ struct EventShape {
   uint32_t payloadType = 0;
 };
 
-Value expandEvent(Operation *op, const EventShape &shape, const KernelTraceState &st,
-                  int64_t eventsPerWave, int64_t capacitySlots) {
+// Straight-line code: the slot comes from the wave's count, and the record is stored by every
+// active lane with wave-uniform data, so no lane guard or bounds branch splits the block.
+void expandEvent(Operation *op, const EventShape &shape, const KernelTraceState &st) {
   OpBuilder b(op);
   Location loc = op->getLoc();
   Type i32 = b.getI32Type();
+  Type i64 = b.getI64Type();
 
-  Value lane = b.create<arith::IndexCastOp>(loc, i32, b.create<gpu::LaneIdOp>(loc, nullptr));
-  Value leader = firstActiveLane(b, loc);
-  Value isLeader = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, lane, leader);
-  if (st.recording)
-    isLeader = b.create<arith::AndIOp>(loc, isLeader, st.recording);
-
-  SmallVector<Type, 1> guardResults;
-  if (shape.producesSlot)
-    guardResults.push_back(i32);
-  auto leaderIf = b.create<scf::IfOp>(loc, guardResults, isLeader, shape.producesSlot);
-  b.setInsertionPointToStart(leaderIf.thenBlock());
-
-  Value baseInBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, st.base,
-                                               i32Const(b, loc, capacitySlots));
-  auto baseIf = b.create<scf::IfOp>(loc, guardResults, baseInBounds, shape.producesSlot);
-  b.setInsertionPointToStart(baseIf.thenBlock());
-
-  // Read the clock before the slot atomic so its latency does not skew the timestamp.
-  Value ts = callIntrinsic(b, loc, "llvm.amdgcn.s.memrealtime", b.getI64Type());
-  Value ctrPtr = gepBytes(b, loc, st.bufPtr,
-                          b.create<arith::MulIOp>(loc, st.base, i32Const(b, loc, kRecordBytes)));
-  Value local = b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, ctrPtr,
-                                            i32Const(b, loc, 1), LLVM::AtomicOrdering::monotonic);
-  Value slot = b.create<arith::AddIOp>(loc, st.base, local);
-
-  Value withinWave = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, local,
-                                             i32Const(b, loc, eventsPerWave - 1));
-  Value inBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, slot,
-                                           i32Const(b, loc, capacitySlots));
-  Value storeOk = b.create<arith::AndIOp>(loc, withinWave, inBounds);
-
-  auto storeIf = b.create<scf::IfOp>(loc, guardResults, storeOk, shape.producesSlot);
-  b.setInsertionPointToStart(storeIf.thenBlock());
-
-  Value slot1 = b.create<arith::AddIOp>(loc, slot, i32Const(b, loc, 1));
-  Value byteOff = b.create<arith::MulIOp>(loc, slot1, i32Const(b, loc, kRecordBytes));
-  Value recPtr = gepBytes(b, loc, st.bufPtr, byteOff);
-
-  Value payload =
-      shape.payload
-          ? shape.payload
-          : b.create<LLVM::ConstantOp>(loc, b.getI64Type(), b.getI64IntegerAttr(0)).getResult();
   Value startSlot = i32Const(b, loc, 0);
+  Value active;
   if (shape.startSlot) {
     assert(shape.startSlot.getType() == i32 &&
            "range_stop's token must already be lowered to its i32 slot");
-    startSlot = shape.startSlot;
+    // The lanes that reach a stop can hold different tokens, and some none, as after a loop they
+    // leave at different iterations. The stop closes the latest range they started; if none of
+    // them started one, it takes no slot and its stores go out of bounds.
+    startSlot = waveMax(b, loc, shape.startSlot);
+    active = arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, startSlot,
+                                   i32Const(b, loc, kInactiveToken));
   }
+
+  Value issued = waveMax(b, loc, LLVM::LoadOp::create(b, loc, i32, st.counter));
+  Value taken =
+      active ? arith::ExtUIOp::create(b, loc, i32, active).getResult() : i32Const(b, loc, 1);
+  LLVM::StoreOp::create(b, loc, arith::AddIOp::create(b, loc, issued, taken), st.counter);
+  Value ts = callIntrinsic(b, loc, "llvm.amdgcn.s.memrealtime", i64);
+
+  // Events past the per-wave limit all go one slot past the region, which the bound drops.
+  Value slotInRegion = arith::AddIOp::create(
+      b, loc, arith::MinUIOp::create(b, loc, issued, i32Const(b, loc, kEventsPerWave - 1)),
+      i32Const(b, loc, 1));
+  Value byteOffset = arith::MulIOp::create(b, loc, slotInRegion, i32Const(b, loc, kRecordBytes));
+  if (active)
+    byteOffset = arith::SelectOp::create(b, loc, active, byteOffset,
+                                         i32Const(b, loc, kEventsPerWave * kRecordBytes));
+
+  Value payload = shape.payload ? ROCDL::ReadfirstlaneOp::create(b, loc, i64, shape.payload)
+                                : i64Const(b, loc, 0);
   uint32_t packed = (shape.eventId & 0xFFFFFF) | ((shape.kind & 0x7) << 24) |
                     (shape.payloadType << 27) | (shape.payload ? (1u << 31) : 0);
 
-  struct Field {
-    int64_t offset;
-    Value value;
-  };
-  Field fields[] = {
-      {kOffTimestamp, ts},
-      {kOffPayload, payload},
-      {kOffHwId, st.hwId},
-      {kOffXccId, st.xccId},
-      {kOffPacked, i32Const(b, loc, static_cast<int64_t>(packed))},
-      {kOffStartSlot, startSlot},
-  };
-  for (const Field &f : fields) {
-    Value fieldPtr = gepBytes(b, loc, recPtr, i32Const(b, loc, f.offset));
-    b.create<LLVM::StoreOp>(loc, f.value, fieldPtr);
-  }
+  auto [tsLo, tsHi] = splitI64(b, loc, ts);
+  auto [payloadLo, payloadHi] = splitI64(b, loc, payload);
+  storeToRegion(b, loc, st, packI32(b, loc, {tsLo, tsHi, payloadLo, payloadHi}), byteOffset);
+  storeToRegion(
+      b, loc, st,
+      packI32(b, loc,
+              {st.hwId, st.xccId, i32Const(b, loc, static_cast<int32_t>(packed)), startSlot}),
+      arith::AddIOp::create(b, loc, byteOffset, i32Const(b, loc, 16)));
 
-  if (!shape.producesSlot) {
-    op->erase();
-    return Value();
-  }
-
-  b.create<scf::YieldOp>(loc, ValueRange{slot1});
-
-  b.setInsertionPointToStart(storeIf.elseBlock());
-  b.create<scf::YieldOp>(loc, ValueRange{i32Const(b, loc, kUnpairedSlot)});
-
-  b.setInsertionPointAfter(storeIf);
-  b.create<scf::YieldOp>(loc, ValueRange{storeIf.getResult(0)});
-
-  b.setInsertionPointToStart(baseIf.elseBlock());
-  b.create<scf::YieldOp>(loc, ValueRange{i32Const(b, loc, kUnpairedSlot)});
-
-  b.setInsertionPointAfter(baseIf);
-  b.create<scf::YieldOp>(loc, ValueRange{baseIf.getResult(0)});
-
-  b.setInsertionPointToStart(leaderIf.elseBlock());
-  b.create<scf::YieldOp>(loc, ValueRange{i32Const(b, loc, kUnpairedSlot)});
-
-  Value result = leaderIf.getResult(0);
-  op->getResult(0).replaceAllUsesWith(result);
+  if (shape.producesSlot)
+    op->getResult(0).replaceAllUsesWith(
+        arith::AddIOp::create(b, loc, st.regionSlot, slotInRegion).getResult());
   op->erase();
-  return result;
 }
 
 LogicalResult checkTargetArch(gpu::GPUModuleOp mod, StringRef chipHint) {
@@ -422,7 +576,7 @@ LogicalResult legalizeTokenTypes(Operation *root) {
   converter.addConversion([](Type t) { return t; });
   converter.addConversion([i32](fly_ktrace::TokenType) { return i32; });
   auto materialize = [](OpBuilder &b, Type resultType, ValueRange inputs, Location loc) -> Value {
-    return b.create<UnrealizedConversionCastOp>(loc, resultType, inputs).getResult(0);
+    return UnrealizedConversionCastOp::create(b, loc, resultType, inputs).getResult(0);
   };
   converter.addSourceMaterialization(materialize);
   converter.addTargetMaterialization(materialize);
@@ -506,25 +660,31 @@ struct FlyKtraceToROCDLConversionPass
       if (!mod || failed(checkTargetArch(mod, chipHint)))
         return WalkResult::interrupt();
 
-      constexpr int64_t kEventsPerWave = 256;
-
       int64_t capacitySlots = kDefaultCapacitySlots;
       if (auto attr = root->getAttrOfType<IntegerAttr>("fly_ktrace.capacity_slots"))
         capacitySlots = attr.getInt();
+      int64_t partitions = 1;
+      if (auto attr = root->getAttrOfType<IntegerAttr>("fly_ktrace.partitions"))
+        partitions = attr.getInt();
+      FailureOr<BufferLayout> layout = bufferLayout(kernel, capacitySlots, partitions);
+      if (failed(layout))
+        return WalkResult::interrupt();
 
       StringRef blocksSpec;
       if (auto attr = root->getAttrOfType<StringAttr>("fly_ktrace.blocks"))
         blocksSpec = attr.getValue();
 
-      FailureOr<KernelTraceState> st =
-          emitPrologue(kernel, kEventsPerWave, capacitySlots, blocksSpec);
+      FailureOr<KernelTraceState> st = emitPrologue(kernel, *layout, blocksSpec);
       if (failed(st))
         return WalkResult::interrupt();
+      splitIfsThatRecordOnBothSides(kernel);
+      syncCountAfterRegions(kernel, *st);
+      emitEventCounts(kernel, *st);
 
       for (Operation *op : events) {
         if (isa<InactiveTokenOp>(op)) {
           OpBuilder b(op);
-          Value seed = i32Const(b, op->getLoc(), kUnpairedSlot);
+          Value seed = i32Const(b, op->getLoc(), kInactiveToken);
           op->getResult(0).replaceAllUsesWith(seed);
           op->erase();
           continue;
@@ -562,7 +722,7 @@ struct FlyKtraceToROCDLConversionPass
           }
           shape.payloadType = encoding;
         }
-        expandEvent(op, shape, *st, kEventsPerWave, capacitySlots);
+        expandEvent(op, shape, *st);
       }
       return WalkResult::advance();
     });

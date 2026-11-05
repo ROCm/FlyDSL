@@ -14,14 +14,31 @@ module attributes {gpu.container_module} {
       // CHECK-NOT: fly_ktrace.token
       // CHECK-NOT: unrealized_conversion_cast
 
-      // CHECK: %[[SEED:.*]] = llvm.mlir.constant(-1 : i32)
+      // CHECK: %[[COUNT:.*]] = llvm.alloca
+      // An inactive token is 0, which no slot takes.
+      // CHECK: arith.constant 4 : index
+      // CHECK-NEXT: %[[SEED:.*]] = llvm.mlir.constant(0 : i32)
       %init = fly_ktrace.inactive_token -> !fly_ktrace.token
 
+      // Each iteration advances the wave's count, so its records take fresh slots. The first
+      // iteration's stop sees the seed, which takes no slot and stores out of bounds. Lanes that
+      // left the loop earlier hold older tokens, so the stop takes the highest one.
       // CHECK: scf.for {{.*}} iter_args(%[[TOK:.*]] = %[[SEED]]) -> (i32)
+      // CHECK-NOT: scf.if
+      // CHECK: %[[LATEST:.*]] = llvm.call_intrinsic "llvm.amdgcn.wave.reduce.umax"(%[[TOK]]
+      // CHECK-NEXT: %[[START:.*]] = rocdl.readfirstlane %[[LATEST]]
+      // CHECK: %[[ACTIVE:.*]] = arith.cmpi ne, %[[START]], %{{.*}} : i32
+      // CHECK: llvm.load %[[COUNT]]
+      // CHECK: arith.extui %[[ACTIVE]] : i1 to i32
+      // CHECK: llvm.store {{.*}}, %[[COUNT]]
+      // CHECK: arith.select %[[ACTIVE]]
+      // CHECK-NOT: scf.if
+      // CHECK: llvm.load %[[COUNT]]
+      // CHECK: llvm.store {{.*}}, %[[COUNT]]
+      // CHECK-NOT: scf.if
+      // CHECK: scf.yield %{{.*}} : i32
       %out = scf.for %i = %c0 to %c4 step %c1
              iter_args(%tok = %init) -> (!fly_ktrace.token) {
-        // CHECK: llvm.mlir.constant(28 : i32)
-        // CHECK: llvm.store %[[TOK]]
         fly_ktrace.range_stop %tok, "phase" : !fly_ktrace.token
         %next = fly_ktrace.range_start "phase" -> !fly_ktrace.token
         scf.yield %next : !fly_ktrace.token

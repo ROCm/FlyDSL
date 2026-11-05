@@ -3,7 +3,6 @@
 
 import ctypes
 import enum
-import fcntl
 import hashlib
 import inspect
 import os
@@ -63,13 +62,28 @@ from .protocol import (
     get_ir_types,
 )
 
+if os.name == "nt":
+    import msvcrt
+
+    def _flock(fd, operation):
+        # msvcrt.locking starts at the current position: pin every holder to byte 0.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & fcntl.LOCK_UN else msvcrt.LK_NBLCK, 1)
+
+    # The part of fcntl FileLock uses. LOCK_SH locks exclusively (readers take turns),
+    # no call blocks (FileLock retries until its timeout), and the OS drops the lock
+    # when the process dies.
+    fcntl = types.SimpleNamespace(LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=_flock)
+else:
+    import fcntl
+
 EXTRA_SOURCE_DIRS: List[str] = []
 
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
 
 
 class FileLock:
-    """fcntl-based file lock supporting shared and exclusive modes."""
+    """fcntl-based file lock supporting shared and exclusive modes (msvcrt on Windows, where shared is exclusive)."""
 
     def __init__(self, path, *, exclusive=True, timeout=30):
         self._path = str(path)
@@ -145,6 +159,12 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_KTRACE_BUFFER_BYTES",
 )
 
+# Env vars that change codegen for one arch only. They enter the cache key
+# when the resolved target arch matches, and stay out of every other arch's key.
+_TARGET_CACHE_INVALIDATING_ENV_VARS = {
+    "gfx1250": ("LLVM_GFX1250_ANY_XNACK_CODEGEN",),
+}
+
 
 _SNAPSHOT_SCALARS = (int, float, bool, str, bytes, type(None))
 _SNAPSHOT_CONTAINERS = (tuple, list, set, frozenset, dict)
@@ -153,25 +173,36 @@ _CLOSURE_SCALARS = (int, float, bool, str, type(None), tuple, enum.Enum)
 # os._Environ keeps the live mapping in a plain dict (``_data``) keyed by the
 # OS-encoded bytes of each name; mutations to os.environ update it in place.
 # Reading it with pre-encoded keys skips os.environ.get's per-call key encoding,
-# which is ~5x faster on this hot path. Guarded: if the internal layout is
-# absent (non-posix / future CPython) we fall back to the public API. Values go
+# which is ~5x faster on this hot path. Guarded: where names are not bytes
+# (Windows keys ``_data`` by upper-cased str) or the internal layout is absent
+# (future CPython) we fall back to the public API. Values go
 # through os.fsdecode so the fast and slow paths — and thus two processes
 # sharing a cache dir — produce byte-for-byte identical keys.
 try:
-    _ENABLE_ENV_FAST_READ = isinstance(os.environ._data, dict)
+    _ENABLE_ENV_FAST_READ = os.supports_bytes_environ and isinstance(os.environ._data, dict)
 except Exception:
     _ENABLE_ENV_FAST_READ = False
 _CACHE_INVALIDATING_ENV_VARS_ENCODED = tuple((n, os.fsencode(n)) for n in _CACHE_INVALIDATING_ENV_VARS)
+_TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED = {
+    arch: tuple((n, os.fsencode(n)) for n in names) for arch, names in _TARGET_CACHE_INVALIDATING_ENV_VARS.items()
+}
 
 
-def _cache_invalidating_env_values() -> tuple:
+def _cache_invalidating_env_values(target=None) -> tuple:
     # Re-read on every call: users may mutate os.environ mid-process (e.g.
     # toggling FLYDSL_COMPILE_OPT_LEVEL between runs) and any caching here
     # would freeze the first observed values into every subsequent cache key.
+    # ``target`` is a GPUTarget or an arch string. Target-specific vars are
+    # appended only when that arch is the one they affect.
+    arch = getattr(target, "arch", target)
+    encoded = _CACHE_INVALIDATING_ENV_VARS_ENCODED
+    extra = _TARGET_CACHE_INVALIDATING_ENV_VARS_ENCODED.get(arch)
+    if extra:
+        encoded = encoded + extra
     if _ENABLE_ENV_FAST_READ:
         data = os.environ._data
-        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in _CACHE_INVALIDATING_ENV_VARS_ENCODED)
-    return tuple((n, os.environ.get(n, "")) for n in _CACHE_INVALIDATING_ENV_VARS)
+        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in encoded)
+    return tuple((n, os.environ.get(n, "")) for n, _b in encoded)
 
 
 def _snapshot_global_value(val, *, stable, _path=()):
@@ -795,9 +826,18 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
+    _run_pass_manager(pm, module)
+
+
+def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
+    """Run *pm* on *module*, raising a failure as a DSLCompileError that points at the user's source."""
     with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
+        except ir.MLIRError as exc:
+            # PassManager.run captures the errors into the MLIRError before any other handler sees them.
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError(str(exc), diagnostics=records) from exc
         except Exception as exc:
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
@@ -805,17 +845,30 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
 class MlirCompiler:
     @classmethod
     def compile(
-        cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
+        cls,
+        module: ir.Module,
+        *,
+        arch: str = "",
+        func_name: str = "",
+        link_libs: Optional[list] = None,
+        printed_asm: Optional[str] = None,
     ) -> ir.Module:
+        """Lower *module* to a GPU binary. *printed_asm*, if given, is lowered in place of *module*, so it must be
+        *module* as it is now, printed with debug info."""
         try:
             module.operation.verify()
         except ir.MLIRError as exc:
-            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
+            records = diag_records_from_mlir_error(exc)
+            raise DSLCompileError("MLIR verification failed", diagnostics=records) from exc
 
         backend = get_backend(arch=arch)
 
         compile_hints = CompilationContext.get_compile_hints()
-        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
+        # Keep source locations so pass diagnostics point at user code. They only become DWARF when
+        # the debug-info pass runs.
+        if printed_asm is None:
+            printed_asm = module.operation.get_asm(enable_debug_info=True)
+        module = ir.Module.parse(printed_asm)
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
@@ -843,8 +896,17 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        dump_enabled = env.debug.dump_ir
+        # FLYDSL_DEBUG_DUMP_ASM takes the FLYDSL_DUMP_IR path but writes only the final ISA.
+        dump_ir = env.debug.dump_ir
+        dump_enabled = dump_ir or env.debug.dump_asm
         dump_dir = Path(env.debug.dump_dir).resolve()
+
+        if dump_enabled and not dump_ir and external_binary:
+            raise RuntimeError(
+                "FLYDSL_DEBUG_DUMP_ASM is not supported with "
+                "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
+                "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
+            )
 
         with _llvm_ctx:
             if dump_enabled:
@@ -852,10 +914,11 @@ class MlirCompiler:
                 kernel_names = _infer_kernel_names_from_asm(asm)
                 subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
                 dump_dir = dump_dir / _sanitize_path_component(subdir)
-                print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+                if dump_ir:
+                    print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-                out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
-                print(f"[flydsl.compile] dump 00_origin -> {out}")
+                    out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+                    print(f"[flydsl.compile] dump 00_origin -> {out}")
 
                 asm_for_isa = None
                 llir = None
@@ -869,15 +932,12 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with dsl_ir_diagnostics(module.context) as diags:
-                        try:
-                            pm.run(module.operation)
-                        except Exception as exc:
-                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
+                    _run_pass_manager(pm, module)
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
-                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                    print(f"[flydsl.compile] dump {stage_name} -> {out}")
+                    if dump_ir:
+                        out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                        print(f"[flydsl.compile] dump {stage_name} -> {out}")
 
                     if frag.strip() == "reconcile-unrealized-casts":
                         asm_for_isa = stage_asm
@@ -906,8 +966,9 @@ class MlirCompiler:
 
                 if llir is not None:
                     ll_name = f"{next_stage:02d}_llvm_ir"
-                    (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
-                    print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
+                    if dump_ir:
+                        (dump_dir / f"{ll_name}.ll").write_text(llir, encoding="utf-8")
+                        print(f"[flydsl.compile] dump {ll_name} -> {dump_dir / f'{ll_name}.ll'}")
                     next_stage += 1
 
                 if asm_for_isa is not None:
@@ -934,13 +995,6 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
-
-                    if env.debug.dump_asm:
-                        raise RuntimeError(
-                            "FLYDSL_DEBUG_DUMP_ASM is not supported with "
-                            "FLYDSL_COMPILE_LLVM_DIR external codegen; use FLYDSL_DUMP_IR=1 "
-                            "to inspect pre-binary/final MLIR, or run external LLVM tools directly for ISA dumps."
-                        )
 
                     run_external_binary_codegen(
                         module,
@@ -1359,9 +1413,9 @@ class JitFunction:
         self._manager_owner_cls = owner_cls
         self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
 
-        if run_only and env.debug.dump_ir:
+        if run_only and (env.debug.dump_ir or env.debug.dump_asm):
             raise ValueError(
-                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1 or FLYDSL_DEBUG_DUMP_ASM=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
             )
 
@@ -1393,7 +1447,10 @@ class JitFunction:
 
         sig = self._sig
         # Re-read env vars on every call.
-        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
+        key_parts = [
+            ("_env_", _cache_invalidating_env_values(self._backend_target)),
+            ("_target_", self._backend_target),
+        ]
         if effective_hints is None:
             effective_hints = self._effective_compile_hints()
         if effective_hints:
@@ -1521,6 +1578,8 @@ class JitFunction:
                             self.func(**named_args)
                     func.ReturnOp([])
 
+        # Reused by compile() as printed_asm, so it must match what compile() would print: same flags, and no module
+        # edits before compile() other than extern linking, which withholds this text.
         original_ir = module.operation.get_asm(enable_debug_info=True)
 
         link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
@@ -1541,6 +1600,8 @@ class JitFunction:
             arch=backend.target.arch,
             func_name=self.func.__name__,
             link_libs=link_libs,
+            # Extern linking changed the module after it was printed.
+            printed_asm=None if extern_linked else original_ir,
         )
         return _TraceResult(
             compiled_module=compiled_module,
@@ -1634,8 +1695,9 @@ class JitFunction:
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         _rejected_link_libs = False
+        dumping = env.debug.dump_ir or env.debug.dump_asm
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not dumping:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
@@ -1677,7 +1739,7 @@ class JitFunction:
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
-        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        _use_compile_lock = use_disk_cache and self.cache_manager and not dumping
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(
@@ -1884,6 +1946,8 @@ class CompiledFunction:
         Host export currently requires 64-bit little-endian Linux ELF tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
+        if os.name == "nt":
+            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):
