@@ -274,4 +274,44 @@ def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wm
   let genVerifyDecl = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// MmaOp GFX120X — SWMMAC wave32 (RDNA4: gfx1200, gfx1201)
+//===----------------------------------------------------------------------===//
+//
+// 2:4 structured sparse WMMA on RDNA4 wave32 (`V_SWMMAC_*`).
+//   * Floating-point (16x16x32 -> f32): f16, bf16, and every fp8(f8E4M3FN) /
+//     bf8(f8E5M2) A/B combination.
+//   * Integer (-> i32): iu8 16x16x32, and iu4 16x16x32 or 16x16x64.
+// A stores the compressed non-zero elements (16 x K/2, indexed by `tv_layout_a`);
+// B stores the dense elements (16 x K, indexed by `tv_layout_b`). The 32-bit
+// 2:4 selector mask is passed as the second A-group operand (`[a, sparse_index]`)
+// on `fly.mma_atom_call_ssa` / `fly.mma_atom_call` / `fly.gemm`.
+
+def FlyROCDL_MmaOpGFX120X_SWMMAC : FlyROCDL_MmaOp<"MmaOpGFX120X_SWMMAC", "gfx120x.swmmac", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc,
+    // Integer-SWMMAC controls, forwarded to the ROCDL iu8/iu4 intrinsic.
+    // Rejected when true on the floating-point paths. Always printed.
+    "bool":$signA,
+    "bool":$signB,
+    "bool":$clamp
+  );
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
+
 #endif // FLYROCDL_MMAATOM

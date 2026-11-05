@@ -4,6 +4,7 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX11_WMMAType,
+    MmaOpGFX120X_SWMMACType,
     MmaOpGFX120X_WMMAType,
     MmaOpGFX1250_WMMAType,
 )
@@ -230,6 +231,63 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     raise ValueError(
         f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx120x (RDNA4), and gfx1250. "
     )
+
+
+def SWMMAC(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
+    """Create a 2:4 structured-sparse SWMMAC atom (RDNA4 gfx120x wave32).
+
+    Supported shapes and types on gfx120x:
+        * 16x16x32: f16, bf16, and every FP8(E4M3FN)/BF8(E5M2) A/B combination
+          -> f32 accumulator (sign_a/sign_b/clamp must be False).
+        * 16x16x32: iu8 -> i32 accumulator (accepts sign_a/sign_b/clamp).
+        * 16x16x32 and 16x16x64: iu4 -> i32 accumulator (accepts sign_a/sign_b/clamp).
+
+    Operand A is passed to ``fly.mma_atom_call_ssa`` / ``fx.gemm`` as a 2-value
+    group ``[a_compressed, sparse_index]``, where ``a_compressed`` holds the
+    non-zero half of the 2:4 sparse ``(M, K)`` tile (``(M, K/2)`` -> ``K/4``
+    elements per lane) and ``sparse_index`` is a per-lane ``i32`` 2-bit selector
+    word. Because generic ``TiledMma`` operand-A helpers (``partition_A``,
+    ``make_fragment_A``, ``make_tiled_copy_A``) tile A by dense ``shape_mnk``
+    (``(M, K)``), multi-K-tile kernels should partition compressed A and
+    ``sparse_index`` explicitly while using ``TiledMma`` for B, C/D, and
+    variadic ``fx.gemm``.
+
+    Supported kwargs:
+        elem_ty_b: optional B operand type for mixed FP8/BF8 or integer forms;
+            defaults to ``elem_ty_ab``.
+        sign_a (bool, default False): treat A operand as signed (iu8/iu4 only).
+        sign_b (bool, default False): treat B operand as signed (iu8/iu4 only).
+        clamp  (bool, default False): saturate integer accumulator (iu8/iu4 only).
+    """
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
+    if elem_ty_acc is None:
+        ty_acc = ir.F32Type.get()
+    else:
+        ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+
+    sign_a = bool(kwargs.pop("sign_a", False))
+    sign_b = bool(kwargs.pop("sign_b", False))
+    clamp = bool(kwargs.pop("clamp", False))
+    if kwargs:
+        unknown = ", ".join(sorted(kwargs))
+        raise TypeError(f"SWMMAC() got unexpected keyword argument(s): {unknown}")
+
+    arch = get_rocm_arch() or ""
+    if arch.startswith("gfx120"):
+        return MmaOpGFX120X_SWMMACType.get(
+            m,
+            n,
+            k,
+            ty_a,
+            ty_b,
+            ty_acc,
+            sign_a=sign_a,
+            sign_b=sign_b,
+            clamp=clamp,
+        )
+    raise ValueError(f"SWMMAC is not available on target arch {arch!r}; supported: gfx120x (RDNA4).")
 
 
 def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):

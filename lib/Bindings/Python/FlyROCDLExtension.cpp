@@ -159,6 +159,29 @@ struct PyMmaOpGFX120X_WMMAType : PyConcreteType<PyMmaOpGFX120X_WMMAType> {
   }
 };
 
+struct PyMmaOpGFX120X_SWMMACType : PyConcreteType<PyMmaOpGFX120X_SWMMACType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpGFX120X_SWMMACType, "MmaOpGFX120X_SWMMACType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
+           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
+          return PyMmaOpGFX120X_SWMMACType(
+              context->getRef(),
+              wrap(MmaOpGFX120X_SWMMACType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                                unwrap(elemTyAcc), signA, signB, clamp)));
+        },
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
+        "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
+        "Create a MmaOpGFX120X_SWMMACType with m, n, k dimensions and element types "
+        "(RDNA4 gfx1200 / gfx1201 wave32 2:4 structured-sparse SWMMAC: 16x16x32 plus "
+        "IU4 16x16x64). Floating-point forms (fp16, bf16, every fp8(E4M3FN)/bf8(E5M2) "
+        "A/B combination) require sign_a/sign_b/clamp false. Integer IU8 (K=32) and "
+        "IU4 (K=32 or 64) accept sign_a/sign_b/clamp.");
+  }
+};
+
 struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType> {
   FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA3BufferCopyType, "CopyOpCDNA3BufferCopyType");
 
@@ -374,6 +397,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAScaleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX11_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX120X_WMMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX120X_SWMMACType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);

@@ -369,6 +369,23 @@ mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32,
                                   elem_ty_b=fx.Float8E5M2))  # RDNA4 FP8 x BF8
 ```
 
+**2:4 structured-sparse SWMMAC (RDNA4)** — `rocdl.SWMMAC(m, n, k, elem_ty_ab,
+elem_ty_acc=None, **kwargs)` builds `MmaOpGFX120X_SWMMACType` (`V_SWMMAC_*`) on
+`gfx1200` / `gfx1201`: `16x16x32` f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B
+combination accumulating to f32, plus `16x16x32` iu8 and `16x16x32` / `16x16x64`
+iu4 accumulating to i32 (`sign_a`, `sign_b`, `clamp`). Pass operand A as
+`[frag_A_compressed, frag_sparse_idx]`, where `frag_A_compressed` holds the
+`(M, K/2)` non-zero values (`K/4` elements per lane) and `frag_sparse_idx` holds
+one `i32` 2:4 selector mask per lane. Because generic `TiledMma` operand-A
+helpers (`partition_A`, `make_fragment_A`, `make_tiled_copy_A`) tile A by dense
+`shape_mnk` (`(M, K)`), partition compressed A and `frag_sparse_idx` explicitly
+for multi-K-tile loops while using `TiledMma` for B, C/D, and variadic `fx.gemm`.
+
+```python
+mma = fx.make_mma_atom(rocdl.SWMMAC(16, 16, 32, fx.Float16, fx.Float32))
+fx.gemm(tiled_mma, frag_C, [frag_A_comp, frag_idx], frag_B, frag_C)
+```
+
 **MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,
 elem_ty_acc=None, *, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False,
 block_size=32)` builds the E8M0 block-scaled WMMA (`V_WMMA_SCALE` /
