@@ -27,9 +27,12 @@ from .common import (
     bld,
     bst,
     ceildiv,
+    f32_bits_add,
     g_or_agent,
     g_st_sys,
     gptr,
+    i8x4_pack,
+    i8x4_unpack,
     i32,
     lds_ld_i32,
     lds_st,
@@ -37,7 +40,6 @@ from .common import (
     poll_sys_ge,
     rsrc,
     sum_live,
-    traced,
     uni,
     wave_red,
 )
@@ -52,7 +54,6 @@ const_expr = fx.const_expr
 
 ZT = 16
 NRT_MAX = 128
-ROWF = NRT_MAX * 16
 
 
 @functools.cache
@@ -67,9 +68,11 @@ def compile_sp_rs_norm(
     gemma: bool = True,
     logit_bf16: bool = True,
     nb: int = 256,
+    nrt: int = NRT_MAX,
 ):
     NB = nb  # CTAs: one per CU
-    ERR = NB + ROWF + NRT_MAX * KS_MAX  # ctrl: sticky watchdog bit
+    ROWF = nrt * ZT  # ctrl: per-row flags (rows per rank <= nrt * ZT)
+    ERR = NB + ROWF + nrt * KS_MAX  # ctrl: sticky watchdog bit
     RT = E > 0
     EPL = E // 64
     assert not RT or (E % 64 == 0 and EPL in (2, 4) and topk <= 64)
@@ -89,25 +92,8 @@ def compile_sp_rs_norm(
         + ("" if gemma else "_rms")
         + ("_lf32" if RT and not logit_bf16 else "")
         + (f"_nb{NB}" if NB != 256 else "")
+        + (f"_nrt{nrt}" if nrt != NRT_MAX else "")
     )
-
-    def i8x4_pack(f, inv):
-        w = i32(0)
-        for k in range_constexpr(4):
-            q = fx.Int32(fmath.roundeven(f[k] * inv))
-            q = fx.max(fx.min(q, i32(127)), i32(-127))
-            w = w | ((q & i32(0xFF)) << i32(8 * k))
-        return w
-
-    def i8x4_unpack(d, sc):
-        out = []
-        for k in range_constexpr(4):
-            b = (fx.Int32(d) << i32(24 - 8 * k)) >> i32(24)
-            out.append(b.to(fx.Float32) * sc)
-        return out
-
-    def fadd(x, y):
-        return (x.bitcast(fx.Float32) + y.bitcast(fx.Float32)).bitcast(fx.Int32)
 
     LDSB = 128 + (NTH // 64) * 64 * (E // 16 if E else 1) * 16
     Shared = fx.struct(type("Shared", (), {"__annotations__": {"buf": fx.Array[fx.Int8, LDSB, 16]}}))
@@ -118,7 +104,7 @@ def compile_sp_rs_norm(
     def lds_stf(L, off, v):
         lds_st(L, off, fx.Float32(v).bitcast(fx.Int32))
 
-    @traced
+    @flyc.jit
     def wait_epoch(a, addr):
         cur = poll_sys_ge(addr, a["epoch"], 1)
         if before(cur, a["epoch"]):
@@ -135,7 +121,7 @@ def compile_sp_rs_norm(
             ks = ((ks == i32(1)) & (cap >= i32(d))).select(i32(d), ks)
         return rt, ks
 
-    @traced
+    @flyc.jit
     def router_tasks(L, a, tid):
         m = a["m"]
         bid = i32(gpu.block_id("x"))
@@ -180,7 +166,7 @@ def compile_sp_rs_norm(
                     out_.append(fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [av, bv, acc[n], 0, 0, 0])))
                 return out_
 
-            acc0 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(E // 16)]
+            acc0 = [fx.full(4, 0.0, fx.Float32) for _ in range(E // 16)]
             for j in range_constexpr(NPF):
                 acc0 = step(acc0, k0 + i32(j * 32) + (lane // i32(16)) * i32(8), pf[j], row)
             for kk_, st in range(i32(NPF * 32), kw // i32(4), i32(32), init=acc0):
@@ -226,7 +212,7 @@ def compile_sp_rs_norm(
                 router_row(a, lane, rt, i32(rl_), KS)
             gpu.barrier()
 
-    @traced
+    @flyc.jit
     def router_row(a, lane, rt, rl, KS):
         rzp = rsrc(a["zp"])
         rb = rsrc(a["bias"])
@@ -249,7 +235,7 @@ def compile_sp_rs_norm(
                 x = x + live.select(v, fx.Float32(0.0))
             if const_expr(logit_bf16):
                 x = fx.Float32(x).to(fx.BFloat16).to(fx.Float32)
-            sc = fx.Float32(1.0) / (fx.Float32(1.0) + fx.Float32(fmath.exp2(x * fx.Float32(-LOG2E))))
+            sc = 1.0 / (1.0 + fx.Float32(fmath.exp2(x * fx.Float32(-LOG2E))))
             orig.append(sc)
             b = fx.Int32(bld(rb, e * i32(4), 0, T.i32)).bitcast(fx.Float32)
             vals.append(sc + b)
@@ -274,8 +260,8 @@ def compile_sp_rs_norm(
                     lambda p_, q_: fx.max(p_.bitcast(fx.Float32), q_.bitcast(fx.Float32)).bitcast(fx.Int32),
                 ).bitcast(fx.Float32)
                 bal = fx.Int64(rocdl.ballot(T.i64, mv == mx))
-                win = i32(fx.ctpop(fx.Int64((bal & (fx.Int64(0) - bal)) - fx.Int64(1))))
-                win = (bal == fx.Int64(0)).select(i32(0), win)
+                win = i32(fx.ctpop((bal & (0 - bal)) - 1))
+                win = (bal == 0).select(i32(0), win)
                 wid = i32(rocdl.readlane(T.i32, mi, win))
                 wgt = fx.Int32(rocdl.readlane(T.i32, mo.bitcast(fx.Int32), win)).bitcast(fx.Float32)
                 cur = cur + ((lane == win) & (cur < i32(2))).select(i32(1), i32(0))
@@ -301,8 +287,8 @@ def compile_sp_rs_norm(
                     lambda p_, q_: fx.max(p_.bitcast(fx.Float32), q_.bitcast(fx.Float32)).bitcast(fx.Int32),
                 ).bitcast(fx.Float32)
                 bal = fx.Int64(rocdl.ballot(T.i64, bv == mx))
-                win = i32(fx.ctpop(fx.Int64((bal & (fx.Int64(0) - bal)) - fx.Int64(1))))
-                win = (bal == fx.Int64(0)).select(i32(0), win)
+                win = i32(fx.ctpop((bal & (0 - bal)) - 1))
+                win = (bal == 0).select(i32(0), win)
                 wid = i32(rocdl.readlane(T.i32, bi, win))
                 wgt = fx.Int32(rocdl.readlane(T.i32, bo.bitcast(fx.Int32), win)).bitcast(fx.Float32)
                 for j in range_constexpr(EPL):
@@ -325,9 +311,9 @@ def compile_sp_rs_norm(
                 0,
             )
 
-    @traced
+    @flyc.jit
     def blk_sum(L, tid, v):
-        r = wave_red(v.bitcast(fx.Int32), tid % i32(64), fadd)
+        r = wave_red(v.bitcast(fx.Int32), tid % i32(64), f32_bits_add)
         if ((tid % i32(64)) == i32(0)) & (tid < i32(NTH)):
             lds_st(L, i32(16) + (tid // i32(64)) * i32(4), r)
         gpu.barrier()
@@ -337,7 +323,7 @@ def compile_sp_rs_norm(
         gpu.barrier()
         return t
 
-    @traced
+    @flyc.jit
     def send_rows(a, tid):
         m = a["m"]
         bid = i32(gpu.block_id("x"))
@@ -358,9 +344,7 @@ def compile_sp_rs_norm(
             for k in range_constexpr(PIT):
                 p = tid + i32(k * NTH)
                 f = bf16x8_to_f32(bld(rp, (i * i32(H) + p * i32(8)) * i32(2), 0, T.vec(4, T.i32)))
-                am = amax(f)
-                am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
-                am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
+                am = fx.coop.warp_reduce(amax(f), fx.ReductionOp.MAX, width=4)
                 sc = fx.max(am, fx.Float32(1e-30)) / fx.Float32(127.0)
                 inv = fx.Float32(1.0) / sc
                 dv = fx.Vector.from_elements([i8x4_pack(f[0:4], inv), i8x4_pack(f[4:8], inv)], fx.Int32)
@@ -374,7 +358,7 @@ def compile_sp_rs_norm(
                         AUX_SYS,
                     )
 
-    @traced
+    @flyc.jit
     def post_flags(L, a, tid):
         rocdl.s_waitcnt(vmcnt=0)
         gpu.barrier()
@@ -386,7 +370,7 @@ def compile_sp_rs_norm(
             fo = fx.Int64(a["off_f"]) + fx.Int64((a["rank"] * i32(NB) + bid) * i32(4))
             g_st_sys(fx.Int64(peer) + fo, a["epoch"])
 
-    @traced
+    @flyc.jit
     def wait_row(a, tid, r):
         if tid < i32(tp):
             k = (a["rank"] - tid - i32(1) + i32(tp)) % i32(tp)
@@ -396,7 +380,7 @@ def compile_sp_rs_norm(
                 wait_epoch(a, addr)
         gpu.barrier()
 
-    @traced
+    @flyc.jit
     def reduce_rows(L, a, tid):
         m = a["m"]
         bid = i32(gpu.block_id("x"))
@@ -457,7 +441,7 @@ def compile_sp_rs_norm(
                 gpu.barrier()
                 if tid == i32(0):
                     g_st_sys(
-                        fx.Int64(a["ctrl"]) + fx.Int64((i32(NB) + r) * i32(4)),
+                        fx.Int64(a["ctrl"]) + fx.Int64((i32(NB) + r) * 4),
                         a["epoch"],
                     )
 
@@ -497,8 +481,8 @@ def compile_sp_rs_norm(
         for j in range_constexpr(1, MAX_TP):
             mine = (rank == i32(j)).select(peers[j], mine)
         bid = i32(gpu.block_id("x"))
-        ea = fx.Int64(ctrl) + fx.Int64(bid * i32(4))
-        epoch = i32(fx.generic_load(gptr(ea), dtype=fx.Int32)) + i32(1)
+        ea = ctrl + fx.Int64(bid * 4)
+        epoch = fx.generic_load(gptr(ea), dtype=fx.Int32) + 1
         a = {
             "part": part,
             "res": res,
@@ -509,8 +493,8 @@ def compile_sp_rs_norm(
             "mine": fx.Int64(mine),
             # receive buffers double-buffered by launch parity: a peer's next launch
             # never overwrites the rows this one still reads
-            "off_x": off_x + fx.Int64(epoch & i32(1)) * xbank,
-            "off_s": off_s + fx.Int64(epoch & i32(1)) * (xbank // fx.Int64(8)),
+            "off_x": off_x + fx.Int64(epoch & 1) * xbank,
+            "off_s": off_s + fx.Int64(epoch & 1) * (xbank // 8),
             "off_f": off_f,
             "rank": rank,
             "m": m,
@@ -522,15 +506,15 @@ def compile_sp_rs_norm(
             "tw": tw,
             "zp": zp,
         }
-        if tid < i32(4):
-            lds_st(L, tid * i32(4), i32(0))
+        if tid < 4:
+            lds_st(L, tid * 4, i32(0))
         gpu.barrier()
         send_rows(a, tid)
         post_flags(L, a, tid)
         reduce_rows(L, a, tid)
         if const_expr(RT):
             router_tasks(L, a, tid)
-        if tid == i32(0):
+        if tid == 0:
             fx.generic_store(gptr(ea), epoch)
 
     @flyc.jit
@@ -626,6 +610,8 @@ class SpRsNorm:
         self.rank = dist.get_rank(group)
         mmax = ceildiv(int(max_tokens), self.tp)
         self.mmax = mmax
+        # router row tiles per rank (ctrl / scratch sizes): the default up to 2048 rows per rank
+        self.nrt = max(NRT_MAX, ceildiv(mmax, ZT))
         self.router = router
         E = int(router[0]) if router else 0
         topk = int(router[1]) if router else 0
@@ -637,8 +623,6 @@ class SpRsNorm:
             bad.append(f"hidden % {8 * NTH} == 0")
         if router and (E not in (128, 256) or not 0 < topk < 64):
             bad.append("router experts in (128, 256) and 0 < topk < 64")
-        if router and mmax // ZT > NRT_MAX:
-            bad.append(f"router: max_tokens / tp <= {NRT_MAX * ZT}")
         if bad:
             raise ValueError(f"SpRsNorm h{self.H} tp{self.tp}: need " + ", ".join(bad))
         self._xbank = self.tp * mmax * self.H
@@ -648,14 +632,14 @@ class SpRsNorm:
         self._f = arena.reserve("f", (MAX_TP * self.nb,), torch.int32)
         arena.commit()
         self.arena = arena
-        self._err = self.nb + ROWF + NRT_MAX * KS_MAX
+        self._err = self.nb + self.nrt * ZT + self.nrt * KS_MAX
         self.ctrl = torch.zeros(self._err + 1, dtype=torch.int32, device=device)
         self._zp = torch.empty(
-            (NRT_MAX * KS_MAX * ZT * max(E, 1),) if router else (1,),
+            (self.nrt * KS_MAX * ZT * max(E, 1),) if router else (1,),
             dtype=torch.float32,
             device=device,
         )
-        self._fn = compile_sp_rs_norm(self.H, self.tp, self.eps, gemma=bool(gemma), nb=self.nb)
+        self._fn = compile_sp_rs_norm(self.H, self.tp, self.eps, gemma=bool(gemma), nb=self.nb, nrt=self.nrt)
         self._fn_rt = (
             compile_sp_rs_norm(
                 self.H,
@@ -668,6 +652,7 @@ class SpRsNorm:
                 gemma=bool(gemma),
                 logit_bf16=bool(logit_bf16),
                 nb=self.nb,
+                nrt=self.nrt,
             )
             if router
             else None

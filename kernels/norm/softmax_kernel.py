@@ -10,10 +10,8 @@ The kernel register-buffers the row across max, exp+sum, and normalize passes.
 
 Two paths:
   - Fast path (N % tile_cols == 0): buffer_load/store vectorised access.
-  - Generic path (arbitrary N): scalar copy_atom_call with masking.
+  - Generic path (arbitrary N): scalar fx.copy with masking.
 """
-
-import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -29,7 +27,7 @@ WARP_SIZE = get_warp_size()
 
 # Bumped whenever a kernel or search-space change can change the tuned winner. The
 # scratch cache does not fingerprint kernel source, so this is what forces a retune.
-TUNING_SCHEMA = 5
+TUNING_SCHEMA = 6
 
 
 def build_softmax_module(
@@ -57,11 +55,8 @@ def build_softmax_module(
     # vector width must satisfy vec_width * elem_bits == 128 (8 for 16-bit, 4 for f32).
     vec_width = 128 // elem_bits
     tile_cols = THREADS_PER_ROW * vec_width
-    RED_SLOTS = max(1, (THREADS_PER_ROW + WARP_SIZE - 1) // WARP_SIZE)
-
-    @fx.struct
-    class SharedStorage:
-        s_red: fx.Array[fx.Float32, RED_SLOTS, 16]
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     # No explicit known_block_size: launch_softmax passes a static block dim, so the
     # compiler infers it and max_flat_workgroup_size tracks BLOCK_THREADS above 256.
@@ -90,54 +85,18 @@ def build_softmax_module(
         fm_fast = arith.FastMathFlags.fast
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
 
         c_zero_f = fx.Float32(0.0)
         c_neg_inf = fx.Float32(float("-inf"))
 
-        # ── wave / block reduction (supports max and sum) ─────────────────
-        def shuffle_reduce(x, mode, width):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(width))):
-                off = width // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, width)
-                if const_expr(mode == "max"):
-                    w = fx.max(w, peer)
-                else:
-                    w = w.addf(peer, fastmath=fm_fast)
-            return w
-
-        def block_reduce(val, mode, s_red_buffer):
+        def block_reduce(val, op):
             if const_expr(THREADS_PER_ROW <= WARP_SIZE):
-                return shuffle_reduce(val, mode, THREADS_PER_ROW)
-
-            lane_in_wave = lane % WARP_SIZE
-            wave = lane // WARP_SIZE
-            neutral = c_neg_inf if mode == "max" else c_zero_f
-
-            # The scratch buffer is reused by the max and sum reductions. Order
-            # every wave's final read from the preceding reduction before any
-            # wave overwrites its slot for the next reduction.
+                with fx.fastmath(fm_fast if op == ReductionOp.ADD else arith.FastMathFlags.none):
+                    return fx.coop.warp_reduce(val, op, width=THREADS_PER_ROW)
+            # Order the preceding reduction's readers before scratch reuse.
             gpu.barrier()
-            w = shuffle_reduce(val, mode, WARP_SIZE)
-
-            if lane_in_wave == 0:
-                fx.memref_store(w, s_red_buffer, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane_in_wave < RED_SLOTS
-                lane_safe = in_range.select(lane_in_wave, 0)
-                v = fx.memref_load(s_red_buffer, lane_safe)
-                z = neutral
-                ww = in_range.select(v, z)
-                ww = shuffle_reduce(ww, mode, WARP_SIZE)
-
-                if lane_in_wave == 0:
-                    fx.memref_store(ww, s_red_buffer, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_red_buffer, 0)
+            with fx.fastmath(fm_fast if op == ReductionOp.ADD else arith.FastMathFlags.none):
+                return BlockReduce(val, op, storage=lds)
 
         # ==================================================================
         # Fast path: N is a multiple of tile_cols
@@ -183,7 +142,7 @@ def build_softmax_module(
                 red_max = x.reduce(ReductionOp.MAX)
                 thread_max = fx.max(thread_max, red_max)
 
-            global_max = block_reduce(thread_max, "max", s_red)
+            global_max = block_reduce(thread_max, ReductionOp.MAX)
 
             # 2. Exp + local sum
             thread_sum = c_zero_f
@@ -196,7 +155,7 @@ def build_softmax_module(
                 red_sum = exp_val.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sum = thread_sum + red_sum
 
-            global_sum = block_reduce(thread_sum, "sum", s_red)
+            global_sum = block_reduce(thread_sum, ReductionOp.ADD)
 
             # 3. Normalize + store
             inv_sum = 1.0 / global_sum
@@ -261,7 +220,7 @@ def build_softmax_module(
                 row_buffer.append((safe_val, is_valid))
                 thread_max = fx.max(thread_max, safe_val)
 
-            global_max = block_reduce(thread_max, "max", s_red)
+            global_max = block_reduce(thread_max, ReductionOp.MAX)
 
             # 2. Exp + sum
             thread_sum = c_zero_f
@@ -274,7 +233,7 @@ def build_softmax_module(
                 thread_sum = thread_sum + safe_exp
                 new_buffer.append((exp_val, is_valid))
 
-            global_sum = block_reduce(thread_sum, "sum", s_red)
+            global_sum = block_reduce(thread_sum, ReductionOp.ADD)
             inv_sum = 1.0 / global_sum
 
             # 3. Normalize + store

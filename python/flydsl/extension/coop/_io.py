@@ -90,8 +90,8 @@ def _store_pack(destination, value, index, offset, valid_items, width):
             _scalar_store_pack(destination, value, index, offset, valid_items)
 
 
-def _store_vectorized(destination, value, index, offset, valid_items):
-    items = _as_items(value)
+def _store_vectorized(destination, value, index, offset, valid_items, dtype=None):
+    items = _as_items(value, dtype)
     width = _pack_width(destination, len(items))
     for i in range(0, len(items), width):
         if width == 1:

@@ -110,7 +110,7 @@ public:
       : tiledCopy_(std::move(tiledCopy)), thr_idx_(std::move(thrIdx)) {}
 
   const TiledCopy<Cat> &tiledCopy() const { return tiledCopy_; }
-  const IntTuple<Cat> &threadIndex() const { return thr_idx_; }
+  const IntTuple<Cat> &thr_idx() const { return thr_idx_; }
 
   template <class TensorOrLayout> auto partition_S(const TensorOrLayout &stensor) const;
 
@@ -562,7 +562,7 @@ template <class Cat> void print(const ThrCopy<Cat> &copy, llvm::raw_ostream &os)
   os << "thr_copy<";
   print(copy.tiledCopy(), os);
   os << ",thr_idx=";
-  print(copy.threadIndex(), os);
+  print(copy.thr_idx(), os);
   os << '>';
 }
 

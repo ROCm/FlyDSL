@@ -34,7 +34,7 @@ if torch is None or not torch.cuda.is_available():
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
 _arch = str(get_rocm_arch())
-if _arch != "gfx1250":
+if not _arch.startswith("gfx1250"):
     pytest.skip(f"Cluster launch requires gfx1250, got {_arch}", allow_module_level=True)
 
 

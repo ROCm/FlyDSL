@@ -98,7 +98,11 @@ fi
 # ---------------------------------------------------------------------------
 # CMake configure
 # ---------------------------------------------------------------------------
-NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')" 2>/dev/null || true)
+# Pin the MLIR Python bindings to one interpreter and locate nanobind from it.
+# MLIR detects Python twice (Python3_ for the project, Python_ for nanobind), so
+# pinning only Python3_EXECUTABLE lets the bindings build against a different
+# interpreter and land under the wrong ABI tag.
+source "${SCRIPT_DIR}/python_interpreter.sh"
 
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
@@ -113,12 +117,9 @@ cmake_args=(
   -G "${GENERATOR}"
   "${REPO_ROOT}"
   -DMLIR_DIR="${MLIR_PATH}/lib/cmake/mlir"
-  -DPython3_EXECUTABLE="$(which python3)"
+  "${FLY_PYTHON_CMAKE_ARGS[@]}"
   -DHIP_PLATFORM="${HIP_PLATFORM}"
 )
-if [ -n "${NANOBIND_DIR}" ]; then
-  cmake_args+=(-Dnanobind_DIR="${NANOBIND_DIR}")
-fi
 
 echo "Configuring CMake..."
 cmake "${cmake_args[@]}"

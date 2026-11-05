@@ -15,6 +15,7 @@ import ctypes
 import gc
 import json
 import os
+import pickle
 import shutil
 import struct
 import subprocess
@@ -82,6 +83,23 @@ def _scale_kernel(X: fx.Pointer, n: fx.Int32, factor: fx.Constexpr[float]):
     idx = fx.block_idx.x * fx.block_dim.x + fx.thread_idx.x
     if idx < n:
         X[idx] = X[idx] * factor
+
+
+@flyc.jit
+def add_one_optional(X: fx.Pointer, optional: fx.Pointer, stream: fx.Stream):
+    """The optional buffer is disabled, as with attention scales or sinks."""
+    _add_one_kernel(X, fx.Int32(1)).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+
+
+@flyc.kernel
+def _tensor_add_one_kernel(X: fx.Tensor):
+    if fx.thread_idx.x == 0:
+        X[0] = X[0] + 1.0
+
+
+@flyc.jit
+def tensor_add_one_optional(X: fx.Tensor, optional: fx.Pointer, stream: fx.Stream):
+    _tensor_add_one_kernel(X).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
 
 
 @flyc.jit
@@ -244,11 +262,7 @@ def _ptr(value=0):
 def _aot_view(launcher, *args, **kwargs):
     """Compile through the public API and expose its internal export view."""
     compiled = flyc.compile(launcher, *args, **kwargs)
-    if compiled._aot_error is not None:
-        error_type, message = compiled._aot_error
-        raise error_type(message)
-    assert compiled._aot_compiled is not None
-    return compiled._aot_compiled
+    return compiled._get_aot_compiled()
 
 
 # C-caller helpers (metadata-driven, independent of FlyDSL's own dispatch)
@@ -515,6 +529,10 @@ class TestExportCompile:
         tensor = flyc.from_dlpack(CpuDlpackSource())
         _aot_view(tensor_add, tensor, tensor, tensor)
 
+        # A non-null pointer cannot make a CPU tensor safe to execute, even
+        # when another test has changed PyTorch's default device to CUDA.
+        _aot_view(tensor_add_one_optional, torch.empty(1, device="cpu"), _ptr(1), fx.Stream(None))
+
     def test_placeholder_detection_does_not_duck_type_user_arguments(self):
         from flydsl.compiler.jit_function import _is_compile_placeholder
 
@@ -591,11 +609,70 @@ class TestExportCompile:
     def test_artifact_keeps_no_example_arguments(self):
         t = torch.empty(4, 8)
         ref = weakref.ref(t)
-        compiled = _aot_view(tensor_add, t, t, t)
+        compiled = flyc.compile(tensor_add, t, t, t)
         del t
         gc.collect()
         assert ref() is None
-        assert compiled._abi[0].kind == "tensor_data"
+        assert compiled._get_aot_compiled()._abi[0].kind == "tensor_data"
+
+    def test_delayed_export_keeps_each_callables_original_layout(self):
+        tensor = flyc.from_torch_tensor(torch.empty(4, 8))
+        tensor.mark_shape_dynamic(0)
+        first = flyc.compile(tensor_add, tensor, tensor, tensor)
+
+        tensor.mark_shape_dynamic(1)
+        second = flyc.compile(tensor_add, tensor, tensor, tensor)
+
+        # Export after mutating the original wrapper and compiling again.
+        # Each callable must retain its own layout description, not the wrapper.
+        first_layout = first._get_aot_compiled()._abi[1]
+        second_layout = second._get_aot_compiled()._abi[1]
+        assert first_layout.shape_dims == (0,) and first_layout.size == 4
+        assert second_layout.shape_dims == (0, 1) and second_layout.size == 8
+
+    def test_export_ir_is_lazy_and_prepared_once(self, monkeypatch):
+        from flydsl.compiler import jit_function
+
+        @flyc.jit
+        def lazy_export(X: fx.Pointer, n: fx.Int32):
+            _add_one_kernel(X, n).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+        calls = []
+        original = aot._aot_from_jit_artifact
+
+        def prepare(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(aot, "_aot_from_jit_artifact", prepare)
+        compiled = flyc.compile(lazy_export, _ptr(), 8)
+        assert calls == []
+
+        def unexpected(*args, **kwargs):
+            raise AssertionError("cached compile must not retrace")
+
+        monkeypatch.setattr(jit_function.JitFunction, "_trace_and_compile", unexpected)
+        again = flyc.compile(lazy_export, _ptr(), 16)
+        assert calls == []
+        assert again._keepalive is compiled._keepalive
+        # Concurrent first exports share one prepared view per callable.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            views = list(pool.map(lambda _: compiled._get_aot_compiled(), range(4)))
+        assert all(view is views[0] for view in views)
+        assert calls == [1]
+
+    def test_delayed_export_after_artifact_deserialization(self):
+        @flyc.jit
+        def cached_export(X: fx.Pointer, n: fx.Int32):
+            _add_one_kernel(X, n).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+        compiled = flyc.compile(cached_export, _ptr(), 8)
+        restored = pickle.loads(pickle.dumps(compiled._keepalive))
+        key = next(iter(cached_export._mem_cache))
+        cached_export._mem_cache[key] = restored
+        again = flyc.compile(cached_export, _ptr(), 16)
+        assert again._keepalive is restored
+        assert again._get_aot_compiled()._abi == compiled._get_aot_compiled()._abi
 
 
 @pytest.mark.l0_backend_agnostic
@@ -1003,6 +1080,75 @@ def _export_and_load(tmp_path, compiled, name, lib_name=None):
 @needs_gpu
 @needs_cc
 class TestEndToEnd:
+    def test_cached_compile_launches_without_export_work(self, monkeypatch):
+        from flydsl.compiler import jit_function
+
+        @flyc.jit
+        def scale(X: fx.Pointer, factor: fx.Constexpr[float]):
+            _scale_kernel(X, fx.Int32(1), factor).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+        x = torch.ones(1, device="cuda")
+        y = torch.ones(1, device="cuda")
+        flyc.compile(scale, _ptr(x.data_ptr()), 2.0)
+        flyc.compile(scale, _ptr(y.data_ptr()), 3.0)
+        calls = []
+        original = scale._build_full_cache_key
+
+        def key(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        def unexpected(*args, **kwargs):
+            raise AssertionError("cached compile must not create IR contexts or rebuild call state")
+
+        monkeypatch.setattr(scale, "_build_full_cache_key", key)
+        monkeypatch.setattr(jit_function, "_create_mlir_context", unexpected)
+        monkeypatch.setattr(jit_function, "_build_call_spec", unexpected)
+        monkeypatch.setattr(aot, "_create_mlir_context", unexpected)
+        for _ in range(3):
+            x_compiled = flyc.compile(scale, _ptr(x.data_ptr()), factor=2.0)
+            y_compiled = flyc.compile(scale, _ptr(y.data_ptr()), factor=3.0)
+        assert len(calls) == 6  # One existing specialization lookup per compile.
+        monkeypatch.setattr(scale, "_build_full_cache_key", unexpected)
+        x_compiled(_ptr(x.data_ptr()), 2.0)
+        y_compiled(_ptr(y.data_ptr()), 3.0)
+        torch.cuda.synchronize()
+        assert x.item() == 2.0**5 and y.item() == 3.0**5
+
+    @pytest.mark.parametrize("argument_kind", ["pointer", "torch", "wrapped_torch", "dlpack"])
+    @pytest.mark.parametrize("null_optional", [False, True])
+    def test_compile_with_optional_pointer_launches_once(self, argument_kind, null_optional, monkeypatch):
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            value = torch.zeros(1, device="cuda")
+            optional = _ptr() if null_optional else _ptr(value.data_ptr())
+            launcher = add_one_optional if argument_kind == "pointer" else tensor_add_one_optional
+            if argument_kind == "pointer":
+                data = _ptr(value.data_ptr())
+            elif argument_kind == "torch":
+                data = value
+            elif argument_kind == "wrapped_torch":
+                data = flyc.from_torch_tensor(value)
+            else:
+                data = flyc.from_dlpack(value)
+            args = (data, optional, fx.Stream(stream))
+
+            with monkeypatch.context() as compile_only:
+                compile_only.setenv("COMPILE_ONLY", "1")
+                assert flyc.compile(launcher, *args) is None
+            stream.synchronize()
+            assert value.item() == 0
+
+            # Both a first compile and an artifact-cache hit must launch once.
+            # Use a kwarg too, so default/keyword binding cannot hide an input.
+            for expected in (1, 2):
+                compiled = flyc.compile(launcher, *args[:-1], stream=args[-1])
+                stream.synchronize()
+                assert value.item() == expected
+            compiled(*args)
+            stream.synchronize()
+            assert value.item() == 3
+
     def test_flyc_compile_result_can_export(self, tmp_path, monkeypatch):
         n = 256
         x = torch.randn(n, device="cuda")

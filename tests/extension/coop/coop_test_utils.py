@@ -27,20 +27,28 @@ def full_matrix_enabled():
     return os.environ.get("FLYDSL_COOP_TESTS_FULL") == "1"
 
 
-def matrix_cases(*axes):
+def matrix_cases(*axes, independent=False):
     """Return a small representative matrix, or the full product on request.
 
     The cooperative tests contain several independent parameter axes and most
     cases compile a fresh GPU kernel.  Running their Cartesian product in every
     presubmit job is prohibitively expensive.  The default diagonal matrix
     visits every value from every axis at least once; exhaustive runs remain
-    available with ``FLYDSL_COOP_TESTS_FULL=1``.
+    available with ``FLYDSL_COOP_TESTS_FULL=1``. For expensive interacting axes,
+    ``independent=True`` varies one axis at a time around the first value of
+    each axis. Put inexpensive baseline values first: a large block and a
+    large per-thread tile then remain covered without compiling them together.
     """
     axes = tuple(tuple(axis) for axis in axes)
     if not axes or any(not axis for axis in axes):
         raise ValueError("matrix_cases requires non-empty parameter axes")
     if full_matrix_enabled():
         return tuple(itertools.product(*axes))
+    if independent:
+        baseline = tuple(axis[0] for axis in axes)
+        return (baseline,) + tuple(
+            baseline[:index] + (value,) + baseline[index + 1 :] for index, axis in enumerate(axes) for value in axis[1:]
+        )
     count = max(map(len, axes))
     return tuple(tuple(axis[index % len(axis)] for axis in axes) for index in range(count))
 

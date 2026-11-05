@@ -12,8 +12,6 @@ Two paths:
     implementation.
 """
 
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
@@ -35,16 +33,6 @@ EPS = 1e-5
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
-
-
-# ── Shared-memory allocation for block reductions ─────────────────────
-def _make_reduction_storage(red_slots: int):
-    @fx.struct
-    class SharedStorage:
-        s_sum: fx.Array[fx.Float32, red_slots, 16]
-        s_sumsq: fx.Array[fx.Float32, red_slots, 16]
-
-    return SharedStorage
 
 
 def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
@@ -101,13 +89,13 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
     VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
 
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     # ── GPU kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -127,8 +115,6 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
         eps_c = eps
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         # The wrapper guarantees contiguous [M, N] rows and contiguous [N]
         # affine parameters. Reconstruct only this block's static views so the
@@ -148,45 +134,12 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
             rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
 
         # ── helpers: wave / block reduction ───────────────────────────────
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add2(val0, val1):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
-            if lane == 0:
-                fx.memref_store(w0, s_sum, wave)
-                fx.memref_store(w1, s_sumsq, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_sum, lane_safe)
-                v1 = fx.memref_load(s_sumsq, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-
-                if lane == 0:
-                    fx.memref_store(ww0, s_sum, 0)
-                    fx.memref_store(ww1, s_sumsq, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = 1.0 / float(N)
@@ -355,8 +308,8 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
     only — a vectorized fast path (mirroring the forward) and caching x/dy/gamma
     between pass 1 and pass 2 would cut global traffic.
     """
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def layernorm_bwd_kernel(
@@ -378,48 +331,12 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
         c_zero_f = fx.Float32(0.0)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add2(val0, val1):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
-            if lane == 0:
-                fx.memref_store(w0, s_sum, wave)
-                fx.memref_store(w1, s_sumsq, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_sum, lane_safe)
-                v1 = fx.memref_load(s_sumsq, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-
-                if lane == 0:
-                    fx.memref_store(ww0, s_sum, 0)
-                    fx.memref_store(ww1, s_sumsq, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
 
         # All layouts are fixed by the wrapper's contiguous contract. Rebuild
         # only the row/scalar views used by this block so the kernel ABI carries
@@ -505,13 +422,13 @@ def build_fused_add_layernorm_module(N: int, dtype_str: str, eps: float = EPS):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
     VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
 
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def fused_add_layernorm_kernel(
@@ -530,47 +447,12 @@ def build_fused_add_layernorm_module(N: int, dtype_str: str, eps: float = EPS):
         eps_c = eps
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
 
         def block_reduce_add2(val0, val1):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
-            if lane == 0:
-                fx.memref_store(w0, s_sum, wave)
-                fx.memref_store(w1, s_sumsq, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_sum, lane_safe)
-                v1 = fx.memref_load(s_sumsq, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-
-                if lane == 0:
-                    fx.memref_store(ww0, s_sum, 0)
-                    fx.memref_store(ww1, s_sumsq, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
 
         def compute_mean_rstd(sum_val, sumsq_val):
             inv_n = 1.0 / float(N)
@@ -725,14 +607,14 @@ def _build_layernorm_quant_module(
     quant_dtype_str: str = "i8",
     eps: float = EPS,
 ):
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
     VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def layernorm_quant_kernel(
@@ -754,86 +636,22 @@ def _build_layernorm_quant_module(
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
-        c_neg_inf = fx.Float32(float("-inf"))
         c_dtype_max = fx.Float32(quant_dtype_max)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
 
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
-
-        def wave_reduce_max(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = fx.max(w, peer)
-            return w
-
         def block_reduce_add2(val0, val1):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
-            if lane == 0:
-                fx.memref_store(w0, s_sum, wave)
-                fx.memref_store(w1, s_sumsq, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_sum, lane_safe)
-                v1 = fx.memref_load(s_sumsq, lane_safe)
-                ww0 = in_range.select(v0, c_zero_f)
-                ww1 = in_range.select(v1, c_zero_f)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-                if lane == 0:
-                    fx.memref_store(ww0, s_sum, 0)
-                    fx.memref_store(ww1, s_sumsq, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
 
         def block_reduce_max(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_max(val)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            # s_sum still holds the sum reduction's result, which every wave
-            # broadcast-reads on exit. Only this barrier orders that read
-            # against the store below; without it a late wave reads this max.
+            # Finish readers of the previous sum before reusing its shared slots.
             gpu.barrier()
-            w = wave_reduce_max(val)
-            if lane == 0:
-                fx.memref_store(w, s_sum, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_sum, lane_safe)
-                ww = in_range.select(v, c_neg_inf)
-                ww = wave_reduce_max(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_sum, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0)
+            values = fx.full(2, val, fx.Float32)
+            return BlockReduce(values, fx.ReductionOp.MAX, storage=lds)[0]
 
         # ==================================================================
         # Vector path for every complete f16/bf16 vec8 row.
@@ -1073,14 +891,14 @@ def _build_fused_add_layernorm_quant_module(
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
     VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
+    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
     def fused_add_layernorm_quant_kernel(
@@ -1104,87 +922,23 @@ def _build_fused_add_layernorm_quant_module(
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
-        c_neg_inf = fx.Float32(float("-inf"))
         c_dtype_max = fx.Float32(quant_dtype_max)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
-        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
 
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
-
-        def wave_reduce_max(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = fx.max(w, peer)
-            return w
-
         def block_reduce_add2(val0, val1):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val0), wave_reduce_add(val1)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w0 = wave_reduce_add(val0)
-            w1 = wave_reduce_add(val1)
-
-            if lane == 0:
-                fx.memref_store(w0, s_sum, wave)
-                fx.memref_store(w1, s_sumsq, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v0 = fx.memref_load(s_sum, lane_safe)
-                v1 = fx.memref_load(s_sumsq, lane_safe)
-                ww0 = in_range.select(v0, c_zero_f)
-                ww1 = in_range.select(v1, c_zero_f)
-                ww0 = wave_reduce_add(ww0)
-                ww1 = wave_reduce_add(ww1)
-                if lane == 0:
-                    fx.memref_store(ww0, s_sum, 0)
-                    fx.memref_store(ww1, s_sumsq, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
 
         def block_reduce_max(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_max(val)
-
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            # s_sum still holds the sum reduction's result, which every wave
-            # broadcast-reads on exit. Only this barrier orders that read
-            # against the store below; without it a late wave reads this max.
+            # Finish readers of the previous sum before reusing its shared slots.
             gpu.barrier()
-            w = wave_reduce_max(val)
-            if lane == 0:
-                fx.memref_store(w, s_sum, wave)
-            gpu.barrier()
-
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_sum, lane_safe)
-                ww = in_range.select(v, c_neg_inf)
-                ww = wave_reduce_max(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_sum, 0)
-            gpu.barrier()
-
-            return fx.memref_load(s_sum, 0)
+            values = fx.full(2, val, fx.Float32)
+            return BlockReduce(values, fx.ReductionOp.MAX, storage=lds)[0]
 
         # ==================================================================
         # Vector path for every complete f16/bf16 vec8 row.

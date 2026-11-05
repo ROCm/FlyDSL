@@ -21,5 +21,6 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRSCFDialect
   MLIRSCFTransforms
   MLIRTransforms
+  MLIRUBDialect
   MLIRVectorDialect
 )

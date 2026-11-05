@@ -22,17 +22,22 @@ from .scan import _hillis_steele
 __all__ = [
     "WarpReduce",
     "warp_reduce",
+    "warp_sum",
+    "warp_max",
+    "warp_min",
     "warp_head_segmented_reduce",
     "warp_tail_segmented_reduce",
+    "warp_head_segmented_sum",
+    "warp_tail_segmented_sum",
 ]
 
 
 @jit
-def _reduce_valid(value, op, width, valid_items):
+def _reduce_valid(value, op, width, valid_items, dtype=None):
     lane = lane_id() % width
-    partial = _as_items(value)[0]
+    partial = _as_items(value, dtype)[0]
     if lane < valid_items:
-        partial = _thread_partial(value, op)
+        partial = _thread_partial(value, op, dtype)
     for stage in range_constexpr(width.bit_length() - 1):
         offset = 1 << stage
         # All lanes shuffle together; only valid prefixes evaluate the operator.
@@ -46,9 +51,9 @@ def _reduce_valid(value, op, width, valid_items):
 
 
 @jit
-def _segmented_reduce(value, tail_flag, op, width):
+def _segmented_reduce(value, tail_flag, op, width, dtype=None):
     """Suffix doubling: the aggregate is valid at each segment's head lane."""
-    value = _thread_partial(value, op)
+    value = _thread_partial(value, op, dtype)
     lane = lane_id() % width
     ended = Int32(tail_flag != 0) | Int32(lane == width - 1)
     for stage in range_constexpr(width.bit_length() - 1):
@@ -69,6 +74,7 @@ def warp_reduce(
     *,
     width: int | None = None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Reduce lane-local values and return the aggregate to every lane.
 
@@ -125,11 +131,11 @@ def warp_reduce(
     width = _resolve_warp_width(width, "warp_reduce width")
     _validate_valid_items(valid_items, width)
     if valid_items is not None:
-        if _is_items(value):
+        if _is_items(value, _dtype):
             raise TypeError("valid_items is supported only for a single item per lane")
-        return _reduce_valid(value, op, width, valid_items)
+        return _reduce_valid(value, op, width, valid_items, _dtype)
 
-    value = _thread_partial(value, op)
+    value = _thread_partial(value, op, _dtype)
     if isinstance(op, ReductionOp):
         # Full tiles with built-in commutative operators keep the original
         # butterfly. Ordered scans/broadcasts are only needed by the extensions.
@@ -144,12 +150,46 @@ def warp_reduce(
     return _shuffle_value(raw, base + width - 1, width)
 
 
+def warp_sum(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_reduce(value, ReductionOp.ADD, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_max(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.MAX, ...)``."""
+    return warp_reduce(value, ReductionOp.MAX, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_min(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.MIN, ...)``."""
+    return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
 def warp_head_segmented_reduce(
     value,
     head_flag: int | Integer,
     op,
     *,
     width: int | None = None,
+    _dtype=None,
 ):
     """Reduce head-delimited segments within a logical warp.
 
@@ -185,7 +225,7 @@ def warp_head_segmented_reduce(
     """
     width = _resolve_warp_width(width, "warp_head_segmented_reduce width")
     tail = shuffle_down(Int32(head_flag != 0), 1, width)
-    return _segmented_reduce(value, tail, op, width)
+    return _segmented_reduce(value, tail, op, width, _dtype)
 
 
 def warp_tail_segmented_reduce(
@@ -194,6 +234,7 @@ def warp_tail_segmented_reduce(
     op,
     *,
     width: int | None = None,
+    _dtype=None,
 ):
     """Reduce tail-delimited segments within a logical warp.
 
@@ -245,17 +286,52 @@ def warp_tail_segmented_reduce(
         # L0, L1, L4 and L7 are one-lane segments and return 4, 1, 6 and 5 respectively.
     """
     width = _resolve_warp_width(width, "warp_tail_segmented_reduce width")
-    return _segmented_reduce(value, tail_flag, op, width)
+    return _segmented_reduce(value, tail_flag, op, width, _dtype)
+
+
+def warp_head_segmented_sum(
+    value,
+    head_flag: int | Integer,
+    *,
+    width: int | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_head_segmented_reduce(value, head_flag, fx.ReductionOp.ADD, ...)``."""
+    return warp_head_segmented_reduce(value, head_flag, ReductionOp.ADD, width=width, _dtype=_dtype)
+
+
+def warp_tail_segmented_sum(
+    value,
+    tail_flag: int | Integer,
+    *,
+    width: int | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_tail_segmented_reduce(value, tail_flag, fx.ReductionOp.ADD, ...)``."""
+    return warp_tail_segmented_reduce(value, tail_flag, ReductionOp.ADD, width=width, _dtype=_dtype)
 
 
 class WarpReduce(WarpPrimitive):
     """Reduce logical-warp inputs into their designated head lanes.
 
-    Specialize with ``[dtype, width=None]``. ``None`` selects the target's
-    physical warp width. Every lane in each logical warp must participate.
+    Specialize with ``WarpReduce[dtype, width]``. The parameters below are compile-time
+    positional arguments to ``WarpReduce[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Optional; defaults to None. A positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+
+    Every lane in each logical warp must participate.
     SharedStorage is Empty: explicit storage has a zero-byte layout.
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
+    The declared dtype is one complete element: a bare Vector is one element
+    for a Vector dtype, and a scalar item range for a Numeric dtype. Outer
+    lists/tuples contain complete elements. The result is always one dtype.
 
     Examples:
         P = fx.coop.WarpReduce[fx.Int32, 8]
@@ -297,7 +373,43 @@ class WarpReduce(WarpPrimitive):
             valid_items. Empty groups have unspecified results.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_reduce, value, op, valid_items=valid_items, storage=storage)
+        return cls._invoke(warp_reduce, value, op, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def sum(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_sum, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def max(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.MAX, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_max, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def min(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.MIN, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_min, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def head_segmented_reduce(
@@ -330,7 +442,7 @@ class WarpReduce(WarpPrimitive):
             unspecified. A one-lane segment returns its locally folded items at that lane.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_head_segmented_reduce, value, head_flag, op, storage=storage)
+        return cls._invoke(warp_head_segmented_reduce, value, head_flag, op, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def tail_segmented_reduce(
@@ -363,4 +475,28 @@ class WarpReduce(WarpPrimitive):
             unspecified. A one-lane segment returns its locally folded items at that lane.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_tail_segmented_reduce, value, tail_flag, op, storage=storage)
+        return cls._invoke(warp_tail_segmented_reduce, value, tail_flag, op, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def head_segmented_sum(
+        cls,
+        value,
+        head_flag: int | Integer,
+        *,
+        storage=None,
+    ):
+        """Shorthand for ``head_segmented_reduce(value, head_flag, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_head_segmented_sum, value, head_flag, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def tail_segmented_sum(
+        cls,
+        value,
+        tail_flag: int | Integer,
+        *,
+        storage=None,
+    ):
+        """Shorthand for ``tail_segmented_reduce(value, tail_flag, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_tail_segmented_sum, value, tail_flag, storage=storage, _dtype=cls.dtype)

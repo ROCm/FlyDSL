@@ -18,6 +18,7 @@
 #include "flydsl/Backend/Backend.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
+#include "flydsl/Dialect/FlyKtrace/IR/Dialect.h"
 
 // Forward-declare per-backend CAPI registration functions.
 // FLYDSL_BACKEND_COUNT and FLYDSL_BACKEND_0..N-1 are set by CMake.
@@ -39,6 +40,7 @@ int main(int argc, char **argv) {
   mlir::registerAllExtensions(registry);
   mlir::registerAllGPUToLLVMIRTranslations(registry);
   registry.insert<mlir::fly::FlyDialect>();
+  registry.insert<mlir::fly_ktrace::FlyKtraceDialect>();
   FLYDSL_FOR_EACH_BACKEND(REGISTER_BACKEND_DIALECTS)
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(argc, argv, "Fly Optimizer Driver\n", registry));

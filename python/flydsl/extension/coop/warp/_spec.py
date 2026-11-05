@@ -14,7 +14,7 @@ _CACHE = {}
 class WarpPrimitiveMeta(type):
     """Specialize operators with the same dimension order as block operators.
 
-    Scalar operators take ``[dtype, width=None]``. Tile operators take
+    Reduce/scan operators take ``[dtype, width=None]``. Tile operators take
     ``[dtype, width, items_per_thread]``, with an optional final algorithm only
     for operators that offer algorithm selection. ``None`` selects the target
     warp width. Batched reductions use the tile extent as their batch count.
@@ -80,12 +80,16 @@ class WarpPrimitive(metaclass=WarpPrimitiveMeta):
     A specialization fixes the element type, logical width and any tile extent
     or algorithm. All lanes in that logical warp participate in each call.
 
+    A value matching dtype is one complete element, including Vector or Struct.
+    An outer list/tuple supplies multiple elements. For a Numeric dtype, a Vector
+    is shorthand for a scalar item sequence. Item counts exclude fields/components.
+
     Attributes:
         dtype: Input element type, or the key type for pair sorting.
         key_dtype: Identical to dtype.
         value_dtype: Payload type for a pair sort; otherwise None.
         warp_threads: Power-of-two logical width within a physical warp.
-        items_per_thread: Static tile extent, or None for scalar operators.
+        items_per_thread: Static tile extent, or None for inferred item counts.
         algorithm: Selected policy, or None when there is no algorithm choice.
         SharedStorage: Scratch type for one logical warp. Register-only
             implementations expose Empty, which can be allocated directly.
@@ -124,10 +128,12 @@ class WarpPrimitive(metaclass=WarpPrimitiveMeta):
         cls._check()
         if cls.items_per_thread == 0 and isinstance(value, (tuple, list)) and not value:
             return value
-        items = _as_items(value)
+        dtype = cls.dtype if dtype is None else dtype
+        value = _convert_value(value, dtype)
+        items = _as_items(value, dtype)
         if cls.items_per_thread is not None and len(items) != cls.items_per_thread:
             raise ValueError(f"expected {cls.items_per_thread} items per thread, got {len(items)}")
-        return _convert_value(value, cls.dtype if dtype is None else dtype)
+        return value
 
     @classmethod
     def _invoke(cls, implementation, *args, storage=None, **kwargs):

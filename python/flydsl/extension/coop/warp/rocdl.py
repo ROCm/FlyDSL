@@ -27,8 +27,13 @@ from .reduce import warp_reduce as _portable_warp_reduce
 
 __all__ = [
     "warp_reduce",
+    "warp_sum",
+    "warp_max",
+    "warp_min",
     "warp_inclusive_scan",
     "warp_exclusive_scan",
+    "warp_inclusive_sum",
+    "warp_exclusive_sum",
     "warp_scan",
     "warp_scan_with_aggregate",
 ]
@@ -184,6 +189,7 @@ def warp_reduce(
     *,
     width: int | None = None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Reduce lane-local values and return the aggregate to every lane.
 
@@ -239,15 +245,30 @@ def warp_reduce(
     """
     width = _resolve_warp_width(width, "warp_reduce width")
     if valid_items is not None:
-        return _portable_warp_reduce(value, op, width=width, valid_items=valid_items)
+        return _portable_warp_reduce(value, op, width=width, valid_items=valid_items, _dtype=_dtype)
     # Dispatch before folding: a partial may itself be an item range, which
     # the portable entry point would otherwise interpret and reduce again.
-    if not isinstance(op, ReductionOp) or not _dpp_applies(_as_items(value)[0]):
-        return _portable_warp_reduce(value, op, width=width)
-    value = _thread_partial(value, op)
+    if not isinstance(op, ReductionOp) or not _dpp_applies(_as_items(value, _dtype)[0]):
+        return _portable_warp_reduce(value, op, width=width, _dtype=_dtype)
+    value = _thread_partial(value, op, _dtype)
     if width == 64:
         return _wave64_reduce(value, op)
     return _butterfly_reduce(value, op, width)
+
+
+def warp_sum(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.ADD``."""
+    return warp_reduce(value, ReductionOp.ADD, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_max(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.MAX``."""
+    return warp_reduce(value, ReductionOp.MAX, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_min(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.MIN``."""
+    return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
 
 
 # -- scan -------------------------------------------------------------------
@@ -320,6 +341,7 @@ def warp_inclusive_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute the inclusive prefix in ascending lane order.
 
@@ -346,7 +368,7 @@ def warp_inclusive_scan(
         This lane's inclusive prefix, with the input value type and shape.
     """
     width = _resolve_warp_width(width, "warp_inclusive_scan width")
-    _universal_scan._validate_scan(value, init, valid_items, width)
+    _universal_scan._validate_scan(value, init, valid_items, width, _dtype)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_inclusive_scan(
             value,
@@ -354,6 +376,7 @@ def warp_inclusive_scan(
             width=width,
             init=init,
             valid_items=valid_items,
+            _dtype=_dtype,
         )
     return _seed(_inclusive_scan(value, op, width), op, init)
 
@@ -365,6 +388,7 @@ def warp_exclusive_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute the exclusive prefix in ascending lane order.
 
@@ -391,7 +415,7 @@ def warp_exclusive_scan(
         This lane's exclusive prefix, with the input value type and shape.
     """
     width = _resolve_warp_width(width, "warp_exclusive_scan width")
-    _universal_scan._validate_scan(value, init, valid_items, width)
+    _universal_scan._validate_scan(value, init, valid_items, width, _dtype)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_exclusive_scan(
             value,
@@ -399,8 +423,23 @@ def warp_exclusive_scan(
             width=width,
             init=init,
             valid_items=valid_items,
+            _dtype=_dtype,
         )
     return _seed(_shift_up(_inclusive_scan(value, op, width), op, width), op, init)
+
+
+def warp_inclusive_sum(
+    value, *, width: int | None = None, init=None, valid_items: int | Integer | None = None, _dtype=None
+):
+    """``warp_inclusive_scan`` with ``ReductionOp.ADD``."""
+    return warp_inclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_exclusive_sum(
+    value, *, width: int | None = None, init=None, valid_items: int | Integer | None = None, _dtype=None
+):
+    """``warp_exclusive_scan`` with ``ReductionOp.ADD``."""
+    return warp_exclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
 
 
 def warp_scan(
@@ -410,6 +449,7 @@ def warp_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute inclusive and exclusive prefixes with one scan.
 
@@ -436,7 +476,7 @@ def warp_scan(
         A tuple (inclusive, exclusive) of this lane's prefixes.
     """
     width = _resolve_warp_width(width, "warp_scan width")
-    _universal_scan._validate_scan(value, init, valid_items, width)
+    _universal_scan._validate_scan(value, init, valid_items, width, _dtype)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_scan(
             value,
@@ -444,6 +484,7 @@ def warp_scan(
             width=width,
             init=init,
             valid_items=valid_items,
+            _dtype=_dtype,
         )
     raw = _inclusive_scan(value, op, width)
     return _seed(raw, op, init), _seed(_shift_up(raw, op, width), op, init)
@@ -456,6 +497,7 @@ def warp_scan_with_aggregate(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute both prefixes and the unseeded group aggregate.
 
@@ -483,7 +525,7 @@ def warp_scan_with_aggregate(
         participating lane and has the input element type, even for an item range.
     """
     width = _resolve_warp_width(width, "warp_scan_with_aggregate width")
-    _universal_scan._validate_scan(value, init, valid_items, width)
+    _universal_scan._validate_scan(value, init, valid_items, width, _dtype)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_scan_with_aggregate(
             value,
@@ -491,6 +533,7 @@ def warp_scan_with_aggregate(
             width=width,
             init=init,
             valid_items=valid_items,
+            _dtype=_dtype,
         )
     raw = _inclusive_scan(value, op, width)
     inclusive = _seed(raw, op, init)

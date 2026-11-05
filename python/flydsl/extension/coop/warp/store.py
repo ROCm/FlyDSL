@@ -45,9 +45,26 @@ class WarpStoreAlgorithm(enum.Enum):
 class WarpStore(WarpPrimitive):
     """Store a logical-warp tile with a fixed memory-access policy.
 
-    Specialize with ``[dtype, width, items_per_thread, algorithm]``. The final
-    policy is optional and defaults to ``WarpStoreAlgorithm.DIRECT``.
-    ``None`` selects the target's physical warp width. All participating lanes
+    Specialize with ``WarpStore[dtype, width, items_per_thread, algorithm]``. The parameters
+    below are compile-time positional arguments to ``WarpStore[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required positive Python int giving the number of complete items
+            owned by each lane; the logical-warp tile has width * items_per_thread items.
+            Element components/fields do not increase this count.
+        algorithm: Optional member of WarpStoreAlgorithm selecting the implementation
+            policy. Defaults to ``WarpStoreAlgorithm.DIRECT`` when omitted; member calls use
+            this fixed policy.
+
+    All participating lanes
     use the same specialization and per-call options. Algorithm selection is
     part of the operator type; member functions do not accept an algorithm.
     STRIPED retains striped ownership; other policies use blocked ownership.
@@ -125,16 +142,16 @@ class WarpStore(WarpPrimitive):
         algorithm = cls.algorithm
         width = cls.warp_threads
         _validate_valid_items(valid_items, width * cls.items_per_thread)
-        count = len(_as_items(value))
+        count = len(_as_items(value, cls.dtype))
         lane = lane_id() % width
         if algorithm is WarpStoreAlgorithm.VECTORIZE:
-            _store_vectorized(destination, value, lane * count, offset, valid_items)
+            _store_vectorized(destination, value, lane * count, offset, valid_items, cls.dtype)
             return
         if algorithm is WarpStoreAlgorithm.TRANSPOSE:
             indices = Vector.from_elements([lane + i * width for i in range(count)])
-            value = _warp_gather(value, indices, width=width)
+            value = _warp_gather(value, indices, width=width, _dtype=cls.dtype)
         striped = algorithm in (WarpStoreAlgorithm.STRIPED, WarpStoreAlgorithm.TRANSPOSE)
-        items = _as_items(value)
+        items = _as_items(value, cls.dtype)
         for i, item in enumerate(items):
             index = i * width + lane if striped else lane * count + i
             _store_item(destination, item, index, offset, valid_items)

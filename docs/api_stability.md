@@ -107,6 +107,12 @@ is stable, while `fx.rocdl.cluster.*` is unstable when `cluster` is not listed
 in `rocdl.__all__`. An upstream-MLIR ODS builder that is re-exported but omitted
 from the final `__all__` is unstable as well.
 
+The members of `fx.ktrace` -- in-kernel wave tracing -- are unstable: it defines
+no `__all__`, so no member qualifies under the rule above. Its record format, trace
+schema and entry points may change in any minor release. Adding an `__all__` to it
+would silently make them stable; that is a reviewable compatibility commitment, not
+a cleanup.
+
 `__all__` is not access control: an attribute may exist and be callable while
 still failing the stability test above.
 

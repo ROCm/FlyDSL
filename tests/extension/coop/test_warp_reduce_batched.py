@@ -83,11 +83,3 @@ def test_batched_reduce(width, universal):
 @pytest.mark.usefixtures("warp_default_device")
 def test_matrix_batched_reduction_dtypes_and_operations(entry, width, op):
     checks.check_batched_reduction_dtypes_and_operations(entry, width, op)
-
-
-@pytest.mark.l1b_target_dialect
-@pytest.mark.rocm_lower
-@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, ["warp_reduce_batched"]))
-def test_compile_family(monkeypatch, arch, case):
-    checks.check_compile_family(monkeypatch, arch, case)

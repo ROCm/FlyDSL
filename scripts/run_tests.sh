@@ -45,7 +45,7 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
 fi
 # pytest.ini already enables verbose mode; -q brings the broad suite back to
 # compact per-file progress instead of emitting thousands of node IDs to CI.
-pytest_args=(-q --no-header --tb=short -m "${pytest_markers}")
+pytest_args=(-q --no-header --tb=short --durations=20 -m "${pytest_markers}")
 
 # ---------------------------------------------------------------------------
 # 1. Single-GPU correctness tests (kernels + language + unit + system + extension + examples)

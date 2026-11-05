@@ -16,8 +16,9 @@
 #define FLYDSL_CORE_ENABLE_ASSERTIONS 1
 #endif
 
-// Range inference is temporarily disabled for the Fly integration. Keep one
-// default shared by every evaluation category and by installed headers.
+// Range inference is temporarily disabled for the Fly integration. The Core
+// library and every user of these headers must agree on it, so only override
+// it for the whole build.
 #ifndef FLYDSL_CORE_ENABLE_RANGE_INFERENCE
 #define FLYDSL_CORE_ENABLE_RANGE_INFERENCE 0
 #endif
@@ -156,9 +157,9 @@ enum class ErrorCode : uint8_t {
   IncompatibleShapeDivision,
   InvalidDynamicRange,
   RangeOutsideBitWidth,
-  FastDivModRequiresI32,
+  FastDivModRequiresI32OrI64,
   RangeRequiresDynamicInt,
-  FastDivModRequiresDynamicInt,
+  FastDivModRequiresPositiveInt,
   InvalidBasisScale,
   TooManyBasisModes,
   BasisModeOutOfRange,
@@ -205,12 +206,12 @@ inline llvm::StringRef get_error_message(ErrorCode c) {
     return "!invalid-dynamic-range";
   case ErrorCode::RangeOutsideBitWidth:
     return "!range-outside-bit-width";
-  case ErrorCode::FastDivModRequiresI32:
-    return "!fast-divmod-requires-i32";
+  case ErrorCode::FastDivModRequiresI32OrI64:
+    return "!fast-divmod-requires-i32-or-i64";
   case ErrorCode::RangeRequiresDynamicInt:
     return "!range-requires-dynamic-int";
-  case ErrorCode::FastDivModRequiresDynamicInt:
-    return "!fast-divmod-requires-dynamic-int";
+  case ErrorCode::FastDivModRequiresPositiveInt:
+    return "!fast-divmod-requires-positive-int";
   case ErrorCode::InvalidBasisScale:
     return "!invalid-basis-scale";
   case ErrorCode::TooManyBasisModes:
@@ -268,7 +269,7 @@ enum class AlgebraOp : uint8_t {
   Sub,
   Mul,
   Mod,
-  Floor,
+  Div,
   Ceil,
   Min,
   Max,
@@ -281,11 +282,18 @@ enum class AlgebraOp : uint8_t {
   BitXor,
   Shl,
   Shr,
+  LShr,
   Lt,
   Eq,
   Ne,
-  // IntTuple algorithms.
-  Transform = 0x20,
+  // IntTuple algorithms. The arithmetic operators are the mode-wise
+  // counterparts of the leaf arithmetic above.
+  TupleAdd = 0x20,
+  TupleSub,
+  TupleMul,
+  TupleFloor,
+  TupleMod,
+  Transform,
   FilterTuple,
   Front,
   Back,
@@ -359,8 +367,8 @@ inline llvm::StringRef get_algebra_op_name(AlgebraOp op) {
     return "mul";
   case AlgebraOp::Mod:
     return "mod";
-  case AlgebraOp::Floor:
-    return "floor_div";
+  case AlgebraOp::Div:
+    return "div";
   case AlgebraOp::Ceil:
     return "ceil_div";
   case AlgebraOp::Min:
@@ -385,12 +393,24 @@ inline llvm::StringRef get_algebra_op_name(AlgebraOp op) {
     return "shl";
   case AlgebraOp::Shr:
     return "shr";
+  case AlgebraOp::LShr:
+    return "lshr";
   case AlgebraOp::Lt:
     return "lt";
   case AlgebraOp::Eq:
     return "eq";
   case AlgebraOp::Ne:
     return "ne";
+  case AlgebraOp::TupleAdd:
+    return "tuple_add";
+  case AlgebraOp::TupleSub:
+    return "tuple_sub";
+  case AlgebraOp::TupleMul:
+    return "tuple_mul";
+  case AlgebraOp::TupleFloor:
+    return "tuple_floor_div";
+  case AlgebraOp::TupleMod:
+    return "tuple_mod";
   case AlgebraOp::Transform:
     return "transform";
   case AlgebraOp::FilterTuple:

@@ -81,10 +81,8 @@ public:
   bool isZero() const { return isSInt(0); }
   bool isOne() const { return isSInt(1); }
 
-  bool hasFastDivMod() const {
-    FLYDSL_CORE_ASSERT(isDInt());
-    return (flags_ & DynIntFlag::FastDivMod) != 0;
-  }
+  bool hasFastDivMod() const { return (flags_ & DynIntFlag::FastDivMod) != 0; }
+
   bool hasRange() const {
     FLYDSL_CORE_ASSERT(isDInt());
 #if FLYDSL_CORE_ENABLE_RANGE_INFERENCE

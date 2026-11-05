@@ -61,11 +61,22 @@ public:
 
   bool isStatic() const;
 
+  /// Always slices, just like Layout::operator(): Core stores wildcard markers
+  /// as values, so their presence cannot select the C++ return type.
+  /// Use layout.crd2idx(coord) explicitly for coordinate-to-index mapping.
   template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
   auto operator()(const Coord &coord) const;
   template <class Coord0, class Coord1, class... Coords,
             std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
   auto operator()(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
+
+  /// Map a coordinate through outer, offset, then inner, equivalent to
+  /// core::crd2idx(coord, *this).
+  template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
+  auto crd2idx(const Coord &coord) const;
+  template <class Coord0, class Coord1, class... Coords,
+            std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
+  auto crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
 
   template <class Other> auto compose(const Other &other) const;
   template <class Other0, class Other1, class... Others>
@@ -148,14 +159,14 @@ ComposedLayout<Cat> prepend(const ComposedLayout<Cat> &value, const Layout<Cat> 
 template <class Cat>
 ComposedLayout<Cat> replace(const ComposedLayout<Cat> &value, int32_t i, const Layout<Cat> &sub);
 
-template <class Coord, class Cat>
+template <class Coord, class Cat = category_of<Coord>>
 std::pair<ComposedLayout<Cat>, IntTuple<Cat>> slice_and_offset(const Coord &coord,
                                                                const ComposedLayout<Cat> &value);
 
-template <class Coord, class Cat>
+template <class Coord, class Cat = category_of<Coord>>
 ComposedLayout<Cat> dice(const Coord &coord, const ComposedLayout<Cat> &value);
 
-template <class Coord, class Cat>
+template <class Coord, class Cat = category_of<Coord>>
 std::pair<ComposedLayout<Cat>, IntTuple<Cat>> domain_offset(const Coord &coord,
                                                             const ComposedLayout<Cat> &value);
 
@@ -165,7 +176,8 @@ ComposedLayout<Cat> composition(const ComposedLayout<Cat> &lhs, const Tiler &rhs
 template <class Cat>
 ComposedLayout<Cat> composition(const Layout<Cat> &lhs, const ComposedLayout<Cat> &rhs);
 
-template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
+template <class Cotarget, class Cat = category_of<Cotarget>,
+          std::enable_if_t<is_int_tuple_v<Cotarget>, int> = 0>
 Layout<Cat> complement(const ComposedLayout<Cat> &value, const Cotarget &cotarget);
 
 template <class Cat> ComposedLayout<Cat> zip(const ComposedLayout<Cat> &value);
@@ -174,7 +186,7 @@ template <class Cat, class Shape>
 ComposedLayout<Cat> tile_to_shape(const ComposedLayout<Cat> &value, const Shape &targetShape,
                                   LayoutLeft order = {});
 
-template <class Cat, class Shape, class Order, std::enable_if_t<is_int_tuple_v<Order>, int>>
+template <class Cat, class Shape, class Order, std::enable_if_t<is_int_tuple_v<Order>, int> = 0>
 ComposedLayout<Cat> tile_to_shape(const ComposedLayout<Cat> &value, const Shape &targetShape,
                                   const Order &order);
 
@@ -434,6 +446,20 @@ IntTuple<Cat> crd2idx(const Coord &coord, const ComposedLayout<Cat> &layout) {
 }
 
 template <class Cat>
+template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int>>
+auto ComposedLayout<Cat>::crd2idx(const Coord &coord) const {
+  return core::crd2idx(coord, *this);
+}
+
+template <class Cat>
+template <class Coord0, class Coord1, class... Coords,
+          std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int>>
+auto ComposedLayout<Cat>::crd2idx(const Coord0 &c0, const Coord1 &c1,
+                                  const Coords &...coords) const {
+  return crd2idx(make_tuple(c0, c1, coords...));
+}
+
+template <class Cat>
 ComposedLayout<Cat> layout(const ComposedLayout<Cat> &value, llvm::ArrayRef<int32_t> path) {
   if (path.empty())
     return value;
@@ -618,7 +644,7 @@ ComposedLayout<Cat> replace(const ComposedLayout<Cat> &value, int32_t i, const L
   return make_composed_layout(value.inner(), value.offset(), std::move(newOuter));
 }
 
-template <class Coord, class Cat = category_of<Coord>>
+template <class Coord, class Cat>
 std::pair<ComposedLayout<Cat>, IntTuple<Cat>> slice_and_offset(const Coord &coord,
                                                                const ComposedLayout<Cat> &value) {
   return std::visit(
@@ -640,14 +666,14 @@ ComposedLayout<Cat> slice(const Coord &coord, const ComposedLayout<Cat> &value) 
   return slice_and_offset(coord, value).first;
 }
 
-template <class Coord, class Cat = category_of<Coord>>
+template <class Coord, class Cat>
 ComposedLayout<Cat> dice(const Coord &coord, const ComposedLayout<Cat> &value) {
   auto newOuter = std::visit(
       [&](const auto &outer) -> AnyLayout<Cat> { return dice(coord, outer); }, value.outer());
   return make_composed_layout(value.inner(), value.offset(), std::move(newOuter));
 }
 
-template <class Coord, class Cat = category_of<Coord>>
+template <class Coord, class Cat>
 std::pair<ComposedLayout<Cat>, IntTuple<Cat>> domain_offset(const Coord &coord,
                                                             const ComposedLayout<Cat> &value) {
   auto outerOffset =
@@ -687,8 +713,7 @@ ComposedLayout<Cat> composition(const Layout<Cat> &lhs, const ComposedLayout<Cat
       rhs.inner());
 }
 
-template <class Cotarget, class Cat = category_of<Cotarget>,
-          std::enable_if_t<is_int_tuple_v<Cotarget>, int> = 0>
+template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
 Layout<Cat> complement(const ComposedLayout<Cat> &value, const Cotarget &cotarget) {
   return std::visit([&](const auto &outer) { return complement(outer, cotarget); }, value.outer());
 }
@@ -734,7 +759,7 @@ ComposedLayout<Cat> tile_to_shape(const ComposedLayout<Cat> &value, const Shape 
   return make_composed_layout(value.inner(), value.offset(), std::move(newOuter));
 }
 
-template <class Cat, class Shape, class Order, std::enable_if_t<is_int_tuple_v<Order>, int> = 0>
+template <class Cat, class Shape, class Order, std::enable_if_t<is_int_tuple_v<Order>, int>>
 ComposedLayout<Cat> tile_to_shape(const ComposedLayout<Cat> &value, const Shape &targetShape,
                                   const Order &order) {
   auto newOuter = std::visit(
