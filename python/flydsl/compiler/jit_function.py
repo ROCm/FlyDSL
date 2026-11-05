@@ -208,12 +208,30 @@ def _is_native_library(name: str) -> bool:
     return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
 
 
+@lru_cache(maxsize=64)
+def _file_sha256_at(path: str, mtime_ns: int, size: int) -> str:
+    # mtime_ns and size only key the memo: a rewritten file is hashed again.
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_sha256(path) -> str:
+    st = os.stat(path)
+    return _file_sha256_at(os.fspath(path), st.st_mtime_ns, st.st_size)
+
+
 def _native_library_digests(libs_dir: Path) -> List[str]:
     """``name:sha256`` of every native library in ``libs_dir``, sorted by name.
 
     Uses the table the build bakes into ``_native_digest.py``; only if it is
     missing or lists other files (an unsupported manual edit) are the libraries
-    hashed here, which costs several hundred milliseconds.
+    hashed here, which costs several hundred milliseconds. The table is matched
+    by file name only: ``auditwheel repair`` rewrites the libraries of a release
+    wheel after the build, so contents and sizes cannot be checked. A partial
+    build (``--target`` without ``FlyNativeDigest``) leaves it stale.
     """
     names = sorted(
         entry.name
@@ -231,14 +249,7 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
         f"No build-time digest matches the native libraries in {libs_dir}; hashing them at runtime. "
         "Rebuild FlyDSL (scripts/build.sh) to restore the fast path."
     )
-    digests = []
-    for name in names:
-        h = hashlib.sha256()
-        with open(libs_dir / name, "rb") as f:
-            while chunk := f.read(1024 * 1024):
-                h.update(chunk)
-        digests.append(f"{name}:{h.hexdigest()}")
-    return digests
+    return [f"{name}:{_file_sha256(libs_dir / name)}" for name in names]
 
 
 @lru_cache(maxsize=4)
@@ -495,7 +506,7 @@ def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
-def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, post_load_processors=()) -> str:
+def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, link_libs=None, post_load_processors=()) -> str:
     """Identify the lowering input and loaded-module initialization within this process.
 
     ``asm`` is the prepared module text, omitting source locations when DWARF
@@ -513,6 +524,9 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, post_load_pro
         "llvm_options": cfg.llvm_opts,
         "env": _cache_invalidating_env_values(target),
     }
+    if link_libs:
+        # The pipeline names the bitcode files; their contents are linked into the binary.
+        config["link_libs"] = [_file_sha256(lib) for lib in link_libs]
     if post_load_processors:
         # An artifact owns the initialized module, not just the binary. Callbacks
         # are absent from IR, so different ordered callback lists need separate
@@ -1171,11 +1185,17 @@ class JitFunction:
                 compile_hints=effective_hints,
                 link_libs=traced.link_libs,
             )
-            cache_key = _artifact_cache_key(asm, config, backend, post_load_processors=traced.post_load_processors)
-            # Extern artifacts are process-local. The key also distinguishes
-            # Python callbacks so each initialization owns its loaded module.
+            cache_key = _artifact_cache_key(
+                asm,
+                config,
+                backend,
+                link_libs=traced.link_libs,
+                post_load_processors=traced.post_load_processors,
+            )
+            # Artifacts with post-load callbacks are process-local. The key also distinguishes
+            # the callbacks so each initialization owns its loaded module.
             dumping = env.debug.dump_ir or env.debug.dump_asm
-            manager = None if traced.extern_linked or dumping else self.cache_manager
+            manager = None if traced.post_load_processors or dumping else self.cache_manager
             compiled_func = self._mem_cache.get(cache_key)
             disk_key = None if manager is None else _disk_cache_key(cache_key)
             if compiled_func is None and manager is not None:
@@ -1186,8 +1206,8 @@ class JitFunction:
             if compiled_func is None:
                 if env.runtime.run_only:
                     reason = (
-                        "it links external libraries or post-load initializers, which are never cached on disk"
-                        if traced.extern_linked
+                        "it has post-load initializers, which are never cached on disk"
+                        if traced.post_load_processors
                         else f"no artifact {disk_key} in {manager.cache_dir}"
                     )
                     raise RuntimeError(

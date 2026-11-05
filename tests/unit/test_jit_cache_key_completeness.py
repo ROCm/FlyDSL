@@ -395,6 +395,21 @@ def test_extern_linked_artifacts_stay_off_disk(frontend, monkeypatch):
         _compile(launch)
 
 
+def test_linked_bitcode_contents_split_disk_artifacts(frontend, tmp_path):
+    bitcode = tmp_path / "lib.bc"
+    bitcode.write_bytes(b"first")
+
+    @flyc.jit
+    def launch():
+        CompilationContext.get_current().add_link_lib(str(bitcode))
+
+    first = _compile(launch)[0]
+    assert len(list(launch.cache_manager.cache_dir.glob("*.pkl"))) == 1
+    bitcode.write_bytes(b"second, a different size")
+    assert _compile(launch)[0] != first
+    assert len(list(launch.cache_manager.cache_dir.glob("*.pkl"))) == 2
+
+
 @pytest.mark.parametrize("disk_cache", [False, True])
 @pytest.mark.parametrize("callback_kind", ["function", "bound_method", "callable_object"])
 def test_post_load_callback_identity_selects_separate_artifacts(
