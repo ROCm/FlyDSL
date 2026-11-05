@@ -50,6 +50,7 @@ b = torch.randn(SIZE, device="cuda", dtype=torch.float32)
 c = torch.zeros(SIZE, device="cuda", dtype=torch.float32)
 
 stream = torch.cuda.Stream()
+stream.wait_stream(torch.cuda.current_stream())
 tA = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
 vecAdd(tA, b, c, SIZE, SIZE, THREADS, VEC_WIDTH, stream=stream)
 torch.cuda.synchronize()

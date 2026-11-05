@@ -106,7 +106,9 @@ def _run_both(values, call, *, block):
 
     fast = torch.zeros_like(values)
     ref = torch.zeros_like(values)
-    launch(values, fast, ref, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, fast, ref, stream=stream)
     torch.cuda.synchronize()
     return fast.cpu(), ref.cpu()
 

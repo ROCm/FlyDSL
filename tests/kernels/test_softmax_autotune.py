@@ -259,6 +259,7 @@ def test_default_serves_without_searching_on_the_current_stream(monkeypatch):
 
     x, out = _inputs(64, 4096, torch.bfloat16)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         softmax_autotuned(x, out)
     stream.synchronize()
@@ -282,6 +283,7 @@ def test_compiled_cache_hit_bypasses_resolution_and_accepts_new_buffers_and_stre
     )
     x2, out2 = _inputs(64, 4096, torch.bfloat16, seed=2)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     softmax_autotuned(x2, out2, stream=stream)
     stream.synchronize()
 
