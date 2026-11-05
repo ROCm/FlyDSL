@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T01:39:20Z",
+ "updated": "2026-11-05T02:40:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41956274297,
+   "pr": 1368,
+   "commit": "2cd80c40c08c9672bb827b065beb374a7f727126",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41956274297",
+   "created_at": "2026-11-05T02:36:03Z",
+   "updated_at": "2026-11-05T02:38:39Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 41869616793,
    "pr": 1361,
@@ -66,7 +81,7 @@
   },
   {
    "run_id": 41843924231,
-   "pr": 1368,
+   "pr": null,
    "commit": "9a85c3b1019a115184832e378be07d23fd7a770b",
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
@@ -1887,52 +1902,6 @@
    "updated_at": "2026-10-30T08:56:22Z",
    "actor": "Qubitium",
    "jobs": []
-  },
-  {
-   "run_id": 41025736481,
-   "pr": 1355,
-   "commit": "133102b7b88431d868402d52235559e847e20a32",
-   "branch": "claude-plugin-marketplace",
-   "event": "pull_request",
-   "title": "[Misc] Publish FlyDSL skills as a Claude Code plugin",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481",
-   "created_at": "2026-10-30T08:20:07Z",
-   "updated_at": "2026-10-30T13:51:12Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T09:38:13Z",
-     "completed_at": "2026-10-30T10:05:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244345",
-     "machine": "smci350-odcdh2-a08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T08:52:42Z",
-     "completed_at": "2026-10-30T13:50:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244358"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-30T08:52:42Z",
-     "completed_at": "2026-10-30T13:50:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41025736481/job/123975244379"
-    }
-   ]
   }
  ]
 }
