@@ -713,6 +713,21 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
 
 
 @dsl_loc_tracing
+def cvt_pk_bf8_f32(res, src_a, src_b, old, word_sel, **kw):
+    """ROCDL ``cvt_pk_bf8_f32``: pack two f32 values into bf8 in the low/high word of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_pk_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
 def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
 
@@ -723,6 +738,81 @@ def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_f32_fp8 as _op
 
     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+# NOTE: ``cvt_pk_f32_bf8`` DSL wrapper is intentionally disabled until upstream
+# LLVM PR https://github.com/llvm/llvm-project/pull/231721 lands and FlyDSL's
+# pinned LLVM commit includes it. In unmodified LLVM (AMDGPU/VOP1Instructions.td),
+# ``HasCvtFP8ByteSel`` defines ISel patterns only for ``V_CVT_PK_F32_{FP8,BF8}_fake16``
+# and omits ``UseRealTrue16Insts`` (``_t16``) patterns, failing MC assembly under
+# ``+real-true16`` (gfx117x/gfx120x/gfx125x) or treating the 16-bit source as Fake16
+# instead of True16 ``lo16``/``hi16`` subregisters. Use ``cvt_f32_bf8(..., byte_sel)``
+# (0..3) until the LLVM True16 fix is merged.
+#
+# @dsl_loc_tracing
+# def cvt_pk_f32_bf8(res, src, word_sel, **kw):
+#     """ROCDL ``cvt_pk_f32_bf8``: unpack one i32 (4 packed bf8) into ``vector<2xf32>``.
+#
+#     ``word_sel=False`` decodes the low half (bf8 elems 0,1); ``word_sel=True`` the
+#     high half (bf8 elems 2,3).
+#     """
+#     from ..._mlir.dialects.rocdl import cvt_pk_f32_bf8 as _op
+#
+#     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_fp8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_fp8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from fp8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_fp8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_bf8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_bf8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from bf8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_bf8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_sr_fp8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_fp8_f32``: stochastic-round ``src_a`` with ``src_b`` into fp8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_fp8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_sr_bf8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_bf8_f32``: stochastic-round ``src_a`` with ``src_b`` into bf8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_pkrtz(res, src_a, src_b, **kw):
+    """ROCDL ``cvt_pkrtz``: pack two f32 values into ``vector<2xf16>`` with round-toward-zero."""
+    from ..._mlir.dialects.rocdl import cvt_pkrtz as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), **kw)
 
 
 @dsl_loc_tracing
