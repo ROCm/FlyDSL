@@ -20,6 +20,10 @@ include "flydsl/Dialect/Fly/IR/FlyAttrDefs.td"
 
 def Fly_IteratorLikeType : AnyTypeOf<[Fly_IntTuple, Fly_Pointer]>;
 def Fly_TensorLikeType : AnyTypeOf<[Fly_CoordTensor, Fly_MemRef]>;
+// A row list is either data in memory or a tuple of indices. The tuple form lets an
+// index that is known while tracing fold into the descriptor as an immediate, the
+// same way a tile coordinate does, instead of costing a load.
+def Fly_IndexListType : AnyTypeOf<[Fly_TensorLikeType, Fly_IntTuple]>;
 def Fly_NarrowLayoutType : AnyTypeOf<[Fly_Layout, Fly_ComposedLayout]>;
 def Fly_LayoutLikeType : AnyTypeOf<[Fly_NarrowLayoutType, Fly_TensorLikeType]>;
 def Fly_IntTupleLikeType : AnyTypeOf<[Fly_IntTuple, Fly_LayoutLikeType]>;
@@ -375,7 +379,7 @@ def Fly_CopyAtomCall : Fly_Op<"copy_atom_call", [AttrSizedOperandSegments]> {
   }];
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_TensorLikeType:$src,
                        Fly_TensorLikeType:$dst, Optional<Fly_MemRef>:$pred,
-                       Optional<Fly_TensorLikeType>:$index);
+                       Optional<Fly_IndexListType>:$index);
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`index` $index^)? (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call", [AttrSizedOperandSegments]> {
@@ -457,7 +461,7 @@ def Fly_MmaMakeFragmentOp : Fly_Op<"mma.make_fragment", [Pure, DeclareOpInterfac
 
 def Fly_CopyOp : Fly_Op<"copy", [AttrSizedOperandSegments]> {
   let arguments = (ins AnyType:$copyAtom, Fly_TensorLikeType:$src, Fly_TensorLikeType:$dst,
-                       Optional<Fly_MemRef>:$pred, Optional<Fly_TensorLikeType>:$index);
+                       Optional<Fly_MemRef>:$pred, Optional<Fly_IndexListType>:$index);
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`index` $index^)? (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {

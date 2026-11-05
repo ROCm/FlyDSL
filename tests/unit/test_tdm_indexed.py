@@ -192,6 +192,55 @@ def test_row_of_exactly_one_dword_builds():
     _build(rows=8, width=2)
 
 
+# -- the row list as a tuple -----------------------------------------------------
+
+
+def _build_tuple(rows, entries, width=WIDTH):
+    """Trace an indexed load whose row list is a tuple rather than data in memory."""
+
+    @flyc.kernel
+    def k(src: fx.Tensor):
+        lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, rows * width]).peek()
+        box = fx.make_layout((rows, width), (width, 1))
+        smem = fx.make_view(lds.ptr, fx.make_layout(((rows, width), 1), ((width, 1), rows * width)))
+        atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(fx.rocdl.TensorLoadGather(), src, box, (rows, width))
+        blk = fx.zipped_divide(coord, (rows, width))[None, (0, None)]
+        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
+        fx.copy(atom, [tAg[None, 0], fx.make_int_tuple(entries)], tAs[None, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
+
+    @flyc.jit
+    def j(src: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        k(src).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+    j(torch.zeros(64, N, dtype=torch.float16, device="cuda"))
+
+
+@_needs_target
+def test_a_static_tuple_needs_no_row_list_in_memory():
+    """Every entry is known while tracing, so the descriptor is built from immediates
+    and the atom needs no index tensor at all."""
+    _build_tuple(8, (3, 1, 17, 5, 40, 2, 9, 33))
+
+
+@_needs_target
+def test_a_tuple_may_mix_known_and_runtime_entries():
+    """A tuple is per-entry: what is known folds, the rest rides in as an operand."""
+    _build_tuple(4, (3, 1, 17, fx.Int32(5)))
+
+
+@_needs_target
+def test_a_tuple_keeps_the_atom_default_width():
+    """A tuple has no element type, so the width stays the atom's 16-bit default --
+    which is what lets sixteen rows through here."""
+    _build_tuple(16, tuple(range(16)))
+
+
+def test_a_tuple_must_match_the_row_count():
+    with pytest.raises(Exception, match="entries but the tile has"):
+        _build_tuple(8, (3, 1, 17))
+
+
 # -- the scatter direction --------------------------------------------------------
 
 

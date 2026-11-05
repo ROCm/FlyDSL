@@ -128,11 +128,22 @@ def index_rows_limit(index_bits):
     return 16 if index_bits == 16 else 8
 
 
-def index_bits_of(index_tensor, what):
-    """Index width implied by a row list's element type, or None if no list is given."""
-    if index_tensor is None:
+def is_index_tuple(index_list):
+    """Whether a row list is a tuple of indices rather than data in memory."""
+    from ..typing import IntTuple
+
+    return isinstance(index_list, IntTuple)
+
+
+def index_bits_of(index_list, what):
+    """Index width implied by a row list, or None when the list does not fix one.
+
+    A tuple holds the indices themselves, with no element type to read a width off,
+    so it leaves the width to the atom.
+    """
+    if index_list is None or is_index_tuple(index_list):
         return None
-    elem = getattr(index_tensor, "element_type", None)
+    elem = getattr(index_list, "element_type", None)
     bits = INDEX_WIDTHS.get(elem)
     if bits is None:
         raise TypeError(f"{what} must hold 16- or 32-bit integer row indices, got {elem}")
@@ -148,12 +159,12 @@ def check_index_rows(index_bits, count, what):
         raise ValueError(f"{what} carries 1 to {limit} rows at {index_bits}-bit indices, got {count}")
 
 
-def static_length(tensor):
-    """Element count of a tensor whose shape is static, else None."""
+def static_length(index_list):
+    """Entry count of a row list whose length is static, else None."""
     from ..primitive import size
 
     try:
-        value = size(tensor.layout).unpack()
+        value = size(index_list if is_index_tuple(index_list) else index_list.layout).unpack()
     except Exception:
         return None
     return value if isinstance(value, int) else None
@@ -164,8 +175,9 @@ class TensorLoadGather(TensorLoad):
 
     The outer dimension is not walked, it is listed: the atom is handed one row index
     per row of the tile and collects exactly those rows. Pass the row list to
-    :func:`make_tiled_tdm_atom` as ``index_tensor``; its element type picks the index
-    width, and a call site may hand :func:`copy` a different list.
+    :func:`make_tiled_tdm_atom` as ``index_tensor``; a tensor's element type picks the
+    index width, and a call site may hand :func:`copy` a different list -- including an
+    int tuple, whose known entries become descriptor immediates.
 
     Atom state is ``TensorLoad``'s. A row index at or past the tensor's row count
     reads as zero, which is how a tile masks rows it does not want.
@@ -313,7 +325,7 @@ def make_tiled_tdm_atom(
 
     * ``op`` — the copy op: ``TensorLoad(...)`` / ``TensorStore(...)`` for a linear
       tile, or ``TensorLoadGather(...)`` / ``TensorStoreScatter(...)`` for a row-indexed
-      one. The op carries ``index_bits``; the row list itself is ``index_tensor``.
+      one. The row list is ``index_tensor``.
     * ``tensor`` — the global tensor.
     * ``smem_layout`` — the LDS tile layout.
     * ``tdm_tile`` — the tiler: how many elements to take from each global mode.
@@ -323,13 +335,16 @@ def make_tiled_tdm_atom(
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
     * ``internal_type`` — reserved; currently must be ``None``.
-    * ``index_tensor`` — the row list an indexed ``op`` starts with, holding one
-      16- or 32-bit integer index per row of the tile. Its element *width* picks the
-      index width; leaving it out keeps the 16-bit default and leaves the list to the
-      call site. A linear op refuses it.
+    * ``index_tensor`` — the row list an indexed ``op`` starts with: either a tensor
+      of 16- or 32-bit integers, whose element *width* picks the index width, or an
+      int tuple of the indices themselves, which leaves the width at the 16-bit
+      default. Leaving it out also keeps the default and leaves the list to the call
+      site. A linear op refuses it.
 
-    The atom sets the row list up; a :func:`copy` may hand over a different one, whose
-    element type then decides the width for that call.
+    The atom sets the row list up; a :func:`copy` may hand over a different one. A
+    tensor there decides the width for that call; a tuple keeps the atom's, and every
+    index it already knows folds into the descriptor as an immediate rather than
+    costing a load.
 
     Indexed addressing is 2D only, and the per-row span must be a whole multiple of
     4 bytes. One issue carries any row count in ``[1, limit]``: 8 rows at 32-bit

@@ -654,38 +654,54 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   SmallVector<Value> rowIndex;
   int32_t indexBits = cfg.indexBits;
   if (indexBits) {
-    auto indexMemTy = dyn_cast_or_null<fly::MemRefType>(indexTyArg);
-    if (!index || !indexMemTy)
-      return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand, got "
-                                  << indexTyArg;
-    // The atom sets the row list up and a call site may hand over a different one, so
-    // the width that counts is this operand's. Reading it off the element type is what
-    // keeps a list and the width it is read at from ever disagreeing.
-    unsigned elemBitsIdx =
-        indexMemTy.getElemTy().isIntOrFloat() ? indexMemTy.getElemTy().getIntOrFloatBitWidth() : 0;
-    if (elemBitsIdx != 16 && elemBitsIdx != 32)
-      return mlir::emitError(loc) << "cdna5 TDM: row indices must be 16- or 32-bit, got "
-                                  << indexMemTy.getElemTy();
-    indexBits = static_cast<int32_t>(elemBitsIdx);
+    if (!index)
+      return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand";
     // `tileShape` is outermost-first, so its leading dim is the row count.
     int32_t rows = tileShape.front();
+
+    if (auto tupleTy = dyn_cast<IntTupleType>(indexTyArg)) {
+      // A tuple carries the indices themselves, so one that is known while tracing
+      // folds into the descriptor as an immediate instead of costing a load. The
+      // width stays the atom's: a tuple has no element type to read one off.
+      if (failed(unpackCoord(builder, loc, tupleTy.getAttr(), index, rowIndex)))
+        return failure();
+      if (static_cast<int32_t>(rowIndex.size()) != rows)
+        return mlir::emitError(loc) << "cdna5 TDM: the index tuple has " << rowIndex.size()
+                                    << " entries but the tile has " << rows << " rows";
+    } else if (auto indexMemTy = dyn_cast<fly::MemRefType>(indexTyArg)) {
+      // The atom sets the row list up and a call site may hand over a different one, so
+      // the width that counts is this operand's. Reading it off the element type is what
+      // keeps a list and the width it is read at from ever disagreeing.
+      unsigned elemBitsIdx = indexMemTy.getElemTy().isIntOrFloat()
+                                 ? indexMemTy.getElemTy().getIntOrFloatBitWidth()
+                                 : 0;
+      if (elemBitsIdx != 16 && elemBitsIdx != 32)
+        return mlir::emitError(loc)
+               << "cdna5 TDM: row indices must be 16- or 32-bit, got " << indexMemTy.getElemTy();
+      indexBits = static_cast<int32_t>(elemBitsIdx);
+      // The descriptor is scalar state, so every index has to reach an SGPR. The loads
+      // are uniform across the wave; readfirstlane is what tells the backend so. A narrow
+      // index is widened on the way, because the groups are packed as whole words below.
+      Type idxElemTy = builder.getIntegerType(indexBits);
+      Type idxPtrTy = index.getType();
+      for (int32_t i = 0; i < rows; ++i) {
+        Value slot = LLVM::GEPOp::create(builder, loc, idxPtrTy, idxElemTy, index,
+                                         ArrayRef<LLVM::GEPArg>{i});
+        Value raw = LLVM::LoadOp::create(builder, loc, idxElemTy, slot);
+        if (indexBits != 32)
+          raw = LLVM::ZExtOp::create(builder, loc, i32Ty, raw);
+        rowIndex.push_back(ROCDL::ReadfirstlaneOp::create(builder, loc, i32Ty, raw));
+      }
+    } else {
+      return mlir::emitError(loc) << "cdna5 TDM: the index operand must be a memref or an "
+                                     "int tuple, got "
+                                  << indexTyArg;
+    }
+
     if (rows > tdm::maxIndexedRows(indexBits))
       return mlir::emitError(loc) << "cdna5 TDM: " << rows << " rows exceed the "
                                   << tdm::maxIndexedRows(indexBits) << " that " << indexBits
                                   << "-bit indices carry";
-    // The descriptor is scalar state, so every index has to reach an SGPR. The loads
-    // are uniform across the wave; readfirstlane is what tells the backend so. A narrow
-    // index is widened on the way, because the groups are packed as whole words below.
-    Type idxElemTy = builder.getIntegerType(indexBits);
-    Type idxPtrTy = index.getType();
-    for (int32_t i = 0; i < rows; ++i) {
-      Value slot =
-          LLVM::GEPOp::create(builder, loc, idxPtrTy, idxElemTy, index, ArrayRef<LLVM::GEPArg>{i});
-      Value raw = LLVM::LoadOp::create(builder, loc, idxElemTy, slot);
-      if (indexBits != 32)
-        raw = LLVM::ZExtOp::create(builder, loc, i32Ty, raw);
-      rowIndex.push_back(ROCDL::ReadfirstlaneOp::create(builder, loc, i32Ty, raw));
-    }
   }
 
   Value glbCoord = cfg.isLoad ? src : dst;
