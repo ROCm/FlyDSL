@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T05:44:03Z",
+ "updated": "2026-11-05T05:48:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41976007324,
+   "pr": null,
+   "commit": "07c882c9439d57a105bbf7aa7ff4c59d835354b3",
+   "branch": "main",
+   "event": "push",
+   "title": "[Windows] Native build and ROCm JIT for Windows x64 (#1366)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976007324",
+   "created_at": "2026-11-05T05:45:27Z",
+   "updated_at": "2026-11-05T05:46:52Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41975509448,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[DSL] Speed up tracing by caching op source positions (#1361)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41975509448",
    "created_at": "2026-11-05T05:40:39Z",
-   "updated_at": "2026-11-05T05:41:03Z",
+   "updated_at": "2026-11-05T05:46:40Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,13 +40,41 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41957037048",
    "created_at": "2026-11-05T02:43:23Z",
-   "updated_at": "2026-11-05T05:29:21Z",
+   "updated_at": "2026-11-05T05:42:56Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-05T05:42:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41957037048/job/127074045860"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-05T05:45:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41957037048/job/127074045866"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-05T05:42:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41957037048/job/127074046027"
+    }
+   ]
   },
   {
    "run_id": 41956274297,
@@ -622,7 +665,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411",
    "created_at": "2026-11-03T08:06:47Z",
-   "updated_at": "2026-11-05T05:41:42Z",
+   "updated_at": "2026-11-05T05:43:11Z",
    "actor": "edjson",
    "jobs": []
   },
@@ -1885,52 +1928,6 @@
      "started_at": "2026-10-30T16:02:07Z",
      "completed_at": "2026-10-30T16:59:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41066117154/job/124167321428"
-    }
-   ]
-  },
-  {
-   "run_id": 41035175337,
-   "pr": 1332,
-   "commit": "d05ea42d8e41988c52e3fd3e54a7cae07d249f8b",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41035175337",
-   "created_at": "2026-10-30T09:40:43Z",
-   "updated_at": "2026-10-30T18:07:52Z",
-   "actor": "Qubitium",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T16:10:02Z",
-     "completed_at": "2026-10-30T17:03:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41035175337/job/124171681045"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T16:10:01Z",
-     "completed_at": "2026-10-30T16:41:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41035175337/job/124171681173",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-30T17:01:37Z",
-     "completed_at": "2026-10-30T17:15:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41035175337/job/124171681188"
     }
    ]
   }
