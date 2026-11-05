@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T11:26:48Z",
+ "updated": "2026-11-05T12:07:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -193,38 +193,41 @@
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312",
    "created_at": "2026-11-05T07:14:25Z",
-   "updated_at": "2026-11-05T11:06:46Z",
+   "updated_at": "2026-11-05T12:04:38Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T11:11:55Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T12:04:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434614"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T11:07:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434672"
+     "completed_at": "2026-11-05T11:38:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434672",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-05T11:06:46Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-05T11:38:17Z",
+     "completed_at": "2026-11-05T11:53:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312/job/127207434760"
     }
    ]
