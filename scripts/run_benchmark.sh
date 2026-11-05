@@ -192,12 +192,13 @@ Usage:
   bash scripts/run_benchmark.sh softmax          # run only softmax
   bash scripts/run_benchmark.sh softmax_bwd      # run only softmax backward
   bash scripts/run_benchmark.sh rmsnorm flash_attn moe    # run only selected benchmarks
+  bash scripts/run_benchmark.sh rdna_wmma      # run only RDNA WMMA GEMM benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe | rdna_wmma
   (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -265,7 +266,10 @@ _fmt_table_header() {
 
 _emit_row() {
   op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"
-  printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
+  output_mode="${6:-table}"
+  if [ "${output_mode}" != "csv_only" ]; then
+    printf "%-22.22s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
+  fi
   if [ -n "${BENCH_OUTPUT_CSV:-}" ]; then
     status="ok"
     if [ "${tbps}" = "skip" ] || [ "${tflops}" = "skip" ]; then
@@ -290,12 +294,14 @@ _normalize_op() {
     softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
+    rdna|rdna_wmma|rdna-wmma|wmma) echo "rdna_wmma" ;;
     *) echo "${op}" ;;
   esac
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others:
+# softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe, rdna_wmma
 RUN_SOFTMAX=1
 RUN_SOFTMAX_BWD=1
 RUN_RMSNORM=1
@@ -303,6 +309,7 @@ RUN_FLASH_ATTN=1
 RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
+RUN_RDNA_WMMA=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
@@ -312,6 +319,7 @@ _enable_only_ops() {
   RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
+  RUN_RDNA_WMMA=0
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
@@ -322,6 +330,7 @@ _enable_only_ops() {
       mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
+      rdna_wmma) RUN_RDNA_WMMA=1 ;;
       "" ) ;;
       *) _die "unknown op '${op}'" ;;
     esac
@@ -360,19 +369,20 @@ if [ "$#" -gt 0 ]; then
         echo "mla"
         echo "gemm"
         echo "moe"
+        echo "rdna_wmma"
         exit 0
         ;;
       --only)
         shift
         [ "$#" -gt 0 ] || _die "--only requires a comma-separated op list"
+        v="$1"
         oldIFS=$IFS
         IFS=,
         # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-        set -- $1
-        IFS=$oldIFS
-        for op in "$@"; do
+        for op in $v; do
           _add_selected_op "$op"
         done
+        IFS=$oldIFS
         ;;
       --only=*)
         v="${1#--only=}"
@@ -380,11 +390,10 @@ if [ "$#" -gt 0 ]; then
         oldIFS=$IFS
         IFS=,
         # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-        set -- $v
-        IFS=$oldIFS
-        for op in "$@"; do
+        for op in $v; do
           _add_selected_op "$op"
         done
+        IFS=$oldIFS
         ;;
       --output_csv|--output-csv)
         flag="$1"
@@ -537,6 +546,37 @@ PY
     _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}"
   done <<EOF
 ${_moe_rows}
+EOF
+}
+
+_emit_wmma_csv_rows() {
+  # Args: log_path
+  # Convert the FlyDSL latency column from print_perf_table() into the common
+  # throughput CSV schema. This stays separate from the human comparison table.
+  [ -n "${BENCH_OUTPUT_CSV:-}" ] || return 0
+  _wmma_rows="$(awk '
+    ($1 == "wmma_gemm" || $1 == "fp8_gemm") && $4 != "-" {
+      split($2, dims, "x")
+      gpu_us = $4
+      gsub(/,/, "", gpu_us)
+      m = dims[1] + 0
+      n = dims[2] + 0
+      k = dims[3] + 0
+      if ($3 == "fp8") {
+        bytes = m * k + k * n + 2 * m * n + 4 * (m + n)
+      } else {
+        bytes = 2 * (m * k + k * n + m * n)
+      }
+      tbps = bytes / gpu_us / 1000000
+      tflops = 2 * m * n * k / gpu_us / 1000000
+      printf "%s\t%s\t%s\t%.3f\t%.3f\n", $1, $2, $3, tbps, tflops
+    }
+  ' "$1")"
+  [ -z "${_wmma_rows}" ] && return 0
+  while IFS="$(printf '\t')" read -r _op _sh _dt _tb _tf; do
+    _emit_row "${_op}" "${_sh}" "${_dt}" "${_tb}" "${_tf}" csv_only
+  done <<EOF
+${_wmma_rows}
 EOF
 }
 
@@ -1074,7 +1114,7 @@ fi
 
 # RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
 # FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.
-if [ "${IS_RDNA_WMMA}" = "true" ]; then
+if [ "${RUN_RDNA_WMMA}" -eq 1 ] && [ "${IS_RDNA_WMMA}" = "true" ]; then
   echo ""
   echo "========================================================================"
   echo "RDNA WMMA Benchmarks (arch: ${GPU_ARCH})"
@@ -1082,6 +1122,7 @@ if [ "${IS_RDNA_WMMA}" = "true" ]; then
   log="${BENCH_LOG_DIR}/rdna_wmma_sweep.log"
   if python3 -c "from tests.kernels.benchmark_common import run_wmma_sweep, print_perf_table; rows = run_wmma_sweep(); print_perf_table(rows)" >"${log}" 2>&1; then
     cat "${log}"
+    _emit_wmma_csv_rows "${log}"
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
   else
     _fail_or_skip "${log}" "RDNA WMMA benchmark"
