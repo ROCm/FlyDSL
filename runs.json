@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T08:44:11Z",
+ "updated": "2026-11-05T08:55:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -161,11 +161,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982235299",
    "created_at": "2026-11-05T06:42:35Z",
-   "updated_at": "2026-11-05T08:27:23Z",
+   "updated_at": "2026-11-05T08:53:39Z",
    "actor": "xudoyuan",
    "jobs": [
     {
