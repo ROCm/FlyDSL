@@ -100,36 +100,37 @@ Type MmaOpGFX1250_WMMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeD() const { return getElemTyAcc(); }
 
-// PROVISIONAL layouts for the 32x16x128 f4 form: the emit path is FileCheck-
-// validated, but these thr-val layouts are derived by analogy to the 16-row form
-// and NOT hardware-verified for make_tiled_mma. The shipping fp4 kernels feed
-// pre-arranged fragments through a direct mma_atom_call and never consult them.
-static Attribute scaled32RowLayoutA(MLIRContext *ctx, int32_t k) {
-  auto getContext = [&]() { return ctx; };
-  // 32 lanes over 32 M rows; each lane holds the full K. Reference (M,K) stride (1, 32).
-  return FxLayout(FxShape(FxThr(32), FxVal(k)), FxStride(FxThr(1), FxVal(32)));
-}
-
-static Attribute scaled32x16LayoutC(MLIRContext *ctx) {
-  auto getContext = [&]() { return ctx; };
-  // C is 32x16 f32: N = lane%16, M = (lane/16)*16 + v, 16 VGPRs per lane.
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(16)), FxStride(FxThr(16, 16), FxVal(1)));
-}
-
-// gfx1250 block-scaled WMMA A/B layout (CDNA5 ISA 7.12.6.1). The scaled
-// instruction has its own register layouts, separate from plain WMMA.
-// FP4/FP6: each lane group holds 32-wide K chunks.
-//   lanes 0-15: K 0-31, 64-95; lanes 16-31: K 32-63, 96-127
-//   k = (l/16)*32 + v%32 + (v/32)*64
-// Other types (FP8) keep the shared layout for now.
+// gfx1250 block-scaled WMMA A/B layout for a 16-row operand (CDNA5 ISA 7.12.6.1).
+// The scaled instruction has its own register layouts, separate from plain WMMA:
+// K is split into per-format chunks that alternate between the two lane groups.
+// V_WMMA_SCALE picks each value's block scale by its register slot, so A and B
+// must both match the ISA exactly (a shared K permutation is not enough).
+//   FP8:     16-wide chunks, k = (l/16)*16 + v%16 + (v/16)*32
+//   FP6/FP4: 32-wide chunks, k = (l/16)*32 + v%32 + (v/32)*64
+// Reference (rows, K) space is column-major with stride (1, 16).
 static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t k, Type elemTy) {
   auto getContext = [&]() { return ctx; };
-  if (isa<Float4E2M1FNType, Float6E2M3FNType, Float6E3M2FNType>(elemTy)) {
-    int valsPerLane = k / 2;
-    return FxLayout(FxShape(FxThr(16, 2), FxVal(32, valsPerLane / 32)),
-                    FxStride(FxThr(1, 512), FxVal(16, 1024)));
-  }
-  return gfx1250::getThrValLayoutAB(ctx, k, elemTy);
+  int chunk = elemTy.getIntOrFloatBitWidth() == 8 ? 16 : 32;
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(chunk, k / (2 * chunk))),
+                  FxStride(FxThr(1, chunk * 16), FxVal(16, chunk * 32)));
+}
+
+// 32x16x128 f4 form: A is two 16-row FP4 operands in consecutive VGPRs (M 16-31
+// in the second half), each laid out as in scaledLayoutAB.
+//   m = l%16 + (v/64)*16, k = (l/16)*32 + v%32 + ((v/32)%2)*64
+// Reference (M, K) space is column-major with stride (1, 32).
+static Attribute scaled32RowLayoutA(MLIRContext *ctx, int32_t k) {
+  auto getContext = [&]() { return ctx; };
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(32, k / 64, 2)),
+                  FxStride(FxThr(1, 1024), FxVal(32, 2048, 16)));
+}
+
+// C is 32x16 f32: two 16x16 halves in consecutive VGPRs (M 16-31 in VGPRs 8-15).
+//   n = l%16, m = (v/8)*16 + (l/16)*8 + v%8
+// Reference (M, N) space is column-major with stride (1, 32).
+static Attribute scaled32x16LayoutC(MLIRContext *ctx) {
+  auto getContext = [&]() { return ctx; };
+  return FxLayout(FxShape(FxThr(16, 2), FxVal(8, 2)), FxStride(FxThr(32, 8), FxVal(1, 16)));
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutA() const {
