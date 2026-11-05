@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T08:27:33Z",
+ "updated": "2026-11-05T08:44:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41995518229,
+   "pr": 1368,
+   "commit": "11050556820b4c7e7b78ef2b7091fa4a997475ab",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41995518229",
+   "created_at": "2026-11-05T08:34:27Z",
+   "updated_at": "2026-11-05T08:36:18Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 41994225680,
    "pr": 1338,
@@ -10,11 +25,11 @@
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
    "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41994225680",
    "created_at": "2026-11-05T08:24:32Z",
-   "updated_at": "2026-11-05T08:25:54Z",
+   "updated_at": "2026-11-05T08:29:27Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -146,11 +161,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982235299",
    "created_at": "2026-11-05T06:42:35Z",
-   "updated_at": "2026-11-05T06:57:34Z",
+   "updated_at": "2026-11-05T08:27:23Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -165,10 +180,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T08:09:09Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T08:27:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982235299/job/127099989430"
     },
     {
@@ -189,11 +204,11 @@
    "branch": "feat/windows-aot",
    "event": "pull_request",
    "title": "[Windows] AOT export support for Windows x64",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238",
    "created_at": "2026-11-05T06:26:53Z",
-   "updated_at": "2026-11-05T08:14:36Z",
+   "updated_at": "2026-11-05T08:42:21Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -449,7 +464,7 @@
   },
   {
    "run_id": 41956274297,
-   "pr": 1368,
+   "pr": null,
    "commit": "2cd80c40c08c9672bb827b065beb374a7f727126",
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
@@ -1793,21 +1808,6 @@
    "created_at": "2026-11-02T08:43:41Z",
    "updated_at": "2026-11-02T08:49:49Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 41410239840,
-   "pr": null,
-   "commit": "e1faa830fe60bb9b8eb4c5eb2894288f3043d632",
-   "branch": "zhimding/observe_launches_1102",
-   "event": "pull_request",
-   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41410239840",
-   "created_at": "2026-11-02T08:03:01Z",
-   "updated_at": "2026-11-02T08:54:58Z",
-   "actor": "zhiding512",
    "jobs": []
   }
  ]
