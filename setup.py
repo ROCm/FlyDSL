@@ -193,6 +193,8 @@ def _assert_embedded_mlir_exists() -> None:
         try:
             env = dict(os.environ)
             env.setdefault("FLY_BUILD_DIR", str(BUILD_DIR_REL))
+            # The wheel's ABI tag is determined by this interpreter, not PATH.
+            env["PYTHON_EXECUTABLE"] = sys.executable
             subprocess.run(["bash", "scripts/build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
         except Exception as e:
             raise RuntimeError("Failed to build via `scripts/build.sh`.\n" f"Original error: {e}\n") from e
@@ -413,7 +415,7 @@ setup(
     ),
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     packages=all_packages,
     package_dir=package_dir,
     include_package_data=True,
@@ -429,6 +431,9 @@ setup(
             "_mlir_libs/libMLIRPythonSupport-*.so",
             "_mlir_libs/lib*.so",
             "_mlir_libs/lib*.so.*",
+            "_mlir_libs/libfly_*_aot_runtime.a",
+            "_mlir_libs/*.pyd",
+            "_mlir_libs/*.dll",
             "*.pyi",
         ],
     },

@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 FlyDSL Project Contributors
+
+// Every function an evaluation category implements, listed once. Include this
+// file, inside namespace mlir::fly::core, in one of two ways:
+//
+// - To declare all functions of a category, define FLYDSL_CORE_CATEGORY:
+//
+//     #define FLYDSL_CORE_CATEGORY Trait
+//     #include "flydsl/Core/Category.def"
+//
+// - To expand only the leaf operations, e.g. to define them, define
+//
+//     FLYDSL_CORE_LEAF_BINARY(NAME, OP)  Leaf NAME(Leaf a, Leaf b)
+//     FLYDSL_CORE_LEAF_UNARY(NAME, OP)   Leaf NAME(Leaf a)
+//
+// A category defines every declared function in lib/Core. Operations derived
+// from them (operator!= and add_offset by a leaf or an owning tuple) are
+// defined once, for every category, in Algebra/Pointer.hpp. All of the macros
+// above are undefined at the end of this file.
+
+#ifdef FLYDSL_CORE_CATEGORY
+#define FLYDSL_CORE_LEAF Leaf<FLYDSL_CORE_CATEGORY>
+#define FLYDSL_CORE_POINTER Pointer<FLYDSL_CORE_CATEGORY>
+#define FLYDSL_CORE_LEAF_BINARY(NAME, OP) FLYDSL_CORE_LEAF NAME(FLYDSL_CORE_LEAF a, FLYDSL_CORE_LEAF b);
+#define FLYDSL_CORE_LEAF_UNARY(NAME, OP) FLYDSL_CORE_LEAF NAME(FLYDSL_CORE_LEAF a);
+#endif
+
+#ifndef FLYDSL_CORE_LEAF_BINARY
+#define FLYDSL_CORE_LEAF_BINARY(NAME, OP)
+#endif
+#ifndef FLYDSL_CORE_LEAF_UNARY
+#define FLYDSL_CORE_LEAF_UNARY(NAME, OP)
+#endif
+
+//===----------------------------------------------------------------------===//
+// Leaf operations
+//===----------------------------------------------------------------------===//
+//
+// Every category computes the same results, under these rules. Core evaluates
+// layout algebra, whose static values are shapes, strides and coordinates far
+// below the i64 limits; the operations rely on that rather than check it.
+//
+// - Integers are i64. A static result or intermediate value outside i64 is
+//   undefined, and no category detects it. A dynamic result outside its own
+//   width is undefined as well.
+// - A static integer has the type of its literal: i32, or i64 when it does not
+//   fit. None is the static 0. A dynamic result takes the wider operand type;
+//   i1 becomes i32 in arithmetic but stays i1 in bitwise operations and shifts.
+//   A comparison yields i32 0 or 1. An identity that returns an operand gives
+//   it the result type.
+// - A ratio is num/den in lowest terms with den > 1 and both within i32;
+//   otherwise it is RatioOverflow. A whole result is an integer.
+// - An error operand propagates unchanged; an error that an operation detects
+//   itself records that operation.
+
+FLYDSL_CORE_LEAF_BINARY(operator+, Add)
+FLYDSL_CORE_LEAF_BINARY(operator-, Sub)
+FLYDSL_CORE_LEAF_BINARY(operator*, Mul)
+
+// Dividing by a static zero is an error. `/` truncates toward zero and `%`
+// takes the sign of the dividend, as in C++, for operands of any sign.
+//
+// A fast-divmod divisor (withFastDivMod) is positive, and every division by
+// it (`/`, `%`, safe_div, ceil_div, shape_div) is defined only for a >= 0. A
+// category may return any value for a negative dividend.
+FLYDSL_CORE_LEAF_BINARY(operator/, Div)
+FLYDSL_CORE_LEAF_BINARY(operator%, Mod)
+
+FLYDSL_CORE_LEAF_BINARY(operator&, BitAnd)
+FLYDSL_CORE_LEAF_BINARY(operator|, BitOr)
+FLYDSL_CORE_LEAF_BINARY(operator^, BitXor)
+
+// Shifts are arithmetic, and a negative amount shifts the other way. A dynamic
+// result needs an amount below its width.
+FLYDSL_CORE_LEAF_BINARY(operator<<, Shl)
+FLYDSL_CORE_LEAF_BINARY(operator>>, Shr)
+
+FLYDSL_CORE_LEAF_BINARY(lshr, LShr)
+
+FLYDSL_CORE_LEAF_BINARY(operator<, Lt)
+FLYDSL_CORE_LEAF_BINARY(eq, Eq)
+FLYDSL_CORE_LEAF_BINARY(ne, Ne)
+FLYDSL_CORE_LEAF_BINARY(lt, Lt)
+FLYDSL_CORE_LEAF_BINARY(min, Min)
+FLYDSL_CORE_LEAF_BINARY(max, Max)
+FLYDSL_CORE_LEAF_BINARY(gcd, Gcd)
+
+// exact_div of static operands is the exact quotient, a ratio when it is not
+// whole. With a dynamic operand it needs a static divisor that divides the
+// dividend's divisibility; otherwise it is InexactDivision.
+FLYDSL_CORE_LEAF_BINARY(exact_div, Exact)
+
+// safe_div checks exactness only between static operands; with a dynamic
+// operand it is the plain truncating quotient.
+FLYDSL_CORE_LEAF_BINARY(safe_div, Safe)
+
+// ceil_div and shape_div are defined only for a >= 0 and b > 0.
+// Other operands are undefined: a category may return any value for them.
+FLYDSL_CORE_LEAF_BINARY(ceil_div, Ceil)
+FLYDSL_CORE_LEAF_BINARY(shape_div, Shape)
+
+FLYDSL_CORE_LEAF_UNARY(operator-, Neg)
+FLYDSL_CORE_LEAF_UNARY(operator~, Not)
+FLYDSL_CORE_LEAF_UNARY(abs, Abs)
+FLYDSL_CORE_LEAF_UNARY(signum, Signum)
+
+#undef FLYDSL_CORE_LEAF_BINARY
+#undef FLYDSL_CORE_LEAF_UNARY
+
+#ifdef FLYDSL_CORE_CATEGORY
+
+void print(FLYDSL_CORE_LEAF leaf, llvm::raw_ostream &os);
+
+//===----------------------------------------------------------------------===//
+// Pointer operations
+//===----------------------------------------------------------------------===//
+
+bool operator==(const FLYDSL_CORE_POINTER &lhs, const FLYDSL_CORE_POINTER &rhs);
+
+FLYDSL_CORE_POINTER add_offset(const FLYDSL_CORE_POINTER &pointer,
+                               IntTupleRef<FLYDSL_CORE_CATEGORY> offset);
+
+#undef FLYDSL_CORE_LEAF
+#undef FLYDSL_CORE_POINTER
+#undef FLYDSL_CORE_CATEGORY
+
+#endif // FLYDSL_CORE_CATEGORY

@@ -38,8 +38,7 @@ KV cache layouts:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr.arith import ArithValue
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
@@ -123,7 +122,6 @@ def build_fused_rope_cache_module(
         pid_t = fx.block_idx.y
         tid = fx.thread_idx.x
 
-        elem_type = T.bf16 if dtype_str == "bf16" else T.f16
         elem_dtype = fx.BFloat16 if dtype_str == "bf16" else fx.Float16
 
         # --- Layout API setup ---
@@ -158,13 +156,13 @@ def build_fused_rope_cache_module(
             if const_expr(VEC_WIDTH == 1):
                 # vector<1xf16/bf16> → extract scalar → bitcast to i16 → zero-extend i32
                 elem_val = vec_val[0]
-                i16_val = ArithValue(elem_val).bitcast(T.i16)
-                i32_val = ArithValue(i16_val).extui(T.i32)
+                i16_val = elem_val.bitcast(fx.Uint16)
+                i32_val = fx.Uint32(i16_val)
                 # Cross-lane shuffle: get pair thread's 32-bit VGPR (pair elem in low 16 bits)
                 peer_i32 = fx.rocdl.ds_bpermute(T.i32, pair_byte_addr, i32_val)
                 # Truncate back to i16, bitcast to elem_type, reconstruct vector<1xelem_type>
-                peer_i16 = ArithValue(peer_i32).trunci(T.i16)
-                peer_elem = ArithValue(peer_i16).bitcast(elem_type)
+                peer_i16 = fx.Uint16(peer_i32)
+                peer_elem = peer_i16.bitcast(elem_dtype)
                 return Vec.from_elements([peer_elem], elem_dtype)
             else:
                 # VEC_WIDTH>=2: VEC_WIDTH bf16/f16 elements → n_i32 x i32, one ds_bpermute per chunk.
@@ -288,8 +286,6 @@ def build_fused_rope_cache_module(
                         k_rot_vec = Vec(k_rot_e.ir_value())
                         v_vec = Vec(v_e)
                         for i in range_constexpr(VEC_WIDTH):
-                            # Always use vector.extract; works for VEC_WIDTH=1 (vector<1xbf16>)
-                            # and VEC_WIDTH>1 equally.
                             ke = k_rot_vec[i].to(fx.Float32) * k_rcp
                             ve = v_vec[i].to(fx.Float32) * v_rcp
                             k_scaled.append(ke)
@@ -348,15 +344,15 @@ def build_fused_rope_cache_module(
                                     i32_idx = vi // 4
                                     byte_in_i32 = vi % 4
                                     shifted = v_fp8[i32_idx] >> (byte_in_i32 * 8)
-                                    fp8_byte = arith.trunci(T.i8, shifted)
+                                    fp8_byte = fx.Int8(shifted)
                                     buffer_ops.buffer_store(fp8_byte, vc_fp8_rsrc, vc_byte_off)
                         else:
                             # VEC_WIDTH < 4: store individual fp8 bytes
                             for vi in range_constexpr(VEC_WIDTH):
                                 k_pk = fx.rocdl.cvt_pk_fp8_f32(T.i32, k_scaled[vi], 0.0, 0, False)
                                 v_pk = fx.rocdl.cvt_pk_fp8_f32(T.i32, v_scaled[vi], 0.0, 0, False)
-                                k_byte = arith.trunci(T.i8, k_pk)
-                                v_byte = arith.trunci(T.i8, v_pk)
+                                k_byte = fx.Int8(k_pk)
+                                v_byte = fx.Int8(v_pk)
 
                                 d_idx = tid * VEC_WIDTH + vi
 

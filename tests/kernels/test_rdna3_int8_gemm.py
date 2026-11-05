@@ -247,6 +247,15 @@ def test_int8_gemm_split_k_rejects_unsupported_epilogues():
         create_wmma_int8_gemm_module(256, 256, 512, in_dtype="int8", out_dtype="i32", split_k=8)
 
 
+def test_int8_gemm_rejects_shapes_that_wrap_the_32bit_buffer_offset():
+    # C spans 0xFFFF0600 bytes, just under 4 GiB, so num_records is representable.
+    # M % BLOCK_M == 3, so the tail block covers invalid row M; at column 16000 that
+    # row's byte offset is exactly 2**32 and wraps to 0, which the hardware would
+    # accept as in-range and write near C[0].
+    with pytest.raises(ValueError, match="32-bit buffer offset"):
+        create_wmma_int8_gemm_module(65027, 16512, 128, in_dtype="int8", out_dtype="i32")
+
+
 def test_int8_autotune_splits_k_only_when_the_grid_is_short():
     # 32 output tiles on a 48-processor part leave room for several K slices.
     assert pick_split_k(64, 4096, 4096, TILE_64x128x64, num_cu=48) == 4

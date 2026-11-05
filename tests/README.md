@@ -25,6 +25,21 @@ The project uses a **layered model** so CI and contributors can select tests by 
 
 **Legacy:** `large_shape` — used for slow/large kernel shapes; `scripts/run_tests.sh` skips it unless `RUN_TESTS_FULL=1`.
 
+`scripts/run_tests.sh` always excludes `multi_gpu` and `benchmark` tests. Those
+tests have dedicated CI jobs/steps and running them in the broad correctness
+suite duplicates work (and can accidentally consume every GPU on a multi-GPU
+host). CI can still opt into the full suite, including `large_shape` tests, with
+`RUN_TESTS_FULL=1`; the exclusions apply in both modes.
+
+The test script reports the 20 slowest tests to help track runtime regressions.
+
+The `Fly DSL test` workflow runs correctness and benchmarks in separate jobs
+after the shared wheel build. The `test` job runs pytest, examples and MLIR
+FileCheck. The `benchmark` job runs the current benchmark and comparisons
+against the exact PR base (or the previous commit on main pushes) and the latest
+PyPI tag. Both jobs cover the same single-GPU runners and can run in parallel
+when runner capacity is available; benchmarks do not wait for correctness.
+
 ### Rollout status
 
 First-pass annotations now cover `tests/unit` and `tests/kernels` for clearly classified files (L0/L1a/L1b/L2).
@@ -72,22 +87,33 @@ export LD_LIBRARY_PATH="${PWD}/build-fly/python_packages/flydsl/_mlir/_mlir_libs
 Examples:
 
 ```bash
-# Default: full pytest areas (same idea as scripts/run_tests.sh pytest step)
-python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -v
+# Default PR correctness suite (matches scripts/run_tests.sh)
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests/extension/ tests/python/examples/ \
+  -m "not large_shape and not multi_gpu and not benchmark" -v
 
-# Exclude large shapes (matches run_tests.sh when RUN_TESTS_FULL is unset)
-python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -m "not large_shape" -v
+# Exhaustive single-GPU correctness suite (RUN_TESTS_FULL=1)
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests/extension/ tests/python/examples/ \
+  -m "not multi_gpu and not benchmark" -v
 
 # When tests are annotated — examples (forward-looking)
 # python3 -m pytest tests/ -m "l0_backend_agnostic or l1a_compile_no_target_dialect" -v
 # python3 -m pytest tests/ -m "l2_device" -v
 ```
 
-The JIT disk cache auto-invalidates when kernel source or closure values change. Only disable it when modifying C++ passes or non-closure helper functions:
+The JIT disk cache is keyed by the traced MLIR and the toolchain fingerprint, so Python edits and rebuilt C++ passes invalidate it. Disable it when debugging a suspected stale artifact:
 
 ```bash
 export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache
 ```
+
+Cooperative tests use a representative parameter matrix by default so each
+axis value is covered without compiling its full Cartesian product. Set
+`FLYDSL_COOP_TESTS_FULL=1` to run every cooperative-test combination; this is
+also when the shared default-device fixture covers both CPU and CUDA defaults.
+This switch is independent of `RUN_TESTS_FULL`, which continues to control
+`large_shape`.
+See [coop test coverage](extension/coop/README.md) for the matrix selection,
+cross-target compilation and stress-input policies.
 
 ## MLIR FileCheck tests
 

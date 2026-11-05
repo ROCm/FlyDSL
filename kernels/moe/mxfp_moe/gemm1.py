@@ -3,9 +3,7 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
 from . import dpp_utils
@@ -204,7 +202,7 @@ def _gemm1_body(
     accm = [[fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32) for _ in range(4)] for _ in range(kMChunks)]
     for i in range_constexpr(kMChunks):
         for J in range_constexpr(4):
-            accm[i][J].store(fx.Vector.filled(4, 0.0, fx.Float32))
+            accm[i][J].store(fx.full(4, 0.0, fx.Float32))
     b = [[[None, None] for _ in range(4)] for _ in range(kStages)]
     b_scale_v = [[None, None] for _ in range(kStages)]
 
@@ -231,14 +229,14 @@ def _gemm1_body(
                 aq_dma_atom,
                 fx.slice(aq_dma_tiles4, (None, voffset // fx.Int32(16))),
                 fx.slice(s_aq_i32x4_tiles, (None, off // fx.Int32(16))),
-                soffset=fx.Int32(kt * KH_TILE) // fx.Int32(4),
+                soffset=fx.Int32(kt * KH_TILE) // 4,
             )
             if const_expr(a_dtype == "fp8"):
                 fx.copy(
                     aq_dma_atom,
                     fx.slice(aq_dma_tiles4, (None, (voffset + fx.Int32(128)) // fx.Int32(16))),
                     fx.slice(s_aq_i32x4_tiles, (None, (off + fx.Int32(128)) // fx.Int32(16))),
-                    soffset=fx.Int32(kt * KH_TILE) // fx.Int32(4),
+                    soffset=fx.Int32(kt * KH_TILE) // 4,
                 )
 
     def _lds_i32x4_frag(tile_idx):
@@ -360,17 +358,17 @@ def _gemm1_body(
             off = row_off + (blk_byte ^ mask_r) + (lib & fx.Int32(1)) * fx.Int32(8)
             # cvt.pk.fp8 packs 2 fp8 into a 16b lane of a vector<2xi16> accumulator
             # (dstLoHiSel = lo/hi); two lanes -> 4 fp8 = one i32 stored to LDS.
-            i16x2 = ir.Type.parse("vector<2xi16>")
-            zero16 = llvm.BitcastOp(i16x2, _raw(fx.Int32(0))).result
+            i16x2 = T.vec(2, T.i16)
+            zero16 = _raw(fx.full(2, 0, fx.Int16))
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[0]), qs_raw, 0)
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, pk0, _bf16x2(h_dw_i[1]), qs_raw, 1)
             pk1 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[2]), qs_raw, 0)
             pk1 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, pk1, _bf16x2(h_dw_i[3]), qs_raw, 1)
-            _scalar_store(s_aq_i32x1_tiles, off // fx.Int32(4), fx.Int32(llvm.BitcastOp(T.i32, pk0).result), fx.Int32)
+            _scalar_store(s_aq_i32x1_tiles, off // fx.Int32(4), fx.Vector(pk0).bitcast(fx.Int32)[0], fx.Int32)
             _scalar_store(
                 s_aq_i32x1_tiles,
                 (off + fx.Int32(4)) // fx.Int32(4),
-                fx.Int32(llvm.BitcastOp(T.i32, pk1).result),
+                fx.Vector(pk1).bitcast(fx.Int32)[0],
                 fx.Int32,
             )
         else:
@@ -383,7 +381,7 @@ def _gemm1_body(
 
     def _inline_quant_core_batch(specs, slot, scale_accum):
         n = len(specs)
-        h_dw = [[fx.Int32(_raw(h_v[j])) for j in range_constexpr(4)] for (_b, _s, h_v) in specs]
+        h_dw = [[h_v[j] for j in range_constexpr(4)] for (_b, _s, h_v) in specs]
         a = [_iq_block_amax(h_dw[i]) for i in range_constexpr(n)]
         s1 = [
             fx.Int32(dpp_utils.update_dpp_i32(_raw(a[i]), _raw(a[i]), 0xB1, 0xF, 0xF, True)) for i in range_constexpr(n)
@@ -396,7 +394,7 @@ def _gemm1_body(
         e8 = [_inline_e8m0(a[i]) for i in range_constexpr(n)]
         for i in range_constexpr(n):
             B128_IDX, SUB, _hv = specs[i]
-            qs_raw = _raw(fx.Float32(_raw(e8[i] << fx.Int32(23)).bitcast(T.f32)))
+            qs_raw = _raw((e8[i] << fx.Int32(23)).bitcast(fx.Float32))
             _iq_pack_store(h_dw[i], qs_raw, B128_IDX, SUB, slot)
             pack_byte = B128_IDX * 2 + SUB
             scale_accum = scale_accum | (e8[i] << fx.Int32(pack_byte * 8))
@@ -557,7 +555,7 @@ def _gemm1_body(
 
     def acc_store(idx, value):
         r = fx.make_rmem_tensor(acc_reg_lay, fx.Float32)
-        r.store(fx.Vector.from_elements([fx.Float32(value)], fx.Float32))
+        r.store(fx.Vector.from_elements([value], fx.Float32))
         fx.copy(acc_copy_atom, r, fx.slice(acc_flat_tiles, (None, idx)))
 
     def acc_load(idx):
@@ -580,10 +578,10 @@ def _gemm1_body(
     gpu.barrier()
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(16)
-    n_lane = tx_i32 % fx.Int32(16)
-    wave_grp = n_lane // fx.Int32(4)
-    kk = n_lane % fx.Int32(4)
+    m_lane = tx_i32 // 16
+    n_lane = tx_i32 % 16
+    wave_grp = n_lane // 4
+    kk = n_lane % 4
 
     aqout_layout = fx.make_layout((BM, K_G2_HALF), (K_G2_HALF, 1))
     # UniversalCopy has no nontemporal/cache-hint knob; dropped (perf-neutral).
@@ -596,9 +594,9 @@ def _gemm1_body(
         gate_vs = [None] * 8
         up_vs = [None] * 8
         for ee in range_constexpr(8):
-            col_in_grp = fx.Int32(8) * kk + fx.Int32(ee)
-            gate_col = wave_grp * fx.Int32(32) + col_in_grp
-            up_col = fx.Int32(128) + gate_col
+            col_in_grp = 8 * kk + fx.Int32(ee)
+            gate_col = wave_grp * 32 + col_in_grp
+            up_col = 128 + gate_col
             gate_vs[ee] = acc_load(acc_idx(row_local, gate_col))
             up_vs[ee] = acc_load(acc_idx(row_local, up_col))
         result = _silu_mul_batch(gate_vs, up_vs)
@@ -606,8 +604,8 @@ def _gemm1_body(
         local_max = fx.absf(result[0])
         for ee in range_constexpr(1, 8):
             local_max = fx.maxnumf(local_max, fx.absf(result[ee]))
-        lm_i = _inline_dpp_quad_amax(fx.Int32(_raw(local_max).bitcast(T.i32)))
-        local_max = fx.Float32(_raw(lm_i).bitcast(T.f32))
+        lm_i = _inline_dpp_quad_amax(local_max.bitcast(fx.Int32))
+        local_max = lm_i.bitcast(fx.Float32)
 
         e8m0, qscale = _e8m0_from_amax(local_max)
         scales_per_mr[mr] = e8m0
@@ -620,7 +618,7 @@ def _gemm1_body(
             )
         packed = fx.Int32(packed_i32)
 
-        byte_pos = n_block_idx * fx.Int32(BN_INT // 2) + wave_grp * fx.Int32(16) + kk * fx.Int32(4)
+        byte_pos = n_block_idx * fx.Int32(BN_INT // 2) + wave_grp * 16 + kk * 4
         out_row = m_row + row_local
         store_off = _layout_idx(aqout_layout, out_row, byte_pos)
         _scalar_store(aqout_tiles, store_off // fx.Int32(4), packed, fx.Int32)
@@ -629,7 +627,7 @@ def _gemm1_body(
     ascaleout_layout = fx.make_layout((1 << 20, 2, 4, 16), (OUT_AS_PER_CHUNK_DW, 64, 16, 1))
     ascaleout_i8_tiles = _global_scalar_tiles(arg_ascaleout, fx.Int8, 1 << 26)
     ascaleout_i16_tiles = _global_scalar_tiles(arg_ascaleout, fx.Int16, 1 << 25)
-    if kk == fx.Int32(0):
+    if kk == 0:
         ku = n_block_idx >> fx.Int32(1)
         ikxdl = n_block_idx & fx.Int32(1)
         if const_expr(BM == 16):
@@ -743,8 +741,8 @@ def compile_gemm1_a4w4_port(
         bx = gpu.block_id("x")
         tx_i32 = fx.Int32(tx)
         bx_i32 = fx.Int32(bx)
-        lane = tx_i32 % fx.Int32(64)
-        wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
+        lane = tx_i32 % 64
+        wave = rocdl.readfirstlane(T.i32, tx_i32 // 64)
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_NUM_N_BLOCKS)
@@ -756,12 +754,12 @@ def compile_gemm1_a4w4_port(
 
         def _xcd(pid):
             xc = _umod(pid, _NXCD)
-            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
             _ng = fx.Int32(_SW * _NUM_N_BLOCKS)
             group_id = wgid // _ng
             first_pid_m = group_id * fx.Int32(_SW)
             remaining_m = total_m_blocks - first_pid_m
-            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            group_size_m = fx.min(remaining_m, fx.Int32(_SW))
             wig = wgid % _ng
             m_block = first_pid_m + (wig % group_size_m)
             n_block = wig // group_size_m

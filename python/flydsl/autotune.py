@@ -7,7 +7,9 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import statistics
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
@@ -41,7 +43,7 @@ def _env_fingerprint() -> tuple:
     try:
         from .compiler.jit_function import _cache_invalidating_env_values
 
-        return tuple(sorted(_cache_invalidating_env_values()))
+        return tuple(sorted(_cache_invalidating_env_values(_device_fingerprint())))
     except Exception:
         return ()
 
@@ -133,14 +135,18 @@ class Config:
         *,
         num_warps=None,
         waves_per_eu=None,
-        maxnreg=None,
         pre_hook=None,
         **kwargs,
     ):
+        # Explicit, or **kwargs would silently accept it as a Constexpr arg.
+        if "maxnreg" in kwargs:
+            raise TypeError(
+                "Config(maxnreg=...) is no longer supported: it never reached LLVM. "
+                "Use waves_per_eu to target occupancy instead."
+            )
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.waves_per_eu = waves_per_eu
-        self.maxnreg = maxnreg
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -152,14 +158,7 @@ class Config:
 
     def compiler_opts(self):
         """Compiler-level options (not user kwargs)."""
-        return {
-            k: v
-            for k, v in [
-                ("waves_per_eu", self.waves_per_eu),
-                ("maxnreg", self.maxnreg),
-            ]
-            if v is not None
-        }
+        return {k: v for k, v in [("waves_per_eu", self.waves_per_eu)] if v is not None}
 
     def __repr__(self):
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
@@ -167,13 +166,11 @@ class Config:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
             parts.append(f"waves_per_eu={self.waves_per_eu}")
-        if self.maxnreg is not None:
-            parts.append(f"maxnreg={self.maxnreg}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
         d = dict(self.kwargs)
-        for k in ("num_warps", "waves_per_eu", "maxnreg"):
+        for k in ("num_warps", "waves_per_eu"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -182,10 +179,11 @@ class Config:
     @classmethod
     def from_dict(cls, d):
         d = dict(d)
+        # Tolerate maxnreg in caches written before its removal.
+        d.pop("maxnreg", None)
         return cls(
             num_warps=d.pop("num_warps", None),
             waves_per_eu=d.pop("waves_per_eu", None),
-            maxnreg=d.pop("maxnreg", None),
             **d,
         )
 
@@ -309,6 +307,9 @@ class Autotuner:
         if fn_name is not None and not isinstance(fn_name, str):
             fn_name = getattr(fn_name, "__name__", "unknown")
         fn_name = fn_name or "unknown"
+        if sys.platform == "win32":
+            # Windows forbids these characters in file names, and a lambda is "<lambda>".
+            fn_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", fn_name)
         cache_dir = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", os.path.expanduser("~/.flydsl/autotune")))
         self._cache_file = cache_dir / f"{fn_name}.json"
 
@@ -442,6 +443,7 @@ class Autotuner:
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
+        run = self._candidate(compiler_opts, args, merged_kwargs)
 
         with self._stream_context(args, merged_kwargs):
             # Snapshot once before any rep runs, so restores are from pristine input.
@@ -459,11 +461,11 @@ class Autotuner:
                     self.pre_hook(merged_kwargs)
                 if validation:
                     with self.validate_hook(self._sig_args(args, merged_kwargs)):
-                        self._run_with_hints(compiler_opts, args, merged_kwargs)
+                        run()
                         if self.post_hook:
                             self.post_hook(merged_kwargs)
                     return
-                self._run_with_hints(compiler_opts, args, merged_kwargs)
+                run()
                 if self.post_hook:
                     self.post_hook(merged_kwargs)
 
@@ -479,6 +481,36 @@ class Autotuner:
                 # Leave the caller's tensors as a single clean run would.
                 if snapshot:
                     self._restore_tensors(snapshot)
+
+    def _candidate(self, compiler_opts, args, kwargs):
+        """One launch of a candidate config.
+
+        Every ordinary ``@jit`` call retraces, so a ``@jit`` function is compiled
+        on its first launch and timed through that ``CompiledFunction``. Any
+        other callable owns its dispatch and must reuse compiled handles itself.
+        """
+        # A JitFunction implies its module is loaded; never import bindings for other callables.
+        jit_function = sys.modules.get(f"{__package__}.compiler.jit_function")
+        if jit_function is None or not isinstance(self.fn, jit_function.JitFunction):
+            return lambda: self._run_with_hints(compiler_opts, args, kwargs)
+
+        from .compiler.kernel_function import CompilationContext
+
+        compiled = None
+
+        def run():
+            nonlocal compiled
+            if compiled is not None:
+                # Bind per launch: a pre_hook may have replaced a keyword argument.
+                bound = self._signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                compiled(*bound.arguments.values())
+                return
+            with CompilationContext.compile_hints(compiler_opts):
+                # Not flyc.compile, which returns an argument-free function uncompiled.
+                compiled = jit_function._compile_impl(self.fn, *args, **kwargs)  # Compiles and launches once.
+
+        return run
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
         """Run the kernel with optional compiler hints. Import is deferred so
@@ -756,6 +788,10 @@ def autotune(
         @flyc.jit
         def myKernel(..., BLOCK: fx.Constexpr[int], ...):
             ...
+
+    A ``@jit`` function is benchmarked through one ``flyc.compile`` handle per
+    config. A plain callable is benchmarked as called, so it must launch through
+    cached compiled handles: every ordinary ``@jit`` call retraces.
 
     Args:
         configs: sequence of :class:`Config`, or a callable returning one for

@@ -12,11 +12,15 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRFlyROCDLDialect
   
   MLIRArithDialect
+  MLIRControlFlowTransforms
+  MLIRFuncTransforms
   MLIRIR
   MLIRLLVMDialect
   MLIRMathDialect
   MLIRPass
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRTransforms
+  MLIRUBDialect
   MLIRVectorDialect
 )

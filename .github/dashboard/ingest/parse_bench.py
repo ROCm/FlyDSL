@@ -41,7 +41,7 @@ DEFAULT_REGRESSION_PCT = -3.0
 RUNNER_ARCH = {
     "linux-flydsl-mi355-1": "gfx950",  # MI355 / MI350X
     "linux-flydsl-mi355-8": "gfx950",
-    "linux-flydsl-mi35x-1": "gfx950",  # MI350
+    "linux-flydsl-mi35x-1": "gfx950",  # pooled MI350 + MI355; see ingest.MIXED_RUNNERS
     "linux-flydsl-mi35x-8": "gfx950",
     "linux-flydsl-mi325-1": "gfx942",  # MI325
     "linux-flydsl-mi325-8": "gfx942",
@@ -68,12 +68,13 @@ _AITER_ROW = re.compile(
     rf"(?P<fly>{_AITER_CELL})\s+(?P<ait>{_AITER_CELL})\s+(?P<sp>[\d.]+x|-)\s*$"
 )
 
-_CMP_HEADER = re.compile(r"^=== Benchmark: current vs (?P<base>\S+) ===\s*$")
-# A comparison row. <base>= may be "main", a fallback like "main~2", or a tag like "v0.2.0";
-# dtype may be e.g. "int4_bf16". The label allows ~ so the main~N fallback baselines parse.
+# Labels include exact-base commit IDs and, after an LLVM pin change, the
+# baseline's LLVM revision. Use the same grammar for the header and each row.
+_CMP_LABEL = r"[\w][\w.@~\-]*(?: \(llvm [0-9a-f]+\))?"
+_CMP_HEADER = re.compile(rf"^=== Benchmark: current vs (?P<base>{_CMP_LABEL}) ===\s*$")
 _CMP_ROW = re.compile(
     r"^\s*(?P<op>\S+)\s+(?P<shape>\S+)\s+(?P<dtype>\S+)\s+"
-    r"(?P<blabel>[\w][\w.~\-]*)=\s*(?P<base_val>-?\d+(?:\.\d+)?)\s+(?P<unit>TB/s|TFLOPS)\s+"
+    rf"(?P<blabel>{_CMP_LABEL})=\s*(?P<base_val>-?\d+(?:\.\d+)?)\s+(?P<unit>TB/s|TFLOPS)\s+"
     r"current=\s*(?P<cur>-?\d+(?:\.\d+)?)\s+(?:TB/s|TFLOPS)\s+"
     r"ratio=\s*(?P<ratio>-?\d+(?:\.\d+)?)x\s+"
     r"delta=\s*(?P<delta>[-+]?\d+(?:\.\d+)?)\s+\(\s*(?P<pct>[-+]?\d+(?:\.\d+)?)%\)\s*$"

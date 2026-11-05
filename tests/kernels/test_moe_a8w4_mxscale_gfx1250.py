@@ -38,7 +38,7 @@ def _ptr(t):
 
 def _require_gpu():
     arch = str(get_rocm_arch())
-    if arch != "gfx1250":
+    if not arch.startswith("gfx1250"):
         pytest.skip(f"requires gfx1250, got {arch}")
 
 
@@ -325,6 +325,13 @@ def test_grouped_moe_accuracy(E, model_dim, inter_dim, token_num, topk):
 def test_grouped_moe_token_sweep(token_num):
     args, ref = _build_case(8, 512, 256, token_num, 2, seed=token_num)
     _check_accuracy(_grouped_moe(**args), ref)
+
+
+def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
+    # model_dim is stage 1's K; with tile_k=256, K=640 used to drop its last 128 columns.
+    args, _ = _build_case(8, 640, 256, 64, 2)
+    with pytest.raises(ValueError, match="multiple of tile_k"):
+        _grouped_moe(**args)
 
 
 def test_grouped_moe_stability():

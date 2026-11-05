@@ -1,0 +1,42 @@
+# Run skillscope on evals.json (same intake criteria as amd/skills)
+
+name: AMD Skills Checks
+
+on:
+  pull_request:
+    paths:
+      - ".claude/skills/flydsl-kernel-authoring/**"
+      - ".claude/skills/kernel-trace-analysis/**"
+      - ".github/workflows/skill-evals.yml"
+  workflow_dispatch:
+    inputs:
+      structural:
+        description: Structural Tests
+        type: boolean
+        default: true
+      routing:
+        description: Routing Tests
+        type: boolean
+        default: false
+      behavioral:
+        description: Behavioral Tests
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: AMD Skills Checks
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      skills: |
+        .claude/skills/flydsl-kernel-authoring
+        .claude/skills/kernel-trace-analysis
+      # Each step can be set to `required`, `optional`, or `off`.
+      structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
+      routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
+      behavioral: ${{ github.event_name == 'workflow_dispatch' && inputs.behavioral && 'required' || 'off' }}

@@ -79,13 +79,6 @@ class _Buf:
         return fx.add_offset(self.base_ptr, self.byte_off)
 
 
-_gep = _buffer_ops.get_element_ptr
-
-
-def _lds_ptr_t():
-    return _ir.Type.parse("!llvm.ptr<3>")
-
-
 def _asm_void(operands, asm_string, constraints, clobbers=""):
     """Side-effecting void inline asm (LLVM sees no memory op -> no waitcnt added)."""
     if clobbers:
@@ -95,15 +88,8 @@ def _asm_void(operands, asm_string, constraints, clobbers=""):
 
 def _cvt_pk_bf16(a, b):
     """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
-    v2f32 = _ir.VectorType.get([2], fx.Float32.ir_type)
-    vec = Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
-    src = fx.as_ir_value(vec)
-    if src.type != v2f32:
-        src = fx.arith.bitcast(v2f32, src)
-    v2bf16 = _ir.VectorType.get([2], fx.BFloat16.ir_type)
-    # llvm.bitcast, not arith.bitcast: the latter requires operand and result to
-    # have the same shape, and this one is <2xbf16> -> i32.
-    return _llvm.BitcastOp(fx.Int32.ir_type, fx.arith.trunc_f(v2bf16, src)).result
+    vec = Vec.from_elements([a, b], fx.Float32)
+    return vec.to(fx.BFloat16).bitcast(fx.Int32)[0].ir_value()
 
 
 # for FP4_DMA_INTRINSIC=1 path, don't let compiler reorder the m0 set
@@ -187,7 +173,7 @@ class G2SLoaderAsm:
             # Off the readfirstlane'd wave base, not ptrtoint(base)+wave_id*1024:
             # wave_id is a VGPR, which would cost a v_readfirstlane per load.
             addr = fx.Int64(fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off + step * stride))
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(addr))
+            lds_ptr = fx.inttoptr(fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, 16), addr).llvm_ptr
             dma = _rocdl.raw_ptr_buffer_load_lds(self.rsrc, lds_ptr, fx.Int32(16), voff, soff, fx.Int32(0), fx.Int32(0))
             _tag_alias(dma, self.scopes, slot)
             return
@@ -232,15 +218,12 @@ class S2RLoaderFp4:
         imm = total_off - window_base
         assert 0 <= imm <= 0xFFFF
         vaddr = fx.Int32(fx.ptrtoint(lds_src.base_ptr)) + fx.Int32(window_base + dyn_offset)
-        lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
-        if imm != 0:
-            lds_ptr = _gep(lds_ptr, static_byte_offset=imm)
-        vec4_i32 = _ir.VectorType.get([4], fx.Int32.ir_type)
-        load = _llvm.LoadOp(vec4_i32, lds_ptr, alignment=16)
+        ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 16)
+        lds_ptr = fx.inttoptr(ptr_type, vaddr + imm)
+        value = fx.generic_load(lds_ptr, count=4)
         if self.scopes is not None:
-            _tag_alias(load, self.scopes, lds_src.byte_off // _LDS_BUF_BYTES)
-        raw = load.result
-        return Vec(raw)
+            _tag_alias(value, self.scopes, lds_src.byte_off // _LDS_BUF_BYTES)
+        return value
 
     def _dyn_offset(self, step, preshuffled):
         # Lane-dependent part (tile i=0); the per-tile i*2048 is added as a constant.
@@ -322,7 +305,7 @@ def _s2r_thunks(s2r, src, holder, n, pre):
 
 
 def _min(a, b):
-    return fx.arith.select(a < b, a, b)
+    return (a < b).select(a, b)
 
 
 def _divmod_nonneg(a, b):
@@ -358,7 +341,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     if const_expr(isinstance(use_simple, bool)):
         return (simple_m, simple_n) if use_simple else (pid_m, pid_n)
-    return (fx.arith.select(use_simple, simple_m, pid_m), fx.arith.select(use_simple, simple_n, pid_n))
+    return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
 
 
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
@@ -515,9 +498,9 @@ class ScaleGatherLDS:
 
         self._wave_base_s = fx.as_ir_value(self._lds_base + wid * fx.Int32(_SCALE_QUARTER_BYTES))
 
-        is_a = wid < fx.Int32(2)
-        q = wid % fx.Int32(2)
-        base_tile = fx.arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
+        is_a = wid < 2
+        q = wid % 2
+        base_tile = is_a.select(a_base_tile + q * 64, b_base_tile + q * 64)
         self._G = _uniform_i32(base_tile // fx.Int32(32))
         self._rsrc = fx.arith.select(is_a, self.a_rsrc, self.b_rsrc)
         # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).
@@ -525,12 +508,14 @@ class ScaleGatherLDS:
 
     def gather(self, kstep, slot):
         grp = fx.Int32(self._G) + (self._blk // 2) * fx.Int32(4) + (self._blk % 2)
-        i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * fx.Int32(64) + self._in16 * fx.Int32(4)
+        i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * 64 + self._in16 * fx.Int32(4)
         voff = fx.as_ir_value(i32_off * fx.Int32(4))  # bytes
         # m0 = precomputed wave quarter (SGPR) + slot*4096 (scalar): no readfirstlane.
         addr = fx.Int32(self._wave_base_s) + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES)
         if self.scopes is not None:
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(fx.Int64(addr)))
+            lds_ptr = fx.inttoptr(
+                fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, 16), fx.Int64(addr)
+            ).llvm_ptr
             dma = _rocdl.raw_ptr_buffer_load_lds(
                 self._rsrc, lds_ptr, fx.Int32(16), voff, self._soff0, fx.Int32(0), fx.Int32(0)
             )
@@ -564,11 +549,11 @@ class ScaleLoaderLDS:
         for gi in range_constexpr(self.n_groups):
             blk = half * 2 + gi
             vaddr = base + fx.Int32(blk * 256)
-            lds_ptr = _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(vaddr))
-            load = _llvm.LoadOp(fx.Int32.ir_type, lds_ptr, alignment=4)
+            ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 4)
+            value = fx.generic_load(fx.inttoptr(ptr_type, vaddr))
             if self.scopes is not None:
-                _tag_alias(load, self.scopes, self.slot_id)
-            grp_list.append(fx.Int32(load.result))
+                _tag_alias(value.ir_value(), self.scopes, self.slot_id)
+            grp_list.append(value)
         return grp_list
 
     def read(self, slot):
@@ -616,9 +601,7 @@ class StoreCFp4:
         g = self.lane_id // 16
         row = base_row + ti * 16 + self.lane_id % 16
         col = base_col + (tj + g % 2) * 16 + (g // 2) * 8
-        pack = Vec.from_elements([fx.Int32(a0), fx.Int32(a1), fx.Int32(b0), fx.Int32(b1)], fx.Int32).bitcast(
-            fx.BFloat16
-        )
+        pack = Vec.from_elements([a0, a1, b0, b1], fx.Int32).bitcast(fx.BFloat16)
         fx.memref_store_vec(pack, self.reg_bf16_8)
         c_index = row * self.c_cols + col
         fx.copy(self.out_atom_8, self.reg_bf16_8, fx.slice(self.c_div, (None, fx.Int32(c_index))))
@@ -830,8 +813,8 @@ def compile_fp4_gemm_4w(
             _b0n = [None] * N_TILES_B
             _b1n = [None] * N_TILES_B
             # This step prefetches K-step (kc+2) for g2s. a*_off = base + (kc+2)*STEP.
-            ak = (kc_i + fx.Int32(2)) * fx.Int32(A_K_STEP)
-            bk = (kc_i + fx.Int32(2)) * fx.Int32(B_K_STEP)
+            ak = (kc_i + 2) * fx.Int32(A_K_STEP)
+            bk = (kc_i + 2) * fx.Int32(B_K_STEP)
             a0_off = fx.Int32(A0_gl_offset) + ak
             a1_off = fx.Int32(A1_gl_offset) + ak
             b0_off = fx.Int32(B0_gl_offset) + bk
@@ -839,7 +822,7 @@ def compile_fp4_gemm_4w(
 
             _scn = [None, None, None, None]  # saR0, saR1, sbC0, sbC1 for kc+1
             _rd_scn = _read_scale_thunks(kc_i + 1, _scn)
-            _gk = _min(kc_i + fx.Int32(3), fx.Int32(K_ITERS - 1))
+            _gk = _min(kc_i + 3, fx.Int32(K_ITERS - 1))
             _sc_gather = _gather_scale_thunks(_gk, _slot(_gk))
 
             wait_barrier(_MAIN_VMCNT)

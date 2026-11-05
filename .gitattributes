@@ -1,4 +1,7 @@
+# `git apply --index` matches a patch against the index, which is LF. Keep the
+# LLVM patches LF in every checkout, including Git for Windows' default
+# core.autocrlf=true, or build_llvm_windows.ps1 cannot apply them.
+thirdparty/**/*.patch text eol=lf
+
 # Generated benchmark evidence; never read by runtime selection.
-tests/perf/data/rdna4_mxfp4_analytical.json linguist-generated=true
-tests/perf/data/rdna4_mxfp4_comprehensive.json linguist-generated=true
-tests/perf/data/rdna4_mxfp4_structure.json linguist-generated=true
+tests/perf/data/rdna4_mxfp4_*.json linguist-generated=true

@@ -5,6 +5,7 @@ description: >
   analyze the trace data using hotspot_analyzer.py to identify top-K stall hotspots
   (VMEM-load, VMEM-wait, LDS/SMEM-wait, barrier, MFMA stalls) mapped back to source
   lines, and produce an actionable optimization plan.
+  Also analyzes rocprofv3 PMC counter CSVs (L2 hit rate, partial reads, over-fetch).
   Usage: /kernel-trace-analysis <cmd>
   Can also analyze an existing dispatch dir directly: /kernel-trace-analysis --dir <path>
 allowed-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
@@ -15,8 +16,18 @@ allowed-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
 Profile and analyze GPU kernel ATT traces to identify stall hotspots and produce
 an optimization plan.
 
-All analysis is done programmatically via `hotspot_analyzer.py` + `code.json`.
+All analysis is done by running the bundled `hotspot_analyzer.py` (ATT) and
+`pmc_l2_analyzer.py` (PMC CSVs); never recompute their metrics yourself.
 Do **not** use GUI tools.
+
+> If the question is only "did my change increase register pressure, spills, or
+> LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
+> profiler run, and answers in seconds. Come here when you need to know *why* a
+> kernel is slow rather than *what resources it uses*.
+>
+> To pick an LLVM knob that changes what the compiler emits — a compile hint, a
+> function attribute, an `-mllvm` flag — and to prove it took effect, use
+> `/llvm`. That is also compile-only.
 
 ## Arguments
 
@@ -48,8 +59,7 @@ If the user provides `--dir <path>` or already has a `ui_output_agent_*_dispatch
 
 ```bash
 # Both analyzers ship with this skill -- do not reimplement them.
-python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
-python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --kernel <kernel> --topk 15 --mode both --detail --context 4
 ```
 
 Skip to **Step 5: Interpret Results**.
@@ -328,8 +338,9 @@ Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512
 wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
 combined ≤ 256, e.g. freeing ~24 VGPRs.
 
-**Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
-arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
+**Note**: `maxnreg` has been removed (it never reached LLVM). Forcing
+`accum_vgpr=0` with it doubled occupancy but caused MFMA spills through
+arch_vgpr — measured 4.5x GPU slowdown. Use `waves_per_eu` instead.
 
 ### L2 / HBM efficiency analysis (PMC, not ATT)
 
@@ -433,7 +444,7 @@ After running `hotspot_analyzer.py --detail`, produce a prioritized plan:
 ### #1 :LINE  stall=XK (N%)  VMEM-load  stall_rate=92%
 Root cause: buffer_load inside QK MFMA loop — only 1 MFMA of hiding time.
 Fix: Move all V loads before the QK MFMA loop.
-Estimated gain: ~20% kernel cycle reduction.
+Estimated gain: ~20% kernel cycle reduction (hypothesis; verify correctness and re-time).
 
 ### #2 :LINE  stall=XK (N%)  VMEM-load  stall_rate=80%
 Root cause: K loads sequential with no compute interleaved.

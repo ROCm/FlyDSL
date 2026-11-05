@@ -174,7 +174,7 @@ class CompilationContext:
 
     _current = threading.local()
 
-    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    # Thread-local storage for compile hints (waves_per_eu, fast_fp_math, etc.)
     _compile_hints = threading.local()
 
     @classmethod
@@ -208,6 +208,7 @@ class CompilationContext:
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
         # loads it.  Populated by ExternFunction when module_init_fn is set.
         self.post_load_processors: list = []
+        self.ktrace_buf_arg = None
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
@@ -387,6 +388,9 @@ class KernelLauncher:
         kernel_operands = []
         for arg in kernel_args:
             kernel_operands.extend(extract_to_ir_values(arg))
+        _ktrace_ctx = CompilationContext.get_current()
+        if _ktrace_ctx is not None and _ktrace_ctx.ktrace_buf_arg is not None:
+            kernel_operands.append(_ktrace_ctx.ktrace_buf_arg)
 
         with launch_loc:
             grid_x = Index(grid_dims[0]).ir_value()
@@ -462,25 +466,6 @@ class KernelFunction:
 
     def __init__(self, func: Callable, name: Optional[str] = None, known_block_size=None):
         install_excepthook()
-        # ASTRewriter.transform mutates `func.__code__` in place.  To preserve
-        # the *pre-rewrite* code object (whose co_names / co_freevars still
-        # reference helper callables that the rewriter inlines into IR ops),
-        # build a shallow function wrapper around the original __code__ here,
-        # BEFORE the transform runs.  The JIT-cache dependency collector
-        # uses this to detect changes to closure-captured helpers.
-        import types as _types
-
-        _orig_code = func.__code__
-        self._original_func = _types.FunctionType(
-            _orig_code,
-            func.__globals__,
-            name=func.__name__,
-            argdefs=func.__defaults__,
-            closure=func.__closure__,
-        )
-        self._original_func.__kwdefaults__ = func.__kwdefaults__
-        self._original_func.__qualname__ = func.__qualname__
-        self._original_func.__module__ = func.__module__
         self._func = ASTRewriter.transform(func)
         self._name = name
         self._known_block_size = _validate_known_block_size(known_block_size)
@@ -553,6 +538,10 @@ class KernelFunction:
         kernel_arg_types = []
         for value in param_values:
             kernel_arg_types.extend(get_ir_types(value))
+
+        ktrace_traced = ctx.ktrace_buf_arg is not None
+        if ktrace_traced:
+            kernel_arg_types.append(ctx.ktrace_buf_arg.type)
 
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:

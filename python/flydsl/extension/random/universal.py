@@ -86,13 +86,20 @@ def philox(seed, c0, c1, c2, c3, n_rounds: int = 10):
 
 
 def randint4x(seed, offset, n_rounds: int = 10):
-    """Return four Philox-generated ``Uint32`` words.
+    """Generate four unsigned 32-bit random words with Philox.
 
-    The parameter names, order, and default round count match Triton's
-    ``randint4x(seed, offset, n_rounds=10)`` API, down to how a wide or signed
-    input splits across the key and counter words. The same ``(seed, offset)``
-    always yields the same words, so no RNG state has to be threaded through a
-    kernel.
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+            Inputs wider than 32 bits populate two counter words.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        A tuple of four ``Uint32`` values from one Philox 4x32 draw.
+
+    Note:
+        The same ``(seed, offset, n_rounds)`` always produces the same tuple.
+        Use a distinct offset for each logically independent draw.
     """
     low, high = _offset_words(offset)
     zero = Uint32(0)
@@ -100,10 +107,20 @@ def randint4x(seed, offset, n_rounds: int = 10):
 
 
 def randint(seed, offset, n_rounds: int = 10):
-    """Return the first Philox-generated ``Uint32`` word for ``(seed, offset)``.
+    """Generate one unsigned 32-bit random word with Philox.
 
-    The other three words of the draw are discarded; use :func:`randint4x` when
-    four independent words per offset are wanted.
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        The first ``Uint32`` word produced by :func:`randint4x` for the same
+        arguments.
+
+    Note:
+        The other three words in the Philox draw are discarded. Use
+        :func:`randint4x` when four values are needed from each offset.
     """
     word, _, _, _ = randint4x(seed, offset, n_rounds)
     return word
@@ -128,12 +145,39 @@ def uint_to_uniform_float(word):
 
 
 def rand(seed, offset, n_rounds: int = 10):
-    """Return one ``Float32`` uniformly drawn from [0, 1)."""
+    """Generate one uniformly distributed ``Float32`` value in ``[0, 1)``.
+
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        A uniformly distributed ``Float32`` value in the half-open interval
+        ``[0, 1)``.
+
+    Note:
+        This converts the first word produced by :func:`randint4x`; the other
+        three words are discarded.
+    """
     return uint_to_uniform_float(randint(seed, offset, n_rounds))
 
 
 def rand4x(seed, offset, n_rounds: int = 10):
-    """Return four ``Float32`` values uniformly drawn from [0, 1)."""
+    """Generate four uniformly distributed ``Float32`` values in ``[0, 1)``.
+
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        A tuple of four uniformly distributed ``Float32`` values in the
+        half-open interval ``[0, 1)``.
+
+    Note:
+        All four values are derived from one Philox 4x32 draw.
+    """
     w0, w1, w2, w3 = randint4x(seed, offset, n_rounds)
     return (
         uint_to_uniform_float(w0),
@@ -155,14 +199,43 @@ def pair_uniform_to_normal(u1, u2):
 
 
 def randn(seed, offset, n_rounds: int = 10):
-    """Return one ``Float32`` drawn from the standard normal distribution."""
+    """Generate one standard normally distributed ``Float32`` value.
+
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        A ``Float32`` sample from a normal distribution with mean 0 and
+        variance 1.
+
+    Note:
+        The result is the first output of a Box-Muller transform applied to
+        the first two words of one Philox draw. The remaining outputs are
+        discarded.
+    """
     w0, w1, _, _ = randint4x(seed, offset, n_rounds)
     normal, _ = pair_uniform_to_normal(uint_to_uniform_float(w0), uint_to_uniform_float(w1))
     return normal
 
 
 def randn4x(seed, offset, n_rounds: int = 10):
-    """Return four ``Float32`` values drawn from the standard normal distribution."""
+    """Generate four standard normally distributed ``Float32`` values.
+
+    Args:
+        seed: Python integer or integer DSL value used as the Philox key.
+        offset: Python integer or integer DSL value used as the Philox counter.
+        n_rounds: Number of Philox rounds. Defaults to 10.
+
+    Returns:
+        A tuple of four ``Float32`` samples from a normal distribution with
+        mean 0 and variance 1.
+
+    Note:
+        The function converts one Philox 4x32 draw with two Box-Muller
+        transforms.
+    """
     u0, u1, u2, u3 = rand4x(seed, offset, n_rounds)
     n0, n1 = pair_uniform_to_normal(u0, u1)
     n2, n3 = pair_uniform_to_normal(u2, u3)

@@ -9,7 +9,7 @@
 
 </div>
 
-> A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
+> A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling.
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
 tiling, partitioning, data movement, and kernel structure at a high level.
@@ -20,9 +20,10 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 
 ## Overview
 
-- **FlyDSL (Python DSL)**: author kernels in Python and compile them through the Fly dialect
+- **FlyDSL (Python DSL)**: author kernels in Python, compile them through the Fly dialect,
+  and export compiled specializations as linkable C objects
   - Primary package: `python/flydsl/`
-  - Kernel examples: `kernels/` (importable as `kernels.*`)
+  - Kernel examples: `kernels/` (importable as `kernels.*` from a source checkout; not installed in the wheel)
 - **Fly dialect**: the layout IR and compiler foundation
   - Core abstractions: `!fly.int_tuple`, `!fly.layout`, `!fly.coord_tensor`, `!fly.memref`
   - Algebra ops: composition/product/divide/partition + coordinate mapping ops
@@ -31,21 +32,23 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 
 ### Repository layout
 
-```
+```text
 FlyDSL/
 ├── scripts/                   # build & test scripts
-│   ├── build_llvm.sh          # build LLVM/MLIR from source
+│   ├── build_llvm.sh          # build LLVM/MLIR from source (applies thirdparty/llvm-extensions)
+│   ├── llvm_extension.sh      # create/rebase an LLVM extension
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
+│   ├── windows/               # build_llvm_windows.ps1, build_windows.ps1: the same on Windows
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
 ├── include/flydsl/            # C++ Fly/FlyROCDL dialect headers
 ├── lib/                       # C++ dialect implementation + Python bindings
 ├── python/
 │   ├── flydsl/                # Python DSL sources
-│   │   ├── expr/              # DSL expression API (primitive, arith, vector, gpu, rocdl, buffer_ops, math, mem_ops)
+│   │   ├── expr/              # DSL expression API (typing, primitive, derived, arith, gpu, rocdl, math)
 │   │   ├── compiler/          # JIT compilation pipeline (ast_rewriter, kernel_function, jit_function, backends/)
 │   │   ├── runtime/           # Device runtime (device.py, device_runtime/)
-│   │   ├── utils/             # Utilities (smem_allocator, env, logger)
+│   │   ├── utils/             # Utilities (env, logger)
 │   │   └── autotune.py        # Triton-style autotune module
 │   └── mlir_flydsl/           # MLIR Python bindings (built, not edited)
 ├── examples/                  # Runnable examples
@@ -53,7 +56,7 @@ FlyDSL/
 │   ├── 02-tiledCopy.py        # Tiled copy with partitioned tensors
 │   ├── 03-tiledMma.py         # Tiled MMA (GEMM) with MFMA atoms
 │   └── 04-preshuffle_gemm.py  # Preshuffle GEMM end-to-end example
-├── kernels/                   # Production GPU kernels (importable as `kernels.*`)
+├── kernels/                   # Source-tree GPU kernels (not installed in the wheel)
 ├── tests/                     # All tests (kernels/, mlir/, unit/)
 ├── CMakeLists.txt             # top-level CMake
 └── setup.py                   # Python packaging
@@ -71,7 +74,7 @@ FlyDSL/
 For most users, install the published package directly:
 
 ```bash
-pip install flydsl
+python -m pip install flydsl
 ```
 
 ### Verify the install
@@ -97,28 +100,63 @@ bash scripts/build_llvm.sh -j64
 bash scripts/build.sh -j64
 
 # Install in development mode
-pip install -e .
+python -m pip install -e .
 ```
 
 If you already have an MLIR build with Python bindings enabled, point to it instead:
 
 ```bash
-pip install nanobind numpy pybind11  # build.sh does not install these
+python -m pip install nanobind numpy pybind11  # build.sh does not install these
 export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
-pip install -e .
+python -m pip install -e .
 ```
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
+
+The build scripts use `python3` on `PATH` by default. Set `PYTHON_EXECUTABLE`
+to select another Python 3.10+ interpreter (including a virtual environment):
+
+```bash
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build_llvm.sh -j64
+PYTHON_EXECUTABLE=/path/to/venv/bin/python bash scripts/build.sh -j64
+```
+
+LLVM's Python dependencies are installed into that interpreter's environment.
+Both CMake Python detection passes are pinned to it. Builds launched by
+`python -m pip` or `python setup.py` use that Python interpreter instead of
+`PATH` or an inherited `PYTHON_EXECUTABLE`, so newly built bindings match the wheel ABI.
+Use a separate `FLY_BUILD_DIR` for each Python version to avoid reusing old bindings.
+
+### Build on Windows
+
+Prerequisites:
+
+- Visual Studio 2022 with the C++ tools and the C++ Clang tools, or pass
+  `-ClangCl <path to clang-cl.exe>` to both scripts.
+- CMake 3.20+, Ninja and Git on `PATH`.
+- 64-bit Python 3.10+ in a venv with `setuptools` and `wheel`.
+- In that venv, TheRock wheels for your GPU family
+  (`--index-url https://rocm.nightlies.amd.com/v2/gfx120X-all/`): `torch` first, then
+  the matching `rocm[libraries,devel]==<rocm_sdk.__version__>`, then `rocm-sdk init`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_llvm_windows.ps1 -Python .venv\Scripts\python.exe
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_windows.ps1 -Python .venv\Scripts\python.exe
+$env:FLY_BUILD_DIR = "$PWD\build-fly"; .venv\Scripts\python setup.py bdist_wheel
+```
+
+Without a torch that sees the GPU, set `FLYDSL_GPU_ARCH` (for example `gfx1201`).
+AOT export (`export_to_c`) is Linux-only.
 
 ### Run tests
 
 Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
 
 ```bash
-pip install pytest pandas
+python -m pip install pytest pandas
 # torch must be a ROCm build matching your ROCm version (rocm7.2 shown):
-pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+python -m pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 
 # Run GEMM correctness tests (fast, ~15s)
 python -m pytest tests/kernels/test_preshuffle_gemm.py -m "not large_shape"
@@ -133,12 +171,12 @@ bash scripts/run_benchmark.sh
 
 ```bash
 # Install from PyPI:
-pip install flydsl
+python -m pip install flydsl
 
 # Full source build from scratch:
 bash scripts/build_llvm.sh -j64   # one-time: build LLVM/MLIR
 bash scripts/build.sh -j64        # build FlyDSL
-pip install -e .                  # install in dev mode
+python -m pip install -e .        # install in dev mode
 bash scripts/run_tests.sh         # verify
 
 # Rebuild after code changes (C++ only):
@@ -154,11 +192,24 @@ bash scripts/build.sh -j64
   - `unset MLIR_PATH` and let `build.sh` auto-detect, or set it to the correct path.
 
 - **`No module named flydsl`**
-  - Run `pip install flydsl`. For source checkouts, run `pip install -e .` after building.
+  - Run `python -m pip install flydsl`. For source checkouts, run `python -m pip install -e .` after building.
 
 - **MLIR `.so` load errors**
   - Add MLIR build lib dir to the loader path:
-    -  export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
+
+    ```bash
+    export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
+    ```
+
+## Claude Code plugin
+
+The skills under [`.claude/skills/`](.claude/skills) for authoring, debugging, profiling and optimizing FlyDSL kernels are also published as a [Claude Code](https://claude.com/claude-code) plugin, so you can use them outside this checkout:
+
+```
+/plugin install flydsl --marketplace ROCm/FlyDSL
+```
+
+Or from the shell: `claude plugin marketplace add ROCm/FlyDSL && claude plugin install flydsl@flydsl`. Skills are invoked as `/flydsl:<skill>` (e.g. `/flydsl:debug-flydsl-kernel`); update with `claude plugin update flydsl@flydsl`.
 
 ## Documentation
 
@@ -219,6 +270,7 @@ def my_kernel(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int]):
 @flyc.jit
 def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int],
            stream: fx.Stream = fx.Stream(None)):
+    grid_x = (n + 255) // 256
     my_kernel(arg_a, arg_b, n).launch(
         grid=(grid_x, 1, 1),
         block=(256, 1, 1),
@@ -230,7 +282,7 @@ def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int],
 
 On first call, `@flyc.jit` traces the Python function into an MLIR module, then compiles it through `MlirCompiler`. The pass list is built by `RocmBackend._pipeline_parts()` in three stages — see [`docs/architecture_guide.md`](docs/architecture_guide.md#3-compilation-pipeline) for the per-pass table.
 
-```
+```text
 Python Function (@flyc.kernel / @flyc.jit)
         │
         ▼  AST Rewriting + Tracing
@@ -336,7 +388,7 @@ def vectorAddKernel(
 
 @flyc.jit
 def vectorAdd(
-    A: fx.Tensor, B: fx.Tensor, C,
+    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     n: fx.Int32,  # dynamic int32
     const_n: fx.Constexpr[int],  # static int32, affects JIT cache-key
     stream: fx.Stream = fx.Stream(None),
@@ -377,13 +429,14 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| **GFX1250 BF16 GEMM** | `test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | **VecAdd** | `test_vec_add.py` | Basic vector addition |
 | **Quantization** | `test_quant.py` | Quantization utilities |
 
-**Verified Platforms**:
+**Targeted platforms**:
+
 *   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), gfx1250, Radeon AI PRO R9700 (gfx1201)
-*   Linux / ROCm 6.x, 7.x
+*   Linux / ROCm 6.x and 7.x. Hardware coverage varies by CI runner and revision; consult the current workflow results for validation status.
 
 ## 🙏 Acknowledgements
 

@@ -3,12 +3,8 @@
 
 """Layout helpers for GEMM kernels.
 
-Parses fly layout type strings (e.g. '(4,64):(64,1)') and computes
-idx2crd / crd2idx with plain arith ops for static layouts.
-Falls back to fly dialect ops for dynamic layouts.
-
-Optimisation: power-of-2 strides/shapes emit ``shrui`` / ``andi`` instead of
-``divui`` / ``remui``, avoiding 10-15-cycle V_DIV sequences on CDNA GPUs.
+Static layouts use typed arithmetic and replace power-of-two division/remainder
+with shifts/masks. Dynamic layouts use fx.idx2crd and fx.crd2idx.
 """
 
 import builtins as _builtins
@@ -17,42 +13,22 @@ import re
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.expr import arith
-from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T
-
-
-def _wrap(v):
-    """Wrap raw ir.Value in ArithValue for operator overloading compatibility."""
-    if isinstance(v, ArithValue):
-        return v
-    if isinstance(v, ir.Value):
-        return ArithValue(v)
-    return v
 
 
 def _is_pow2(n):
-    """Return True when *n* is a positive power of two."""
     return n > 0 and (n & (n - 1)) == 0
 
 
 def _div_pow2(val, divisor):
-    """Unsigned divide index *val* by a **compile-time** power-of-2 *divisor*.
-
-    Emits ``arith.shrui`` (1 VALU cycle) instead of ``arith.divui``
-    (10-15 VALU cycles on CDNA).
-    """
+    """Unsigned divide by a compile-time power of two using a shift."""
     shift = _math.log2(divisor)
     assert shift == int(shift), f"{divisor} is not a power of 2"
-    return arith.shrui(val, arith.index(int(shift)))
+    return fx.Index(val) >> fx.Index(int(shift))
 
 
 def _mod_pow2(val, modulus):
-    """Unsigned remainder of index *val* by a **compile-time** power-of-2 *modulus*.
-
-    Emits ``arith.andi`` (1 VALU cycle) instead of ``arith.remui``.
-    """
-    return arith.andi(val, arith.index(modulus - 1))
+    """Unsigned remainder by a compile-time power of two using a mask."""
+    return fx.Index(val) & fx.Index(modulus - 1)
 
 
 def _parse_dim(tok):
@@ -73,14 +49,13 @@ def _parse_layout(ly):
 
 
 def _has_dynamic_strides(strides):
-    """Check if any stride is dynamic (None)."""
     return any(s is None for s in strides)
 
 
 def idx2crd(idx, layout):
     """Decompose flat index into a list of coordinate values.
 
-    For static layouts, computes coordinates with plain arith ops.
+    For static layouts, computes coordinates with typed arithmetic.
     Power-of-2 strides/shapes use shift/mask instead of div/rem.
     For dynamic layouts, falls back to fx.idx2crd + fx.get.
     """
@@ -92,10 +67,10 @@ def idx2crd(idx, layout):
     if parsed is None or _has_dynamic_strides(parsed[1]):
         result = fx.idx2crd(fx.Int32(idx), layout)
         ndims = len(parsed[1]) if parsed else 1
-        return [_wrap(fx.get(result, i)) for i in range(ndims)]
+        return [fx.get(result, i) for i in range(ndims)]
 
     if isinstance(idx, ir.Value) and not isinstance(idx.type, ir.IndexType):
-        idx = arith.index_cast(T.index, idx)
+        idx = fx.Index(idx).ir_value()
     shapes, strides = parsed
     ndims = len(strides)
 
@@ -112,12 +87,12 @@ def idx2crd(idx, layout):
         elif _is_pow2(stride_val):
             c = _div_pow2(remaining, stride_val)
         else:
-            c = remaining / arith.index(stride_val)
+            c = fx.Index(remaining) // fx.Index(stride_val)
         if size_val is not None:
             if _is_pow2(size_val):
                 c = _mod_pow2(c, size_val)
             else:
-                c = c % arith.index(size_val)
+                c = fx.Index(c) % fx.Index(size_val)
         coords[i] = c
     for i in range(ndims):
         if coords[i] is None:
@@ -128,7 +103,7 @@ def idx2crd(idx, layout):
 def crd2idx(crd, layout):
     """Compute flat index from a coordinate tuple/list.
 
-    For static layouts, computes with plain arith ops.
+    For static layouts, computes with typed arithmetic.
     For dynamic layouts, falls back to fx.crd2idx with fx.make_coord.
     """
     if not isinstance(crd, (list, tuple)):
@@ -136,42 +111,28 @@ def crd2idx(crd, layout):
     parsed = _parse_layout(layout)
 
     if parsed is None or _has_dynamic_strides(parsed[1]):
-        crd_i32 = []
-        for c in crd:
-            cv = c
-            if isinstance(cv, int):
-                cv = arith.constant(cv, T.i32)
-                crd_i32.append(cv)
-                continue
-            if isinstance(cv, ArithValue):
-                raw = cv.ir_value() if hasattr(cv, "ir_value") else cv
-                if isinstance(raw, ir.Value) and isinstance(raw.type, ir.IndexType):
-                    cv = arith.index_cast(T.i32, raw)
-                else:
-                    cv = raw
-            elif isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
-                cv = arith.index_cast(T.i32, cv)
-            elif hasattr(cv, "ir_value"):
-                raw = cv.ir_value()
-                if isinstance(raw, ir.Value) and isinstance(raw.type, ir.IndexType):
-                    cv = arith.index_cast(T.i32, raw)
-                else:
-                    cv = raw
-            crd_i32.append(cv)
+        crd_i32 = [
+            (
+                fx.Int32(c).ir_value()
+                if isinstance(c, int) or isinstance(fx.as_ir_value(c).type, ir.IndexType)
+                else fx.as_ir_value(c)
+            )
+            for c in crd
+        ]
         coord_val = fx.make_coord(*crd_i32)
         scalar = fx.get_scalar(fx.crd2idx(coord_val, layout)).ir_value()
         if not isinstance(scalar.type, ir.IndexType):
-            scalar = arith.index_cast(T.index, scalar)
-        return _wrap(scalar)
+            scalar = fx.Index(scalar).ir_value()
+        return scalar
 
     _, strides = parsed
     result = None
     for coord_v, stride_v in _builtins.zip(crd, strides):
         if stride_v == 0:
             continue
-        term = coord_v if stride_v == 1 else coord_v * arith.index(stride_v)
+        term = coord_v if stride_v == 1 else coord_v * fx.Index(stride_v)
         result = term if result is None else result + term
-    return result if result is not None else arith.index(0)
+    return result if result is not None else fx.Index(0).ir_value()
 
 
 def get(int_tuple, mode):

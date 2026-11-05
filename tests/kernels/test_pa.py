@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from itertools import combinations, product
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -579,6 +580,7 @@ def run_pa_decode_ps_test(
     trans_v: bool,
     kv_varlen: bool,
     sliding_window: int,
+    measure_performance: bool = True,
 ) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
     if not HAS_FLYDSL_PS:
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
@@ -742,7 +744,12 @@ def run_pa_decode_ps_test(
                 sliding_window=sliding_window,
             )
 
-        gluon_time = measure_us(gluon_call)
+        if measure_performance:
+            gluon_time = measure_us(gluon_call)
+        else:
+            gluon_call()
+            torch.cuda.synchronize()
+            gluon_time = 0.0
         gluon_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
         print("\nGluon vs Torch:")
         torch.testing.assert_close(gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol)
@@ -821,7 +828,12 @@ def run_pa_decode_ps_test(
             temporary_output=flydsl_temporary_output,
         )
 
-    flydsl_ps_time = measure_us(flydsl_ps_call)
+    if measure_performance:
+        flydsl_ps_time = measure_us(flydsl_ps_call)
+    else:
+        flydsl_ps_call()
+        torch.cuda.synchronize()
+        flydsl_ps_time = 0.0
     ps_tol = get_tolerance(kv_varlen=kv_varlen, sliding_window=sliding_window)
     print("\nFlyDSL PS vs Torch:")
     torch.testing.assert_close(flydsl_ps_output, reference_output, atol=ps_tol, rtol=ps_tol)
@@ -1087,21 +1099,61 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
     print("\nAll PS-only tests passed!")
 
 
-@pytest.mark.parametrize("compute_type", ["fp8"])
-@pytest.mark.parametrize("context_partition_size", [256])
-@pytest.mark.parametrize("head_size", [128, 256])
-@pytest.mark.parametrize("num_heads", [(8, 1), (16, 1), (4, 1)])
-@pytest.mark.parametrize("query_length", [1, 2, 3, 4])
-@pytest.mark.parametrize("quant_mode", ["per_token", "per_tensor"])
-@pytest.mark.parametrize("context_length", [1027, 8192])
-@pytest.mark.parametrize("batch_size", [3, 81, 128])
-@pytest.mark.parametrize("trans_v", [True, False])
-@pytest.mark.parametrize("kv_varlen", [False, True])
-@pytest.mark.parametrize("block_size", [16, 64])
-@pytest.mark.parametrize("sliding_window", [0])
+_NORMAL_ACCURACY_CASES = [
+    # Pairwise covering array for the nine varying inputs.  The old Cartesian
+    # product generated 2,304 nearly identical end-to-end launches.
+    pytest.param(128, (4, 1), 1, "per_token", 1027, 3, True, False, 16, id="small-fixed"),
+    pytest.param(256, (8, 1), 2, "per_tensor", 8192, 3, False, True, 64, id="long-varlen"),
+    pytest.param(128, (16, 1), 3, "per_token", 1027, 81, False, True, 64, id="mid-varlen"),
+    pytest.param(256, (16, 1), 4, "per_tensor", 8192, 128, True, False, 16, id="large-fixed"),
+    pytest.param(128, (4, 1), 4, "per_tensor", 1027, 128, False, True, 64, id="gqa4-varlen"),
+    pytest.param(256, (8, 1), 2, "per_token", 1027, 81, True, False, 16, id="gqa8-transposed"),
+    pytest.param(256, (4, 1), 1, "per_tensor", 8192, 81, True, True, 64, id="long-gqa4"),
+    pytest.param(128, (8, 1), 3, "per_token", 8192, 128, False, False, 16, id="long-gqa8"),
+    pytest.param(256, (4, 1), 3, "per_tensor", 1027, 3, True, False, 64, id="short-hd256"),
+    pytest.param(128, (8, 1), 4, "per_token", 1027, 3, True, True, 16, id="short-q4-varlen"),
+    pytest.param(128, (16, 1), 1, "per_token", 1027, 3, False, False, 16, id="mqa16-fixed"),
+    pytest.param(128, (4, 1), 2, "per_token", 1027, 128, True, False, 16, id="batch128-gqa4"),
+    pytest.param(128, (8, 1), 1, "per_token", 1027, 128, True, False, 16, id="batch128-gqa8"),
+    pytest.param(128, (16, 1), 2, "per_token", 1027, 3, True, False, 16, id="mqa16-q2"),
+    pytest.param(128, (4, 1), 4, "per_token", 1027, 81, True, False, 16, id="gqa4-q4"),
+]
+
+_NORMAL_ACCURACY_AXES = [
+    [128, 256],
+    [(4, 1), (8, 1), (16, 1)],
+    [1, 2, 3, 4],
+    ["per_token", "per_tensor"],
+    [1027, 8192],
+    [3, 81, 128],
+    [True, False],
+    [False, True],
+    [16, 64],
+]
+
+
+def _pairwise_projection(cases):
+    return {
+        (left_index, left, right_index, right)
+        for case in cases
+        for left_index, right_index in combinations(range(len(case)), 2)
+        for left, right in [(case[left_index], case[right_index])]
+    }
+
+
+def test_normal_accuracy_cases_preserve_pairwise_coverage() -> None:
+    """Prevent matrix edits from silently dropping an edge-value pairing."""
+    selected = [tuple(case.values) for case in _NORMAL_ACCURACY_CASES]
+    expected = _pairwise_projection(product(*_NORMAL_ACCURACY_AXES))
+    missing = expected - _pairwise_projection(selected)
+    assert not missing, f"normal PA matrix is missing {sorted(missing, key=repr)}"
+
+
+@pytest.mark.parametrize(
+    "head_size,num_heads,query_length,quant_mode,context_length,batch_size,trans_v,kv_varlen,block_size",
+    _NORMAL_ACCURACY_CASES,
+)
 def test_normal_accuracy(
-    compute_type: str,
-    context_partition_size: int,
     head_size: int,
     num_heads: Tuple[int, int],
     query_length: int,
@@ -1111,7 +1163,6 @@ def test_normal_accuracy(
     trans_v: bool,
     kv_varlen: bool,
     block_size: int,
-    sliding_window: int,
 ) -> None:
     run_pa_decode_ps_test(
         context_length=context_length,
@@ -1119,13 +1170,14 @@ def test_normal_accuracy(
         num_heads=num_heads,
         head_size=head_size,
         block_size=block_size,
-        compute_type=dtypes.d_dtypes[compute_type],
+        compute_type=dtypes.d_dtypes["fp8"],
         query_length=query_length,
         quant_mode=quant_mode,
-        context_partition_size=context_partition_size,
+        context_partition_size=256,
         trans_v=trans_v,
         kv_varlen=kv_varlen,
-        sliding_window=sliding_window,
+        sliding_window=0,
+        measure_performance=False,
     )
 
 
@@ -1539,6 +1591,7 @@ def test_metadata_accuracy(query_length: int, quant_mode: str) -> None:
         trans_v=True,
         kv_varlen=False,
         sliding_window=0,
+        measure_performance=False,
     )
 
 
@@ -1597,6 +1650,7 @@ def test_sliding_window_accuracy(
         trans_v=trans_v,
         kv_varlen=kv_varlen,
         sliding_window=sliding_window,
+        measure_performance=False,
     )
 
 

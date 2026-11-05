@@ -1,0 +1,166 @@
+diff --git a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
+index bcc47755a4..9ae621fdc6 100644
+--- a/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
++++ b/llvm/lib/Target/AMDGPU/AsmParser/AMDGPUAsmParser.cpp
+@@ -6990,11 +6990,13 @@ void AMDGPUAsmParser::checkKernelPrologues() {
+       if (!AMDHSAKernelSymbols.contains(Sym))
+         continue;
+       ArrayRef<unsigned> Prologue = ArrayRef(OpcodeStream).drop_front(Offset);
++      if (!Prologue.empty() && Prologue.front() == S_SETREG_IMM32_B32_gfx12)
++        Prologue = Prologue.drop_front();
+       if (Prologue.take_front(std::size(Required)) != ArrayRef(Required)) {
+         Warning(Loc, "kernel '" + Sym->getName() +
+                          "' does not begin with the required prologue "
+-                         "sequence: S_MOV_B64 followed by V_NOP and "
+-                         "GLOBAL_PREFETCH_B8");
++                         "sequence: s_mov_b64 followed by v_nop and "
++                         "global_prefetch_b8");
+       }
+     }
+   }
+diff --git a/llvm/lib/Target/AMDGPU/SIFrameLowering.cpp b/llvm/lib/Target/AMDGPU/SIFrameLowering.cpp
+index 0d31943cde..fad04e0c12 100644
+--- a/llvm/lib/Target/AMDGPU/SIFrameLowering.cpp
++++ b/llvm/lib/Target/AMDGPU/SIFrameLowering.cpp
+@@ -936,17 +936,6 @@ void SIFrameLowering::emitEntryFunctionPrologue(MachineFunction &MF,
+                                          PreloadedScratchRsrcReg,
+                                          ScratchRsrcReg, ScratchWaveOffsetReg);
+   }
+-
+-  if (ST.hasWaitXcnt()) {
+-    // Set REPLAY_MODE (bit 25) in MODE register to enable multi-group XNACK
+-    // replay. This aligns hardware behavior with the compiler's s_wait_xcnt
+-    // insertion logic, which assumes multi-group mode by default.
+-    unsigned RegEncoding =
+-        AMDGPU::Hwreg::HwregEncoding::encode(AMDGPU::Hwreg::ID_MODE, 25, 1);
+-    BuildMI(MBB, I, DL, TII->get(AMDGPU::S_SETREG_IMM32_B32))
+-        .addImm(1)
+-        .addImm(RegEncoding);
+-  }
+ }
+ 
+ // Emit scratch RSRC setup code, assuming `ScratchRsrcReg != AMDGPU::NoReg`
+diff --git a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+index 16743201d9..d73565481e 100644
+--- a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+@@ -3705,22 +3705,39 @@ bool SIInsertWaitcnts::run() {
+     }
+   }
+ 
+-  if (MFI->isEntryFunction() && ST.hasRequiresInitialUnclausedVmem()) {
+-    // Hardware entrypoints must begin with a specific sequence:
+-    //   S_MOV_B64 S[64:65], 0
+-    //   V_NOP
+-    //   GLOBAL_PREFETCH_B8 V0, S[64:65] SCOPE:SCOPE_SE TH:TH_LOAD_RT
+-    MachineBasicBlock::iterator I = EntryBB.begin();
+-    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::S_MOV_B64),
+-            AMDGPU::SGPR64_SGPR65)
+-        .addImm(0);
+-    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::V_NOP_e32));
+-    BuildMI(EntryBB, I, DebugLoc(), TII.get(AMDGPU::GLOBAL_PREFETCH_B8_SADDR))
+-        .addReg(AMDGPU::SGPR64_SGPR65)
+-        .addReg(AMDGPU::VGPR0, RegState::Undef)
+-        .addImm(0)
+-        .addImm(AMDGPU::CPol::SCOPE_SE | AMDGPU::CPol::TH_RT);
+-    Modified = true;
++  if (MFI->isEntryFunction()) {
++    MachineBasicBlock::iterator InsertPt = EntryBB.begin();
++
++    if (ST.hasWaitXcnt()) {
++      // Set REPLAY_MODE (bit 25) in MODE register to enable multi-group XNACK
++      // replay. This aligns hardware behavior with the compiler's s_wait_xcnt
++      // insertion logic, which assumes multi-group mode by default.
++      unsigned RegEncoding =
++          AMDGPU::Hwreg::HwregEncoding::encode(AMDGPU::Hwreg::ID_MODE, 25, 1);
++      BuildMI(EntryBB, InsertPt, DebugLoc(),
++              TII.get(AMDGPU::S_SETREG_IMM32_B32))
++          .addImm(1)
++          .addImm(RegEncoding);
++      Modified = true;
++    }
++
++    if (ST.hasRequiresInitialUnclausedVmem()) {
++      // Hardware entrypoints must begin with a specific sequence:
++      //   S_MOV_B64 S[64:65], 0
++      //   V_NOP
++      //   GLOBAL_PREFETCH_B8 V0, S[64:65] SCOPE:SCOPE_SE TH:TH_LOAD_RT
++      BuildMI(EntryBB, InsertPt, DebugLoc(), TII.get(AMDGPU::S_MOV_B64),
++              AMDGPU::SGPR64_SGPR65)
++          .addImm(0);
++      BuildMI(EntryBB, InsertPt, DebugLoc(), TII.get(AMDGPU::V_NOP_e32));
++      BuildMI(EntryBB, InsertPt, DebugLoc(),
++              TII.get(AMDGPU::GLOBAL_PREFETCH_B8_SADDR))
++          .addReg(AMDGPU::SGPR64_SGPR65)
++          .addReg(AMDGPU::VGPR0, RegState::Undef)
++          .addImm(0)
++          .addImm(AMDGPU::CPol::SCOPE_SE | AMDGPU::CPol::TH_RT);
++      Modified = true;
++    }
+   }
+ 
+   return Modified;
+diff --git a/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s b/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
+index 10b3d4bd4e..a5e4a3f1cf 100644
+--- a/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
++++ b/llvm/test/MC/AMDGPU/amdhsa-kernel-prologue.s
+@@ -1,6 +1,7 @@
+ // RUN: llvm-mc -triple=amdgpu12.50-amd-amdhsa %s -filetype=null 2>&1 | FileCheck %s -implicit-check-not=warning: -check-prefix=GFX1250
++// RUN: llvm-mc -triple=amdgpu12.50-amd-amdhsa -mattr=-wait-xcnt %s -filetype=null 2>&1 | FileCheck %s -implicit-check-not=warning: -check-prefix=GFX1250
+ 
+-// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_before' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_before' does not begin with the required prologue sequence: s_mov_b64 followed by v_nop and global_prefetch_b8
+ test_wrong_before:
+   s_nop 1
+ 
+@@ -14,7 +15,7 @@ test_wrong_before:
+   .amdhsa_next_free_vgpr 0
+ .end_amdhsa_kernel
+ 
+-// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_after' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_wrong_after' does not begin with the required prologue sequence: s_mov_b64 followed by v_nop and global_prefetch_b8
+ test_wrong_after:
+   s_nop 2
+ 
+@@ -23,17 +24,40 @@ test_wrong_after:
+   .amdhsa_next_free_vgpr 1
+ .end_amdhsa_kernel
+ 
+-// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_old_sequence' does not begin with the required prologue sequence: S_MOV_B64 followed by V_NOP and GLOBAL_PREFETCH_B8
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_old_sequence' does not begin with the required prologue sequence: s_mov_b64 followed by v_nop and global_prefetch_b8
+ test_old_sequence:
+   global_prefetch_b8 v0, null scope:SCOPE_SE
+   v_nop
+ 
++.amdhsa_kernel test_setreg_after_v_nop
++  .amdhsa_next_free_sgpr 66
++  .amdhsa_next_free_vgpr 1
++.end_amdhsa_kernel
++
++// GFX1250: :[[@LINE+1]]:1: warning: kernel 'test_setreg_after_v_nop' does not begin with the required prologue sequence: s_mov_b64 followed by v_nop and global_prefetch_b8
++test_setreg_after_v_nop:
++  s_mov_b64 s[64:65], 0
++  v_nop
++  s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
++
++.amdhsa_kernel test_correct_without_setreg
++  .amdhsa_next_free_sgpr 66
++  .amdhsa_next_free_vgpr 1
++.end_amdhsa_kernel
++
++test_correct_without_setreg:
++  s_mov_b64 s[64:65], 0
++  v_nop
++  global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT
++
+ .amdhsa_kernel test_correct
+   .amdhsa_next_free_sgpr 66
+   .amdhsa_next_free_vgpr 1
+ .end_amdhsa_kernel
+ 
+ test_correct:
++  s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
+   s_mov_b64 s[64:65], 0
+   v_nop
+   global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE th:TH_LOAD_RT

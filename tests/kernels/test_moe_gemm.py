@@ -66,29 +66,32 @@ def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch
 # ---------------------------------------------------------------------------
 # a16wi4 (bf16 A x signed-int4 W groupwise) routing of the legacy int4_bf16 path.
 #
-# The moe_2stage_a16wmix ``w_dtype="int4"`` kernel reuses the a16w4 mxfp4 body: int4
-# W is packed 2 nibbles/byte in the SAME preshuffle byte layout as mxfp4 (via
-# ``shuffle_weight`` over a float4_e2m1fn_x2 view of the packed bytes), and the
-# groupwise bf16 scale (group_size=32) is re-laid-out to (E, N, G//2, 2). This lets
-# the legacy ``int4_bf16`` weights map onto the a16w4 mxfp4 preshuffle pipeline.
+# The moe_2stage_a16wmix ``w_dtype="int4"`` kernel shares the a16w4 mxfp4 body but
+# keeps its own operand layout: W is ``shuffle_weight``-ed as int8 and only then packed
+# 2 nibbles/byte, pairing K_j with K_{j+4} (kpack=8), and the groupwise bf16 scale
+# (group_size=32) is re-laid-out to (E, G//2, N, 2). Both match aiter's copy of this
+# kernel (``aiter/ops/shuffle.py``), so the same weights feed either repo.
 # ---------------------------------------------------------------------------
 A16WI4_GROUP = 32
 
 
 def _a16wi4_pack_shuffle_w(w_q_i8: torch.Tensor) -> torch.Tensor:
-    """Pack a signed-int4 (values in [-8,7]) 2D weight ``[rows, K]`` into the a16w4
-    mxfp4-compatible preshuffle byte layout (2 nibbles/byte, contiguous K)."""
-    from tests.kernels.utils.gemm_common_utils import pack_uint4
+    """Pack a signed-int4 (values in [-8,7]) 2D weight ``[rows, K]`` into the packed-int4
+    preshuffle byte layout the a16wi4 kernel reads.
 
-    rows, K = w_q_i8.shape
-    u = (w_q_i8.to(torch.int16) & 0xF).to(torch.uint8)  # [rows, K]
-    packed = pack_uint4(u)  # [rows, K//2] uint8 (low nibble = even K, high = odd K)
-    shuf = shuffle_weight(packed.view(torch.float4_e2m1fn_x2)).view(torch.uint8).contiguous()
-    return shuf.view(-1).contiguous()
+    Shuffle the int8 values first, then pack the pair four apart into one byte
+    (``b_j = v_j | (v_{j+4} << 4)``). That is the kpack=8 layout
+    ``utils.make_b_loader``'s ``load_b_raw_int4`` addresses -- two dwordx2 slots 128 B
+    apart -- and the nibble order its ``_int4_nibble_to_bf16x8(old_pack=True)`` undoes.
+    It is also what ``aiter/ops/shuffle.py::pack_int8_to_packed_int4`` produces, so the
+    same weights feed both repos' copies of this kernel.
+    """
+    shuf = shuffle_weight(w_q_i8)
+    return _pack_shuffled_int8_to_packed_int4_no_perm(shuf).view(-1).contiguous()
 
 
 def _a16wi4_scale_ng_from_legacy(scale_w_groups, scale_w_perrow, experts, N, K):
-    """Build the a16wi4 groupwise bf16 scale ``(E, N, G//2, 2)`` from either the
+    """Build the a16wi4 groupwise bf16 scale ``(E, G//2, N, 2)`` from either the
     legacy groupwise scale ``[E, G, N]`` (Opt-0 layout) or a per-row scale
     ``[E*N, 1]``/``[E*N]`` (expanded to all-equal groups)."""
     G = K // A16WI4_GROUP
@@ -940,7 +943,7 @@ def test_mxfp_moe_variants(a_dtype, variant):
     )
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)")
 @pytest.mark.parametrize("w_dtype", ["mxfp4", "bf16"], ids=["a16w4", "a16w16"])
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
@@ -992,7 +995,7 @@ def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m, w_dt
     )
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)")
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
@@ -1083,7 +1086,7 @@ def test_a16w4_gemm1_guinterleave_parity(tokens, model_dim, inter_dim, experts, 
     ), f"guinterleave stage1 mismatch: max|Δ|={(inter_std.float() - inter_gu.float()).abs().max().item()}"
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)")
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
@@ -1211,86 +1214,80 @@ def test_a16w4_moe_e2e_native_layout(tokens, model_dim, inter_dim, experts, topk
     assert verify_output(out, ref2, rtol=2e-3, atol=2e-3, logits_diff_threshold=2e-3)
 
 
+_MOE_2STAGE_CASES = [
+    # This test used to form a 6x3x3x2x2x2x2 Cartesian product.  Of its 864
+    # cases, 840 were skipped and 16 were non-running xfails.  Keep the eight
+    # valid a16w4 correctness paths; the broken fp4/a8w4 paths are already
+    # tracked by test_mxfp_moe_variants.
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "a16w4", "f16", False, False, False, -1, id="M-eager"
+    ),
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "a16w4", "f16", False, False, True, -1, id="M-graph"
+    ),
+    pytest.param(
+        333,
+        4096,
+        2048,
+        17,
+        9,
+        64,
+        128,
+        128,
+        256,
+        128,
+        False,
+        "a16w4",
+        "f16",
+        False,
+        False,
+        False,
+        -1,
+        id="L-eager",
+        marks=pytest.mark.large_shape,
+    ),
+    pytest.param(
+        333,
+        4096,
+        2048,
+        17,
+        9,
+        64,
+        128,
+        128,
+        256,
+        128,
+        False,
+        "a16w4",
+        "f16",
+        False,
+        False,
+        True,
+        -1,
+        id="L-graph",
+        marks=pytest.mark.large_shape,
+    ),
+    pytest.param(
+        64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, "a16w4", "f16", False, False, False, -1, id="FP4-S-eager"
+    ),
+    pytest.param(
+        64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, "a16w4", "f16", False, False, True, -1, id="FP4-S-graph"
+    ),
+    pytest.param(
+        128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, "a16w4", "f16", False, False, False, -1, id="FP4-M-eager"
+    ),
+    pytest.param(
+        128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, "a16w4", "f16", False, False, True, -1, id="FP4-M-graph"
+    ),
+]
+
+
+@pytest.mark.skipif("gfx95" not in ARCH, reason="A16W4 requires gfx950+")
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
-    [
-        # Small smoke (fast compile + run) for all in_dtype.
-        pytest.param(64, 256, 128, 4, 2, 16, 64, 128, 64, 128, False, id="S"),
-        # Medium (more realistic) for all in_dtype (skip_ref will auto-enable).
-        pytest.param(129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, id="M"),
-        # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
-        pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
-        # FP4-compatible shape (model_dim >= 256, tile_k >= 256, tile_k2 >= 256).
-        # NOTE: To fit within GPU memory during tests, we reduce batch sizes and sequence lengths
-        pytest.param(
-            64,
-            512,
-            256,
-            4,
-            2,
-            32,
-            128,
-            256,
-            128,
-            256,
-            False,
-            id="FP4-S",
-            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-        ),
-        pytest.param(
-            128,
-            1024,
-            256,
-            8,
-            2,
-            64,
-            128,
-            256,
-            256,
-            256,
-            False,
-            id="FP4-M",
-            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-        ),
-        pytest.param(
-            256,
-            1024,
-            256,
-            8,
-            2,
-            128,
-            128,
-            256,
-            256,
-            256,
-            False,
-            id="FP4-L",
-            marks=[
-                pytest.mark.large_shape,
-                pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-            ],
-        ),
-    ],
+    "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n1,tile_k1,tile_n2,tile_k2,"
+    "doweight_stage1,in_dtype,out_dtype,use_reduce,use_valid_mask,test_graph,group_size",
+    _MOE_2STAGE_CASES,
 )
-@pytest.mark.parametrize(
-    "in_dtype",
-    [
-        pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
-        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
-        pytest.param("a16w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A16W4 requires gfx950+")),
-    ],
-)
-@pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
-@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
-@pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
-@pytest.mark.parametrize(
-    "test_graph",
-    [
-        pytest.param(False, id="eager"),
-        pytest.param(True, id="graph"),
-    ],
-)
-@pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1311,8 +1308,8 @@ def test_moe_gemm_2stage(
     group_size: int,
     *,
     seed: int = 0,
-    num_iters: int = 5,
-    num_warmup: int = 2,
+    num_iters: int = 0,
+    num_warmup: int = 0,
     moe_sort_mode: Optional[str] = None,
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
@@ -1723,10 +1720,12 @@ if __name__ == "__main__":
     if "all" in in_dtypes:
         in_dtypes = ["a16w4", "fp4", "a8w4"]
     for dt in in_dtypes:
-        if dt in ("fp4", "a8w4", "a16w4") and "gfx95" not in ARCH:
+        # fp4/a8w4 stay gfx950+: the mxfp_moe family feeds MX-FP4 straight into the
+        # F8F6F4 MFMA, which CDNA3 does not have, and has no software decode.
+        if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
             print(f"Skipped: {dt}: requires gfx950+, got {ARCH}")
             continue
-        if dt == "int4_bf16" and not _A16WMIX_GFX:
+        if dt in ("a16w4", "int4_bf16") and not _A16WMIX_GFX:
             print(f"Skipped: {dt}: requires gfx942 or gfx950+, got {ARCH}")
             continue
         # mxfp_moe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,

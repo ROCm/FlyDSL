@@ -13,6 +13,7 @@
 #include "DLTensorAdaptor.h"
 #include "TiledOpTraits.h"
 
+#include "HostObject/host_object.h"
 #include "LlvmConfig/llvm.h"
 
 #include <cstdint>
@@ -322,7 +323,7 @@ struct PyTileType : PyConcreteType<PyTileType> {
             return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
           }
         },
-        "modes"_a, nb::kw_only(), "context"_a = nb::none(),
+        "modes"_a.none(), nb::kw_only(), "context"_a = nb::none(),
         "Create a TileType from a list of modes or a single mode (leaf tile)");
 
     c.def_prop_ro("rank", [](PyTileType &self) { return self.toCppType().rank(); });
@@ -1119,4 +1120,35 @@ NB_MODULE(_mlirDialectsFly, m) {
         return result;
       },
       "name"_a, "value"_a, "Set an LLVM string cl::opt at runtime; returns the previous value.");
+
+  static constexpr auto appendTo = [](MlirStringRef str, void *userData) {
+    static_cast<std::string *>(userData)->append(str.data, str.length);
+  };
+
+  m.def(
+      "_host_target_triple",
+      []() {
+        std::string triple;
+        flydslHostTargetTriple(appendTo, &triple);
+        return triple;
+      },
+      "Normalized target triple of the host process.");
+
+  m.def(
+      "_emit_host_object",
+      [](MlirOperation module, int optLevel) {
+        std::pair<std::string, std::string> out;
+        auto appendObject = [](MlirStringRef str, void *userData) {
+          appendTo(str, &static_cast<std::pair<std::string, std::string> *>(userData)->first);
+        };
+        auto appendError = [](MlirStringRef str, void *userData) {
+          appendTo(str, &static_cast<std::pair<std::string, std::string> *>(userData)->second);
+        };
+        if (mlirLogicalResultIsFailure(
+                flydslEmitHostObject(module, optLevel, appendObject, appendError, &out)))
+          throw std::runtime_error("host object emission failed: " + out.second);
+        return nb::bytes(out.first.data(), out.first.size());
+      },
+      "module"_a, "opt_level"_a = 2,
+      "Emit a position-independent host object for an LLVM-dialect module; returns its bytes.");
 }

@@ -6,10 +6,10 @@ This guide covers the FlyDSL test infrastructure, how to run tests and benchmark
 
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
-| **MLIR lit tests** | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | No | Verify Fly dialect lowering |
-| **Python tests** | `tests/python/examples/` | Varies | Python-based MLIR generation + AOT examples |
+| **MLIR lit tests** | `tests/mlir/LayoutAlgebra/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | No | Verify Fly dialect lowering |
+| **Python tests** | `tests/python/examples/` | Varies | Python integration and JIT-cache examples |
 | **GPU kernel tests** | `tests/kernels/test_*.py` | Yes | Full compilation → GPU execution |
-| **AOT examples** | `tests/python/examples/` | Varies | AOT pre-compilation examples |
+| **Cache pre-warming examples** | `tests/python/examples/` | Varies | Populate the normal JIT cache before workload execution |
 
 **Run GEMM tests:**
 ```bash
@@ -58,7 +58,8 @@ cmake --build build-fly --target flydsl-lsp-server -j$(nproc)
 
 ### 1.2 Python tests (`tests/python/`)
 
-Python-based tests including AOT pre-compilation examples.
+Python-based integration tests, including an example that pre-warms the normal
+JIT cache. It does not create standalone linkable artifacts.
 
 **Running:**
 ```bash
@@ -89,13 +90,14 @@ python tests/kernels/test_softmax.py
 python tests/kernels/test_preshuffle_gemm.py --in_dtype fp8 -M 16 -N 5120 -K 8192
 ```
 
-### 1.4 AOT examples (`tests/python/examples/`)
+### 1.4 JIT cache pre-warming example (`tests/python/examples/`)
 
-AOT pre-compilation examples:
+The script retains its historical filename, but it exercises compile-only JIT
+cache population:
 
-```
+```text
 tests/python/examples/
-└── aot_example.py      # AOT pre-compilation for preshuffle GEMM
+└── aot_example.py      # JIT cache pre-warming for preshuffle GEMM
 ```
 
 ---
@@ -114,9 +116,13 @@ bash scripts/run_tests.sh
 - Auto-discovers build directory (`build-fly/`)
 - Auto-selects the GPU with the most free VRAM when `HIP_VISIBLE_DEVICES` is unset
 - Sets up `PYTHONPATH` and `LD_LIBRARY_PATH`, and exports `FLYDSL_RUN_QUANT=1`
-- Runs `pytest` over `tests/kernels/`, `tests/unit/`, `tests/system/`, and `tests/python/examples/`
+- Runs `pytest` over `tests/kernels/`, `tests/language/`, `tests/unit/`,
+  `tests/system/`, `tests/extension/`, and `tests/python/examples/`
 - Runs the standalone `examples/` scripts and the MLIR FileCheck tests (`tests/mlir/`)
-- By default skips `large_shape`-marked tests (set `RUN_TESTS_FULL=1` for all)
+- By default skips `large_shape`-marked tests; set `RUN_TESTS_FULL=1` to
+  include them. `multi_gpu` and `benchmark` tests remain separate.
+- Skips the MLIR/FileCheck stage when FileCheck is unavailable unless
+  `FLYDSL_REQUIRE_FILECHECK=1` is set
 - Fail-fast: exits on the first failure
 
 **Environment setup:**
@@ -129,7 +135,11 @@ LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH}"
 
 Specialized benchmarking harness for performance characterization.
 
-**Default configurations:**
+**Selected default configurations:**
+
+The script is the source of truth for the complete matrix; these excerpts show
+the configuration format.
+
 ```bash
 # Softmax/RMSNorm: "M,N,dtype"
 SOFTMAX_SHAPES='32768,8192,bf16'
@@ -145,13 +155,13 @@ int8,9728,8192,8320,64,256,128
 bf16,5120,5120,8320,64,256,128
 '
 
-# FP4 GEMM (gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
-GEMM_FP4_SHAPES='8192,8192,8192,64,128,256'
+# FP4 GEMM (gfx950 only): "M,N,K"
+GEMM_FP4_SHAPES='8192,8192,8192'
 ```
 
 **Selective execution:**
 ```bash
-bash scripts/run_benchmark.sh                    # default: GEMM only
+bash scripts/run_benchmark.sh                    # default: all benchmark groups
 bash scripts/run_benchmark.sh softmax             # only softmax
 bash scripts/run_benchmark.sh gemm moe            # GEMM and MoE
 bash scripts/run_benchmark.sh --only softmax,rmsnorm
@@ -351,7 +361,11 @@ python tests/kernels/test_preshuffle_gemm.py \
     --num_warmup 3 \
     --no_aiter_bench \
     --test_graph        # or -tg for HIPGraph mode
-    --wfp4              # FP4 weight path (gfx950 only)
+
+# FP4 weight path (gfx950 only)
+python tests/kernels/test_preshuffle_gemm.py \
+    --in_dtype fp4 --wfp4 \
+    -M 8192 -N 8192 -K 8192
 ```
 
 ---
@@ -365,7 +379,7 @@ python tests/kernels/test_preshuffle_gemm.py \
 | `FLYDSL_DUMP_IR` | Compiler | Dump intermediate IR at each pipeline stage |
 | `FLYDSL_DUMP_DIR` | Compiler | IR dump directory (default: `~/.flydsl/debug`) |
 | `FLYDSL_RUNTIME_CACHE_DIR` | Compiler | Cache directory (default: `~/.flydsl/cache`) |
-| `RUN_TESTS_FULL` | `run_tests.sh` | Set to `1` to run all parametrized cases |
+| `RUN_TESTS_FULL` | `run_tests.sh` | Set to `1` to include `large_shape` cases; multi-GPU and benchmark tests remain separate |
 | `BENCH_LOG_DIR` | `run_benchmark.sh` | Benchmark log directory (default: `/tmp/flydsl_bench`) |
 
 ---
@@ -383,8 +397,41 @@ Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 ### Dedicated IR dump script
 
 ```bash
-bash scripts/dumpir.sh
+bash scripts/dumpir.sh python my_kernel.py
 ```
+
+### Running a hand-edited `.s`
+
+To try "what if these few instructions were different" without rebuilding the compiler, edit the dumped ISA and run
+the unmodified test against it with `tools/inject_asm/inject_asm.py`:
+
+```bash
+python3 tools/inject_asm/inject_asm.py prepare ./ws -- python -m pytest tests/kernels/test_my_kernel.py -k one_case
+vim ./ws/edited.s
+python3 tools/inject_asm/inject_asm.py run ./ws                # the edited assembly
+python3 tools/inject_asm/inject_asm.py run ./ws --baseline     # the unedited dump, under the same conditions
+```
+
+`prepare` runs the command twice into a fresh workspace: once with `FLYDSL_DUMP_IR` for the ISA, and once with a
+scratch `FLYDSL_RUNTIME_CACHE_DIR` for the compiled kernel, since a dump run leaves the cache alone. It copies the
+dump to `original.s` (read-only) and `edited.s`. `run` assembles `edited.s`, swaps it into the cache entry's
+`gpu.binary`, and reruns the command with `FLYDSL_RUNTIME_RUN_ONLY=1`, so a cache miss is an error rather than a
+silent recompile. This works because a cache entry stores the compiled module as MLIR text and rebuilds its
+ExecutionEngine from it on load.
+
+The command must compile exactly one JIT function in one specialization; narrow it with `-k` otherwise. Constexpr
+specializations of a kernel share its symbol, so the dump keeps only the last one compiled and their cache entries
+cannot be told apart. Keep every kernel symbol unchanged in `edited.s`, since the host launches kernels by name.
+
+FlyDSL assembles with the LLVM it was built with, while the tool defaults to the ROCm `clang`, which is usually older;
+both link with the ROCm `ld.lld`. `prepare` checks that `original.s` reassembles to the compiler's code object byte for
+byte, which holds on gfx942 and gfx950. Dumps for gfx11 and later use directives the ROCm `clang` cannot read, so for
+those pass `prepare --clang` with the `clang` of the LLVM FlyDSL was built with; `run` reuses it.
+
+`inject_asm.py inject CACHE_DIR FILE.s` is the single patching step on its own, for a cache you populated yourself.
+`--check` compares instead of patching and `--save-hsaco` also writes the code object next to the `.s`. It refuses
+any directory that contains or lies inside the default cache `~/.flydsl/cache`, where a patched entry would be served
+to every later run.
 
 ---
 
@@ -395,11 +442,12 @@ bash scripts/dumpir.sh
 | `scripts/run_tests.sh` | Full test runner (pytest + examples + FileCheck) |
 | `scripts/run_benchmark.sh` | Benchmark harness with configurable shapes |
 | `scripts/dumpir.sh` | IR dump helper script |
+| `tools/inject_asm/inject_asm.py` | Run a test against a hand-edited ISA dump (debug only) |
 | `tests/conftest.py` | Pytest fixtures (MLIR context, module, insert point) |
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |
 | `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
-| `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | MLIR lit tests (18 files) |
-| `tests/python/examples/` | Python AOT examples |
-| `tests/kernels/test_*.py` | GPU kernel tests (12 files) |
-| `tests/python/examples/` | AOT pre-compilation examples |
+| `tests/mlir/LayoutAlgebra/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | MLIR lit tests |
+| `tests/python/examples/` | Python integration and cache pre-warming examples |
+| `tests/kernels/test_*.py` | GPU kernel test modules |
+| `tests/python/examples/aot_example.py` | Compile-only JIT cache pre-warming example |
