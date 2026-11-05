@@ -10,10 +10,15 @@ rule with no such PR does not belong here.
 ### A — Cache and recompilation correctness
 
 _The signature FlyDSL failure, silent by construction: the wrong artifact runs and nothing
-reports an error._ Keys have two levels: `manager_key` (function source, transitive helper
-sources, closure values, `_flydsl_key()`) and a per-call tuple (`_env_`, `_target_`, `_hints_`,
-argument signatures). **Every A finding must state its direction**, because the fixes are
-opposite: over-keying recompiles or misses a shipped cache; under-keying serves a stale binary.
+reports an error._ Every ordinary `@flyc.jit` call traces; the artifact key (`_artifact_cache_key`)
+hashes the prepared MLIR text with the pass pipeline, LLVM options, target, `backend.hash()` and
+the `_CACHE_INVALIDATING_ENV_VARS` values; the disk key (`_disk_cache_key`) adds `_flydsl_key()`.
+Python-side inputs reach the key only
+through the IR, so under-keying comes from codegen inputs outside it: options that bypass the
+pipeline fragments and IR attributes, env vars a pass reads but the list omits, and user-level
+factory caches (`cache_tag`, `lru_cache`) that return a stale launcher before tracing. **Every A
+finding must state its direction**, because the fixes are opposite: over-keying recompiles or
+misses a shipped cache; under-keying serves a stale binary.
 
 **A1 — Over-keying: an input already captured elsewhere, or with no effect, enters the key** ⚠️/🔴
 The canonical case is an arch env var: AOT precompilation runs on a GPU-less build host with
@@ -40,12 +45,14 @@ Two places to check. (1) Hand-maintained `cache_tag` tuples, for example the `ca
 in `kernels/attention/flash_attn_utils.py`: nothing enforces their completeness, so a new trait,
 constexpr or builder kwarg that reaches codegen without a matching tag entry makes two
 configurations share one artifact. `$WORK/scan.txt` pairs new traits with tag edits under
-`cache_key`. (2) The automatic dependency collector in `python/flydsl/compiler/jit_function.py`.
-Real example (PR #1130): captured dtype classes (`fx.BFloat16` vs `fx.Float16`) specialize the
-binary but were dropped by the collector, so the second dtype was served the first one's
-binary; the `@flyc.jit` nested-kernel walk had the same hole.
+`cache_key`. (2) Lowering inputs outside the traced IR: a compile hint or env var that changes
+codegen without reaching the pipeline fragments, LLVM options, an IR attribute or
+`_CACHE_INVALIDATING_ENV_VARS`.
+Real example (PR #1130, before IR keys): captured dtype classes (`fx.BFloat16` vs `fx.Float16`)
+specialize the binary but were dropped by the source-walk collector, so the second dtype was
+served the first one's binary; issue #1324 found the same hole for nested defs.
 Ask for a test that compiles with two values of the new input and asserts two cache entries.
-→ `🔴 A3: [input] changes codegen but is absent from [cache_tag / the collector] — [config X] and [config Y] share one artifact`
+→ `🔴 A3: [input] changes codegen but is absent from [cache_tag / the artifact key] — [config X] and [config Y] share one artifact`
 
 **A4 — A trait in the key that nothing reads** ⚠️
 The dual of A3: count read sites for every name in `cache_tag`; zero reads means the user-facing
@@ -496,11 +503,11 @@ Compare head against base. A test-only widening with no numerical justification 
 → `⚠️ T6: [test] runs only under [harness] / no CI job — it never executes in [the other]`
 
 **T7 — A measurement taken with a warm JIT cache** 🔴
-The disk cache invalidates on kernel source and closure changes, not on C++ passes or helper code
-outside the traced closure. Any number in a PR that edits `lib/` or a non-closure helper, taken
-without `FLYDSL_RUNTIME_ENABLE_CACHE=0`, is unverified. PRs #1009, #1033 and #1035 state the cache
-setting explicitly; that is the local standard.
-→ `🔴 T7: the PR edits [C++ pass / non-closure helper] but the numbers were taken with a warm cache — **Author must** re-run with FLYDSL_RUNTIME_ENABLE_CACHE=0`
+The disk key covers the traced MLIR and the native-library digest that a full build regenerates;
+a partial `cmake --build --target` build or a hand-replaced library keeps the old digest. Any
+number in a PR that edits `lib/`, taken without `FLYDSL_RUNTIME_ENABLE_CACHE=0`, is unverified.
+PRs #1009, #1033 and #1035 state the cache setting explicitly; that is the local standard.
+→ `🔴 T7: the PR edits [C++ pass] but the numbers were taken with a warm cache — **Author must** re-run with FLYDSL_RUNTIME_ENABLE_CACHE=0`
 
 **T8 — A skip that reports as a pass** ⚠️
 Real examples: PR #1146 (the MLIR lit stage skipped when FileCheck was missing and still printed

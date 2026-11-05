@@ -100,7 +100,7 @@ python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests
 # python3 -m pytest tests/ -m "l2_device" -v
 ```
 
-The JIT disk cache auto-invalidates when kernel source or closure values change. Only disable it when modifying C++ passes or non-closure helper functions:
+The JIT disk cache is keyed by the traced MLIR and the toolchain fingerprint, so Python edits and rebuilt C++ passes invalidate it. Disable it when debugging a suspected stale artifact:
 
 ```bash
 export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache

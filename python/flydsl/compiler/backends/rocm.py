@@ -181,18 +181,6 @@ class RocmBackend(BaseBackend):
 
     # -- cache / fingerprint ---------------------------------------------
 
-    def native_lib_patterns(self) -> List[str]:
-        if os.name == "nt":
-            return ["_mlirDialectsFly*.pyd", "FlyPythonCAPI.dll", "fly_jit_runtime.dll", "_mlirRegisterEverything*.pyd"]
-        return [
-            "_mlirDialectsFly*.so",
-            "libFly*.so",
-            "libfly_rocm_aot_runtime.a",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
-        ]
-
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":
             return ["fly_jit_runtime.dll", "mlir_c_runner_utils.dll"]
