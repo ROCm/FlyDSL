@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T06:52:03Z",
+ "updated": "2026-11-05T06:55:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41983402193,
+   "pr": 1338,
+   "commit": "e7be0a2fdf2220bba90f0b648d70b6d41a190e05",
+   "branch": "pr/fix-jit-ir-cache-key",
+   "event": "pull_request",
+   "title": "[JIT] Key compiled artifacts by the traced MLIR",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193",
+   "created_at": "2026-11-05T06:53:08Z",
+   "updated_at": "2026-11-05T06:54:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41982598023,
    "pr": null,
@@ -576,11 +591,11 @@
    "branch": "pr/enh-coop-op-shortcuts",
    "event": "pull_request",
    "title": "[Chore][Coop] Add specialization shortcut for primitives",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41793280671",
    "created_at": "2026-11-04T07:35:04Z",
-   "updated_at": "2026-11-05T06:10:10Z",
+   "updated_at": "2026-11-05T06:54:29Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -1820,52 +1835,6 @@
      "started_at": "2026-11-02T02:16:33Z",
      "completed_at": "2026-11-02T02:38:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41374364481/job/125058774321"
-    }
-   ]
-  },
-  {
-   "run_id": 41370910996,
-   "pr": null,
-   "commit": "1ea480433895c70d4bde6a42f254f8ec8d9a2eb3",
-   "branch": "zhimding/observe_launches_1102",
-   "event": "pull_request",
-   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996",
-   "created_at": "2026-11-02T01:08:56Z",
-   "updated_at": "2026-11-02T02:23:08Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T01:21:22Z",
-     "completed_at": "2026-11-02T01:54:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362675",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T01:21:13Z",
-     "completed_at": "2026-11-02T01:41:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362698"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T01:21:30Z",
-     "completed_at": "2026-11-02T02:23:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362700"
     }
    ]
   }
