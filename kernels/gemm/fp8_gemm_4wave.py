@@ -43,6 +43,8 @@ from kernels.gemm.fp8_gemm_utils import (
 _AGPR_PIN_IMPL = os.environ.get("FP8_AGPR_PIN_IMPL", "asm")
 if _AGPR_PIN_IMPL not in ("asm", "sched"):
     raise ValueError(f"FP8_AGPR_PIN_IMPL must be 'asm' or 'sched', got {_AGPR_PIN_IMPL!r}")
+_ACC_AGPRS = 4  # one f32x4 accumulator
+_NUM_AGPRS = 256
 
 
 class Mfma16x16x128AGPR(Mfma16x16x128):
@@ -53,13 +55,22 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     scale is left default (=0); the real per-token scale is applied in StoreC.
 
     ``FP8_AGPR_PIN_IMPL=sched`` pins the same accumulator with strict
-    ``sched_agpr`` on the MFMA intrinsic instead, at ``agpr_base + 4 * idx``."""
+    ``sched_agpr`` on the MFMA intrinsic instead, at ``agpr_regnum(agpr_base, i, j)``."""
+
+    def agpr_base(self, group):
+        """First AGPR of accumulator group ``group`` (0..3 = c00, c01, c10, c11)."""
+        return group * _ACC_AGPRS * self.n_tiles_a * self.n_tiles_b
+
+    def agpr_regnum(self, agpr_base, i, j):
+        regnum = agpr_base + _ACC_AGPRS * self.idx(i, j)
+        assert regnum + _ACC_AGPRS <= _NUM_AGPRS, f"accumulator a[{regnum}:{regnum + _ACC_AGPRS - 1}] out of range"
+        return regnum
 
     def call_one(self, a, b, c, i, j, agpr_base=0):
         assert i < self.n_tiles_a and j < self.n_tiles_b
         acc = c[self.idx(i, j)]
         if const_expr(_AGPR_PIN_IMPL == "sched"):
-            return self._do_mma_sched(a[i], b[j], acc, agpr_base + 4 * self.idx(i, j))
+            return self._do_mma_sched(a[i], b[j], acc, self.agpr_regnum(agpr_base, i, j))
         return self._do_mma(a[i], b[j], acc)
 
     def _do_mma_sched(self, a, b, c, agpr_regnum):
@@ -437,7 +448,7 @@ def compile_fp8_gemm_4w(
                 b0_frag,
                 c00_frag,
                 lds_src_preshuffled=b_preshuffled,
-                agpr_base=0 * 4 * N_ACCUMS,
+                agpr_base=mfma.agpr_base(0),
             )
 
             c01_frag, a1_frag = _compute_block(
@@ -449,7 +460,7 @@ def compile_fp8_gemm_4w(
                 a0_frag,
                 b1_frag,
                 c01_frag,
-                agpr_base=1 * 4 * N_ACCUMS,
+                agpr_base=mfma.agpr_base(1),
             )
 
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
@@ -463,7 +474,7 @@ def compile_fp8_gemm_4w(
                 a1_frag,
                 b0_frag,
                 c10_frag,
-                agpr_base=2 * 4 * N_ACCUMS,
+                agpr_base=mfma.agpr_base(2),
             )
 
             c11_frag, b0_frag = _compute_block(
@@ -476,7 +487,7 @@ def compile_fp8_gemm_4w(
                 b1_frag,
                 c11_frag,
                 lds_src_preshuffled=b_preshuffled,
-                agpr_base=3 * 4 * N_ACCUMS,
+                agpr_base=mfma.agpr_base(3),
             )
 
             a_cur0, a_next0 = a_next0, a_cur0

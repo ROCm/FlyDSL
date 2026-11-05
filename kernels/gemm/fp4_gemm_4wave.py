@@ -348,6 +348,8 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 _FP4_CBSZ = 4
 _FP4_BLGP = 4
 _FP4_PACK = 2  # pack_M = pack_N = pack_K = 2
+_ACC_AGPRS = 4  # one f32x4 accumulator
+_NUM_AGPRS = 256
 _AGPR_PIN_IMPL = os.environ.get("FP4_AGPR_PIN_IMPL", "asm")
 if _AGPR_PIN_IMPL not in ("asm", "sched"):
     raise ValueError(f"FP4_AGPR_PIN_IMPL must be 'asm' or 'sched', got {_AGPR_PIN_IMPL!r}")
@@ -381,6 +383,15 @@ class Mfma16x16x128Fp4:
 
     def idx(self, i, j):
         return i * N_TILES_B + j
+
+    def agpr_base(self, group):
+        """First AGPR of accumulator group ``group`` (0..3 = c00, c01, c10, c11)."""
+        return group * _ACC_AGPRS * N_TILES_A * N_TILES_B
+
+    def agpr_regnum(self, agpr_base, i, j):
+        regnum = agpr_base + _ACC_AGPRS * self.idx(i, j)
+        assert regnum + _ACC_AGPRS <= _NUM_AGPRS, f"accumulator a[{regnum}:{regnum + _ACC_AGPRS - 1}] out of range"
+        return regnum
 
     def _order(self):
         """xdl buffer emission order learn from aiter's asm"""
@@ -428,11 +439,11 @@ class Mfma16x16x128Fp4:
                     # First K-sub of the first K-step: src2 is the inline constant 0,
                     # so the accumulator needs no v_accvgpr_write pre-initialization.
                     c[self.idx(i, j)] = self._mfma_agpr(
-                        a_op, b_op, None, sa_v, sb_v, ksub, ia, jb, agpr_base + 4 * self.idx(i, j)
+                        a_op, b_op, None, sa_v, sb_v, ksub, ia, jb, self.agpr_regnum(agpr_base, i, j)
                     )
                 else:
                     c[self.idx(i, j)] = self._mfma_agpr(
-                        a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb, agpr_base + 4 * self.idx(i, j)
+                        a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb, self.agpr_regnum(agpr_base, i, j)
                     )
                 if nth[0] < len(thunks) and mth[0] in slots:
                     thunks[nth[0]]()
@@ -491,7 +502,6 @@ _SCALE_B_REGION = _SCALE_REGION_BYTES
 
 
 class ScaleGatherLDS:
-
     def __init__(self, a_scale, b_scale, K, lane_id, wave_id, lds_base_ptr, a_rows, b_rows, scopes=None):
         self.row_i32 = (K // 256) * 64
         self.wave_id = wave_id
@@ -550,7 +560,6 @@ class ScaleGatherLDS:
 
 
 class ScaleLoaderLDS:
-
     def __init__(self, n_tiles, lane_id, quarter, lds_base_ptr, region_off, scopes=None, slot_id=None):
         assert n_tiles % _FP4_PACK == 0
         self.n_groups = n_tiles // _FP4_PACK
@@ -852,10 +861,12 @@ def compile_fp4_gemm_4w(
                 _riffle(_g2s_thunks(a_g2s, ac0, a0_off, N_TILES_A), _s2r_thunks(a_s2r, ac1, _a1, N_TILES_A, False))
                 + _rd_scn[:2]
             )
-            c00f = mfma.call(a0f, b0f, c00f, saR0, sbC0, interleave=il, zero_acc=zero_acc, agpr_base=0)
+            c00f = mfma.call(a0f, b0f, c00f, saR0, sbC0, interleave=il, zero_acc=zero_acc, agpr_base=mfma.agpr_base(0))
 
             il = _riffle(_g2s_thunks(b_g2s, bc0, b0_off, N_TILES_A), _rd_scn[2:])
-            c01f = mfma.call(a0f, b1f_in, c01f, saR0, sbC1, interleave=il, zero_acc=zero_acc, agpr_base=64)
+            c01f = mfma.call(
+                a0f, b1f_in, c01f, saR0, sbC1, interleave=il, zero_acc=zero_acc, agpr_base=mfma.agpr_base(1)
+            )
             a1f = _a1
 
             wait_barrier(_SEG2_VMCNT)
@@ -863,14 +874,16 @@ def compile_fp4_gemm_4w(
                 _riffle(_g2s_thunks(b_g2s, bc1, b1_off, N_TILES_A), _s2r_thunks(a_s2r, an0, _a0n, N_TILES_A, False))
                 + _sc_gather
             )
-            c10f = mfma.call(a1f, b0f, c10f, saR1, sbC0, interleave=il, zero_acc=zero_acc, agpr_base=128)
+            c10f = mfma.call(a1f, b0f, c10f, saR1, sbC0, interleave=il, zero_acc=zero_acc, agpr_base=mfma.agpr_base(2))
             a0nf = _a0n
 
             il = _riffle(
                 _g2s_thunks(a_g2s, ac1, a1_off, N_TILES_A),
                 _s2r_thunks(b_s2r, bn0, _b0n, N_TILES_B, True) + _s2r_thunks(b_s2r, bn1, _b1n, N_TILES_B, True),
             )
-            c11f = mfma.call(a1f, b1f_in, c11f, saR1, sbC1, interleave=il, zero_acc=zero_acc, agpr_base=192)
+            c11f = mfma.call(
+                a1f, b1f_in, c11f, saR1, sbC1, interleave=il, zero_acc=zero_acc, agpr_base=mfma.agpr_base(3)
+            )
             b0nf = _b0n
             b1nf = _b1n
 
@@ -990,9 +1003,9 @@ def compile_fp4_gemm_4w(
         _a1 = [None] * N_TILES_A
         wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
         il = _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A, False) + _rd_scn
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, agpr_base=0)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, agpr_base=mfma.agpr_base(0))
         a1_frag = _a1
-        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1, agpr_base=64)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1, agpr_base=mfma.agpr_base(1))
         _a0n = [None] * N_TILES_A
         _b0n = [None] * N_TILES_B
         _b1n = [None] * N_TILES_B
@@ -1005,8 +1018,8 @@ def compile_fp4_gemm_4w(
             + _s2r_thunks(b_s2r, b_next0, _b0n, N_TILES_B, True)
             + _s2r_thunks(b_s2r, b_next1, _b1n, N_TILES_B, True)
         )
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=il, agpr_base=128)
-        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, saR1, sbC1, agpr_base=192)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=il, agpr_base=mfma.agpr_base(2))
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, saR1, sbC1, agpr_base=mfma.agpr_base(3))
         a0_frag = _a0n
         b0_frag = _b0n
         b1_frag = _b1n
@@ -1027,17 +1040,29 @@ def compile_fp4_gemm_4w(
             c_idx_fn=mfma.idx,
         )
         il = _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A, False)
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, agpr_base=0)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, agpr_base=mfma.agpr_base(0))
         a1_frag = _a1
         _rocdl.sched_barrier(0)
-        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1, agpr_base=64)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1, agpr_base=mfma.agpr_base(1))
         _rocdl.sched_barrier(0)
         c10_frag = mfma.call(
-            a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=store_c.thunks(c00_frag, sa_R0, sb_C0), agpr_base=128
+            a1_frag,
+            b0_frag,
+            c10_frag,
+            saR1,
+            sbC0,
+            interleave=store_c.thunks(c00_frag, sa_R0, sb_C0),
+            agpr_base=mfma.agpr_base(2),
         )
         _rocdl.sched_barrier(0)
         c11_frag = mfma.call(
-            a1_frag, b1_frag, c11_frag, saR1, sbC1, interleave=store_c.thunks(c01_frag, sa_R0, sb_C1), agpr_base=192
+            a1_frag,
+            b1_frag,
+            c11_frag,
+            saR1,
+            sbC1,
+            interleave=store_c.thunks(c01_frag, sa_R0, sb_C1),
+            agpr_base=mfma.agpr_base(3),
         )
         _rocdl.sched_barrier(0)
         store_c.store(c10_frag, sa_R1, sb_C0)
