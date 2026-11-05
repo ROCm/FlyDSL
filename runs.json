@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T07:30:30Z",
+ "updated": "2026-11-05T07:46:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41988966389,
+   "pr": 1373,
+   "commit": "71ffdf81ccb1d5c2ee2e98fabf90553fbb766916",
+   "branch": "fix/ci-reviewdog-push-flake",
+   "event": "pull_request",
+   "title": "[CI] Use plain ruff on push to main; reviewdog only for same-repo PRs",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41988966389",
+   "created_at": "2026-11-05T07:41:09Z",
+   "updated_at": "2026-11-05T07:43:55Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41985823312,
    "pr": 1372,
@@ -59,11 +74,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T07:11:20Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193/job/127104915641"
+     "completed_at": "2026-11-05T07:43:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193/job/127104915641",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -123,10 +141,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T06:58:05Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T07:35:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982235299/job/127099989387"
     },
     {
@@ -156,11 +174,11 @@
    "branch": "feat/windows-aot",
    "event": "pull_request",
    "title": "[Windows] AOT export support for Windows x64",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238",
    "created_at": "2026-11-05T06:26:53Z",
-   "updated_at": "2026-11-05T06:43:10Z",
+   "updated_at": "2026-11-05T07:42:51Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -187,9 +205,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-05T06:43:10Z",
+     "started_at": "2026-11-05T07:42:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960178"
     }
@@ -1822,21 +1840,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 41378758831,
-   "pr": null,
-   "commit": "6e2baf7e1bc5f5bba03c754160d3f861b0379255",
-   "branch": "glm-mono-kernel-structure-optmize",
-   "event": "pull_request",
-   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41378758831",
-   "created_at": "2026-11-02T02:37:47Z",
-   "updated_at": "2026-11-02T02:39:07Z",
-   "actor": "james-huang09",
-   "jobs": []
   }
  ]
 }
