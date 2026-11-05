@@ -44,11 +44,16 @@ assert not torch.cuda.is_initialized()
         (1, 17, 32),
         (13, 2053, 1120),
         (33, 70, 160),
+        (47, 10001, 2720),
         (73, 4099, 1568),
         (97, 10003, 2080),
+        (96, 2053, 8192),
+        (96, 51, 18592),
         (257, 1536, 544),
         (1025, 2053, 1120),
+        (1024, 509, 12672),
         (2049, 10003, 2080),
+        (2049, 63, 19040),
         (8191, 6144, 8192),
         (10240, 3072, 2048),
     ],
@@ -139,10 +144,12 @@ from kernels.gemm.rdna4_mxfp4 import choose_config, get_warmup_keys
 from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
 assert not torch.cuda.is_initialized()
 hardware = dict(num_processors=12, cache_size_bytes=8 * 1024**2, lds_size_bytes=32768)
-keys = get_warmup_keys(2053, 1120, 257, cache_policy="rotating", **hardware)
-for m in range(1, 258):
-    config = choose_config(m, 2053, 1120, cache_policy="rotating", **hardware)
-    assert specialization_key(m, 2053, 1120, config=config) in keys
+for n, k, max_m in ((2053, 1120, 257), (10001, 2720, 257), (2053, 8192, 257),
+                     (63, 19040, 2049), (51, 18592, 2049)):
+    keys = get_warmup_keys(n, k, max_m, cache_policy="rotating", **hardware)
+    for m in range(1, max_m + 1):
+        config = choose_config(m, n, k, cache_policy="rotating", **hardware)
+        assert specialization_key(m, n, k, config=config) in keys
 assert not torch.cuda.is_initialized()
 """,
         ],

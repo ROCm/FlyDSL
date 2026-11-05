@@ -56,16 +56,24 @@ It can run without importing Torch, querying a GPU, compiling or timing kernels.
 Selection uses static decode versus aligned/partial row classes, N/K aspect
 ratio, K32 divisors, output tile coverage per processor, padded tile work and
 the compressed weight footprint relative to cache capacity. Register rules
-choose wave ownership and a bounded K unroll. Named hybrid presets cover small
+choose wave ownership, row reuse and K unrolling together, preserving enough
+independent waves when extra reuse reduces lookahead. Narrow output rules
+avoid unnecessary N padding and bound four-N-wave tail layouts to five-group
+K lookahead. Cacheable K64 families can use legal register K96 iterations.
+Named hybrid presets cover small
 batches, narrow outputs, partial M tiles and larger prefill work. The selector
 adapts K tiles to legal divisors and checks accumulator, thread and LDS limits.
+K32 hybrid tiles widen N only when padding and CTA coverage permit it. Partial
+row tiles with long power-of-two K can use a two-stage K128 pipeline; the hot
+policy retains the smaller tile when weights fit within half the cache budget.
+These are measured shape classes, not a guarantee about cache residency.
 Tile sizes, stages, prefetch and wave distribution are configurations of the
 two algorithms, rather than additional algorithms.
 
 | Strategy | Tile geometry | Configuration controls |
 |---|---|---|
 | Register | `M=16*waves_m*repeat_m`, `N=16*waves_n*repeat_n`, `K=32*k_unroll` | Wave ownership, row/column reuse, legal K32 unroll 1..16, nibble conversion and epilogue |
-| Hybrid | M 16/32/64/96/128/192/256, N 32/64/128, K 32/64/128/256 | Fourteen named presets; wave ownership, one/two LDS stages, lookahead, M grouping, LDS layout, scheduling and epilogue |
+| Hybrid | M 16/32/64/96/128/192/256, N 32/64/128, K 32/64/128/256 | Fifteen named presets; wave ownership, one/two LDS stages, lookahead, M grouping, LDS layout, scheduling and epilogue |
 
 The hybrid K tile must be a power of two and divide K. Register unrolling can
 use odd K32 divisors. Staging is reduced when the supplied LDS budget requires
@@ -143,3 +151,9 @@ The [analytical selector evidence](../../../tests/perf/data/rdna4_mxfp4_analytic
 records source hashes, paired latency summaries, worst cases, independent
 cohort provenance, startup coverage, ISA/resources and model evaluation scope.
 This benchmark evidence is outside the installed kernel package.
+
+The [selector refinement evidence](../../../tests/perf/data/rdna4_mxfp4_refinement.json)
+compares the refined host rules with the released analytical selector and the
+earlier profile selector. It separates development measurements, reserved unseen
+shapes, changed-input replay, compile-only coverage and model dispatch equivalence.
+The register and hybrid GPU implementations are unchanged by this refinement.

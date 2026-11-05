@@ -153,11 +153,69 @@ def _three_group_reuse(m, n, k, processors, cache_bytes):
         and _divisor(k // 32, 4) == 3
         and (
             m <= 32
-            or k % 64
+            or (k % 64 or n <= processors * 64 and _weight_bytes(n, k) <= cache_bytes // 4)
             and cache_bytes
             and _weight_bytes(n, k) <= cache_bytes // (1 if m <= 64 else 4)
             and m * n <= processors * 16384
         )
+    )
+
+
+def _row_reuse(m, n, k, processors, cache_bytes):
+    # Odd K32 factors limit LDS tiles; register row reuse can amortize decode.
+    return (
+        32 < m <= 128
+        and n > 128
+        and k % 64
+        and (m <= 64 or not cache_bytes or _weight_bytes(n, k) >= cache_bytes // 8)
+        and (
+            _three_group_reuse(m, n, k, processors, cache_bytes) or not _cached_reuse(m, n, k, processors, cache_bytes)
+        )
+    )
+
+
+def _narrow_tail_lookahead(n, k):
+    # Keep the wider N-wave tail layout within a five-group K lookahead.
+    return 48 < n < 64 and k >= 8192 and _divisor(k // 32, 4) == 1 and _partial_unroll(k // 32) == 5
+
+
+def _long_skinny_register(m, n, k, processors):
+    # Small grids need more independent K work per wave, not more N padding.
+    return (
+        m > 512
+        and n <= 64
+        and (n % 16 == 0 or _narrow_tail_lookahead(n, k))
+        and k % 128 != 0
+        and _divisor(k // 32, 12) >= 5
+        and _ceil_div(m, 64) * _ceil_div(n, 32) <= 4 * processors
+    )
+
+
+def _row_register(m, n, k, processors, cache_bytes):
+    # Keep multi-row register copies bounded by weight traffic and K lookahead.
+    weight_bytes = _weight_bytes(n, k)
+    return (
+        m <= 64
+        and _row_reuse(m, n, k, processors, cache_bytes)
+        and cache_bytes > 0
+        and (_divisor(k // 32, 8) >= 3 or _ceil_div(n, 16) >= 12 * processors)
+        and (
+            weight_bytes <= cache_bytes // 2 or weight_bytes <= cache_bytes and 2 * n <= k and _divisor(k // 32, 8) >= 5
+        )
+    )
+
+
+def _long_thin_register(m, n, k, cache_bytes):
+    # Avoid a padded M64 LDS tile when long, cacheable weights have few columns.
+    return (
+        32 < m <= 64
+        and _ceil_div(m, 16) * 16 * 1.25 < 64
+        and n > 128
+        and k >= 8192
+        and k % 128 == 0
+        and 8 * n <= k
+        and cache_bytes > 0
+        and _weight_bytes(n, k) <= cache_bytes // 2
     )
 
 
@@ -176,8 +234,45 @@ def _register(m, n, k, processors, cache_bytes, policy):
             unroll = _divisor(k // 32, 5) if n > 128 else _partial_unroll(k // 32)
         if m % (16 * wm) == 0:
             unroll = _divisor(k // 32, 16)
+        if _long_skinny_register(m, n, k, processors):
+            return dict(
+                REGISTER_DEFAULTS,
+                waves_m=1 if n % 16 else wm,
+                waves_n=1,
+                repeat_m=1,
+                repeat_n=1,
+                k_unroll=_partial_unroll(k // 32) if n % 16 else _divisor(k // 32, 12),
+                table_mode="lut",
+            )
+        if 16 < m <= 512 and _narrow_tail_lookahead(n, k):
+            return dict(
+                REGISTER_DEFAULTS,
+                waves_m=1,
+                waves_n=4,
+                repeat_m=1,
+                repeat_n=1,
+                k_unroll=_partial_unroll(k // 32),
+                table_mode="lut",
+            )
         if 16 < n <= 128 and n % 16 and m > 16 and _divisor(k // 32, 4) == 1 and unroll > 1:
-            return dict(REGISTER_DEFAULTS, waves_m=1, waves_n=1, repeat_m=1, repeat_n=2, k_unroll=unroll)
+            if m % 16 == 0:
+                return dict(
+                    REGISTER_DEFAULTS,
+                    waves_m=1,
+                    waves_n=1,
+                    repeat_m=1,
+                    repeat_n=1,
+                    k_unroll=unroll,
+                    table_mode="lut" if k >= 8192 else "alu",
+                )
+            return dict(
+                REGISTER_DEFAULTS,
+                waves_m=1,
+                waves_n=1,
+                repeat_m=1,
+                repeat_n=2,
+                k_unroll=unroll,
+            )
         repeat_m = 1
         if n > 128 and m >= 128 and k % 128 and _ceil_div(m, 32 * wm) * _ceil_div(n, 16) >= processors:
             bounded = _divisor(k // 32, 4)
@@ -195,8 +290,87 @@ def _register(m, n, k, processors, cache_bytes, policy):
             repeat_n=1,
             k_unroll=unroll,
         )
+    if _long_thin_register(m, n, k, cache_bytes):
+        return dict(
+            REGISTER_DEFAULTS,
+            waves_m=1,
+            waves_n=1,
+            repeat_m=1,
+            repeat_n=1,
+            k_unroll=_divisor(k // 32, 4),
+            table_mode="alu",
+        )
+    if (
+        _row_reuse(m, n, k, processors, cache_bytes)
+        and (_divisor(k // 32, 8) > 1 or n >= processors * 256)
+        and not (
+            policy == "hot" and cache_bytes and _weight_bytes(n, k) >= cache_bytes // 2 and _divisor(k // 32, 8) == 1
+        )
+    ):
+        padded = _ceil_div(m, 16) * 16
+        three_group = _three_group_reuse(m, n, k, processors, cache_bytes)
+        streamed = cache_bytes and _weight_bytes(n, k) >= cache_bytes // 2
+        wn = 1 if three_group else 4 if n >= processors * 256 or streamed else 2
+        repeats = [
+            r
+            for r in (1, 2, 3, 4)
+            if _ceil_div(m, 16 * r) * 16 * r <= padded * 1.125
+            and _ceil_div(m, 16 * r) * _ceil_div(n, 16 * wn) * wn * min(4, _divisor(k // 32, max(1, 8 // r)))
+            >= (16 if r == 3 else 12) * processors
+        ]
+        if not repeats and three_group:
+            compact = _ceil_div(m, 32) * 32 <= padded * 1.125
+            return dict(
+                REGISTER_DEFAULTS,
+                waves_m=1,
+                waves_n=1 if compact else 2,
+                repeat_m=2 if compact else 1,
+                repeat_n=1,
+                k_unroll=3,
+            )
+        repeat = max(repeats, default=1)
+        if three_group and repeat >= 3:
+            compact = _ceil_div(m, 32) * 32 <= padded * 1.125
+            previous_repeat = 2 if compact else 1
+            if _ceil_div(m, 16 * previous_repeat) < 2 * _ceil_div(m, 16 * repeat):
+                return dict(
+                    REGISTER_DEFAULTS,
+                    waves_m=1,
+                    waves_n=1 if compact else 2,
+                    repeat_m=previous_repeat,
+                    repeat_n=1,
+                    k_unroll=3,
+                )
+        if streamed and k >= 8192:
+            repeat = 1
+        if repeat == 1 and three_group:
+            wn = 2
+        while wn > 1 and _ceil_div(m, 16 * repeat) * _ceil_div(n, 16 * wn) < processors:
+            wn //= 2
+        return dict(
+            REGISTER_DEFAULTS,
+            waves_m=1,
+            waves_n=wn,
+            repeat_m=repeat,
+            repeat_n=1,
+            k_unroll=3 if three_group and repeat == 1 else _divisor(k // 32, max(1, 8 // repeat)),
+            table_mode="lut" if not three_group and not streamed and k >= 4096 and n < processors * 256 else "alu",
+        )
     weight_bytes = _weight_bytes(n, k)
     if _three_group_reuse(m, n, k, processors, cache_bytes):
+        lookahead = _divisor(k // 32, 8)
+        if (
+            m <= 32
+            and k >= 4096
+            and k % 64
+            and lookahead >= 5
+            and cache_bytes
+            and _weight_bytes(n, k) <= cache_bytes // 4
+            and _ceil_div(m, 16) * _ceil_div(n, 16) >= 4 * processors
+        ):
+            return dict(
+                REGISTER_DEFAULTS, waves_m=1, waves_n=1, repeat_m=1, repeat_n=1, k_unroll=lookahead, table_mode="lut"
+            )
         compact = _ceil_div(m, 32) * 32 <= _ceil_div(m, 16) * 16 * 1.125
         return dict(
             REGISTER_DEFAULTS,
@@ -214,13 +388,21 @@ def _register(m, n, k, processors, cache_bytes, policy):
             waves_m=1,
             waves_n=4,
             repeat_m=2,
+            repeat_n=1 if k % 64 == 0 else 2,
+            k_unroll=2 if k % 64 == 0 else 1,
+            table_mode="alu",
+            fast_epilogue=k % 64 == 0,
+        )
+    if _cached_reuse(m, n, k, processors, cache_bytes):
+        return dict(
+            REGISTER_DEFAULTS,
+            waves_m=1,
+            waves_n=1,
+            repeat_m=2,
             repeat_n=2,
             k_unroll=1,
             table_mode="alu",
-            fast_epilogue=False,
         )
-    if _cached_reuse(m, n, k, processors, cache_bytes):
-        return dict(REGISTER_DEFAULTS, waves_m=1, waves_n=1, repeat_m=2, repeat_n=2, k_unroll=1, table_mode="alu")
     # Wider N waves amortize address/decode work for streaming weight tiles.
     wn = 4 if n >= processors * 64 or not cache_bytes or weight_bytes >= cache_bytes // 4 or m > 16 else 2
     while wn > 1 and _ceil_div(m, 16) * _ceil_div(n, 16 * wn) < processors // 2:
@@ -259,6 +441,15 @@ def _register(m, n, k, processors, cache_bytes, policy):
         wn, table, fast = 2, "alu", False
     if m in (8, 16) and wn == 4 and unroll == 8 and n % 64:
         wn, unroll, table = 1, _divisor(k // 32, 4), "alu"
+    if (
+        m in (8, 16)
+        and k % 128 == 64
+        and unroll == 3
+        and n <= processors * 64
+        and cache_bytes
+        and weight_bytes <= cache_bytes // 4
+    ):
+        wn, unroll, table = 1, _divisor(k // 32, 8), "alu"
     repeat_m = 1
     if m >= 32 and unroll <= 2:
         # When K has little legal unrolling, reuse each decoded B fragment
@@ -321,6 +512,7 @@ _HYBRID_PRESETS = {
     "small_wide": (64, 64, 128, 4, 1, 2, 2, 1, True, "groups", "none", False, "lut"),
     "short_k": (64, 32, 32, 2, 2, 2, 1, 1, True, "barrier", "none", False, "alu"),
     "partial96": (96, 64, 256, 2, 2, 1, 13, 1, True, "groups", "none", False, "alu"),
+    "pipelined_partial": (128, 64, 128, 4, 1, 2, 4, 1, True, "groups", "none", True, "lut"),
     "medium_prefill": (128, 64, 128, 4, 1, 2, 2, 1, True, "groups", "none", False, "lut"),
     "partial192": (192, 64, 64, 4, 1, 2, 2, 1, False, "groups", "none", True, "alu"),
     "long_k": (256, 64, 128, 8, 1, 2, 7, 2, False, "groups", "none", True, "alu"),
@@ -328,13 +520,32 @@ _HYBRID_PRESETS = {
 }
 
 
-def _hybrid(m, n, k, processors, cache_bytes):
+def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
     narrow_tail = n <= 32 and n % 16 and m not in (1, 2, 4, 8, 16) and m % 16
+    general_rows = 128 if k % 128 == 0 and _ceil_div(m, 128) >= processors // 2 else 256
+    wide_skinny = (
+        n > 64
+        and k >= 8192
+        and k % 256 == 128
+        and _ceil_div(n, 64) * 64 <= _ceil_div(n, 32) * 32 * 1.125
+        and _ceil_div(m, 256) * _ceil_div(n, 64) >= 2 * processors
+    )
     if narrow_tail and m <= 64 and k >= 4096:
         preset = "ragged_n"
     elif m <= 32:
         preset = "decode" if m <= 16 and n >= 128 else "microbatch"
-    elif n <= 128 or _narrow(n, k, processors) and m <= 2048:
+    elif n > 128 and _narrow(n, k, processors) and m <= 256 and (k <= 8192 or m > 128) and k % 256 == 0:
+        preset = "microbatch" if m <= 128 else "small_prefill"
+    elif (
+        n <= 128
+        and not wide_skinny
+        or _narrow(n, k, processors)
+        and (
+            _ceil_div(m, general_rows) * _ceil_div(n, 64) < processors
+            or _ceil_div(m, 256) * _ceil_div(n, 64) == processors
+            and k % 128 != 0
+        )
+    ):
         grid = _ceil_div(m, 128) * _ceil_div(n, 32)
         preset = "skinny_reuse" if grid >= 2 * processors else "skinny"
     elif processors <= _ceil_div(n, 32) <= processors * 2 and 64 < m <= 128:
@@ -342,18 +553,24 @@ def _hybrid(m, n, k, processors, cache_bytes):
     elif k % 64 and m <= 128 and _ceil_div(m, 64) * _ceil_div(n, 32) <= 8 * processors:
         preset = "short_k"
     else:
-        bm = _m_tile(m, n, processors, 64, n >= k, 1 if k >= 8192 else 2)
+        # An eight-wave tile can retain enough active waves with fewer CTAs
+        # when full K128 iterations amortize the longer cooperative pipeline.
+        reuse_groups = 0.75 if k >= 8192 and k % 128 == 0 and n <= processors * 8 else 1 if k >= 8192 else 2
+        bm = _m_tile(m, n, processors, 64, n >= k, reuse_groups)
         if bm <= 64:
             preset = "small_wide" if _ceil_div(n, 64) >= 2 * processors else "small_prefill"
         elif bm == 96:
-            preset = "partial96"
+            hot_fit = policy == "hot" and cache_bytes and _weight_bytes(n, k) <= cache_bytes // 2
+            preset = "pipelined_partial" if k >= 8192 and k & (k - 1) == 0 and not hot_fit else "partial96"
         elif bm == 128:
             preset = "medium_prefill"
         elif bm == 192:
             preset = "partial192"
         else:
-            preset = "long_k" if n < k else "large_reuse"
+            preset = "long_k" if n < k or m <= 256 and k % 128 == 64 and n >= 2 * k else "large_reuse"
     cfg = dict(HYBRID_DEFAULTS, **dict(zip(_HYBRID_PARAMETERS, _HYBRID_PRESETS[preset])))
+    if preset == "microbatch" and m > 32:
+        cfg["epilogue_prefetch"] = True
     if m <= 16 and n < 128 and preset == "microbatch":
         cfg["tile_m"], cfg["waves_m"] = 16, 1
     # The cooperative copy layout requires power-of-two K tiles. Register
@@ -370,11 +587,32 @@ def _hybrid(m, n, k, processors, cache_bytes):
         cfg.update(schedule="none", epilogue_prefetch=True)
     if preset == "partial96" and cfg["tile_k"] <= 64:
         cfg.update(stages=2, operand_prefetch=min(2, cfg["tile_k"] // 16 - 1))
+    if preset == "long_k" and m <= 256 and cfg["tile_k"] == 64:
+        cfg.update(schedule="barrier")
     if (
         cfg["tile_k"] == 32
-        and m >= 512
-        and n >= processors * 32
-        and _ceil_div(m, 256) * _ceil_div(n, 128) >= 2 * processors
+        and 32 < n <= 128
+        and _ceil_div(n, 128) * 128 <= _ceil_div(n, 32) * 32 * 1.125
+        and _ceil_div(m, 128) * _ceil_div(n, 128) >= 2 * processors
+    ):
+        cfg.update(
+            tile_m=128,
+            tile_n=128,
+            waves_m=4,
+            waves_n=1,
+            cache_group_m=4,
+            fragment_lds=True,
+            table_mode="alu",
+            schedule="barrier",
+            epilogue_prefetch=False,
+        )
+    if (
+        cfg["tile_k"] == 32
+        and m >= 256
+        and k >= 2048
+        and n >= processors * 8
+        and _ceil_div(n, 128) * 128 <= _ceil_div(n, 64) * 64 * 1.125
+        and _ceil_div(m, 256) * _ceil_div(n, 128) >= processors * (2 if n < processors * 32 else 1.5)
     ):
         cfg.update(
             tile_m=256,
@@ -383,11 +621,11 @@ def _hybrid(m, n, k, processors, cache_bytes):
             waves_n=2,
             stages=2,
             operand_prefetch=1,
-            cache_group_m=4,
+            cache_group_m=2 if n < processors * 32 else 4,
             fragment_lds=True,
-            table_mode="alu",
+            table_mode="lut" if n < processors * 32 else "alu",
             schedule="barrier",
-            operand_schedule="none",
+            operand_schedule="barrier" if n < processors * 32 else "none",
             epilogue_prefetch=False,
         )
     return _normalize_config(cfg, m, k)
@@ -418,23 +656,36 @@ def _selected(m, n, k, mode, policy, processors, cache_bytes, lds_bytes):
             policy == "hot" and cache_bytes and weight_bytes < cache_bytes // 64 and m * n <= processors * 2048
         )
         static_decode = m in (1, 2, 4, 8, 16)
-        narrow_tail = n <= 32 and n % 16 and m not in (1, 2, 4, 8, 16) and m % 16 and k >= 4096
+        narrow_tail = (
+            n <= 32 and n % 16 and m not in (1, 2, 4, 8, 16) and m % 16 and k >= 4096 and (k % 64 or k % 128 == 0)
+        )
         short_cached = _cached_reuse(m, n, k, processors, cache_bytes)
         odd_loop = k % 128 != 0 and (
             m <= 32 or k <= 4096 and (m <= 64 and k % 64 != 0 or k % 64 != 0 and m * n < processors * 8192)
         )
         if (
             static_decode
+            or _long_skinny_register(m, n, k, processors)
+            or _long_thin_register(m, n, k, cache_bytes)
+            or _row_register(m, n, k, processors, cache_bytes)
             or _three_group_reuse(m, n, k, processors, cache_bytes)
             or short_cached
             or odd_loop
             or _narrow(n, k, processors)
-            and skinny_groups < (4 if n > 128 and k % 64 else 2 if n > 128 else 1.25) * processors
+            and skinny_groups < (4 if n > 128 and k % 64 else 2 if n > 128 else 1.25) * processors + bool(k % 128)
+            and not (
+                n > 128
+                and m > 64
+                and (m % 16 or m >= 256)
+                and (k <= 8192 or 128 < m <= 256)
+                and k % 256 == 0
+                and skinny_groups >= processors // 2
+            )
             or small_reused
         ) and not narrow_tail:
             cfg = _register(m, n, k, processors, cache_bytes, policy)
         else:
-            cfg = _hybrid(m, n, k, processors, cache_bytes)
+            cfg = _hybrid(m, n, k, processors, cache_bytes, policy)
     cfg = _normalize_config(cfg, m, k)
     while cfg["engine"] == "hybrid" and _geometry(cfg)[-1] > lds_bytes and cfg["stages"] > 1:
         cfg["stages"] -= 1

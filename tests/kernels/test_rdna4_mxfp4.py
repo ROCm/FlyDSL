@@ -63,8 +63,21 @@ def test_formats_tails_and_strategies(shape, mode, strategy, dtype):
 
 @pytest.mark.parametrize("cache_policy", ["auto", "hot", "rotating"])
 @pytest.mark.parametrize("mode", ["e4m3", "e5m2", "grouped"])
-def test_default_policy_reads_changed_inputs_during_replay(cache_policy, mode):
-    x, packed, xs, scales = make_case((73, 2117, 1120))
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (73, 2117, 1120),
+        (47, 10001, 2720),
+        (96, 2053, 8192),
+        (47, 63, 19040),
+        (2049, 63, 19040),
+        (96, 51, 18592),
+        (8, 1616, 5952),
+    ],
+)
+def test_default_policy_reads_changed_inputs_during_replay(cache_policy, mode, shape):
+    """Changed graph inputs also cover three-row register reuse and pipelined partial M."""
+    x, packed, xs, scales = make_case(shape)
     prepared = prepare_weights(packed, scales, mode=mode)
     y = gemm(x, prepared, xs, cache_policy=cache_policy)
     graph = torch.cuda.CUDAGraph()
