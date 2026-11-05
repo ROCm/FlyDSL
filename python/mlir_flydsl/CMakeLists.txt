@@ -374,3 +374,25 @@ if(TARGET FlyRocmAotRuntime)
     ARCHIVE_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   add_dependencies(FlyPythonCAPI FlyRocmAotRuntime)
 endif()
+
+# Windows: the AOT runtime's bitcode (lib/Runtime/ROCm) becomes LLVM-dialect IR,
+# which compiler/_aot.py merges into each exported module. The same MLIR reads
+# it back, so only this build step depends on the compiler's bitcode version.
+if(WIN32 AND TARGET FlyRocmAotRuntimeBitcode)
+  find_program(FLY_LLVM_LINK llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  find_program(FLY_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  set(_fly_aot_runtime_bc "${CMAKE_CURRENT_BINARY_DIR}/fly_rocm_aot_runtime.bc")
+  set(_fly_aot_runtime_ir "${_MLIR_LIBS_DIR}/fly_rocm_aot_runtime.mlir")
+  add_custom_command(
+    OUTPUT "${_fly_aot_runtime_ir}"
+    COMMAND "${FLY_LLVM_LINK}" -o "${_fly_aot_runtime_bc}" "$<TARGET_OBJECTS:FlyRocmAotRuntimeBitcode>"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_MLIR_LIBS_DIR}"
+    COMMAND "${FLY_MLIR_TRANSLATE}" --import-llvm "${_fly_aot_runtime_bc}" -o "${_fly_aot_runtime_ir}"
+    DEPENDS FlyRocmAotRuntimeBitcode "$<TARGET_OBJECTS:FlyRocmAotRuntimeBitcode>"
+    COMMENT "Importing the ROCm AOT runtime into the LLVM dialect"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+  )
+  add_custom_target(FlyRocmAotRuntimeIR ALL DEPENDS "${_fly_aot_runtime_ir}")
+  add_dependencies(FlyPythonCAPI FlyRocmAotRuntimeIR)
+endif()

@@ -7,8 +7,8 @@
 
 Compile-tier tests check the ABI model, symbol namespacing and file publishing.
 Device-tier tests link exported objects into shared libraries with the system
-HIP compiler, load them with ``ctypes`` and launch the kernels through the
-packed C ABI.
+HIP compiler, or with clang-cl or cl on Windows, load them with ``ctypes`` and
+launch the kernels through the packed C ABI.
 """
 
 import ctypes
@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -51,6 +52,33 @@ if HIPCC is None:
     HIPCC = str(adjacent_hipcc) if adjacent_hipcc.is_file() else None
 ROCM_PATH = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
 ROCM_CLANG = ROCM_PATH / "llvm" / "bin" / "clang"
+
+# Platform view of an export: object suffix, symbol reader, link contract.
+OBJ = ".o"
+OUTPUT_LOCK = []  # what the output-directory lock leaves in the directory
+_object_symbols = _defined_global_symbols
+HIP_NEEDED, JIT_RUNTIME = "libamdhip64.so", "libfly_jit_runtime.so"
+LINK_METADATA = (
+    b'"runtime_libraries":[{"link_name":"libamdhip64.so"}]',
+    b'"linker_flags":["-lamdhip64","-pthread","-ldl"]',
+)
+TADD_LAYOUT = "typedef struct __attribute__((packed)) { int32_t shape[2]; int64_t stride[1]; } tadd_A_layout_t;"
+if sys.platform == "win32":
+    from flydsl.runtime.device_runtime.rocm import _rocm_roots
+
+    # MSVC-ABI drivers only: a cc or gcc on PATH (MSYS, Strawberry) targets MinGW.
+    CC = shutil.which("clang-cl") or shutil.which("cl")
+    HIP_ROOT = next((r for r in _rocm_roots() if (r / "lib" / "amdhip64.lib").is_file()), None)
+    ROCM_CLANG = HIP_ROOT / "lib" / "llvm" / "bin" / "clang.exe" if HIP_ROOT else ROCM_CLANG
+    OBJ = ".obj"
+    OUTPUT_LOCK = [aot._WINDOWS_OUTPUT_LOCK]
+    _object_symbols = aot._coff_defined_global_symbols
+    HIP_NEEDED, JIT_RUNTIME = "amdhip64", "fly_jit_runtime.dll"
+    LINK_METADATA = (b'"runtime_libraries":[{"link_name":"amdhip64.lib"}]', b'"linker_flags":["amdhip64.lib"]')
+    TADD_LAYOUT = (
+        "#pragma pack(push, 1)\ntypedef struct { int32_t shape[2]; int64_t stride[1]; } tadd_A_layout_t;\n"
+        "#pragma pack(pop)"
+    )
 
 needs_gpu = pytest.mark.skipif(not HAS_GPU, reason="requires a ROCm GPU")
 needs_cc = pytest.mark.skipif(CC is None, reason="requires a C compiler")
@@ -311,10 +339,71 @@ def _pack_args(abi, values):
 
 def _link_shared(tmp_path, objects, name, extra=()):
     out = tmp_path / name
+    if sys.platform == "win32":
+        return _link_dll(out.with_suffix(".dll"), objects, extra)
     linker = HIPCC or CC
     flags = list(_get_backend_class().aot_runtime_config().linker_flags)
     subprocess.run([linker, "-shared", "-o", str(out), *map(str, objects), *flags, *extra], check=True)
     return out
+
+
+def _link_dll(out, inputs, extra):
+    """Windows ``_link_shared``: a DLL that exports every global its inputs define.
+
+    ``.c`` inputs are compiled first. A DLL never links with undefined symbols, so
+    ``-Wl,`` options are moot; only ``-I`` extras apply. Exported objects name no C
+    runtime, as objects built with /Zl, so the DLL C runtime is named explicitly.
+    """
+    includes = [arg for arg in extra if arg.startswith("-I")]
+    objects = []
+    for path in map(Path, inputs):
+        if path.suffix == ".c":
+            obj = path.with_suffix(".c.obj")
+            subprocess.run([CC, "/nologo", "/c", "/MD", "/std:c11", *includes, str(path), f"/Fo{obj}"], check=True)
+            path = obj
+        objects.append(path)
+    exports = sorted({f"/EXPORT:{name}" for obj in objects for name in aot._coff_defined_global_symbols(obj)})
+    flags = list(_get_backend_class().aot_runtime_config().linker_flags)
+    libpath = [f"/LIBPATH:{HIP_ROOT / 'lib'}"] if HIP_ROOT else []
+    command = [CC, "/nologo", "/LD", *map(str, objects), *flags, "msvcrt.lib", f"/Fe{out}", "/link", *libpath, *exports]
+    subprocess.run(command, check=True)
+    return out
+
+
+def _needed(shared):
+    """DT_NEEDED of a shared library, or the DLL names a PE image imports."""
+    if sys.platform != "win32":
+        return _dynamic_info(shared).needed
+    data = Path(shared).read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    nsections, optional_size = struct.unpack_from("<2xH12xH", data, pe + 4)
+    optional = pe + 24
+    imports = struct.unpack_from("<I", data, optional + 120)[0]  # PE32+ data directory 1
+    sections = [struct.unpack_from("<8xIIII", data, optional + optional_size + 40 * i) for i in range(nsections)]
+
+    def offset(rva):
+        return next(raw + rva - va for vsize, va, size, raw in sections if va <= rva < va + max(vsize, size))
+
+    names, entry = [], offset(imports)
+    while struct.unpack_from("<I", data, entry + 12)[0]:
+        name = offset(struct.unpack_from("<I", data, entry + 12)[0])
+        names.append(data[name : data.index(b"\0", name)].decode().lower())
+        entry += 20
+    return names
+
+
+def _check_header(path, lang, std=None):
+    """Compile a generated header on its own, warnings as errors."""
+    if sys.platform != "win32":
+        subprocess.run(
+            [CC, "-x", lang, *([std] if std else []), "-fsyntax-only", "-Wall", "-Werror", str(path)], check=True
+        )
+        return
+    # Through a source file: clang-cl flags unused static inline helpers of a main file.
+    source = Path(path).with_suffix(".c" if lang == "c" else ".cpp")
+    source.write_text(f'#include "{Path(path).as_posix()}"\n')
+    language = ["/TC", "/std:c11"] if lang == "c" else ["/TP", "/std:c++17"]
+    subprocess.run([CC, "/nologo", "/Zs", "/W4", "/WX", *language, str(source)], check=True)
 
 
 @pytest.mark.l1b_target_dialect
@@ -329,7 +418,7 @@ from pathlib import Path
 
 import flydsl.compiler as flyc
 import flydsl.runtime.device_runtime as device_runtime
-from tests.unit.test_aot_export import _ptr, axpy
+from tests.unit.test_aot_export import OBJ, _ptr, axpy
 
 def unexpected_device_runtime():
     raise AssertionError("AOT compilation must not query the device runtime")
@@ -342,7 +431,7 @@ device_runtime.get_device_runtime = unexpected_device_runtime
 out = Path(sys.argv[1])
 compiled = flyc.compile(axpy, _ptr(), _ptr(), 256, 1.0)
 assert compiled.export_to_c(out, "cpu_only", "cpu_only_kernel") is None
-assert (out / "cpu_only.o").stat().st_size > 0
+assert (out / f"cpu_only{OBJ}").stat().st_size > 0
 assert (out / "cpu_only.h").stat().st_size > 0
 """
     child_env = os.environ.copy()
@@ -358,11 +447,11 @@ assert (out / "cpu_only.h").stat().st_size > 0
     child_env.pop("HSA_OVERRIDE_GFX_VERSION", None)
     subprocess.run([sys.executable, "-c", script, str(tmp_path)], env=child_env, check=True)
 
-    shared = _link_shared(tmp_path, [tmp_path / "cpu_only.o"], "libcpu_only.so")
+    shared = _link_shared(tmp_path, [tmp_path / f"cpu_only{OBJ}"], "libcpu_only.so")
     assert shared.stat().st_size > 0
-    needed = _dynamic_info(shared).needed
-    assert any(name.startswith("libamdhip64.so") for name in needed)
-    assert "libfly_jit_runtime.so" not in needed
+    needed = _needed(shared)
+    assert any(name.startswith(HIP_NEEDED) for name in needed)
+    assert JIT_RUNTIME not in needed
 
 
 class _Loaded:
@@ -779,7 +868,8 @@ def test_external_declaration_resolves_at_link_time(tmp_path):
     ext_src = tmp_path / "ext.c"
     ext_src.write_text("int extern_fn(int x) { return x * 3; }\nint extern_global = 5;\n")
     ext_lib = tmp_path / "libext.so"
-    subprocess.run([CC, "-shared", "-fPIC", "-o", str(ext_lib), str(ext_src)], check=True)
+    if sys.platform != "win32":
+        subprocess.run([CC, "-shared", "-fPIC", "-o", str(ext_lib), str(ext_src)], check=True)
 
     with ir.Context() as ctx, ir.Location.unknown():
         ctx.load_all_available_dialects()
@@ -794,11 +884,15 @@ def test_external_declaration_resolves_at_link_time(tmp_path):
         module.operation.verify()
         data = _emit_host_object(module.operation, 2)
     # Only the probe is exported; extern_fn / extern_global stay undefined references.
-    assert set(_defined_global_symbols(data)) == {"probe"}
-    obj = tmp_path / "probe.o"
+    assert set(_object_symbols(data)) == {"probe"}
+    obj = tmp_path / f"probe{OBJ}"
     obj.write_bytes(data)
     so = tmp_path / "libprobe.so"
-    subprocess.run([CC, "-shared", "-o", str(so), str(obj), str(ext_lib), f"-Wl,-rpath,{tmp_path}"], check=True)
+    if sys.platform == "win32":
+        # A DLL cannot leave symbols to the loader: link the definitions in.
+        so = _link_shared(tmp_path, [obj, ext_src], so.name)
+    else:
+        subprocess.run([CC, "-shared", "-o", str(so), str(obj), str(ext_lib), f"-Wl,-rpath,{tmp_path}"], check=True)
     lib = ctypes.CDLL(str(so))
     lib.probe.restype = ctypes.c_int32
     assert lib.probe() == 42 * 3
@@ -812,13 +906,18 @@ def test_find_aot_runtime_archive():
     runtime = _get_backend_class().aot_runtime_config()
     archive = _find_aot_runtime_archive()
     assert archive.is_absolute() and archive.is_file()
-    assert archive.name == runtime.archive_basename == "libfly_rocm_aot_runtime.a"
-    assert archive.read_bytes().startswith(b"!<arch>\n")
-    assert runtime.runtime_libraries == ("libamdhip64.so",)
-    assert runtime.linker_flags == ("-lamdhip64", "-pthread", "-ldl")
+    if sys.platform == "win32":
+        assert archive.name == runtime.archive_basename == "fly_rocm_aot_runtime.mlir"
+        assert runtime.runtime_libraries == runtime.linker_flags == ("amdhip64.lib",)
+        _text, symbols = aot._load_aot_runtime_ir(archive)
+    else:
+        assert archive.name == runtime.archive_basename == "libfly_rocm_aot_runtime.a"
+        assert archive.read_bytes().startswith(b"!<arch>\n")
+        assert runtime.runtime_libraries == ("libamdhip64.so",)
+        assert runtime.linker_flags == ("-lamdhip64", "-pthread", "-ldl")
 
-    runtime_object, symbols = aot._materialize_aot_runtime(archive)
-    assert runtime_object.startswith(b"\x7fELF")
+        runtime_object, symbols = aot._materialize_aot_runtime(archive)
+        assert runtime_object.startswith(b"\x7fELF")
     assert {"flydslRuntimeTakeError", "hipModuleLoadData", "malloc"} <= symbols
 
 
@@ -892,6 +991,14 @@ def test_elf_reader_rejects_malformed_input():
 
 
 @pytest.mark.l0_backend_agnostic
+def test_coff_reader_rejects_malformed_input():
+    one_section_past_the_end = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 0, 0)
+    for bad in (b"", b"not a COFF object file", one_section_past_the_end):
+        with pytest.raises(ValueError):
+            aot._coff_defined_global_symbols(bad)
+
+
+@pytest.mark.l0_backend_agnostic
 def test_output_directory_lock_serializes_threads(tmp_path):
     first_entered = threading.Event()
     release_first = threading.Event()
@@ -916,6 +1023,31 @@ def test_output_directory_lock_serializes_threads(tmp_path):
         first_future.result(timeout=5)
         second_future.result(timeout=5)
     assert second_entered.is_set()
+
+
+@pytest.mark.l0_backend_agnostic
+def test_output_directory_lock_spans_processes_and_temp_dirs(tmp_path):
+    """An exporter with another temp directory still waits for the same output directory."""
+    out, temp = tmp_path / "out", tmp_path / "other-temp"
+    out.mkdir()
+    temp.mkdir()
+    script = (
+        "import sys\nfrom pathlib import Path\nfrom flydsl.compiler import _aot\n"
+        "out = Path(sys.argv[1])\n(out.parent / 'ready').touch()\n"
+        "with _aot._output_directory_lock(out):\n    (out.parent / 'entered').touch()\n"
+    )
+    pythonpath = os.pathsep.join(filter(None, [str(Path(aot.__file__).parents[2]), os.environ.get("PYTHONPATH")]))
+    env = dict(os.environ, TEMP=str(temp), TMP=str(temp), TMPDIR=str(temp), PYTHONPATH=pythonpath)
+    with aot._output_directory_lock(out):
+        child = subprocess.Popen([sys.executable, "-c", script, str(out)], env=env)
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "ready").exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (tmp_path / "ready").exists()
+        time.sleep(1.0)
+        assert not (tmp_path / "entered").exists()
+    assert child.wait(timeout=60) == 0
+    assert (tmp_path / "entered").exists()
 
 
 # export_to_c
@@ -947,30 +1079,30 @@ class TestExport:
         out = tmp_path / "artifacts"
         out.mkdir()
         assert compiled._export_to_c(out, "axpy_file", "aoti_axpy") is None
-        assert (out / "axpy_file.o").is_file()
+        assert (out / f"axpy_file{OBJ}").is_file()
         assert (out / "axpy_file.h").is_file()
-        assert sorted(path.name for path in out.iterdir()) == ["axpy_file.h", "axpy_file.o"]
-        assert "aoti_axpy" in _defined_global_symbols(out / "axpy_file.o")
-        assert b'"schema_version":2' in (out / "axpy_file.o").read_bytes()
-        assert b'"runtime_libraries":[{"link_name":"libamdhip64.so"}]' in (out / "axpy_file.o").read_bytes()
-        assert b'"linker_flags":["-lamdhip64","-pthread","-ldl"]' in (out / "axpy_file.o").read_bytes()
+        assert sorted(path.name for path in out.iterdir()) == sorted([*OUTPUT_LOCK, "axpy_file.h", f"axpy_file{OBJ}"])
+        assert "aoti_axpy" in _object_symbols(out / f"axpy_file{OBJ}")
+        assert b'"schema_version":2' in (out / f"axpy_file{OBJ}").read_bytes()
+        assert LINK_METADATA[0] in (out / f"axpy_file{OBJ}").read_bytes()
+        assert LINK_METADATA[1] in (out / f"axpy_file{OBJ}").read_bytes()
 
         assert compiled._export_to_c(out, "default_name") is None
-        assert "default_name" in _defined_global_symbols(out / "default_name.o")
+        assert "default_name" in _object_symbols(out / f"default_name{OBJ}")
         assert compiled._export_to_c(out, "empty_prefix", "") is None
-        assert "empty_prefix" in _defined_global_symbols(out / "empty_prefix.o")
+        assert "empty_prefix" in _object_symbols(out / f"empty_prefix{OBJ}")
         assert compiled._export_to_c(out, "keyword_prefix", function_prefix="keyword_symbol") is None
-        assert "keyword_symbol" in _defined_global_symbols(out / "keyword_prefix.o")
+        assert "keyword_symbol" in _object_symbols(out / f"keyword_prefix{OBJ}")
 
     def test_metadata_and_symbols(self, compiled, tmp_path):
         out = tmp_path / "with space"
         out.mkdir()
         compiled._export_to_c(out, "axpy", "aoti_axpy")
 
-        exported = set(_defined_global_symbols(out / "axpy.o"))
+        exported = set(_object_symbols(out / f"axpy{OBJ}"))
         lifecycle = {"aoti_axpy__module_init", "aoti_axpy__module_load", "aoti_axpy__module_unload"}
         assert exported == {"aoti_axpy", "aoti_axpy__metadata", *lifecycle}
-        assert (out / "axpy.o").stat().st_mode & 0o044 == 0o044  # not left 0600
+        assert (out / f"axpy{OBJ}").stat().st_mode & 0o044 == 0o044  # not left 0600
 
     def test_reexport_is_deterministic_and_leaves_artifact_unchanged(self, compiled, tmp_path):
         before = compiled._ir_text
@@ -978,8 +1110,8 @@ class TestExport:
         compiled._export_to_c(tmp_path, "b", "second_name")
         compiled._export_to_c(tmp_path, "c", "first_name")
         assert compiled._ir_text == before
-        assert (tmp_path / "a.o").read_bytes() == (tmp_path / "c.o").read_bytes()
-        assert "first_name" not in (tmp_path / "b.o").read_bytes().decode("latin-1")
+        assert (tmp_path / f"a{OBJ}").read_bytes() == (tmp_path / f"c{OBJ}").read_bytes()
+        assert "first_name" not in (tmp_path / f"b{OBJ}").read_bytes().decode("latin-1")
 
     @needs_cc
     def test_header_matches_abi(self, tmp_path):
@@ -998,20 +1130,15 @@ class TestExport:
         ) in header
         # The header compiles as C and C++ (static size assertions included).
         for lang, std in (("c", "-std=c11"), ("c++", "-std=c++17")):
-            subprocess.run(
-                [CC, "-x", lang, std, "-fsyntax-only", "-Wall", "-Werror", str(tmp_path / "echo.h")], check=True
-            )
+            _check_header(tmp_path / "echo.h", lang, std)
 
         t = torch.empty_strided((2, 3), (5, 1), device="meta")
         tensor = _aot_view(tensor_add, t, t, t)
         tensor._export_to_c(tmp_path, "t", "tadd")
         theader = (tmp_path / "t.h").read_text()
-        assert (
-            "typedef struct __attribute__((packed)) { int32_t shape[2]; int64_t stride[1]; } tadd_A_layout_t;"
-            in theader
-        )
+        assert TADD_LAYOUT in theader
         assert f"sizeof(tadd_A_layout_t) == {tensor._abi[1].size}" in theader
-        subprocess.run([CC, "-x", "c", "-fsyntax-only", "-Wall", "-Werror", str(tmp_path / "t.h")], check=True)
+        _check_header(tmp_path / "t.h", "c")
 
     @needs_cc
     def test_header_parameter_names_avoid_c_keywords(self, tmp_path):
@@ -1026,7 +1153,7 @@ class TestExport:
             "int32_t flydsl__private, void *stream)"
         ) in (tmp_path / "kw.h").read_text()
         for lang in ("c", "c++"):
-            subprocess.run([CC, "-x", lang, "-fsyntax-only", "-Wall", "-Werror", str(tmp_path / "kw.h")], check=True)
+            _check_header(tmp_path / "kw.h", lang)
 
     @needs_cc
     def test_header_layout_type_names_are_unique(self, tmp_path):
@@ -1063,7 +1190,7 @@ class TestExport:
         path = tmp_path / "unique.h"
         path.write_text(header)
         for lang in ("c", "c++"):
-            subprocess.run([CC, "-x", lang, "-fsyntax-only", "-Wall", "-Werror", str(path)], check=True)
+            _check_header(path, lang)
 
 
 # GPU end to end
@@ -1071,7 +1198,7 @@ class TestExport:
 
 def _export_and_load(tmp_path, compiled, name, lib_name=None):
     compiled._export_to_c(tmp_path, name)
-    so = _link_shared(tmp_path, [tmp_path / f"{name}.o"], lib_name or f"lib{name}.so")
+    so = _link_shared(tmp_path, [tmp_path / f"{name}{OBJ}"], lib_name or f"lib{name}.so")
     return _Loaded(ctypes.CDLL(str(so)), compiled, name)
 
 
@@ -1185,7 +1312,7 @@ class TestEndToEnd:
         monkeypatch.setattr(jit_function.JitFunction, "_trace_and_compile", unexpected_compile)
 
         assert compiled.export_to_c(tmp_path, "compiled_axpy", "compiled_axpy_entry") is None
-        so = _link_shared(tmp_path, [tmp_path / "compiled_axpy.o"], "libcompiled_axpy.so")
+        so = _link_shared(tmp_path, [tmp_path / f"compiled_axpy{OBJ}"], "libcompiled_axpy.so")
         loaded = _Loaded(ctypes.CDLL(str(so)), compiled._aot_compiled, "compiled_axpy_entry")
         assert loaded.init() == 0 and loaded.load(-1) == 0
 
@@ -1224,6 +1351,7 @@ class TestEndToEnd:
         y = torch.randn(n, device="cuda")
         expected = 2.5 * x + y
         stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
         assert k(x.data_ptr(), y.data_ptr(), n, 2.5, stream.cuda_stream) == 0
         stream.synchronize()
         torch.testing.assert_close(y, expected)
@@ -1244,7 +1372,7 @@ class TestEndToEnd:
         )
         so = _link_shared(
             tmp_path,
-            [tmp_path / "lazy.o", wrapper],
+            [tmp_path / f"lazy{OBJ}", wrapper],
             "liblazy.so",
             extra=[f"-I{tmp_path}"],
         )
@@ -1351,7 +1479,9 @@ class TestEndToEnd:
         second = _aot_view(add_one_then_scale, _ptr(), 8, factor=10.0)
         first._export_to_c(tmp_path, "a", "twin_a")
         second._export_to_c(tmp_path, "b", "twin_b")
-        so = _link_shared(tmp_path, [tmp_path / "a.o", tmp_path / "b.o"], "libtwins.so", extra=["-Wl,--no-undefined"])
+        so = _link_shared(
+            tmp_path, [tmp_path / f"a{OBJ}", tmp_path / f"b{OBJ}"], "libtwins.so", extra=["-Wl,--no-undefined"]
+        )
         lib = ctypes.CDLL(str(so))
         ka, kb = _Loaded(lib, first, "twin_a"), _Loaded(lib, second, "twin_b")
         for k in (ka, kb):
@@ -1376,6 +1506,8 @@ class TestEndToEnd:
         x = torch.ones(n, device="cuda")
         ys = [torch.zeros(n, device="cuda") for _ in range(threads)]
         streams = [torch.cuda.Stream() for _ in range(threads)]
+        for stream in streams:
+            stream.wait_stream(torch.cuda.current_stream())
         barrier = threading.Barrier(threads)
 
         def work(i):

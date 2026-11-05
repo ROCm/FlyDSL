@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import os
+import sys
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
@@ -183,7 +184,13 @@ class RocmBackend(BaseBackend):
 
     def native_lib_patterns(self) -> List[str]:
         if os.name == "nt":
-            return ["_mlirDialectsFly*.pyd", "FlyPythonCAPI.dll", "fly_jit_runtime.dll", "_mlirRegisterEverything*.pyd"]
+            return [
+                "_mlirDialectsFly*.pyd",
+                "FlyPythonCAPI.dll",
+                "fly_rocm_aot_runtime.mlir",
+                "fly_jit_runtime.dll",
+                "_mlirRegisterEverything*.pyd",
+            ]
         return [
             "_mlirDialectsFly*.so",
             "libFly*.so",
@@ -203,6 +210,14 @@ class RocmBackend(BaseBackend):
 
     @classmethod
     def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        if sys.platform == "win32":
+            # The runtime ships as LLVM-dialect IR (fly_rocm_aot_runtime.mlir, not an
+            # archive); compiler/_aot.py merges it into each export.
+            return AOTRuntimeConfig(
+                archive_basename="fly_rocm_aot_runtime.mlir",
+                runtime_libraries=("amdhip64.lib",),
+                linker_flags=("amdhip64.lib",),
+            )
         return AOTRuntimeConfig(
             archive_basename="libfly_rocm_aot_runtime.a",
             runtime_libraries=("libamdhip64.so",),
