@@ -84,7 +84,7 @@ def warp_bitonic_sort(
     values=None,
     *,
     width: int | None = None,
-    compare_op,
+    compare_op=None,
     valid_items: int | Integer | None = None,
     _dtype=None,
     _value_dtype=None,
@@ -105,8 +105,8 @@ def warp_bitonic_sort(
             of key element types and component shapes.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        compare_op: Required strict weak ordering predicate (a, b). Use a < b for
-            ascending order or a > b for descending order.
+        compare_op: Optional strict weak ordering predicate (a, b). None sorts ascending
+            with a < b; required for record and Vector keys. Use a > b for descending order.
             When NaNs participate, supply a comparator defining a consistent NaN order.
         valid_items: Uniform static or runtime length of the valid striped prefix in [0,
             width * items_per_thread]. None marks all keys valid.
@@ -118,7 +118,7 @@ def warp_bitonic_sort(
 
     Examples:
         # Sort each group in striped order. Group 1 includes negative and duplicate keys.
-        y = fx.coop.warp_bitonic_sort(keys, width=4, compare_op=lambda a, b: a < b)
+        y = fx.coop.warp_bitonic_sort(keys, width=4)
         # Group             |            group 0            ||             group 1
         # Data              | L0    | L1    | L2    | L3    || L4     | L5     | L6     | L7
         # ------------------+-------+-------+-------+-------++--------+--------+--------+------
@@ -150,7 +150,7 @@ def warp_bitonic_sort(
         # Only the first five logical output positions are specified.
         # ? marks unspecified keys and payloads beyond that valid prefix.
     """
-    if not callable(compare_op):
+    if compare_op is not None and not callable(compare_op):
         raise TypeError("compare_op must be a strict ordering callable")
     if not _is_items(keys, _dtype):
         raise TypeError(
@@ -170,8 +170,8 @@ class WarpBitonicSort(WarpPrimitive):
     Args:
         dtype: Required key element type for keys only, or (key_dtype, value_dtype) for
             key/value pairs. Each type describes one complete element, including Vector or
-            Struct elements; payload types are independent of key types. Supply a strict
-            ordering compare_op when invoking the sort.
+            Struct elements; payload types are independent of key types. Supply compare_op
+            at call time when keys require a custom ordering.
         width: Required positional slot: a positive power-of-two Python int no larger than
             the target physical warp width, or None to use that physical width. This is the
             number of participating lanes in each logical warp, not the block thread count.
@@ -195,7 +195,7 @@ class WarpBitonicSort(WarpPrimitive):
 
     Examples:
         P = fx.coop.WarpBitonicSort[fx.Int32, 8, 2]
-        result = P.sort(x, compare_op=lambda a, b: a < b)
+        result = P.sort(x)
     """
 
     _tile = True
@@ -207,7 +207,7 @@ class WarpBitonicSort(WarpPrimitive):
         keys,
         values=None,
         *,
-        compare_op,
+        compare_op=None,
         valid_items: int | Integer | None = None,
         storage=None,
     ):
@@ -230,8 +230,8 @@ class WarpBitonicSort(WarpPrimitive):
             values: Optional outer sequence of payloads with the same item count
                 as keys. Payload element types and component shapes are independent
                 of key element types and component shapes.
-            compare_op: Required strict weak ordering predicate (a, b). Use a < b for
-                ascending order or a > b for descending order.
+            compare_op: Optional strict weak ordering predicate (a, b). None sorts ascending
+                with a < b; required for record and Vector keys. Use a > b for descending order.
                 When NaNs participate, supply a comparator defining a consistent NaN order.
             valid_items: Uniform static or runtime length of the valid striped prefix in [0,
                 width * items_per_thread]. None marks all keys valid.

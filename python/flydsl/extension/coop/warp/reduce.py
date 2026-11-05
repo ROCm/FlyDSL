@@ -22,8 +22,13 @@ from .scan import _hillis_steele
 __all__ = [
     "WarpReduce",
     "warp_reduce",
+    "warp_sum",
+    "warp_max",
+    "warp_min",
     "warp_head_segmented_reduce",
     "warp_tail_segmented_reduce",
+    "warp_head_segmented_sum",
+    "warp_tail_segmented_sum",
 ]
 
 
@@ -145,6 +150,39 @@ def warp_reduce(
     return _shuffle_value(raw, base + width - 1, width)
 
 
+def warp_sum(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_reduce(value, ReductionOp.ADD, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_max(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.MAX, ...)``."""
+    return warp_reduce(value, ReductionOp.MAX, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_min(
+    value,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce(value, fx.ReductionOp.MIN, ...)``."""
+    return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
 def warp_head_segmented_reduce(
     value,
     head_flag: int | Integer,
@@ -251,6 +289,28 @@ def warp_tail_segmented_reduce(
     return _segmented_reduce(value, tail_flag, op, width, _dtype)
 
 
+def warp_head_segmented_sum(
+    value,
+    head_flag: int | Integer,
+    *,
+    width: int | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_head_segmented_reduce(value, head_flag, fx.ReductionOp.ADD, ...)``."""
+    return warp_head_segmented_reduce(value, head_flag, ReductionOp.ADD, width=width, _dtype=_dtype)
+
+
+def warp_tail_segmented_sum(
+    value,
+    tail_flag: int | Integer,
+    *,
+    width: int | None = None,
+    _dtype=None,
+):
+    """Shorthand for ``warp_tail_segmented_reduce(value, tail_flag, fx.ReductionOp.ADD, ...)``."""
+    return warp_tail_segmented_reduce(value, tail_flag, ReductionOp.ADD, width=width, _dtype=_dtype)
+
+
 class WarpReduce(WarpPrimitive):
     """Reduce logical-warp inputs into their designated head lanes.
 
@@ -314,6 +374,42 @@ class WarpReduce(WarpPrimitive):
         """
         value = cls._prepare(value)
         return cls._invoke(warp_reduce, value, op, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def sum(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_sum, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def max(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.MAX, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_max, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def min(
+        cls,
+        value,
+        *,
+        valid_items: int | Integer | None = None,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.MIN, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_min, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def head_segmented_reduce(
@@ -380,3 +476,27 @@ class WarpReduce(WarpPrimitive):
         """
         value = cls._prepare(value)
         return cls._invoke(warp_tail_segmented_reduce, value, tail_flag, op, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def head_segmented_sum(
+        cls,
+        value,
+        head_flag: int | Integer,
+        *,
+        storage=None,
+    ):
+        """Shorthand for ``head_segmented_reduce(value, head_flag, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_head_segmented_sum, value, head_flag, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def tail_segmented_sum(
+        cls,
+        value,
+        tail_flag: int | Integer,
+        *,
+        storage=None,
+    ):
+        """Shorthand for ``tail_segmented_reduce(value, tail_flag, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(warp_tail_segmented_sum, value, tail_flag, storage=storage, _dtype=cls.dtype)

@@ -49,10 +49,17 @@ WarpScan = _warp_scan.WarpScan
 
 warp_head_segmented_reduce = _warp_reduce.warp_head_segmented_reduce
 warp_tail_segmented_reduce = _warp_reduce.warp_tail_segmented_reduce
+warp_head_segmented_sum = _warp_reduce.warp_head_segmented_sum
+warp_tail_segmented_sum = _warp_reduce.warp_tail_segmented_sum
 warp_broadcast = _warp_scan.warp_broadcast
 warp_reduce = _warp_reduce.warp_reduce
+warp_sum = _warp_reduce.warp_sum
+warp_max = _warp_reduce.warp_max
+warp_min = _warp_reduce.warp_min
 warp_inclusive_scan = _warp_scan.warp_inclusive_scan
 warp_exclusive_scan = _warp_scan.warp_exclusive_scan
+warp_inclusive_sum = _warp_scan.warp_inclusive_sum
+warp_exclusive_sum = _warp_scan.warp_exclusive_sum
 warp_scan = _warp_scan.warp_scan
 warp_scan_with_aggregate = _warp_scan.warp_scan_with_aggregate
 
