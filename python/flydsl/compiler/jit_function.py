@@ -3,7 +3,6 @@
 
 import ctypes
 import enum
-import fcntl
 import hashlib
 import inspect
 import os
@@ -63,13 +62,28 @@ from .protocol import (
     get_ir_types,
 )
 
+if os.name == "nt":
+    import msvcrt
+
+    def _flock(fd, operation):
+        # msvcrt.locking starts at the current position: pin every holder to byte 0.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & fcntl.LOCK_UN else msvcrt.LK_NBLCK, 1)
+
+    # The part of fcntl FileLock uses. LOCK_SH locks exclusively (readers take turns),
+    # no call blocks (FileLock retries until its timeout), and the OS drops the lock
+    # when the process dies.
+    fcntl = types.SimpleNamespace(LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=_flock)
+else:
+    import fcntl
+
 EXTRA_SOURCE_DIRS: List[str] = []
 
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
 
 
 class FileLock:
-    """fcntl-based file lock supporting shared and exclusive modes."""
+    """fcntl-based file lock supporting shared and exclusive modes (msvcrt on Windows, where shared is exclusive)."""
 
     def __init__(self, path, *, exclusive=True, timeout=30):
         self._path = str(path)
@@ -159,12 +173,13 @@ _CLOSURE_SCALARS = (int, float, bool, str, type(None), tuple, enum.Enum)
 # os._Environ keeps the live mapping in a plain dict (``_data``) keyed by the
 # OS-encoded bytes of each name; mutations to os.environ update it in place.
 # Reading it with pre-encoded keys skips os.environ.get's per-call key encoding,
-# which is ~5x faster on this hot path. Guarded: if the internal layout is
-# absent (non-posix / future CPython) we fall back to the public API. Values go
+# which is ~5x faster on this hot path. Guarded: where names are not bytes
+# (Windows keys ``_data`` by upper-cased str) or the internal layout is absent
+# (future CPython) we fall back to the public API. Values go
 # through os.fsdecode so the fast and slow paths — and thus two processes
 # sharing a cache dir — produce byte-for-byte identical keys.
 try:
-    _ENABLE_ENV_FAST_READ = isinstance(os.environ._data, dict)
+    _ENABLE_ENV_FAST_READ = os.supports_bytes_environ and isinstance(os.environ._data, dict)
 except Exception:
     _ENABLE_ENV_FAST_READ = False
 _CACHE_INVALIDATING_ENV_VARS_ENCODED = tuple((n, os.fsencode(n)) for n in _CACHE_INVALIDATING_ENV_VARS)
@@ -1931,6 +1946,8 @@ class CompiledFunction:
         Host export currently requires 64-bit little-endian Linux ELF tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
+        if os.name == "nt":
+            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):

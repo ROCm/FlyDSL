@@ -133,6 +133,48 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 )
 
 # ---------------------------------------------------------------------------
+# Windows: FlyPythonCAPI.dll must also be the single home of the C++ code the
+# Fly extensions call besides the C API (BindingUtils.h: getTypeID, isa/cast):
+# MLIR IR and Support, and the Fly dialects. On Linux the version script below
+# exports it from the archives linked in. A DLL exports only what
+# WINDOWS_EXPORT_ALL_SYMBOLS finds in the target's own objects, never archive
+# members, so those objects become sources. Ninja puts them ahead of the
+# archives on the link line, so the archive copies are never pulled in.
+# ---------------------------------------------------------------------------
+if(WIN32)
+  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect)
+  if(FLYDSL_HAS_ROCDL)
+    list(APPEND _fly_dialect_libs MLIRFlyROCDLDialect)
+  endif()
+  foreach(_lib IN LISTS _fly_dialect_libs)
+    # add_mlir_library makes obj.<lib> for every generator except Visual Studio's.
+    if(NOT TARGET obj.${_lib})
+      message(FATAL_ERROR "obj.${_lib} is missing: build FlyDSL with the Ninja generator")
+    endif()
+    target_sources(FlyPythonCAPI PRIVATE $<TARGET_OBJECTS:obj.${_lib}>)
+  endforeach()
+
+  # The MLIR install ships object files only for its C API libraries, so unpack
+  # MLIRIR's and MLIRSupport's archives. Configure depends on the archives: an
+  # LLVM reinstalled in place re-runs this instead of linking stale objects.
+  find_program(FLY_LLVM_AR llvm-ar HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  foreach(_lib MLIRIR MLIRSupport)
+    get_target_property(_archive ${_lib} LOCATION)
+    set(_dir "${CMAKE_CURRENT_BINARY_DIR}/archive_objects/${_lib}")
+    file(REMOVE_RECURSE "${_dir}")
+    file(MAKE_DIRECTORY "${_dir}")
+    execute_process(COMMAND "${FLY_LLVM_AR}" x "${_archive}"
+                    WORKING_DIRECTORY "${_dir}" RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+      message(FATAL_ERROR "llvm-ar could not unpack ${_archive}")
+    endif()
+    file(GLOB _objects "${_dir}/*.obj")
+    target_sources(FlyPythonCAPI PRIVATE ${_objects})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_archive}")
+  endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
 # Symbol visibility: prevent LLVM/MLIR internals from leaking out of
 # FlyPythonCAPI.so, which would conflict with ROCm's own LLVM
 # (libamd_comgr.so).
@@ -213,6 +255,32 @@ foreach(_m IN LISTS _flydsl_stubgen_modules)
   string(APPEND _flydsl_stubgen_m_flags " -m ${_m}")
 endforeach()
 
+if(WIN32)
+  # Same stubs without /bin/bash; PYTHONPATH is ';'-separated here. Whether
+  # nanobind.stubgen imports is settled at configure time, with that same path.
+  list(JOIN _STUBGEN_PYTHONPATH ";" _fly_stubgen_pythonpath)
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${_fly_stubgen_pythonpath}"
+            "${Python3_EXECUTABLE}" -c "import nanobind.stubgen"
+    RESULT_VARIABLE _fly_no_stubgen OUTPUT_QUIET ERROR_QUIET)
+  if(_fly_no_stubgen)
+    set(_fly_stubgen ${CMAKE_COMMAND} -E echo
+        "Warning: nanobind.stubgen not available -- skipping stub generation")
+  else()
+    separate_arguments(_fly_stubgen_m_args UNIX_COMMAND "${_flydsl_stubgen_m_flags}")
+    set(_fly_stubgen "${Python3_EXECUTABLE}" -m nanobind.stubgen
+        -q -r ${_fly_stubgen_m_args} -O "${_MLIR_LIBS_DIR}")
+  endif()
+  add_custom_command(
+    OUTPUT "${_STUB_MARKER_FILE}"
+    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${_fly_stubgen_pythonpath}" ${_fly_stubgen}
+    COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
+    DEPENDS CopyFlyPythonSources
+    COMMENT "Generating Python stub files for all extension modules"
+    VERBATIM
+  )
+else()
+# Unindented so the quoted bash script keeps its bytes.
 add_custom_command(
   OUTPUT "${_STUB_MARKER_FILE}"
   COMMAND /bin/bash -c "\
@@ -229,6 +297,7 @@ add_custom_command(
   COMMENT "Generating Python stub files for all extension modules"
   VERBATIM
 )
+endif()
 
 add_custom_target(FlyPythonStubs ALL
   DEPENDS "${_STUB_MARKER_FILE}"
@@ -245,6 +314,20 @@ if(FLYDSL_HAS_ROCDL)
   )
 else()
   set(_FLY_COPY_ROCDL_TABLEGEN "")
+endif()
+
+# The JIT asks for the C runner utils by an unversioned name. Windows keeps the
+# DLL names and has no rpath to patch: Python preloads mlir_c_runner_utils.dll,
+# and that load finds mlir_float16_utils.dll in the same folder
+# (flydsl/runtime/device_runtime/rocm.py).
+set(_FLY_C_RUNNER_UTILS_NAME libmlir_c_runner_utils.so)
+set(_FLY_PATCHELF_RUNTIME_LIBS
+  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so'"
+  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>'"
+)
+if(WIN32)
+  set(_FLY_C_RUNNER_UTILS_NAME mlir_c_runner_utils.dll)
+  set(_FLY_PATCHELF_RUNTIME_LIBS "")
 endif()
 
 add_custom_target(CopyFlyPythonSources ALL
@@ -264,12 +347,11 @@ add_custom_target(CopyFlyPythonSources ALL
   ${_FLY_COPY_ROCDL_TABLEGEN}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
-    "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"
+    "${_MLIR_LIBS_DIR}/${_FLY_C_RUNNER_UTILS_NAME}"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_float16_utils>"
     "${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>"
-  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so'"
-  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>'"
+  ${_FLY_PATCHELF_RUNTIME_LIBS}
   COMMENT "Copying python/flydsl sources to build/python_packages/flydsl"
   DEPENDS FlyPythonModules
 )
@@ -282,6 +364,8 @@ add_dependencies(CopyFlyPythonSources FlyPythonModules)
 if(TARGET FlyJitRuntime)
   set_target_properties(FlyJitRuntime PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  # On Windows the DLL is a RUNTIME output, not a LIBRARY one.
+  set_property(TARGET FlyJitRuntime PROPERTY RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   add_dependencies(FlyPythonCAPI FlyJitRuntime)
 endif()
 
