@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T08:15:25Z",
+ "updated": "2026-11-05T08:27:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41994225680,
+   "pr": 1338,
+   "commit": "8c1333c4936406fdf0f10b2890a5abf0ab8fe934",
+   "branch": "pr/fix-jit-ir-cache-key",
+   "event": "pull_request",
+   "title": "[JIT] Key compiled artifacts by the traced MLIR",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41994225680",
+   "created_at": "2026-11-05T08:24:32Z",
+   "updated_at": "2026-11-05T08:25:54Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41988966389,
    "pr": 1373,
@@ -55,20 +70,20 @@
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
    "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193",
    "created_at": "2026-11-05T06:53:08Z",
-   "updated_at": "2026-11-05T07:11:00Z",
+   "updated_at": "2026-11-05T08:25:37Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-05T07:11:00Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T08:24:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193/job/127104915519"
     },
     {
@@ -86,10 +101,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-05T08:11:18Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T08:25:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41983402193/job/127104915671"
     }
    ]
@@ -174,25 +189,13 @@
    "branch": "feat/windows-aot",
    "event": "pull_request",
    "title": "[Windows] AOT export support for Windows x64",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238",
    "created_at": "2026-11-05T06:26:53Z",
-   "updated_at": "2026-11-05T08:13:09Z",
+   "updated_at": "2026-11-05T08:14:36Z",
    "actor": "Phil-amd",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T06:43:38Z",
-     "completed_at": "2026-11-05T07:06:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960081",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -200,7 +203,19 @@
      "conclusion": "success",
      "started_at": "2026-11-05T06:48:05Z",
      "completed_at": "2026-11-05T08:10:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960161"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127129111929"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-05T06:43:38Z",
+     "completed_at": "2026-11-05T07:06:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127129112286",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -209,7 +224,7 @@
      "conclusion": "success",
      "started_at": "2026-11-05T07:42:50Z",
      "completed_at": "2026-11-05T08:09:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960178"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127129112926"
     }
    ]
   },
@@ -1794,52 +1809,6 @@
    "updated_at": "2026-11-02T08:54:58Z",
    "actor": "zhiding512",
    "jobs": []
-  },
-  {
-   "run_id": 41401502991,
-   "pr": 1348,
-   "commit": "e4130fae0a75b1d7da13337f8230dc7ff987484e",
-   "branch": "glm-mono-kernel-structure-optmize",
-   "event": "pull_request",
-   "title": "[Refactor] Organize GLM mono-kernel stages and shared tools",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991",
-   "created_at": "2026-11-02T06:41:23Z",
-   "updated_at": "2026-11-02T08:40:24Z",
-   "actor": "james-huang09",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T07:09:10Z",
-     "completed_at": "2026-11-02T08:40:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543506"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T07:07:44Z",
-     "completed_at": "2026-11-02T07:37:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543533"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T07:07:49Z",
-     "completed_at": "2026-11-02T07:38:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41401502991/job/125142543553",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
