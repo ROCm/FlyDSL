@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T05:53:50Z",
+ "updated": "2026-11-05T05:56:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41976911909,
+   "pr": null,
+   "commit": "0b7ae01fda254e3fe6239f00aa08870aa0c0527b",
+   "branch": "main",
+   "event": "push",
+   "title": "Rewrite each function's code once and reuse it for every function bui\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976911909",
+   "created_at": "2026-11-05T05:54:12Z",
+   "updated_at": "2026-11-05T05:54:45Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41976564127,
    "pr": 1350,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976564127",
    "created_at": "2026-11-05T05:50:49Z",
-   "updated_at": "2026-11-05T05:52:33Z",
+   "updated_at": "2026-11-05T05:54:20Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Windows] Native build and ROCm JIT for Windows x64 (#1366)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976007324",
    "created_at": "2026-11-05T05:45:27Z",
-   "updated_at": "2026-11-05T05:50:18Z",
+   "updated_at": "2026-11-05T05:54:37Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1082,7 +1097,7 @@
   },
   {
    "run_id": 41464989095,
-   "pr": 1360,
+   "pr": null,
    "commit": "c3ce77f64006ba8c067550d48ae5969a55e0679e",
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
@@ -1183,7 +1198,7 @@
   },
   {
    "run_id": 41453148475,
-   "pr": 1360,
+   "pr": null,
    "commit": "13613ec78ac38ef6b99ac5d997d3ff8f2e999a43",
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
@@ -1198,7 +1213,7 @@
   },
   {
    "run_id": 41452251082,
-   "pr": 1360,
+   "pr": null,
    "commit": "f9afceb00db19c17afbf8b99aac7d3a7a5a54792",
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
@@ -1258,7 +1273,7 @@
   },
   {
    "run_id": 41445521202,
-   "pr": 1360,
+   "pr": null,
    "commit": "d3d48ad745c455c5c2a4fb034cfc69dfc70016fd",
    "branch": "cache-ast-rewrite",
    "event": "pull_request",
@@ -1883,21 +1898,6 @@
    "created_at": "2026-10-31T05:49:14Z",
    "updated_at": "2026-10-31T05:51:06Z",
    "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 41066545711,
-   "pr": 1355,
-   "commit": "133102b7b88431d868402d52235559e847e20a32",
-   "branch": "claude-plugin-marketplace",
-   "event": "pull_request",
-   "title": "[Misc] Publish FlyDSL skills as a Claude Code plugin",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41066545711",
-   "created_at": "2026-10-30T13:50:10Z",
-   "updated_at": "2026-10-30T13:51:19Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
