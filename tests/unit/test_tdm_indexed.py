@@ -5,100 +5,176 @@
 
 The mode is chosen by the copy op -- ``TensorLoadGather`` / ``TensorStoreScatter``
 rather than ``TensorLoad`` / ``TensorStore``. Both forms issue the same TDM
-instruction; only the descriptor differs. The index width is not an op parameter: it
-is the element width of the row list, so a list and the width it is read at can never
-disagree. The atom sets the list up and a ``copy`` may hand over a different one.
+instruction; only the descriptor differs.
+
+The row list comes in two forms, and which one is used is visible in the generated
+code. A tuple carries the indices themselves, so entries known while tracing become
+descriptor immediates and cost no load. A tensor is data in memory, read at run time,
+and its element width also picks the index width.
 
 The limits come from where the row list lives. It occupies the two descriptor groups
 a linear tile would spend on dims 2..4, which is why an indexed tile is 2D only and
 why one issue carries a bounded number of rows: up to sixteen at 16-bit indices, up
-to eight at 32-bit. Unlike a fixed-width gather, any count in ``[1, max]`` is legal.
-"""
+to eight at 32-bit. Any count in ``[1, limit]`` is legal.
 
-import os
+Nothing here needs a GPU: the kernels are compiled for gfx1250 under COMPILE_ONLY and
+the assertions read the emitted ISA.
+"""
 
 import pytest
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
-# TDM is gfx1250-only. Everything here is decided while tracing, so building without
-# a device is enough; on any other card the kernels still have to be compiled for
-# gfx1250, which is what COMPILE_ONLY allows.
-# A rejected configuration is rejected while tracing, before anything is compiled, so
-# those cases run anywhere. A configuration that is accepted goes on to be compiled for
-# gfx1250, which needs either that card or COMPILE_ONLY -- on another card the TDM
-# instructions reach a backend that has none and it aborts rather than diagnosing.
-_arch = get_rocm_arch() or ""
-_needs_target = pytest.mark.skipif(
-    not _arch.startswith("gfx1250") and os.environ.get("COMPILE_ONLY", "") in ("", "0"),
-    reason=f"compiling an accepted indexed atom needs gfx1250 or COMPILE_ONLY, got {_arch}",
-)
-
 WIDTH = 128
-N = 256
+M, N = 64, 256
+# Picked so the packed 16-bit words are unmistakable in the ISA: (1 << 16) | 3 and so on.
+ROW_LIST = (3, 1, 17, 5, 40, 2, 9, 33)
+PACKED_16 = ("0x10003", "0x50011", "0x20028", "0x210009")
 
 
-def _build(rows, width=WIDTH, op=None, tiler=None, index_dtype=torch.int32, index_tensor=True, copy_dtype=None):
-    """Trace a one-issue indexed load; return nothing, raise whatever it raises."""
+def _target_env(monkeypatch, tmp_path):
+    """Compile for gfx1250 without running, and keep every IR stage on disk."""
+    for name, value in (
+        ("FLYDSL_COMPILE_BACKEND", "rocm"),
+        ("FLYDSL_RUNTIME_KIND", "rocm"),
+        ("ARCH", "gfx1250"),
+        ("FLYDSL_GPU_ARCH", "gfx1250"),
+        ("COMPILE_ONLY", "1"),
+        ("FLYDSL_RUNTIME_ENABLE_CACHE", "0"),
+        ("FLYDSL_DUMP_IR", "1"),
+        ("FLYDSL_DUMP_DIR", str(tmp_path)),
+    ):
+        monkeypatch.setenv(name, value)
+
+
+def _isa(tmp_path):
+    """The one kernel's final assembly."""
+    files = list(tmp_path.glob("*/*_final_isa.s"))
+    assert len(files) == 1, f"expected one kernel's ISA, got {files}"
+    return files[0].read_text()
+
+
+def _build(
+    *,
+    rows=8,
+    width=WIDTH,
+    op=None,
+    tiler=None,
+    index_dtype=torch.int32,
+    atom_list=False,
+    copy_list="tuple",
+    entries=None,
+):
+    """Trace and compile one indexed copy.
+
+    ``copy_list`` picks what the copy is handed: ``"tuple"`` for the indices
+    themselves, ``"tensor"`` for data in memory. ``atom_list`` additionally gives the
+    atom a tensor, which is what fixes the index width.
+    """
     tile = tiler if tiler is not None else (rows, width)
     make_op = op if op is not None else fx.rocdl.TensorLoadGather
+    storing = issubclass(make_op, fx.rocdl.TensorStore)
+    row_entries = tuple(range(rows)) if entries is None else entries
 
     @flyc.kernel
-    def k(src: fx.Tensor, idx: fx.Tensor, idx2: fx.Tensor):
+    def k(src: fx.Tensor, idx: fx.Tensor):
         lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, rows * width]).peek()
         box = fx.make_layout((rows, width), (width, 1))
         smem = fx.make_view(lds.ptr, fx.make_layout(((rows, width), 1), ((width, 1), rows * width)))
+        # A static shape keeps the geometry out of the kernel arguments, so the only
+        # loads left are the ones the row list costs.
+        g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
         atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-            make_op(), src, box, tile, index_tensor=idx if index_tensor else None
+            make_op(), g, box, tile, index_tensor=idx if atom_list else None
         )
         blk = fx.zipped_divide(coord, (rows, width))[None, (0, None)]
-        tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx])
-        # The atom set the list up; the call site may replace it.
-        fx.copy(atom, [tAg[None, 0], idx2 if copy_dtype is not None else tAi], tAs[None, 0])
+        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
+        row_list = idx if fx.const_expr(copy_list == "tensor") else fx.make_int_tuple(row_entries)
+        # The global side is the source of a gather and the destination of a scatter,
+        # and the row list travels with it either way.
+        if fx.const_expr(storing):
+            fx.copy(atom, tAs[None, 0], [tAg[None, 0], row_list])
+        else:
+            fx.copy(atom, [tAg[None, 0], row_list], tAs[None, 0])
         fx.rocdl.s_wait_tensorcnt(0)
 
     @flyc.jit
-    def j(src: fx.Tensor, idx: fx.Tensor, idx2: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        k(src, idx, idx2).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+    def j(src: fx.Tensor, idx: fx.Tensor):
+        k(src, idx).launch(grid=1, block=32)
 
-    n = rows if rows > 0 else 1
+    # CPU tensors suffice for target compilation; this does not launch on a GPU.
     j(
-        torch.zeros(64, N, dtype=torch.float16, device="cuda"),
-        torch.zeros(n, dtype=index_dtype, device="cuda"),
-        torch.zeros(n, dtype=copy_dtype or index_dtype, device="cuda"),
+        torch.empty(M * N, dtype=torch.float16, device="cpu"),
+        torch.empty(max(rows, 1), dtype=index_dtype, device="cpu"),
     )
 
 
-def _idx(bits):
-    """Index dtype of a given width, as ``_build`` wants it."""
-    return torch.int16 if bits == 16 else torch.int32
+# -- the row list decides when the descriptor is built ----------------------------
 
 
-# -- the op struct is what selects the mode -------------------------------------
+def test_a_static_tuple_becomes_descriptor_immediates(monkeypatch, tmp_path):
+    """Every entry is known while tracing, so the descriptor is built at compile time:
+    the indices appear as immediates and no load reads them back."""
+    _target_env(monkeypatch, tmp_path)
+    _build(entries=ROW_LIST)
+    isa = _isa(tmp_path)
+    for word in PACKED_16:
+        assert word in isa, f"expected the packed row pair {word} as an immediate, got:\n{isa}"
 
 
-def test_linear_op_refuses_an_index_tensor():
+def test_a_tensor_row_list_is_read_at_run_time(monkeypatch, tmp_path):
+    """The same indices live in memory, so the kernel never sees their values and has
+    to read them instead."""
+    _target_env(monkeypatch, tmp_path)
+    _build(atom_list=True, copy_list="tensor")
+    isa = _isa(tmp_path)
+    for word in PACKED_16:
+        assert word not in isa, f"a row list in memory must not fold to {word}, got:\n{isa}"
+    assert "s_load" in isa
+
+
+def test_a_tuple_may_mix_known_and_runtime_entries(monkeypatch, tmp_path):
+    """A tuple is decided per entry: what is known folds, the rest rides in as an
+    operand, so a partly known list still costs no load."""
+    _target_env(monkeypatch, tmp_path)
+    _build(rows=4, entries=(3, 1, 17, fx.Int32(5)))
+    isa = _isa(tmp_path)
+    assert "0x10003" in isa
+
+
+def test_the_mode_bit_is_set(monkeypatch, tmp_path):
+    """Bit 31 of descriptor group 0 is what turns indexed addressing on; bit 30 picks
+    the width, and a tuple leaves it at the 16-bit default."""
+    _target_env(monkeypatch, tmp_path)
+    _build(entries=ROW_LIST)
+    assert "0x80000001" in _isa(tmp_path)
+
+
+def test_a_tensor_row_list_picks_the_width(monkeypatch, tmp_path):
+    """A 32-bit list sets bit 30 as well, which is the same descriptor word with the
+    width bit flipped."""
+    _target_env(monkeypatch, tmp_path)
+    _build(atom_list=True, copy_list="tensor", index_dtype=torch.int32)
+    assert "0xc0000001" in _isa(tmp_path)
+
+
+def test_a_narrow_tensor_row_list_clears_the_width_bit(monkeypatch, tmp_path):
+    _target_env(monkeypatch, tmp_path)
+    _build(rows=16, atom_list=True, copy_list="tensor", index_dtype=torch.int16)
+    assert "0x80000001" in _isa(tmp_path)
+
+
+# -- the op struct is what selects the mode ---------------------------------------
+
+
+def test_linear_op_refuses_a_row_list():
     """A plain TensorLoad has no indexed descriptor to put the list in."""
     with pytest.raises(Exception, match="index_tensor needs an indexed op"):
-        _build(rows=8, op=fx.rocdl.TensorLoad)
-
-
-@_needs_target
-def test_atom_without_a_list_defaults_to_16_bit():
-    """The atom may leave the list to the call site; the default width is 16-bit,
-    which is why 16 rows are allowed here with no list to read it from."""
-    _build(rows=16, index_tensor=False, index_dtype=_idx(16))
-
-
-def test_index_width_comes_from_the_element_type():
-    """A 16-bit list doubles the row budget a 32-bit one allows, with no op change."""
-    assert fx.rocdl.cdna5.index_rows_limit(16) == 16
-    assert fx.rocdl.cdna5.index_rows_limit(32) == 8
+        _build(op=fx.rocdl.TensorLoad, atom_list=True)
 
 
 def test_indexed_ops_keep_their_direction():
@@ -108,59 +184,39 @@ def test_indexed_ops_keep_their_direction():
     assert not isinstance(fx.rocdl.TensorLoadGather(), fx.rocdl.TensorStore)
 
 
-# -- row counts ------------------------------------------------------------------
+def test_the_row_budget_follows_the_width():
+    assert fx.rocdl.cdna5.index_rows_limit(16) == 16
+    assert fx.rocdl.cdna5.index_rows_limit(32) == 8
 
 
-@_needs_target
-def test_gather_builds():
-    """Eight rows at 32-bit indices is the widest a single issue carries."""
-    _build(rows=8)
+# -- row counts -------------------------------------------------------------------
 
 
-@_needs_target
-def test_gather_builds_16bit():
-    """Halving the index width doubles the rows one issue can name."""
-    _build(rows=16, index_dtype=_idx(16))
-
-
-@_needs_target
-def test_copy_may_replace_the_row_list():
-    """The atom initialises the list; a call site hands over a different one."""
-    _build(rows=8, copy_dtype=torch.int32)
-
-
-@_needs_target
-def test_copy_may_narrow_the_index_width():
-    """The replacement carries its own width, so the descriptor follows the operand."""
-    _build(rows=8, index_dtype=_idx(32), copy_dtype=_idx(16))
-
-
-@_needs_target
-@pytest.mark.parametrize("rows", [1, 2, 3, 5, 8])
-def test_any_row_count_up_to_the_budget_builds(rows):
-    """The row count is not fixed: the descriptor says how many indices to consume,
-    so a short tile needs no padding entries."""
+@pytest.mark.parametrize("rows", [1, 2, 5, 8, 16])
+def test_any_row_count_up_to_the_budget_builds(monkeypatch, tmp_path, rows):
+    """The count is not fixed: the descriptor says how many indices to consume, so a
+    short tile needs no padding entries."""
+    _target_env(monkeypatch, tmp_path)
     _build(rows=rows)
 
 
-@_needs_target
-@pytest.mark.parametrize("rows", [1, 7, 16])
-def test_any_row_count_up_to_the_budget_builds_16bit(rows):
-    """The same at 16-bit indices, where two share a descriptor word."""
-    _build(rows=rows, index_dtype=_idx(16))
+def test_too_many_rows_for_16bit():
+    """A tuple keeps the 16-bit default, so seventeen rows have nowhere to go."""
+    with pytest.raises(Exception, match="1 to 16 rows|rows exceed the 16"):
+        _build(rows=32)
 
 
 def test_too_many_rows_for_32bit():
-    with pytest.raises(Exception, match="1 to 8 rows"):
-        _build(rows=16, index_dtype=_idx(32))
+    with pytest.raises(Exception, match="1 to 8 rows|rows exceed the 8"):
+        _build(rows=16, atom_list=True, copy_list="tensor", index_dtype=torch.int32)
 
 
-def test_too_many_rows_for_16bit():
-    with pytest.raises(Exception, match="1 to 16 rows"):
-        _build(rows=32, index_dtype=_idx(16))
+def test_a_tuple_must_match_the_row_count():
+    with pytest.raises(Exception, match="entries but the tile has"):
+        _build(rows=8, entries=(3, 1, 17))
 
 
-# -- descriptor shape ------------------------------------------------------------
+# -- descriptor shape -------------------------------------------------------------
 
 
 def test_rank_must_be_two():
@@ -171,104 +227,37 @@ def test_rank_must_be_two():
     authoritative one -- hence the regex spans both messages.
     """
     with pytest.raises(Exception, match="2D only|must be 2D"):
-        _build(rows=8, tiler=(2, 4, WIDTH))
+        _build(tiler=(2, 4, WIDTH))
 
 
-def test_index_element_type_must_be_16_or_32_bit():
+def test_row_list_element_type_must_be_16_or_32_bit():
     """The width is a descriptor bit, so anything else has no encoding."""
     with pytest.raises(Exception, match="16- or 32-bit integer row indices"):
-        _build(rows=8, index_dtype=torch.int8)
+        _build(atom_list=True, index_dtype=torch.int8)
 
 
 def test_row_shorter_than_a_dword_is_rejected():
     """A 1-element f16 row is 2 bytes, which the descriptor cannot encode."""
     with pytest.raises(Exception, match="whole multiple of 4 bytes"):
-        _build(rows=8, width=1)
+        _build(width=1)
 
 
-@_needs_target
-def test_row_of_exactly_one_dword_builds():
+def test_row_of_exactly_one_dword_builds(monkeypatch, tmp_path):
     """Two f16 elements are 4 bytes, the narrowest row there is."""
-    _build(rows=8, width=2)
-
-
-# -- the row list as a tuple -----------------------------------------------------
-
-
-def _build_tuple(rows, entries, width=WIDTH):
-    """Trace an indexed load whose row list is a tuple rather than data in memory."""
-
-    @flyc.kernel
-    def k(src: fx.Tensor):
-        lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, rows * width]).peek()
-        box = fx.make_layout((rows, width), (width, 1))
-        smem = fx.make_view(lds.ptr, fx.make_layout(((rows, width), 1), ((width, 1), rows * width)))
-        atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(fx.rocdl.TensorLoadGather(), src, box, (rows, width))
-        blk = fx.zipped_divide(coord, (rows, width))[None, (0, None)]
-        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
-        fx.copy(atom, [tAg[None, 0], fx.make_int_tuple(entries)], tAs[None, 0])
-        fx.rocdl.s_wait_tensorcnt(0)
-
-    @flyc.jit
-    def j(src: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        k(src).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
-
-    j(torch.zeros(64, N, dtype=torch.float16, device="cuda"))
-
-
-@_needs_target
-def test_a_static_tuple_needs_no_row_list_in_memory():
-    """Every entry is known while tracing, so the descriptor is built from immediates
-    and the atom needs no index tensor at all."""
-    _build_tuple(8, (3, 1, 17, 5, 40, 2, 9, 33))
-
-
-@_needs_target
-def test_a_tuple_may_mix_known_and_runtime_entries():
-    """A tuple is per-entry: what is known folds, the rest rides in as an operand."""
-    _build_tuple(4, (3, 1, 17, fx.Int32(5)))
-
-
-@_needs_target
-def test_a_tuple_keeps_the_atom_default_width():
-    """A tuple has no element type, so the width stays the atom's 16-bit default --
-    which is what lets sixteen rows through here."""
-    _build_tuple(16, tuple(range(16)))
-
-
-def test_a_tuple_must_match_the_row_count():
-    with pytest.raises(Exception, match="entries but the tile has"):
-        _build_tuple(8, (3, 1, 17))
+    _target_env(monkeypatch, tmp_path)
+    _build(width=2)
 
 
 # -- the scatter direction --------------------------------------------------------
 
 
-@_needs_target
-def test_scatter_builds():
+def test_scatter_builds(monkeypatch, tmp_path):
     """The store side takes the same row list, naming where each row lands."""
-
-    @flyc.kernel
-    def k(dst: fx.Tensor, idx: fx.Tensor):
-        lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, 8 * WIDTH]).peek()
-        box = fx.make_layout((8, WIDTH), (WIDTH, 1))
-        smem = fx.make_view(lds.ptr, fx.make_layout(((8, WIDTH), 1), ((WIDTH, 1), 8 * WIDTH)))
-        atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-            fx.rocdl.TensorStoreScatter(), dst, box, (8, WIDTH), index_tensor=idx
-        )
-        blk = fx.zipped_divide(coord, (8, WIDTH))[None, (0, None)]
-        tBs, tBg, tBi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx])
-        fx.copy(atom, tBs[None, 0], [tBg[None, 0], tBi])
-        fx.rocdl.s_wait_tensorcnt(0)
-
-    @flyc.jit
-    def j(dst: fx.Tensor, idx: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        k(dst, idx).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
-
-    j(
-        torch.zeros(64, N, dtype=torch.float16, device="cuda"),
-        torch.zeros(8, dtype=torch.int32, device="cuda"),
-    )
+    _target_env(monkeypatch, tmp_path)
+    _build(op=fx.rocdl.TensorStoreScatter, entries=ROW_LIST)
+    isa = _isa(tmp_path)
+    assert "tensor_store_from_lds" in isa
+    assert "0x10003" in isa
 
 
 def test_partition_rejects_a_malformed_pair():
@@ -279,17 +268,18 @@ def test_partition_rejects_a_malformed_pair():
             lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, 8 * WIDTH]).peek()
             box = fx.make_layout((8, WIDTH), (WIDTH, 1))
             smem = fx.make_view(lds.ptr, fx.make_layout(((8, WIDTH), 1), ((WIDTH, 1), 8 * WIDTH)))
+            g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
             atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-                fx.rocdl.TensorLoadGather(), src, box, (8, WIDTH), index_tensor=idx
+                fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=idx
             )
             blk = fx.zipped_divide(coord, (8, WIDTH))[None, (0, None)]
             fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx, idx])
 
         @flyc.jit
-        def j(src: fx.Tensor, idx: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-            k(src, idx).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+        def j(src: fx.Tensor, idx: fx.Tensor):
+            k(src, idx).launch(grid=1, block=32)
 
         j(
-            torch.zeros(64, N, dtype=torch.float16, device="cuda"),
-            torch.zeros(8, dtype=torch.int32, device="cuda"),
+            torch.empty(M * N, dtype=torch.float16, device="cpu"),
+            torch.empty(8, dtype=torch.int32, device="cpu"),
         )
