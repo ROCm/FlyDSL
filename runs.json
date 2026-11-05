@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-05T06:12:20Z",
+ "updated": "2026-11-05T06:25:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41980011706,
+   "pr": 1369,
+   "commit": "d49e26b2fafa03259bbb347e14ffb0f48398c57f",
+   "branch": "feat/windows-aot",
+   "event": "pull_request",
+   "title": "[Windows] AOT export support for Windows x64",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980011706",
+   "created_at": "2026-11-05T06:22:49Z",
+   "updated_at": "2026-11-05T06:23:03Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 41979954014,
+   "pr": 1350,
+   "commit": "e6b08010ebef9c11430f43bc44d74fd4dfe050cf",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41979954014",
+   "created_at": "2026-11-05T06:22:18Z",
+   "updated_at": "2026-11-05T06:23:50Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 41978620092,
    "pr": null,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41978620092",
    "created_at": "2026-11-05T06:10:14Z",
-   "updated_at": "2026-11-05T06:10:31Z",
+   "updated_at": "2026-11-05T06:18:23Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,13 +85,41 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976564127",
    "created_at": "2026-11-05T05:50:49Z",
-   "updated_at": "2026-11-05T05:54:20Z",
+   "updated_at": "2026-11-05T06:23:35Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-05T06:17:40Z",
+     "completed_at": "2026-11-05T06:22:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976564127/job/127085893005"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-05T06:17:40Z",
+     "completed_at": "2026-11-05T06:22:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976564127/job/127085893023"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-05T06:18:08Z",
+     "completed_at": "2026-11-05T06:23:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41976564127/job/127085893114"
+    }
+   ]
   },
   {
    "run_id": 41976007324,
@@ -1833,67 +1891,6 @@
      "started_at": "2026-11-02T17:20:48Z",
      "completed_at": "2026-11-02T18:26:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41266884417/job/125430484806"
-    }
-   ]
-  },
-  {
-   "run_id": 41257373081,
-   "pr": null,
-   "commit": "bbbc5040017e51d676badaf5cdc463e764264bc3",
-   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41257373081",
-   "created_at": "2026-11-01T00:35:01Z",
-   "updated_at": "2026-11-05T06:08:17Z",
-   "actor": "edjson",
-   "jobs": []
-  },
-  {
-   "run_id": 41181396588,
-   "pr": 1349,
-   "commit": "3fcf04cccb1f8bd7dd7b13001720918e89f34b7e",
-   "branch": "jli/gfx1250-strict-cherrypick",
-   "event": "pull_request",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588",
-   "created_at": "2026-10-31T07:38:21Z",
-   "updated_at": "2026-10-31T12:42:10Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-31T12:23:36Z",
-     "completed_at": "2026-10-31T12:42:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588/job/124536215142",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-31T08:57:55Z",
-     "completed_at": "2026-10-31T09:20:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588/job/124536216081"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-31T08:13:27Z",
-     "completed_at": "2026-10-31T09:01:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41181396588/job/124536235210"
     }
    ]
   }
