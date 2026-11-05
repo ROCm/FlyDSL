@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-05T05:30:32Z",
+ "updated": "2026-11-05T05:44:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41975509448,
+   "pr": null,
+   "commit": "3f58ab064abc12a9c634e4a0331080445108a132",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL] Speed up tracing by caching op source positions (#1361)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41975509448",
+   "created_at": "2026-11-05T05:40:39Z",
+   "updated_at": "2026-11-05T05:41:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 41957037048,
    "pr": 1350,
@@ -10,11 +25,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41957037048",
    "created_at": "2026-11-05T02:43:23Z",
-   "updated_at": "2026-11-05T02:45:52Z",
+   "updated_at": "2026-11-05T05:29:21Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -112,7 +127,7 @@
   },
   {
    "run_id": 41847460842,
-   "pr": 1361,
+   "pr": null,
    "commit": "f744123611691ec07902fe4a90ba6d0d7b4366cf",
    "branch": "faster-trace-locations",
    "event": "pull_request",
@@ -603,11 +618,11 @@
    "branch": "fix-1323-wmmascale-fp4-fp6-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411",
    "created_at": "2026-11-03T08:06:47Z",
-   "updated_at": "2026-11-03T08:06:47Z",
+   "updated_at": "2026-11-05T05:41:42Z",
    "actor": "edjson",
    "jobs": []
   },
@@ -619,10 +634,10 @@
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600868796",
    "created_at": "2026-11-03T08:06:45Z",
-   "updated_at": "2026-11-03T08:06:45Z",
+   "updated_at": "2026-11-05T05:41:42Z",
    "actor": "edjson",
    "jobs": []
   },
@@ -934,7 +949,7 @@
   },
   {
    "run_id": 41478166582,
-   "pr": 1361,
+   "pr": null,
    "commit": "11774a6182dbcfe80b8c9af202fd1d4217d9dfe5",
    "branch": "faster-trace-locations",
    "event": "pull_request",
@@ -979,7 +994,7 @@
   },
   {
    "run_id": 41476043974,
-   "pr": 1361,
+   "pr": null,
    "commit": "ad1f2aa8d1bcad6452d4c0d3d605c3bdee5a9059",
    "branch": "faster-trace-locations",
    "event": "pull_request",
@@ -994,7 +1009,7 @@
   },
   {
    "run_id": 41474707458,
-   "pr": 1361,
+   "pr": null,
    "commit": "1b65d47125a138f95f927ee322703636aad848b0",
    "branch": "faster-trace-locations",
    "event": "pull_request",
@@ -1918,21 +1933,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41035175337/job/124171681188"
     }
    ]
-  },
-  {
-   "run_id": 41032580481,
-   "pr": null,
-   "commit": "8d2c042348a4719323a1cf4662f3e484c8ff09ad",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41032580481",
-   "created_at": "2026-10-30T09:19:25Z",
-   "updated_at": "2026-10-30T09:19:25Z",
-   "actor": "Qubitium",
-   "jobs": []
   }
  ]
 }
