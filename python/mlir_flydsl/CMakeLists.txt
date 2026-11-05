@@ -396,3 +396,23 @@ if(WIN32 AND TARGET FlyRocmAotRuntimeBitcode)
   add_custom_target(FlyRocmAotRuntimeIR ALL DEPENDS "${_fly_aot_runtime_ir}")
   add_dependencies(FlyPythonCAPI FlyRocmAotRuntimeIR)
 endif()
+
+################################################################################
+# Native library digest (JIT disk-cache toolchain fingerprint)
+################################################################################
+# Runs on every build, after everything that writes native files into
+# _mlir_libs (the patchelf'd runtime copies in CopyFlyPythonSources included),
+# so the table always describes the libraries next to it. Any new target that
+# writes into _mlir_libs must be added as a dependency here.
+add_custom_target(FlyNativeDigest ALL
+  COMMAND ${CMAKE_COMMAND} -DLIBS_DIR=${_MLIR_LIBS_DIR}
+    -P ${PROJECT_SOURCE_DIR}/cmake/WriteNativeDigest.cmake
+  COMMENT "Fingerprinting native libraries in ${_MLIR_LIBS_DIR}"
+  VERBATIM
+)
+add_dependencies(FlyNativeDigest CopyFlyPythonSources FlyPythonModules FlyPythonCAPI)
+foreach(_runtime_target IN ITEMS FlyJitRuntime FlyRocmAotRuntime FlyRocmAotRuntimeIR)
+  if(TARGET ${_runtime_target})
+    add_dependencies(FlyNativeDigest ${_runtime_target})
+  endif()
+endforeach()

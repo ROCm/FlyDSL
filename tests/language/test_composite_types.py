@@ -23,7 +23,6 @@ story and live in ``test_storage_and_allocator.py``.
 """
 
 import importlib
-import inspect
 import json
 import linecache
 import subprocess
@@ -242,13 +241,6 @@ class TestInlineForms:
 
 
 _MEMBER_SCALE = 2
-_NON_STRUCT_CACHE_TYPE = None
-
-
-class _NonStructWithSignature:
-    @classmethod
-    def __cache_signature__(cls):
-        raise AssertionError("the JIT must not query non-Struct type signatures")
 
 
 @fx.struct
@@ -445,33 +437,6 @@ def test_type_signature_protocol_supports_class_and_static_methods():
     assert cache_signature(Static) == ("static", 8)
 
 
-@pytest.mark.parametrize("dtype", [int, fx.Int32, _NonStructWithSignature, fx.Union["x" : fx.Int32]])
-def test_non_struct_types_keep_existing_cache_paths(monkeypatch, dtype):
-    # Even a non-Struct class offering a type signature must keep the old keys.
-    monkeypatch.setitem(globals(), "_NON_STRUCT_CACHE_TYPE", dtype)
-
-    def global_reference():
-        return _NON_STRUCT_CACHE_TYPE
-
-    def closure_reference():
-        return dtype
-
-    assert jit_function._snapshot_global_value(dtype, stable=True) == ("callable", dtype.__module__, dtype.__qualname__)
-    assert jit_function._snapshot_global_value(dtype, stable=False) == ("callable", id(dtype), repr(dtype))
-    for function in (global_reference, closure_reference):
-        assert jit_function._collect_dependency_sources(function, inspect.getfile(function)) == []
-    assert jit_function._collect_closure_scalar_vals(closure_reference) == [
-        f"dtype={dtype.__module__}.{dtype.__qualname__}"
-    ]
-
-    @flyc.jit
-    def build(schema: type):
-        pass
-
-    build._ensure_sig()
-    assert ("schema", dtype) in build._resolve_and_make_cache_key({"schema": dtype})
-
-
 def test_constexpr_callable_type_signatures_are_stable(monkeypatch):
     from typing import Callable
 
@@ -506,9 +471,9 @@ def test_definition_keys_are_stable_across_redeclaration():
     first = make(source, "/first/location.py")
     second = make("\n\n" + source, "/another/location.py")
     changed = make(source.replace("+ 1", "+ 2"), "/first/location.py")
-    snapshot = lambda cls: jit_function._snapshot_global_value(cls, stable=True)
-    assert snapshot(first) == snapshot(second)
-    assert snapshot(first) != snapshot(changed)
+    # The type signature names the schema; an instance signature adds its exact type.
+    assert first.__cache_signature__() == second.__cache_signature__() == changed.__cache_signature__()
+    assert cache_signature(first(1)) != cache_signature(changed(1))
 
 
 def test_jit_entry_passes_runtime_fields_to_struct_member():
@@ -608,24 +573,10 @@ def test_plain_struct_cache_never_rehashes_definitions(monkeypatch):
     value = Outer(Pair(1, 2.0), 32)
     monkeypatch.setattr(struct_module, "_field_type_signature", unexpected_hash)
     assert cache_signature(value) == (type(value), ("child", (Pair, ("x", (fx.Int32,)), ("y", (fx.Float32,)))))
-    assert jit_function._snapshot_global_value(Outer, stable=True) == ("callable", Outer.__module__, Outer.__qualname__)
-
-    def captured():
-        return Outer
-
-    assert jit_function._collect_dependency_sources(captured, inspect.getfile(captured)) == []
-
-    @flyc.jit
-    def build(schema: type, value):
-        pass
-
-    build._ensure_sig()
-    key = build._resolve_and_make_cache_key({"schema": Outer, "value": value})
-    assert ("schema", Outer) in key
 
 
 @pytest.mark.parametrize("entry", ["scalar", "plain_struct", "member_struct", "type"])
-def test_warm_jit_cache_does_not_collect_dependencies(monkeypatch, tmp_path, entry):
+def test_warm_jit_ir_cache_does_not_lower(monkeypatch, tmp_path, entry):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
     if entry == "type":
@@ -651,10 +602,9 @@ def test_warm_jit_cache_does_not_collect_dependencies(monkeypatch, tmp_path, ent
     compiled = launch._last_compiled
 
     def unexpected(*args, **kwargs):
-        raise AssertionError("warm JIT calls must not collect dependencies")
+        raise AssertionError("unchanged IR must not lower again")
 
-    monkeypatch.setattr(jit_function, "_collect_dependency_sources", unexpected)
-    monkeypatch.setattr(jit_function, "_collect_closure_scalar_vals", unexpected)
+    monkeypatch.setattr(jit_function.MlirCompiler, "compile", unexpected)
     launch(*second)
     assert launch._last_compiled == compiled
     assert len(launch._mem_cache) == 1
@@ -727,6 +677,8 @@ def test_definition_cache_keys_are_stable_across_processes(tmp_path, monkeypatch
         "import flydsl.expr as fx\n"
         "from flydsl.compiler import jit_function as j\n"
         "j._flydsl_key = lambda: 'fixed-toolchain'\n"
+        "lower, lowered = j.MlirCompiler.compile, []\n"
+        "j.MlirCompiler.compile = classmethod(lambda cls, *a, **k: lowered.append(1) or lower(*a, **k))\n"
         "definition = 'class Item:\\n x: fx.Int32\\n def read(self):\\n  return self.x + ' + sys.argv[1] + '\\n'\n"
         "linecache.cache['<item>'] = (len(definition), None, definition.splitlines(True), '<item>')\n"
         "exec(compile(definition, '<item>', 'exec'))\n"
@@ -745,7 +697,7 @@ def test_definition_cache_keys_are_stable_across_processes(tmp_path, monkeypatch
         "Fields = fx.Struct['rows':fx.Array[Inline, 4], 'aligned':fx.Align[Inline, 16], 'view':fx.Storage[Inline]]\n"
         "Config = fx.Struct['scale':fx.Constexpr[tuple]]\n"
         "field_key = (Fields.__cache_signature__(), type(Config((2, 3))).__cache_signature__())\n"
-        "print(json.dumps({'compiled': launch._last_compiled is not None, 'hits': launch.cache_info().hits, 'ir': artifact.source_ir, 'field_key': field_key}))\n"
+        "print(json.dumps({'compiled': bool(lowered), 'hits': launch.cache_info().hits, 'ir': artifact.source_ir, 'field_key': field_key}))\n"
     )
 
     def run(offset):
@@ -866,7 +818,6 @@ def test_python_class_jit_entry_calls_struct_member_gpu(monkeypatch, tmp_path, d
             program.run(Config(bias, scale), values, output)
             torch.testing.assert_close(output.cpu(), expected_values * scale + bias)
             assert len(Program.run._mem_cache) == compilations
-            assert len(Program.run._call_state_cache) == compilations
 
 
 def _declare_record(offset, *, member_kind="method"):
@@ -893,18 +844,6 @@ def test_field_types_are_implicit_dependencies():
             return Inner(self.child.x + 1)
 
     assert Outer(Inner(1)).next().read() == 3
-
-
-@pytest.mark.parametrize(
-    "wrapper", [lambda t: t, lambda t: fx.Array[t, 4], lambda t: fx.Align[t, 16], lambda t: fx.Storage[t]]
-)
-def test_nested_field_signatures_include_frozen_member_definitions(wrapper):
-    first, second = _declare_record(1), _declare_record(9)
-    before = fx.Struct["items" : wrapper(first)]
-    after = fx.Struct["items" : wrapper(second)]
-    assert jit_function._snapshot_global_value(before, stable=True) != jit_function._snapshot_global_value(
-        after, stable=True
-    )
 
 
 @pytest.mark.parametrize("entry", ["value", "type", "capture"])
@@ -939,14 +878,13 @@ def test_redeclaration_recompiles_with_the_new_member_body(entry, monkeypatch, t
         first_args = second_args = (1,)
     launch(*first_args)
     first_key, first_artifact = launch._last_compiled
-    first_manager_key = launch.manager_key
     launch(*first_args)
     assert launch._last_compiled[1] is first_artifact
     if entry == "capture":
         launch = make(Second)
     launch(*second_args)
     key, artifact = launch._last_compiled
-    assert (launch.manager_key, key) != (first_manager_key, first_key)
+    assert key != first_key
     assert "arith.constant 1" in first_artifact.source_ir
     assert "arith.constant 9" in artifact.source_ir
 
@@ -989,7 +927,6 @@ def test_signature_hot_path_never_rebuilds_definitions(monkeypatch):
         raise AssertionError("definition hashing on a warmed cache query")
 
     monkeypatch.setattr(struct_module, "_field_type_signature", unexpected)
-    monkeypatch.setattr(struct_module, "_member_dependencies", unexpected)
     for _ in range(10):
         assert cache_signature(value) == before
 
@@ -1007,30 +944,6 @@ def test_field_wrappers_supply_implicit_dependencies(wrapper):
             return Item(x)
 
     assert Outer.make(1).read() == 2
-
-
-@pytest.mark.parametrize("kind", ["method", "property", "staticmethod", "classmethod", "jit", "operator"])
-def test_every_declared_member_affects_the_signature(kind):
-    def first(self):
-        return 1
-
-    def second(self):
-        return 9
-
-    wrappers = {
-        "method": lambda f: f,
-        "property": property,
-        "staticmethod": staticmethod,
-        "classmethod": classmethod,
-        "jit": flyc.jit,
-        "operator": lambda f: f,
-    }
-    name = "__call__" if kind == "operator" else "unused"
-
-    def make(function):
-        return fx.struct(type("Record", (), {"__annotations__": {"x": fx.Int32}, name: wrappers[kind](function)}))
-
-    assert make(first).__cache_signature__() != make(second).__cache_signature__()
 
 
 @pytest.mark.parametrize("jit", [False, True])
@@ -1128,7 +1041,6 @@ def test_direct_closure_dependencies_are_automatic():
         return Record
 
     first, second = make(_declare_record(1)), make(_declare_record(9))
-    assert first.__cache_signature__() != second.__cache_signature__()
     assert first(1).read() == 2
     assert second(1).read() == 10
 
@@ -1165,9 +1077,7 @@ def test_direct_type_calls_track_dependency_changes(scope, call, jit):
         exec(compile(source, filename, "exec"), namespace)
         return namespace["Wrapper"]
 
-    first, equivalent, changed = make(1), make(1), make(9)
-    assert first.__cache_signature__() == equivalent.__cache_signature__()
-    assert first.__cache_signature__() != changed.__cache_signature__()
+    first, changed = make(1), make(9)
 
     @flyc.jit
     def launch(value):
@@ -1195,7 +1105,6 @@ def test_dependency_signatures_preserve_name_bindings():
 
     first, second = _declare_record(1), _declare_record(9)
     records = (make(first, second, first), make(second, first, first), make(first, second, second))
-    assert len({record.__cache_signature__() for record in records}) == 3
     assert [record(1).read() for record in records] == [-6, 10, 2]
 
 
@@ -1213,7 +1122,6 @@ def test_direct_types_in_nested_member_code_are_dependencies(scope):
         return namespace["Record"]
 
     first, second = make(_declare_record(1)), make(_declare_record(9))
-    assert first.__cache_signature__() != second.__cache_signature__()
     assert first(1).read() == 2
     assert second(1).read() == 10
 
@@ -1236,11 +1144,11 @@ def test_indirect_type_references_are_not_scanned(expression):
     assert make(_declare_record(1)).__cache_signature__() == make(_declare_record(9)).__cache_signature__()
 
 
-def test_source_snapshot_requires_inspectable_members():
+def test_members_need_no_inspectable_source():
     namespace = {}
     exec("def read(self): return self.x", namespace)
-    with pytest.raises(OSError):
-        fx.struct(type("Record", (), {"__annotations__": {"x": fx.Int32}, "read": namespace["read"]}))
+    Record = fx.struct(type("Record", (), {"__annotations__": {"x": fx.Int32}, "read": namespace["read"]}))
+    assert Record(3).read() == 3
 
 
 def test_field_wrapper_keys_include_type_size_and_alignment():

@@ -744,21 +744,25 @@ def test_a8w8_row_major_rejects_small_k():
         _execute(cfg, shape, tile, b_preshuffle=False)
 
 
-@pytest.mark.parametrize("K", (256, 512, 768, 1536, 16384))
-def test_a4w4_k_is_runtime_in_jit_cache(K):
+def test_a4w4_k_is_runtime_in_jit_cache(monkeypatch):
     """Short prologues, drain remainders and long K share a compiled launcher."""
+    from flydsl.compiler import jit_function
+
     launch = launch_gemm_a4w4_256x256
-    launch._ensure_sig()
+    # Compare traced artifact keys only: lower nothing and keep placeholders out of every cache.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function.MlirCompiler, "compile", classmethod(lambda cls, asm, **kwargs: asm))
+    monkeypatch.setattr(launch, "_mem_cache", {})
+    monkeypatch.setattr(launch, "_last_compiled", None)
     ptr = flyc.from_c_void_p(fx.Int8, 0, assumed_align=16)
     args = [ptr] * 5 + [1536, fx.Stream(0), 24576, 1536, 16384, 24576, ptr, 256, 256, 256, 2, 2, 0, 4, 2, 4]
 
     def key(k):
         args[8] = k
-        bound = launch._sig.bind(*args)
-        bound.apply_defaults()
-        return launch._resolve_and_make_cache_key(bound.arguments)
+        launch._compile_only(*args)
+        return launch._last_compiled[0]
 
-    assert key(K) == key(1536)
+    assert len({key(k) for k in (256, 512, 768, 1536, 16384)}) == 1
 
 
 def _bench_us(run):
