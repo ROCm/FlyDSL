@@ -48,7 +48,7 @@ def _build_module(build_fn, arg_types=None):
 
 def test_sched_bank_strict():
     """Default (strict) sched_bank emits the op without the soft keyword."""
-    from flydsl.expr.rocdl import sched_bank
+    from flydsl.expr.rocdl.experimental import sched_bank
 
     def build(x):
         return sched_bank(x, bank=0)
@@ -60,7 +60,7 @@ def test_sched_bank_strict():
 
 def test_sched_bank_soft():
     """soft=True emits the soft keyword in the printed op."""
-    from flydsl.expr.rocdl import sched_bank
+    from flydsl.expr.rocdl.experimental import sched_bank
 
     def build(x):
         return sched_bank(x, bank=2, soft=True)
@@ -72,7 +72,7 @@ def test_sched_bank_soft():
 
 def test_sched_bank_identity_type():
     """Result type must match the input value type (identity semantics)."""
-    from flydsl.expr.rocdl import sched_bank
+    from flydsl.expr.rocdl.experimental import sched_bank
 
     def build(x):
         return sched_bank(x, bank=1)
@@ -83,7 +83,7 @@ def test_sched_bank_identity_type():
 
 def test_sched_bank_all_banks():
     """Banks 0-3 are all accepted."""
-    from flydsl.expr.rocdl import sched_bank
+    from flydsl.expr.rocdl.experimental import sched_bank
 
     for bank_id in range(4):
 
@@ -97,7 +97,7 @@ def test_sched_bank_all_banks():
 
 def test_sched_bank_integer_input():
     """sched_bank on an integer-typed value preserves the type."""
-    from flydsl.expr.rocdl import sched_bank
+    from flydsl.expr.rocdl.experimental import sched_bank
 
     def build(x):
         return sched_bank(x, bank=3)

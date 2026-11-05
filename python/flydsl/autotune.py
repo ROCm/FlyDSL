@@ -7,7 +7,9 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import statistics
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
@@ -305,6 +307,9 @@ class Autotuner:
         if fn_name is not None and not isinstance(fn_name, str):
             fn_name = getattr(fn_name, "__name__", "unknown")
         fn_name = fn_name or "unknown"
+        if sys.platform == "win32":
+            # Windows forbids these characters in file names, and a lambda is "<lambda>".
+            fn_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", fn_name)
         cache_dir = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", os.path.expanduser("~/.flydsl/autotune")))
         self._cache_file = cache_dir / f"{fn_name}.json"
 

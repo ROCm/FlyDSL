@@ -4,6 +4,7 @@
 """Batched reductions with output ownership distributed across lanes."""
 
 from ....expr.gpu import lane_id, num_warp_threads
+from ....expr.typing import ReductionOp
 from .._common import _combine, _resolve_warp_width, _select_value, _shuffle_value
 from .._values import _as_items, _from_items, _is_items
 from ._spec import WarpPrimitive
@@ -13,6 +14,9 @@ __all__ = [
     "warp_reduce_batched",
     "warp_reduce_batched_to_blocked",
     "warp_reduce_batched_to_striped",
+    "warp_sum_batched",
+    "warp_sum_batched_to_blocked",
+    "warp_sum_batched_to_striped",
 ]
 
 
@@ -235,6 +239,45 @@ def warp_reduce_batched_to_striped(
     return _reduce_batched(value, op, width, "striped", sync_physical_warp, _dtype)
 
 
+def warp_sum_batched(
+    value,
+    *,
+    width: int | None = None,
+    sync_physical_warp: bool = False,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce_batched(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_reduce_batched(
+        value, ReductionOp.ADD, width=width, sync_physical_warp=sync_physical_warp, _dtype=_dtype
+    )
+
+
+def warp_sum_batched_to_blocked(
+    value,
+    *,
+    width: int | None = None,
+    sync_physical_warp: bool = False,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce_batched_to_blocked(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_reduce_batched_to_blocked(
+        value, ReductionOp.ADD, width=width, sync_physical_warp=sync_physical_warp, _dtype=_dtype
+    )
+
+
+def warp_sum_batched_to_striped(
+    value,
+    *,
+    width: int | None = None,
+    sync_physical_warp: bool = False,
+    _dtype=None,
+):
+    """Shorthand for ``warp_reduce_batched_to_striped(value, fx.ReductionOp.ADD, ...)``."""
+    return warp_reduce_batched_to_striped(
+        value, ReductionOp.ADD, width=width, sync_physical_warp=sync_physical_warp, _dtype=_dtype
+    )
+
+
 class WarpReduceBatched(WarpPrimitive):
     """Reduce independent register columns into distributed lane outputs.
 
@@ -405,4 +448,46 @@ class WarpReduceBatched(WarpPrimitive):
             sync_physical_warp=sync_physical_warp,
             storage=storage,
             _dtype=cls.dtype,
+        )
+
+    @classmethod
+    def sum(
+        cls,
+        value,
+        *,
+        sync_physical_warp: bool = False,
+        storage=None,
+    ):
+        """Shorthand for ``reduce(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(
+            warp_sum_batched, value, sync_physical_warp=sync_physical_warp, storage=storage, _dtype=cls.dtype
+        )
+
+    @classmethod
+    def sum_to_blocked(
+        cls,
+        value,
+        *,
+        sync_physical_warp: bool = False,
+        storage=None,
+    ):
+        """Shorthand for ``reduce_to_blocked(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(
+            warp_sum_batched_to_blocked, value, sync_physical_warp=sync_physical_warp, storage=storage, _dtype=cls.dtype
+        )
+
+    @classmethod
+    def sum_to_striped(
+        cls,
+        value,
+        *,
+        sync_physical_warp: bool = False,
+        storage=None,
+    ):
+        """Shorthand for ``reduce_to_striped(value, fx.ReductionOp.ADD, ...)``."""
+        value = cls._prepare(value)
+        return cls._invoke(
+            warp_sum_batched_to_striped, value, sync_physical_warp=sync_physical_warp, storage=storage, _dtype=cls.dtype
         )

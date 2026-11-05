@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import os
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
@@ -30,6 +31,9 @@ class RocmBackend(BaseBackend):
     @staticmethod
     def detect_target() -> GPUTarget:
         arch = env.compile.arch or get_rocm_arch()
+        if not arch:
+            # ARCH alone would not do: most callers read get_rocm_arch() directly.
+            raise RuntimeError("No ROCm GPU architecture detected; set FLYDSL_GPU_ARCH (e.g. gfx1201)")
         return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
     @classmethod
@@ -120,7 +124,13 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        toolkit = ""
+        if os.name == "nt":
+            # No /opt/rocm default here: name a root holding llvm/bin/ld.lld and amdgcn/bitcode.
+            from ...runtime.device_runtime.rocm import _rocm_toolkit_root
+
+            toolkit = f' toolkit="{_rocm_toolkit_root()}"'
+        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"{toolkit}}}'
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
@@ -172,6 +182,8 @@ class RocmBackend(BaseBackend):
     # -- cache / fingerprint ---------------------------------------------
 
     def native_lib_patterns(self) -> List[str]:
+        if os.name == "nt":
+            return ["_mlirDialectsFly*.pyd", "FlyPythonCAPI.dll", "fly_jit_runtime.dll", "_mlirRegisterEverything*.pyd"]
         return [
             "_mlirDialectsFly*.so",
             "libFly*.so",
@@ -182,6 +194,8 @@ class RocmBackend(BaseBackend):
         ]
 
     def jit_runtime_lib_basenames(self) -> List[str]:
+        if os.name == "nt":
+            return ["fly_jit_runtime.dll", "mlir_c_runner_utils.dll"]
         return [
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",

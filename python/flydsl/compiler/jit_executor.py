@@ -3,6 +3,7 @@
 
 import ctypes
 import importlib
+import os
 import pickle
 import threading
 import zlib
@@ -69,6 +70,10 @@ def _resolve_runtime_libs() -> List[str]:
     for lib in libs:
         if not lib.exists():
             raise FileNotFoundError(f"Required JIT runtime library not found: {lib}\nPlease rebuild the project.")
+    if os.name == "nt":
+        from ..runtime.device_runtime.rocm import _preload_runtime_libs
+
+        _preload_runtime_libs(libs)
     return [str(p) for p in libs]
 
 

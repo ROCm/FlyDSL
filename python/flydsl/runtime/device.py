@@ -27,9 +27,23 @@ def _arch_from_rocm_agent_enumerator() -> Optional[str]:
     return None
 
 
+def _arch_from_torch() -> str:
+    """Device 0's arch from a ROCm torch; "" when there is no torch or no GPU."""
+    try:
+        import torch
+
+        return torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+    except Exception:
+        return ""
+
+
 @functools.lru_cache(maxsize=None)
 def _arch_from_hardware() -> str:
     """Cached hardware detection (rocm_agent_enumerator is slow)."""
+    if os.name == "nt":
+        # Windows ROCm ships no rocm_agent_enumerator, and guessing gfx942 there
+        # would compile for the wrong GPU.
+        return _arch_from_torch()
     arch = _arch_from_rocm_agent_enumerator()
     if arch:
         return arch.split(":", 1)[0]
@@ -60,8 +74,13 @@ def get_rocm_device_count() -> int:
     """Best-effort ROCm visible GPU count via ``rocm_agent_enumerator`` (standard ROCm tool).
 
     Uses the same invocation as :func:`_arch_from_rocm_agent_enumerator`. Returns 0
-    when the tool is unavailable or no discrete GPU agents are reported.
+    when the tool is unavailable or no discrete GPU agents are reported. Windows
+    has no such tool: there HIP's ``hipGetDeviceCount`` answers.
     """
+    if os.name == "nt":
+        from .device_runtime.rocm import _hip_device_count
+
+        return _hip_device_count()
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator", "-name"],
