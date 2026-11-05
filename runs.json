@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-11-05T06:44:09Z",
+ "updated": "2026-11-05T06:48:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 41982598023,
+   "pr": null,
+   "commit": "e425b54da96a5b0558fe84488fa12f1b3b97f9da",
+   "branch": "main",
+   "event": "push",
+   "title": "[Misc] Bump version to 0.5.0 (#1370)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982598023",
+   "created_at": "2026-11-05T06:45:44Z",
+   "updated_at": "2026-11-05T06:47:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 41982351814,
+   "pr": 1370,
+   "commit": "07d8e6ea475af1e5b94c49252385daf8fc496384",
+   "branch": "bump-version-0.5.0",
+   "event": "pull_request",
+   "title": "[Misc] Bump version to 0.5.0",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982351814",
+   "created_at": "2026-11-05T06:43:38Z",
+   "updated_at": "2026-11-05T06:45:00Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 41982235299,
+   "pr": 1350,
+   "commit": "7fc01bf679e935cd9d34edc0fd1823d476cd75a3",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41982235299",
+   "created_at": "2026-11-05T06:42:35Z",
+   "updated_at": "2026-11-05T06:44:22Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 41980469238,
    "pr": 1369,
@@ -10,13 +55,41 @@
    "branch": "feat/windows-aot",
    "event": "pull_request",
    "title": "[Windows] AOT export support for Windows x64",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238",
    "created_at": "2026-11-05T06:26:53Z",
-   "updated_at": "2026-11-05T06:30:32Z",
+   "updated_at": "2026-11-05T06:43:10Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-05T06:43:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960081"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-05T06:43:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960161"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-05T06:43:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41980469238/job/127094960178"
+    }
+   ]
   },
   {
    "run_id": 41980011706,
@@ -55,38 +128,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Chore] Add specialization shortcut for coop primitives (#1365)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41978620092",
    "created_at": "2026-11-05T06:10:14Z",
-   "updated_at": "2026-11-05T06:34:05Z",
+   "updated_at": "2026-11-05T06:46:56Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-05T06:34:05Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T06:45:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41978620092/job/127091680782"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-05T06:34:31Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T06:46:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41978620092/job/127091680895"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-05T06:34:05Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T06:45:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41978620092/job/127091680970"
     }
    ]
@@ -1793,107 +1866,6 @@
      "started_at": "2026-11-02T01:21:30Z",
      "completed_at": "2026-11-02T02:23:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41370910996/job/125044362700"
-    }
-   ]
-  },
-  {
-   "run_id": 41301335116,
-   "pr": 1338,
-   "commit": "b284e898621e37eaa40d8a3e76d93d971a460926",
-   "branch": "pr/fix-jit-ir-cache-key",
-   "event": "pull_request",
-   "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116",
-   "created_at": "2026-11-01T11:18:53Z",
-   "updated_at": "2026-11-01T12:17:02Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-01T11:34:22Z",
-     "completed_at": "2026-11-01T11:43:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836031977"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-01T11:34:56Z",
-     "completed_at": "2026-11-01T12:02:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836031982"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-01T11:50:05Z",
-     "completed_at": "2026-11-01T12:05:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41301335116/job/124836032051"
-    }
-   ]
-  },
-  {
-   "run_id": 41300861970,
-   "pr": 1338,
-   "commit": "d4edc2d01c6d1e378f852d56a6bad1a7b82ff981",
-   "branch": "pr/fix-jit-ir-cache-key",
-   "event": "pull_request",
-   "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41300861970",
-   "created_at": "2026-11-01T11:12:31Z",
-   "updated_at": "2026-11-01T11:19:42Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 41296199970,
-   "pr": 1338,
-   "commit": "d2aca0ca0defd178440578c2f221bca3f2900a49",
-   "branch": "pr/fix-jit-ir-cache-key",
-   "event": "pull_request",
-   "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970",
-   "created_at": "2026-11-01T10:09:10Z",
-   "updated_at": "2026-11-01T11:13:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-01T10:24:43Z",
-     "completed_at": "2026-11-01T10:43:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888727"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-01T10:24:50Z",
-     "completed_at": "2026-11-01T11:13:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888775"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-01T10:24:53Z",
-     "completed_at": "2026-11-01T11:05:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41296199970/job/124820888789"
     }
    ]
   }
