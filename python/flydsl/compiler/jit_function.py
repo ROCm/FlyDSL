@@ -830,8 +830,16 @@ def _run_pass_manager(pm: PassManager, module: ir.Module) -> None:
 class MlirCompiler:
     @classmethod
     def compile(
-        cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
+        cls,
+        module: ir.Module,
+        *,
+        arch: str = "",
+        func_name: str = "",
+        link_libs: Optional[list] = None,
+        printed_asm: Optional[str] = None,
     ) -> ir.Module:
+        """Lower *module* to a GPU binary. *printed_asm*, if given, is lowered in place of *module*, so it must be
+        *module* as it is now, printed with debug info."""
         try:
             module.operation.verify()
         except ir.MLIRError as exc:
@@ -843,7 +851,9 @@ class MlirCompiler:
         compile_hints = CompilationContext.get_compile_hints()
         # Keep source locations so pass diagnostics point at user code. They only become DWARF when
         # the debug-info pass runs.
-        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=True))
+        if printed_asm is None:
+            printed_asm = module.operation.get_asm(enable_debug_info=True)
+        module = ir.Module.parse(printed_asm)
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
@@ -1553,6 +1563,8 @@ class JitFunction:
                             self.func(**named_args)
                     func.ReturnOp([])
 
+        # Reused by compile() as printed_asm, so it must match what compile() would print: same flags, and no module
+        # edits before compile() other than extern linking, which withholds this text.
         original_ir = module.operation.get_asm(enable_debug_info=True)
 
         link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
@@ -1573,6 +1585,8 @@ class JitFunction:
             arch=backend.target.arch,
             func_name=self.func.__name__,
             link_libs=link_libs,
+            # Extern linking changed the module after it was printed.
+            printed_asm=None if extern_linked else original_ir,
         )
         return _TraceResult(
             compiled_module=compiled_module,

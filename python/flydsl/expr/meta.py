@@ -3,8 +3,10 @@
 
 import contextlib
 import inspect
+import itertools
 import os
 import threading
+import types
 from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, overload
 
@@ -30,6 +32,9 @@ __all__ = [
 # and skipped when locating the user's source position.
 _FLYDSL_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Python 3.10 has no column positions.
+_HAS_CO_POSITIONS = hasattr(types.CodeType, "co_positions")
+
 
 @lru_cache(maxsize=1024)
 def _is_framework_file(filename: str) -> bool:
@@ -54,6 +59,48 @@ def _stack():
     return s
 
 
+def _source_path_and_positions(code) -> tuple:
+    """Absolute source path and co_positions() of *code*. Positions are None unless a frame with a func is open."""
+    cache = getattr(_tls, "source_position_cache", None)
+
+    # Keyed by id, since code objects from different files can compare equal.
+    entry = cache.get(id(code)) if cache is not None else None
+    if entry is not None:
+        return entry[1], entry[2]
+
+    file = inspect.getsourcefile(code) or inspect.getfile(code)
+    source_path = os.path.abspath(file)
+    if cache is None:
+        return source_path, None
+
+    positions = tuple(code.co_positions()) if _HAS_CO_POSITIONS else ()
+    # code is part of cache value to keep it alive
+    cache[id(code)] = (code, source_path, positions)
+    return source_path, positions
+
+
+def _frame_position(frame) -> tuple:
+    """Source path, line and column of *frame*'s current instruction, as inspect.getframeinfo reports them."""
+    code = frame.f_code
+    path, positions = _source_path_and_positions(code)
+
+    line = None
+    col = None
+    # co_positions() has one (line, end_line, col, end_col) entry per 2-byte code unit; Python 3.10 has none.
+    if _HAS_CO_POSITIONS and frame.f_lasti >= 0:
+        index = frame.f_lasti // 2
+        if positions is None:
+            line, _, col, _ = next(itertools.islice(code.co_positions(), index, None))
+        else:
+            line, _, col, _ = positions[index]
+
+    return (
+        path,
+        frame.f_lineno if line is None else line,
+        0 if col is None else col,
+    )
+
+
 @contextlib.contextmanager
 def tracing_context(func=None, **options):
     """Push a tracing frame for the duration of the ``with`` block.
@@ -65,6 +112,10 @@ def tracing_context(func=None, **options):
     -- an explicit ``None`` shadows an enclosing setting.
     """
     stack = _stack()
+    # Only the outermost trace owns the cache; a fastmath scope can span traces and would pin their code objects.
+    owns_cache = func is not None and getattr(_tls, "source_position_cache", None) is None
+    if owns_cache:
+        _tls.source_position_cache = {}
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
         boundary = stack[-1][0]
@@ -75,6 +126,8 @@ def tracing_context(func=None, **options):
         stack = _stack()
         if stack:
             stack.pop()
+        if owns_cache:
+            _tls.source_position_cache = None
 
 
 def tracing_option(key, default=None):
@@ -117,13 +170,8 @@ def capture_user_location() -> ir.Location:
             if not _is_framework_file(code.co_filename):
                 keep = len(locs) < max_depth
                 if keep or is_boundary:
-                    info = inspect.getframeinfo(frame, context=0)
-                    # ``Traceback.positions`` only exists on Python 3.11+; fall
-                    # back to ``f_lineno`` / col 0 on 3.8-3.10.
-                    pos = getattr(info, "positions", None)
-                    line = pos.lineno if pos is not None and pos.lineno is not None else frame.f_lineno
-                    col = pos.col_offset if pos is not None and pos.col_offset is not None else 0
-                    floc = file_location(info.filename, line, col, context=ctx)
+                    path, line, col = _frame_position(frame)
+                    floc = ir.Location.file(path, line, col, context=ctx)
                     if keep:
                         locs.append(floc)
                     else:
