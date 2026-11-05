@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-05T10:01:46Z",
+ "updated": "2026-11-05T10:44:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42011342102,
+   "pr": 1369,
+   "commit": "b7b4750bc6c1492b0a941fd8e9c73a99561bf1a0",
+   "branch": "feat/windows-aot",
+   "event": "pull_request",
+   "title": "[Windows] AOT export support for Windows x64",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102",
+   "created_at": "2026-11-05T10:31:00Z",
+   "updated_at": "2026-11-05T10:32:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42009669746,
+   "pr": null,
+   "commit": "66f623145d05d8eae038e72fef8bec7578446101",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Key compiled artifacts by the traced MLIR (#1338)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42009669746",
+   "created_at": "2026-11-05T10:18:51Z",
+   "updated_at": "2026-11-05T10:20:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42003421219,
    "pr": 1264,
@@ -38,11 +68,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T09:56:15Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42003421219/job/127174226021"
+     "completed_at": "2026-11-05T10:27:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42003421219/job/127174226021",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -99,11 +132,11 @@
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
    "title": "[JIT] Key compiled artifacts by the traced MLIR",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41994225680",
    "created_at": "2026-11-05T08:24:32Z",
-   "updated_at": "2026-11-05T09:59:13Z",
+   "updated_at": "2026-11-05T10:42:00Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -160,11 +193,11 @@
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/41985823312",
    "created_at": "2026-11-05T07:14:25Z",
-   "updated_at": "2026-11-05T07:28:39Z",
+   "updated_at": "2026-11-05T10:14:46Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -185,7 +218,7 @@
   },
   {
    "run_id": 41983402193,
-   "pr": 1338,
+   "pr": null,
    "commit": "e7be0a2fdf2220bba90f0b648d70b6d41a190e05",
    "branch": "pr/fix-jit-ir-cache-key",
    "event": "pull_request",
@@ -1838,67 +1871,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41422840145/job/125400575488"
     }
    ]
-  },
-  {
-   "run_id": 41416520863,
-   "pr": 1356,
-   "commit": "f57cb39076d58241de9b5fb1f434909da25dbd76",
-   "branch": "zhimding/observe_launches_1102",
-   "event": "pull_request",
-   "title": "[Feature] Add flyc.observe_launches() to expose launch cache identities",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863",
-   "created_at": "2026-11-02T08:54:57Z",
-   "updated_at": "2026-11-02T10:57:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T10:09:29Z",
-     "completed_at": "2026-11-02T10:57:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938784"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T10:09:39Z",
-     "completed_at": "2026-11-02T10:41:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938820",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-02T10:09:13Z",
-     "completed_at": "2026-11-02T10:35:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41416520863/job/125213938840"
-    }
-   ]
-  },
-  {
-   "run_id": 41415897447,
-   "pr": null,
-   "commit": "b21bfe126d6ecb3a805045deccbd39a8bd4cd304",
-   "branch": "main",
-   "event": "push",
-   "title": "[LLVM] Add gfx1250-strict , xnack- and sched_gpr/sched_bank feature (\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41415897447",
-   "created_at": "2026-11-02T08:49:48Z",
-   "updated_at": "2026-11-02T09:42:26Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
