@@ -6,11 +6,14 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
 
+#include <cassert>
+
+#include "WmmaLayout.h"
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
-#include "WmmaLayout.h"
 
 using namespace mlir;
 using namespace mlir::fly;
@@ -25,6 +28,39 @@ namespace mlir::fly_rocdl {
 // i64 for block-16. An extra scale operand in an atom-call group overrides the
 // corresponding state for that call. Omitted scale operands use atom state.
 //===----------------------------------------------------------------------===//
+
+// The shape constants come from WmmaLayout.h, shared with the plain WMMA
+// layouts on this target. The hand-over table below does not: the plain side is
+// also used by another target and disagrees about how wide a chunk of K is, so
+// each side keeps its own. Reusing one another's widths is exactly the bug this
+// layout once had.
+
+// How many consecutive K values a lane half takes before the other half takes
+// over, keyed by element width. The 8-bit formats hand over twice as often as
+// the narrower ones.
+struct KChunkRule {
+  int elemBits;
+  int chunkK;
+};
+
+constexpr int kNoKChunkRule = -1;
+
+template <size_t N>
+constexpr int lookupChunkK(const KChunkRule (&rules)[N], int elemBits) {
+  for (const KChunkRule &rule : rules)
+    if (rule.elemBits == elemBits)
+      return rule.chunkK;
+  return kNoKChunkRule;
+}
+
+constexpr KChunkRule kScaledKChunks[] = {
+    // fp8 / bf8.
+    {8, 16},
+    // fp6 / bf6.
+    {6, 32},
+    // fp4.
+    {4, 32},
+};
 
 std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField field) {
   switch (field) {
@@ -89,7 +125,9 @@ Value MmaOpGFX1250_WMMAScaleType::setAtomState(OpBuilder &builder, Location loc,
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, scaleVal, ArrayRef<int64_t>{*idx});
 }
 
-Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
+Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const {
+  return FxLayout(FxC(gfx1250::kWaveSize), FxC(1));
+}
 
 Attribute MmaOpGFX1250_WMMAScaleType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
@@ -100,54 +138,70 @@ Type MmaOpGFX1250_WMMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeD() const { return getElemTyAcc(); }
 
-// gfx1250 block-scaled WMMA A/B layout for a 16-row operand (CDNA5 ISA 7.12.6.1).
+// gfx1250 block-scaled WMMA A/B layout.
 // The scaled instruction has its own register layouts, separate from plain WMMA:
-// K is split into per-format chunks that alternate between the two lane groups.
+// K is split into per-format chunks that alternate between the two lane halves.
 // V_WMMA_SCALE picks each value's block scale by its register slot, so A and B
-// must both match the ISA exactly (a shared K permutation is not enough).
+// must both match the hardware exactly (a shared K permutation is not enough).
 //   FP8:     16-wide chunks, k = (l/16)*16 + v%16 + (v/16)*32
 //   FP6/FP4: 32-wide chunks, k = (l/16)*32 + v%32 + (v/32)*64
-// Reference (rows, K) space is column-major with stride (1, 16).
-static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t k, Type elemTy) {
-  auto getContext = [&]() { return ctx; };
-  int chunk = elemTy.getIntOrFloatBitWidth() == 8 ? 16 : 32;
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(chunk, k / (2 * chunk))),
-                  FxStride(FxThr(1, chunk * 16), FxVal(16, chunk * 32)));
-}
-
-// 32x16x128 f4 form: A is two 16-row FP4 operands in consecutive VGPRs (M 16-31
-// in the second half), each laid out as in scaledLayoutAB.
+// A 32-row operand (the 32x16x128 f4 form) is two 16-row operands stacked in
+// consecutive VGPRs, rows 16..31 in the second half of the slots:
 //   m = l%16 + (v/64)*16, k = (l/16)*32 + v%32 + ((v/32)%2)*64
-// Reference (M, K) space is column-major with stride (1, 32).
-static Attribute scaled32RowLayoutA(MLIRContext *ctx, int32_t k) {
+// Reference (rows, K) space is column-major with stride (1, rows).
+static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t rows, int32_t k, Type elemTy) {
   auto getContext = [&]() { return ctx; };
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(32, k / 64, 2)),
-                  FxStride(FxThr(1, 1024), FxVal(32, 2048, 16)));
+  const int chunk = lookupChunkK(kScaledKChunks, elemTy.getIntOrFloatBitWidth());
+  assert(chunk != kNoKChunkRule && "no scaled K hand-over rule for this element width");
+  const int kStride = rows;                               // step K by one
+  const int chunkStride = chunk * kStride;                // skip one chunk of K
+  const int roundStride = gfx1250::kLaneHalves * chunkStride; // skip both halves' chunks
+  const int chunksPerLane = k / (gfx1250::kLaneHalves * chunk);
+  const int rowBlocks = rows / gfx1250::kRowsPerBlock;    // 1, or 2 for the 32-row A
+  if (rowBlocks == 1) {
+    return FxLayout(
+        FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves), FxVal(chunk, chunksPerLane)),
+        FxStride(FxThr(1, chunkStride), FxVal(kStride, roundStride)));
+  }
+  return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+                          FxVal(chunk, chunksPerLane, rowBlocks)),
+                  FxStride(FxThr(1, chunkStride),
+                           FxVal(kStride, roundStride, gfx1250::kRowsPerBlock)));
 }
 
-// C is 32x16 f32: two 16x16 halves in consecutive VGPRs (M 16-31 in VGPRs 8-15).
+// C/D accumulator for the block-scaled form; always f32 (see verify()).
+// Same chunking idea as A/B, but the hand-over runs along M rather than K: a
+// lane half takes kAccChunkM consecutive rows, the columns spread across the
+// 16 lanes within a half, and a 32-row C is two 16x16 halves in consecutive
+// VGPRs (M 16-31 in the second).
 //   n = l%16, m = (v/8)*16 + (l/16)*8 + v%8
-// Reference (M, N) space is column-major with stride (1, 32).
-static Attribute scaled32x16LayoutC(MLIRContext *ctx) {
+// Reference (M, N) space is column-major with stride (1, rows).
+static Attribute scaledLayoutC(MLIRContext *ctx, int32_t rows) {
   auto getContext = [&]() { return ctx; };
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(8, 2)), FxStride(FxThr(32, 8), FxVal(1, 16)));
+  const int nStride = rows;                               // step N by one
+  const int rowBlocks = rows / gfx1250::kRowsPerBlock;
+  if (rowBlocks == 1) {
+    return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+                            FxVal(gfx1250::kAccChunkM)),
+                    FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1)));
+  }
+  return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+                          FxVal(gfx1250::kAccChunkM, rowBlocks)),
+                  FxStride(FxThr(nStride, gfx1250::kAccChunkM),
+                           FxVal(1, gfx1250::kRowsPerBlock)));
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutA() const {
-  if (getM() == 32)
-    return scaled32RowLayoutA(getContext(), getK());
-  return scaledLayoutAB(getContext(), getK(), getElemTyA());
+  return scaledLayoutAB(getContext(), getM(), getK(), getElemTyA());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutB() const {
-  // B is always N=16 rows for both supported shapes.
-  return scaledLayoutAB(getContext(), getK(), getElemTyB());
+  // B is N rows, which is 16 for both supported shapes.
+  return scaledLayoutAB(getContext(), getN(), getK(), getElemTyB());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutC() const {
-  if (getM() == 32)
-    return scaled32x16LayoutC(getContext());
-  return gfx1250::getThrValLayoutCD(getContext(), getElemTyAcc());
+  return scaledLayoutC(getContext(), getM());
 }
 
 static bool isSupportedScaledElemTy(Type ty) {
