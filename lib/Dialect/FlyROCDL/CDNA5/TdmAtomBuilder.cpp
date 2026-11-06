@@ -67,6 +67,26 @@ FailureOr<tdm::Geometry> deriveTdmAtom(AdaptorT adaptor, tdm::Request &request, 
   auto geometry = tdm::derive(request, emitError);
   if (failed(geometry))
     return failure();
+
+  if (int32_t indexBits = adaptor.getIndexBits()) {
+    if (indexBits != 16 && indexBits != 32)
+      return emitError() << "index_bits must be 0, 16 or 32, got " << indexBits;
+    if (geometry->rank() != tdm::kIndexedRank)
+      return emitError() << "an indexed TDM descriptor must be 2D, got rank " << geometry->rank();
+    // `descriptorShape` is outermost-first, so the row count leads and the row width,
+    // which stays the contiguous run, trails.
+    int32_t rows = geometry->descriptorShape.front();
+    int32_t maxRows = tdm::maxIndexedRows(indexBits);
+    if (rows > maxRows)
+      return emitError() << "one indexed issue carries at most " << maxRows << " rows at "
+                         << indexBits << "-bit indices, got " << rows;
+    int64_t rowBits =
+        static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
+    if (rowBits % (4 * 8))
+      return emitError() << "an indexed TDM row must span a whole multiple of 4 bytes, got "
+                         << geometry->descriptorShape.back() << " elements at "
+                         << dataType.getIntOrFloatBitWidth() << " bits";
+  }
   if (geometry->padAmount) {
     int64_t innerBits =
         static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
@@ -129,15 +149,15 @@ FailureOr<fly::LayoutType> tdmPartitionLayout(Type atomType, Type stensorType, T
 
 FailureOr<Type> tdmLoadOpType(MLIRContext *ctx, const tdm::Geometry &geometry, Type dataType,
                               IntTupleAttr tensor2tdm, bool atomicBarrier, int32_t cacheModifier,
-                              function_ref<InFlightDiagnostic()> emitError) {
+                              int32_t indexBits, function_ref<InFlightDiagnostic()> emitError) {
   if (geometry.padAmount &&
       static_cast<int64_t>(geometry.descriptorShape.back()) * dataType.getIntOrFloatBitWidth() % 32)
     return emitError() << "padded physical TDM tile_dim0 must span whole dwords";
   ArrayRef<int32_t> shape(geometry.descriptorShape);
 
-  Type ty = CopyOpCDNA5TensorLoadType::getChecked(emitError, ctx, shape, dataType, tensor2tdm,
-                                                  atomicBarrier, cacheModifier, /*iterCount=*/1,
-                                                  geometry.padInterval, geometry.padAmount);
+  Type ty = CopyOpCDNA5TensorLoadType::getChecked(
+      emitError, ctx, shape, dataType, tensor2tdm, atomicBarrier, cacheModifier, /*iterCount=*/1,
+      indexBits, geometry.padInterval, geometry.padAmount);
   if (!ty)
     return failure();
   return ty;
@@ -145,7 +165,7 @@ FailureOr<Type> tdmLoadOpType(MLIRContext *ctx, const tdm::Geometry &geometry, T
 
 FailureOr<Type> tdmStoreOpType(MLIRContext *ctx, const tdm::Geometry &geometry, Type dataType,
                                IntTupleAttr tensor2tdm, bool atomicBarrier, int32_t cacheModifier,
-                               function_ref<InFlightDiagnostic()> emitError) {
+                               int32_t indexBits, function_ref<InFlightDiagnostic()> emitError) {
   if (geometry.padAmount)
     return emitError() << "a TDM store cannot drain a padded LDS tile (pad interval "
                        << geometry.padInterval << ", amount " << geometry.padAmount
@@ -153,7 +173,8 @@ FailureOr<Type> tdmStoreOpType(MLIRContext *ctx, const tdm::Geometry &geometry, 
                           "packed tile stride";
   ArrayRef<int32_t> shape(geometry.descriptorShape);
   Type ty = CopyOpCDNA5TensorStoreType::getChecked(emitError, ctx, shape, dataType, tensor2tdm,
-                                                   atomicBarrier, cacheModifier, /*iterCount=*/1);
+                                                   atomicBarrier, cacheModifier, /*iterCount=*/1,
+                                                   indexBits);
   if (!ty)
     return failure();
   return ty;
