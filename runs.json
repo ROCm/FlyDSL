@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-11-06T08:55:22Z",
+ "updated": "2026-11-06T08:57:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42190974208,
+   "pr": 1381,
+   "commit": "f70f57b40b18258376da5a0cdb16f996cc20a245",
+   "branch": "fix/jit-key-rocm-toolkit",
+   "event": "pull_request",
+   "title": "[JIT] Key disk cache entries by the ROCm device bitcode and external LLVM libs",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42190974208",
+   "created_at": "2026-11-06T08:53:52Z",
+   "updated_at": "2026-11-06T08:55:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42190209931,
    "pr": 1381,
    "commit": "328c170b0fcbaf5b917e5dbecb0ea11afd7d4904",
    "branch": "fix/jit-key-rocm-toolkit",
    "event": "pull_request",
-   "title": "[JIT] Key disk cache entries by the ROCm device bitcode",
-   "status": "queued",
-   "conclusion": null,
+   "title": "[JIT] Key disk cache entries by the ROCm device bitcode and external LLVM libs",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42190209931",
    "created_at": "2026-11-06T08:47:29Z",
-   "updated_at": "2026-11-06T08:48:51Z",
+   "updated_at": "2026-11-06T08:53:54Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1737,21 +1752,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 41600868796,
-   "pr": 1352,
-   "commit": "fe8b27e6144646d8d5ab5dff52c0f0e2340a9332",
-   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600868796",
-   "created_at": "2026-11-03T08:06:45Z",
-   "updated_at": "2026-11-05T05:41:42Z",
-   "actor": "edjson",
-   "jobs": []
   }
  ]
 }
