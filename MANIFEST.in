@@ -5,7 +5,7 @@ include setup.py
 recursive-include scripts *.sh
 
 recursive-include python/flydsl *.py
-recursive-include kernels/gemm/rdna4_mxfp4 *.py *.json *.md
+recursive-include kernels/gemm/rdna4_mxfp4 *.py *.md
 recursive-include python requirements.txt
 recursive-include examples *.py
 recursive-include tests *

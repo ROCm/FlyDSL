@@ -154,22 +154,3 @@ python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
 python tests/perf/bench_rdna4_mxfp4.py --m 128 --configs candidates.json --output timings.json
 python -m pytest tests/unit/test_rdna4_mxfp4_heuristic.py tests/kernels/test_rdna4_mxfp4.py
 ```
-
-The earlier profile-selector validation is retained as historical data in
-`tests/perf/data/rdna4_mxfp4_comprehensive.json` and
-`rdna4_mxfp4_structure.json`; its timings describe the earlier selector.
-The [analytical selector evidence](../../../tests/perf/data/rdna4_mxfp4_analytical.json)
-records source hashes, paired latency summaries, worst cases, independent
-cohort provenance, startup coverage, ISA/resources and model evaluation scope.
-This benchmark evidence is outside the installed kernel package.
-
-The [selector refinement evidence](../../../tests/perf/data/rdna4_mxfp4_refinement.json)
-compares the refined host rules with the released analytical selector and the
-earlier profile selector. It separates development measurements, reserved unseen
-shapes, changed-input replay, compile-only coverage and model dispatch equivalence.
-The register and hybrid GPU implementations are unchanged by this refinement.
-
-The [implementation simplification evidence](../../../tests/perf/data/rdna4_mxfp4_simplification.json)
-records fixed-option removal, compatibility tests, selector equivalence and
-paired GPU timings against `ce625eb`. All 64 measured comparisons have matching
-instruction fingerprints and resource counts, including changed-input replay.

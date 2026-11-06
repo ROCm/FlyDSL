@@ -2,6 +2,3 @@
 # LLVM patches LF in every checkout, including Git for Windows' default
 # core.autocrlf=true, or build_llvm_windows.ps1 cannot apply them.
 thirdparty/**/*.patch text eol=lf
-
-# Generated benchmark evidence; never read by runtime selection.
-tests/perf/data/rdna4_mxfp4_*.json linguist-generated=true
