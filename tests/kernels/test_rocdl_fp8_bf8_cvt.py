@@ -107,9 +107,7 @@ def test_rocdl_fp8_bf8_f16_cvt_roundtrip():
     )
 )
 def test_rocdl_pk_f32_fp8_bf8_unpack():
-    # Uncomment alongside ``cvt_pk_f32_bf8`` in ``flydsl.expr.rocdl`` once
-    # https://github.com/llvm/llvm-project/pull/231721 is in FlyDSL's LLVM commit:
-    #
+    """Uncomment alongside ``cvt_pk_f32_bf8`` once llvm/llvm-project#231721 lands in FlyDSL's LLVM commit."""
     # @flyc.kernel
     # def cvt_pk_unpack_kernel(Out: fx.Tensor):
     #     tid = fx.thread_idx.x
@@ -149,7 +147,6 @@ def test_rocdl_pk_f32_fp8_bf8_unpack():
     #
     # expected = torch.tensor([1.5, -2.0, 0.25, 4.0, 1.5, -2.0, 0.25, 4.0], dtype=torch.float32)
     # torch.testing.assert_close(out.cpu(), expected, atol=0, rtol=0)
-    pass
 
 
 if __name__ == "__main__":

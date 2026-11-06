@@ -99,9 +99,7 @@ def test_scalar_unpack_fp8_bf8_accept_dsl_int32_and_literals():
     )
 )
 def test_packed_unpack_bf8_disabled_until_llvm_true16_fix():
-    # Uncomment alongside ``cvt_pk_f32_bf8`` in ``flydsl.expr.rocdl`` once
-    # https://github.com/llvm/llvm-project/pull/231721 is in FlyDSL's LLVM commit:
-    #
+    """Uncomment alongside ``cvt_pk_f32_bf8`` once llvm/llvm-project#231721 lands in FlyDSL's LLVM commit."""
     # def build(packed_raw):
     #     packed = fx.Int32(packed_raw)
     #     bf8_lo = fx.rocdl.cvt_pk_f32_bf8(T.f32x2, packed, False)
@@ -114,7 +112,6 @@ def test_packed_unpack_bf8_disabled_until_llvm_true16_fix():
     #     result_types=[lambda: T.f32x2, lambda: T.f32x2],
     # )
     # assert "rocdl.cvt.pk.f32.bf8" in ir_text
-    pass
 
 
 def test_cvt_wrappers_remain_omitted_from_stable_all():
