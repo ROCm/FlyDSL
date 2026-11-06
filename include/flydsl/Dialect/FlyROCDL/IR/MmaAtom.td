@@ -309,7 +309,8 @@ def FlyROCDL_MmaOpGFX120X_SWMMAC : FlyROCDL_MmaOp<"MmaOpGFX120X_SWMMAC", "gfx120
     TypeBuilderWithInferredContext<
         (ins "int32_t":$m, "int32_t":$n, "int32_t":$k,
              "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
-      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   /*signA=*/false, /*signB=*/false, /*clamp=*/false);
     }]>,
     TypeBuilderWithInferredContext<
         (ins "int32_t":$m, "int32_t":$n, "int32_t":$k,

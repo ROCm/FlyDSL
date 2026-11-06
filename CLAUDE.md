@@ -58,7 +58,7 @@ FlyDSL/
 │   └── mlir_flydsl/               # MLIR Python binding package source
 ├── include/flydsl/                # C++ TableGen headers for Fly / FlyROCDL dialects and passes
 ├── lib/                           # C++ dialect implementation, conversions, runtime wrappers, Python bindings
-│   └── Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
+│   └── Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250, SWMMAC on GFX120X) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
 ├── tools/                         # fly-opt
 ├── kernels/                       # Production kernels, importable as kernels.*
 ├── tests/

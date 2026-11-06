@@ -501,8 +501,9 @@ LogicalResult MmaOpGFX120X_SWMMACType::emitAtomCall(OpBuilder &builder, Location
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
 
   SmallVector<Value, 2> aValues{a, sparseIdx};
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, accTy, ValueRange(aValues).getTypes(),
-                             abTyB, accTy, atomVal, Value{}, aValues, b, c);
+  FailureOr<Value> res =
+      emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, accTy, ValueRange(aValues).getTypes(), abTyB,
+                      accTy, atomVal, Value{}, aValues, b, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);
