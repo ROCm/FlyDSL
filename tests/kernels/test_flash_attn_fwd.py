@@ -34,7 +34,6 @@ import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention import flash_attn_interface  # noqa: E402
-from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.flash_attn_utils import (  # noqa: E402
     BIAS_MAX_DESCRIPTOR_BYTES,
@@ -3913,7 +3912,7 @@ def test_lse_varlen(causal):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 @pytest.mark.parametrize("B,S,H,Hkv,D", [(1, 512, 8, 8, 128), (2, 384, 8, 4, 64)])
 def test_bias_dense(causal, B, S, H, Hkv, D):
     """Dense bias is [Sq, Skv], broadcast over batch and head."""
@@ -3938,7 +3937,7 @@ def test_bias_dense(causal, B, S, H, Hkv, D):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 def test_bias_varlen(causal):
     """Varlen bias is packed [total_q, max_seqlen_kv]: global q rows, batch-local key columns."""
     dtype = torch.bfloat16
@@ -3983,7 +3982,7 @@ def test_bias_varlen(causal):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 @pytest.mark.parametrize("kv_cache_layout", ["linear", "vectorized"])
 def test_bias_paged(causal, kv_cache_layout):
     """Paged bias is [Sq, max_seqlen_kv]: q rows, batch-local logical key columns.
@@ -4037,7 +4036,7 @@ def test_bias_paged(causal, kv_cache_layout):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 def test_bias_paged_rejects_ragged_seqlen_k(causal):
     """Dense paged bias rejects ragged per-batch seqlen_k instead of answering wrongly.
 
@@ -4081,7 +4080,7 @@ def test_bias_paged_rejects_ragged_seqlen_k(causal):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 def test_bias_paged_varlen_ragged_seqlen_k(causal):
     """The varlen paged path -- what the dense rejection points callers at -- is correct.
 
@@ -4269,7 +4268,7 @@ def test_bias_paged_rejects_unaddressable():
             q,
             kv_cache["k_cache"],
             kv_cache["v_cache"],
-            causal=True,
+            causal=False,
             num_kv_heads=Hkv,
             max_seqlen_kv=Sq,
             block_table=kv_cache["block_table"],
@@ -4319,17 +4318,26 @@ def test_precompute_paged_bias_reaches_inputs_and_reference():
 def test_bias_launcher_rejects_unaddressable():
     """The kernel launcher guards too, for callers that bypass flydsl_flash_attn_func.
 
-    The guard also has to fire before the launcher's ``bias.contiguous()``, which
-    would otherwise materialize gigabytes on the way to a guaranteed failure.
+    The guard also has to fire before anything is materialized: the bias is an expanded (zero-stride) view, so a launcher
+    that copied it on the way to a guaranteed failure would allocate gigabytes.
     """
+    from kernels.attention import dispatch
+    from kernels.attention.flash_attn_gfx950_config import FmhaInputMetadata
+
     dtype = torch.bfloat16
-    B, S, H, D = 1, 384, 4, 128
-    launch = build_flash_attn_dualwave_swp_module(num_heads=H, head_dim=D, causal=False, has_bias=True)
-    q, k, v, o = (torch.zeros(B, S, H, D, dtype=dtype, device="cuda") for _ in range(4))
-    bias = _unbacked_bias(*_OVERSIZED_BIAS_SHAPE, dtype=dtype)
+    rows, cols = _OVERSIZED_BIAS_SHAPE
+    arch = dispatch.current_arch()
+    backend = dispatch.backend_for(arch)
+    meta = FmhaInputMetadata(dtype_str="bf16", head_dim=64, bias=True)
+    launch = backend.build_fwd(meta, backend.fwd_knobs(arch).resolve(meta))
+    q = torch.zeros(1, 1, rows, 64, dtype=dtype, device="cuda")
+    k = torch.zeros(1, 1, cols, 64, dtype=dtype, device="cuda")
+    o = torch.zeros_like(q)
+    # A real dense slab (4 GiB): the guard reads only the strides and shape, so the copy it must not make is a second one.
+    bias = torch.empty(rows * cols, dtype=dtype, device="cuda").view(1, 1, rows, cols)
     free_before = torch.cuda.mem_get_info()[0]
     with pytest.raises(ValueError, match=_OVERSIZED_BIAS_MATCH):
-        launch(q, k, v, o, B, S, bias=bias)
+        launch(q, k, k, o, 1, rows, seqlen_k=cols, bias=bias)
     assert torch.cuda.mem_get_info()[0] > free_before - 2**30, "rejected bias must not be materialized"
 
 
@@ -4408,7 +4416,7 @@ def test_alibi_varlen(causal):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [False])  # bias + causal raises, see test_interface.py
 def test_alibi_and_bias_combined(causal):
     """ALiBi and bias are independent score terms and must both land."""
     dtype = torch.bfloat16
