@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-06T09:29:14Z",
+ "updated": "2026-11-06T09:56:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42195400772,
+   "pr": 1332,
+   "commit": "e9c6a41bfc432eb999434c7f61c3eefb2d5e8f30",
+   "branch": "fix/rocm-gpu-detection",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42195400772",
+   "created_at": "2026-11-06T09:29:11Z",
+   "updated_at": "2026-11-06T09:48:08Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42194468255,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194468255",
    "created_at": "2026-11-06T09:21:47Z",
-   "updated_at": "2026-11-06T09:27:36Z",
+   "updated_at": "2026-11-06T09:54:37Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1583,52 +1598,6 @@
      "started_at": "2026-11-04T02:45:28Z",
      "completed_at": "2026-11-04T03:17:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41758721274/job/126369973279"
-    }
-   ]
-  },
-  {
-   "run_id": 41740398006,
-   "pr": 1364,
-   "commit": "a2bc2d84c568f64e7a45cee7acbd42c5a36faf53",
-   "branch": "jli/rocdl-sched-experimental",
-   "event": "pull_request",
-   "title": "[ROCDL] Move unaccepted sched_* register hints to experimental",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006",
-   "created_at": "2026-11-03T23:35:48Z",
-   "updated_at": "2026-11-04T01:45:43Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-04T00:29:58Z",
-     "completed_at": "2026-11-04T00:58:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145284",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-04T00:30:03Z",
-     "completed_at": "2026-11-04T01:45:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145345"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-04T00:56:48Z",
-     "completed_at": "2026-11-04T01:19:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145439"
     }
    ]
   }
