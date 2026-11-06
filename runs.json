@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-05T23:32:16Z",
+ "updated": "2026-11-06T00:11:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -100,39 +100,42 @@
    "branch": "feat/windows-aot",
    "event": "pull_request",
    "title": "[Windows] AOT export support for Windows x64",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102",
    "created_at": "2026-11-05T10:31:00Z",
-   "updated_at": "2026-11-05T23:20:15Z",
+   "updated_at": "2026-11-06T00:08:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T23:21:06Z",
-     "completed_at": null,
+     "completed_at": "2026-11-06T00:08:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930912"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T23:20:38Z",
-     "completed_at": null,
+     "completed_at": "2026-11-05T23:38:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930916"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-05T23:20:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930924"
+     "completed_at": "2026-11-05T23:53:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930924",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
