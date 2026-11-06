@@ -3,6 +3,7 @@
 
 import hashlib
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Tuple
@@ -220,6 +221,14 @@ class RocmBackend(BaseBackend):
 
     @classmethod
     def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        if sys.platform == "win32":
+            # The runtime ships as LLVM-dialect IR (fly_rocm_aot_runtime.mlir, not an
+            # archive); compiler/_aot.py merges it into each export.
+            return AOTRuntimeConfig(
+                archive_basename="fly_rocm_aot_runtime.mlir",
+                runtime_libraries=("amdhip64.lib",),
+                linker_flags=("amdhip64.lib",),
+            )
         return AOTRuntimeConfig(
             archive_basename="libfly_rocm_aot_runtime.a",
             runtime_libraries=("libamdhip64.so",),
