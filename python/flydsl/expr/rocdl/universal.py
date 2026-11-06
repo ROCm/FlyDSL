@@ -247,11 +247,14 @@ def SWMMAC(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     group ``[a_compressed, sparse_index]``, where ``a_compressed`` holds the
     non-zero half of the 2:4 sparse ``(M, K)`` tile (``(M, K/2)`` -> ``K/4``
     elements per lane) and ``sparse_index`` is a per-lane ``i32`` 2-bit selector
-    word. Because generic ``TiledMma`` operand-A helpers (``partition_A``,
-    ``make_fragment_A``, ``make_tiled_copy_A``) tile A by dense ``shape_mnk``
-    (``(M, K)``), multi-K-tile kernels should partition compressed A and
-    ``sparse_index`` explicitly while using ``TiledMma`` for B, C/D, and
-    variadic ``fx.gemm``.
+    word (for example ``0x44444444`` when selecting nibble pairs ``(0, 1)`` of
+    each 4-element group in 16-element NVFP4 ``p + q = 2w`` decompositions on
+    ``16x16x64`` ``iu4``). Because generic ``TiledMma`` operand-A helpers
+    (``partition_A``, ``make_fragment_A``, ``make_tiled_copy_A``) tile A by dense
+    ``shape_mnk`` (``(M, K)``), multi-K-tile kernels should partition compressed
+    A and ``sparse_index`` explicitly while using ``TiledMma`` for B, C/D, and
+    variadic ``fx.gemm`` (or invoke ``fx.gemm(atom, c, [a, idx], [b], c)``
+    directly on ``fx.make_rmem_tensor`` fragments).
 
     Supported kwargs:
         elem_ty_b: optional B operand type for mixed FP8/BF8 or integer forms;

@@ -193,6 +193,25 @@ func.func @test_gfx120x_swmmac_atom_call_memref_iu4_k32(
   return
 }
 
+// CHECK-LABEL: @test_gfx120x_swmmac_atom_call_memref_iu4_k64
+// CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[IDX:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)
+func.func @test_gfx120x_swmmac_atom_call_memref_iu4_k64(
+    %d: !fly.memref<i32, register, 8:1>,
+    %a: !fly.memref<i4, register, 16:1>,
+    %idx: !fly.memref<i32, register, 1:1>,
+    %b: !fly.memref<i4, register, 32:1>,
+    %c: !fly.memref<i32, register, 8:1>) {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.swmmac<16x16x64, (i4, i4) -> i32, signA = false, signB = true, clamp = false>>
+  // CHECK: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> vector<2xi32>
+  // CHECK: %[[IDX_VAL:.*]] = llvm.load %[[IDX]] : !llvm.ptr<5> -> i32
+  // CHECK: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> vector<4xi32>
+  // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<8xi32>
+  // CHECK: %[[RES:.*]] = rocdl.swmmac.i32.16x16x64.iu4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], %[[IDX_VAL]] {signB = true}
+  // CHECK: llvm.store %[[RES]], %[[D]] : vector<8xi32>, !llvm.ptr<5>
+  fly.mma_atom_call(%atom, %d, [%a, %idx], %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.swmmac<16x16x64, (i4, i4) -> i32, signA = false, signB = true, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 1:1>, !fly.memref<i4, register, 32:1>, !fly.memref<i32, register, 8:1>) -> ()
+  return
+}
+
 // CHECK-LABEL: @test_gfx120x_swmmac_atom_call_memref_bf16_bf16
 // CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[IDX:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)
 func.func @test_gfx120x_swmmac_atom_call_memref_bf16_bf16(

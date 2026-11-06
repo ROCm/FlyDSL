@@ -380,7 +380,10 @@ accumulating to i32 (`sign_a`, `sign_b`, `clamp`). Pass operand A as
 one `i32` 2:4 selector mask per lane. Because generic `TiledMma` operand-A
 helpers (`partition_A`, `make_fragment_A`, `make_tiled_copy_A`) tile A by dense
 `shape_mnk` (`(M, K)`), partition compressed A and `frag_sparse_idx` explicitly
-for multi-K-tile loops while using `TiledMma` for B, C/D, and variadic `fx.gemm`.
+for multi-K-tile loops while using `TiledMma` for B, C/D, and variadic `fx.gemm`
+(or pass `fx.make_rmem_tensor` fragments directly to `fx.gemm(mma, frag_C,
+[frag_A_comp, frag_idx], [frag_B], frag_C)`, e.g. for `16x16x64` `fx.Int4`
+micro-scaled sub-byte decompositions).
 
 ```python
 mma = fx.make_mma_atom(rocdl.SWMMAC(16, 16, 32, fx.Float16, fx.Float32))

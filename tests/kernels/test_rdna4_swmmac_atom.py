@@ -237,6 +237,7 @@ def _compile_integer_swmmac(elem_cls, k: int, *, sign_a: bool, sign_b: bool, cla
         pytest.param(fx.Int4, torch.uint8, 0, 16, torch.uint8, 0, 16, False, False, 32),
         pytest.param(fx.Int4, torch.int8, -8, 8, torch.int8, -8, 8, True, True, 64),
         pytest.param(fx.Int4, torch.uint8, 0, 16, torch.uint8, 0, 16, False, False, 64),
+        pytest.param(fx.Int4, torch.uint8, 0, 16, torch.int8, -8, 8, False, True, 64),
     ],
     ids=[
         "iu8-signed-k32",
@@ -246,6 +247,7 @@ def _compile_integer_swmmac(elem_cls, k: int, *, sign_a: bool, sign_b: bool, cla
         "iu4-unsigned-k32",
         "iu4-signed-k64",
         "iu4-unsigned-k64",
+        "iu4-mixed-sign-k64",
     ],
 )
 def test_rdna4_swmmac_integer_atom(elem_cls, dtype_a, low_a, high_a, dtype_b, low_b, high_b, sign_a, sign_b, k):
@@ -283,6 +285,77 @@ def test_rdna4_swmmac_integer_atom(elem_cls, dtype_a, low_a, high_a, dtype_b, lo
 
     ref = a_dense_logical.to(torch.int64) @ b_logical.to(torch.int64).T + c_init.cpu().to(torch.int64)
     torch.testing.assert_close(d.cpu(), ref.to(torch.int32), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("sign_a", [True, False], ids=["i4_x_i4", "u4_x_i4"])
+def test_rdna4_swmmac_iu4_k64_rmem_gemm_nvfp4_pair_select(sign_a: bool):
+    """Test 16x16x64 iu4 via make_rmem_tensor + fx.gemm with NVFP4 p + q = 2w selector 0x44444444."""
+    k = 64
+
+    @flyc.kernel
+    def swmmac_nvfp4_rmem_kernel(A_comp: fx.Tensor, B: fx.Tensor, D: fx.Tensor):
+        lane = fx.thread_idx.x
+        lane16 = lane % 16
+        g = lane // 16
+        a2d = fx.make_view(fx.get_iter(A_comp), fx.make_layout((M, 4), (4, 1)))
+        b2d = fx.make_view(fx.get_iter(B), fx.make_layout((N, 8), (8, 1)))
+        d2d = fx.make_view(fx.get_iter(D), fx.make_layout((M, N), (N, 1)))
+
+        atom = fx.make_mma_atom(fx.rocdl.SWMMAC(M, N, k, fx.Int4, fx.Int32, sign_a=sign_a, sign_b=True, clamp=False))
+        sw_a = fx.make_rmem_tensor(16, fx.Int4)
+        sw_ix = fx.make_rmem_tensor(1, fx.Int32)
+        sw_b = fx.make_rmem_tensor(32, fx.Int4)
+        sw_c = fx.make_rmem_tensor(8, fx.Int32)
+
+        sw_a.store(
+            fx.Vector.from_elements([a2d[lane16, 2 * g + w] for w in fx.range_constexpr(2)], fx.Int32).bitcast(fx.Int4)
+        )
+        sw_ix.store(fx.Vector.from_elements([fx.Int32(0x44444444)], fx.Int32))
+        sw_b.store(
+            fx.Vector.from_elements([b2d[lane16, 4 * g + w] for w in fx.range_constexpr(4)], fx.Int32).bitcast(fx.Int4)
+        )
+        sw_c.store(fx.Vector.from_elements([fx.Int32(0)] * 8, fx.Int32))
+        fx.gemm(atom, sw_c, [sw_a, sw_ix], [sw_b], sw_c)
+
+        res = fx.Vector(sw_c.load())
+        for v in fx.range_constexpr(8):
+            d2d[8 * g + v, lane16] = res[v]
+
+    @flyc.jit
+    def launch(A_comp: fx.Tensor, B: fx.Tensor, D: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+        swmmac_nvfp4_rmem_kernel(A_comp, B, D).launch(grid=(1, 1, 1), block=(WAVE_SIZE, 1, 1), stream=stream)
+
+    torch.manual_seed(1377 + int(sign_a))
+    # 16 micro-block dims per row: duplicate each quantized activation across the selected (0, 1) pair.
+    act_16 = (
+        torch.randint(-8, 8, (M, 16), dtype=torch.int8) if sign_a else torch.randint(0, 16, (M, 16), dtype=torch.uint8)
+    )
+    a_comp = act_16.repeat_interleave(2, dim=1)  # (M, 32)
+
+    # Lossless NVFP4 doubled-E2M1 table 2w in {0, +-1, +-2, +-3, +-4, +-6, +-8, +-12} = p + q with p, q in [-6, 6].
+    pq_pairs = ((0, 0), (1, 0), (1, 1), (2, 1), (2, 2), (3, 3), (4, 4), (6, 6))
+    codes = torch.randint(-7, 8, (N, 16), dtype=torch.int64)
+    b_dense = torch.zeros((N, k), dtype=torch.int8)
+    w_doubled = torch.zeros((N, 16), dtype=torch.int64)
+    for r in range(N):
+        for d_idx in range(16):
+            c_val = int(codes[r, d_idx].item())
+            p_abs, q_abs = pq_pairs[abs(c_val)]
+            sgn = -1 if c_val < 0 else 1
+            p_val, q_val = sgn * p_abs, sgn * q_abs
+            b_dense[r, 4 * d_idx + 0] = p_val
+            b_dense[r, 4 * d_idx + 1] = q_val
+            w_doubled[r, d_idx] = p_val + q_val
+
+    a_dev = torch.from_numpy(pack_int4(a_comp.numpy())).contiguous().to("cuda")
+    b_dev = torch.from_numpy(pack_int4(b_dense.numpy())).contiguous().to("cuda")
+    out = torch.full((M, N), -1, dtype=torch.int32, device="cuda")
+
+    launch(a_dev, b_dev, out, stream=torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    ref = (act_16.to(torch.int64) @ w_doubled.T).to(torch.int32)
+    torch.testing.assert_close(out.cpu(), ref, atol=0, rtol=0)
 
 
 def test_rdna4_swmmac_integer_clamp_saturation():
