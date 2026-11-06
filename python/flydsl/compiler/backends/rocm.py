@@ -199,16 +199,15 @@ class RocmBackend(BaseBackend):
     # -- cache / fingerprint ---------------------------------------------
 
     def toolkit_fingerprint(self) -> str:
-        # The root gpu-module-to-binary links with; on Linux, mlir::ROCDL::getROCMPath()
-        # with its build default (DEFAULT_ROCM_PATH) /opt/rocm.
         if os.name == "nt":
             from ...runtime.device_runtime.rocm import _rocm_toolkit_root
 
             root = str(_rocm_toolkit_root())
         else:
-            root = next(
-                (os.environ[v] for v in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME") if v in os.environ), "/opt/rocm"
-            )
+            # gpu-module-to-binary leaves toolkit= empty here, so ROCDL picks the root.
+            from ..._mlir._mlir_libs import _mlirDialectsFlyROCDL
+
+            root = _mlirDialectsFlyROCDL.rocm_path()
         return f"rocm-bitcode:{_hash_device_bitcode(root)}"
 
     def jit_runtime_lib_basenames(self) -> List[str]:
