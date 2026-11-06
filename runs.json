@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-06T01:25:49Z",
+ "updated": "2026-11-06T02:22:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "fix/test-triton-optional",
    "event": "pull_request",
    "title": "[Tests] Drop the hard triton import from kernel test helpers",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947",
    "created_at": "2026-11-06T01:22:41Z",
-   "updated_at": "2026-11-06T01:24:08Z",
+   "updated_at": "2026-11-06T02:10:11Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T01:49:04Z",
+     "completed_at": "2026-11-06T02:15:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127658339309"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-06T01:49:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127658339318"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T01:48:45Z",
+     "completed_at": "2026-11-06T02:10:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127658339334"
+    }
+   ]
   },
   {
    "run_id": 42139991350,
@@ -68,11 +96,11 @@
    "branch": "fix/test-stream-waits",
    "event": "pull_request",
    "title": "[Tests] Fix missing stream waits in multi-stream tests",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835",
    "created_at": "2026-11-06T00:34:22Z",
-   "updated_at": "2026-11-06T01:06:49Z",
+   "updated_at": "2026-11-06T02:20:20Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -99,10 +127,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-06T00:51:34Z",
-     "completed_at": null,
+     "completed_at": "2026-11-06T01:49:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735301"
     }
    ]
