@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-06T09:22:57Z",
+ "updated": "2026-11-06T09:24:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42194468255,
+   "pr": null,
+   "commit": "1c1a2b0e8aaf48de43aa3e993c2beb76b33a48a8",
+   "branch": "main",
+   "event": "push",
+   "title": "[Tests] Drop the hard triton import from kernel test helpers (#1379)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194468255",
+   "created_at": "2026-11-06T09:21:47Z",
+   "updated_at": "2026-11-06T09:22:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42194370011,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Fix missing stream waits in multi-stream tests (#1378)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194370011",
    "created_at": "2026-11-06T09:21:01Z",
-   "updated_at": "2026-11-06T09:21:12Z",
+   "updated_at": "2026-11-06T09:22:44Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,11 +70,11 @@
    "branch": "fix/jit-key-rocm-toolkit",
    "event": "pull_request",
    "title": "[JIT] Key disk cache entries by the ROCm device bitcode and external LLVM libs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42190974208",
    "created_at": "2026-11-06T08:53:52Z",
-   "updated_at": "2026-11-06T09:20:45Z",
+   "updated_at": "2026-11-06T09:21:43Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -292,7 +307,7 @@
   },
   {
    "run_id": 42143427947,
-   "pr": 1379,
+   "pr": null,
    "commit": "65ae2c1276860e75bc23f4ce573afef1cd4f2488",
    "branch": "fix/test-triton-optional",
    "event": "pull_request",
@@ -338,7 +353,7 @@
   },
   {
    "run_id": 42139991350,
-   "pr": 1379,
+   "pr": null,
    "commit": "8321d978fc2085c1eb0346487f4a2695a4206c9f",
    "branch": "fix/test-triton-optional",
    "event": "pull_request",
@@ -1614,52 +1629,6 @@
      "started_at": "2026-11-04T00:56:48Z",
      "completed_at": "2026-11-04T01:19:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41740398006/job/126303145439"
-    }
-   ]
-  },
-  {
-   "run_id": 41692262255,
-   "pr": 1363,
-   "commit": "99be65c77f63659043692daa36a1e6e8dd43dda6",
-   "branch": "copilot/fix-benchmark-linux-flydsl-mi35x-1",
-   "event": "pull_request",
-   "title": "Rerun benchmark after Docker daemon failure",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41692262255",
-   "created_at": "2026-11-03T18:16:47Z",
-   "updated_at": "2026-11-03T18:22:32Z",
-   "actor": "Copilot",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T18:22:27Z",
-     "completed_at": "2026-11-03T18:22:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41692262255/job/126116664629"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T18:22:26Z",
-     "completed_at": "2026-11-03T18:22:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41692262255/job/126116664724",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T18:22:26Z",
-     "completed_at": "2026-11-03T18:22:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41692262255/job/126116664922"
     }
    ]
   }
