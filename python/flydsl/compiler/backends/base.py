@@ -128,6 +128,13 @@ class BaseBackend(metaclass=ABCMeta):
         """
         return f"{self.target}"
 
+    def toolkit_fingerprint(self) -> str:
+        """Identify external toolchain files that code generation reads (e.g. a linker).
+
+        Namespaces JIT disk cache entries only, so it is computed for disk lookups.
+        """
+        return ""
+
     @abstractmethod
     def jit_runtime_lib_basenames(self) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import hashlib
 import os
+from functools import lru_cache
+from pathlib import Path
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
@@ -13,6 +16,38 @@ def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
     if "ktrace" in compile_hints:
         return bool(compile_hints["ktrace"])
     return bool(env.ktrace.enable)
+
+
+def _rocdl_toolkit_root() -> str:
+    """The root gpu-module-to-binary links against: llvm/bin/ld.lld and amdgcn/bitcode."""
+    if os.name == "nt":
+        from ...runtime.device_runtime.rocm import _rocm_toolkit_root
+
+        try:
+            return str(_rocm_toolkit_root())
+        except RuntimeError:
+            return ""
+    # mlir::ROCDL::getROCMPath(), whose build default (DEFAULT_ROCM_PATH) is /opt/rocm.
+    for var in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME"):
+        if var in os.environ:
+            return os.environ[var]
+    return "/opt/rocm"
+
+
+@lru_cache(maxsize=None)
+def _hash_toolkit(root: str) -> str:
+    """SHA-256 of the linker and the device bitcode under ``root``; read once per root and process."""
+    lld = Path(root, "llvm", "bin", "ld.lld.exe" if os.name == "nt" else "ld.lld")
+    h = hashlib.sha256()
+    for path in [lld, *sorted(Path(root, "amdgcn", "bitcode").glob("*.bc"))]:
+        h.update(path.name.encode() + b"\0")
+        try:
+            with open(path, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    h.update(chunk)
+        except OSError:
+            h.update(b"missing")
+    return h.hexdigest()
 
 
 class RocmBackend(BaseBackend):
@@ -180,6 +215,10 @@ class RocmBackend(BaseBackend):
         return []
 
     # -- cache / fingerprint ---------------------------------------------
+
+    def toolkit_fingerprint(self) -> str:
+        root = _rocdl_toolkit_root()
+        return f"rocm-toolkit:{root}:{_hash_toolkit(root)}"
 
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":
