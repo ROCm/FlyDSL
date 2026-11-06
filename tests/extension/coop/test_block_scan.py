@@ -86,7 +86,9 @@ def run_block_scan(
         kernel(A, Out).launch(grid=(1, 1, 1), block=block_size, stream=stream)
 
     out = torch.zeros_like(values)
-    launch(values, out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, stream=stream)
     torch.cuda.synchronize()
     return out.cpu()
 
@@ -176,7 +178,9 @@ def test_block_aggregate(block_size, inclusive):
     values = sample(name, block_threads * ITEMS)
     out = torch.zeros_like(values)
     agg = torch.zeros(block_threads, dtype=torch.int32, device="cuda")
-    launch(values, out, agg, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, agg, stream=stream)
     torch.cuda.synchronize()
 
     check_scan(values, out.cpu(), name, inclusive=inclusive)
@@ -242,7 +246,9 @@ def test_initial_value_stays_out_of_the_aggregate():
     values = torch.ones(BLOCK, dtype=torch.int32, device="cuda")
     out = torch.zeros_like(values)
     agg = torch.zeros_like(values)
-    launch(values, out, agg, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, agg, stream=stream)
     torch.cuda.synchronize()
 
     # The scan carries init; the aggregate is the inputs alone.

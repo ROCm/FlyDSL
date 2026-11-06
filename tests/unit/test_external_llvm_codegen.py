@@ -140,6 +140,29 @@ def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
     assert len(hash_part) == 64 and all(c in "0123456789abcdef" for c in hash_part)
 
 
+def test_external_llvm_fingerprint_covers_shared_llvm_libraries(tmp_path, monkeypatch):
+    llvm_dir = _make_fake_llvm(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(llvm_dir))
+    lib = llvm_dir / "lib" / "libLLVM.so.23"
+    lib.parent.mkdir()
+    (llvm_dir / "lib" / "libLLVM.so").symlink_to(lib.name)
+    (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"x")
+
+    def fingerprint():
+        external_llvm_fingerprint.cache_clear()
+        return external_llvm_fingerprint()
+
+    try:
+        lib.write_bytes(b"v1")
+        first = fingerprint()
+        (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"y")
+        assert fingerprint() == first
+        lib.write_bytes(b"v2")
+        assert fingerprint() != first
+    finally:
+        external_llvm_fingerprint.cache_clear()
+
+
 def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):
     llvm_dir = _make_fake_llvm(tmp_path)
     monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(llvm_dir))

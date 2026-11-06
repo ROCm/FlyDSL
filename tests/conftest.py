@@ -134,7 +134,6 @@ def pytest_sessionfinish(session, exitstatus):
 # Test files that check Linux-only behaviour, or that only hold on POSIX,
 # and therefore fail on Windows for reasons outside FlyDSL's Windows support.
 _WINDOWS_SKIPS = {
-    "test_aot_export.py": "AOT export is Linux-only",
     "test_llvm_extension_apply.py": "drives the Linux bash build scripts",
     "test_python_interpreter_pinning.py": "drives the Linux bash build scripts",
     "test_external_llvm_codegen.py": "fake tools are POSIX shebang scripts",

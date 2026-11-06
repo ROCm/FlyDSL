@@ -57,7 +57,9 @@ def run_warp_scan(values, name, *, width, inclusive, block):
         kernel(A, Out).launch(grid=(1, 1, 1), block=(block, 1, 1), stream=stream)
 
     out = torch.zeros_like(values)
-    launch(values, out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, stream=stream)
     torch.cuda.synchronize()
     return out.cpu()
 
@@ -125,7 +127,9 @@ def test_combination_scan(width):
     values = sample(name, block)
     inc = torch.zeros_like(values)
     exc = torch.zeros_like(values)
-    launch(values, inc, exc, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, inc, exc, stream=stream)
     torch.cuda.synchronize()
 
     assert torch.equal(inc.cpu(), expected_scan(values, name, width=group, inclusive=True))
@@ -163,7 +167,9 @@ def test_warp_aggregate(entry, width, inclusive):
     values = sample(name, block)
     out = torch.zeros_like(values)
     agg = torch.zeros_like(values)
-    launch(values, out, agg, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, agg, stream=stream)
     torch.cuda.synchronize()
 
     assert torch.equal(out.cpu(), expected_scan(values, name, width=group, inclusive=inclusive))
@@ -200,7 +206,9 @@ def test_initial_value(width, inclusive):
 
     values = sample(name, block)
     out = torch.zeros_like(values)
-    launch(values, out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, stream=stream)
     torch.cuda.synchronize()
 
     expected = expected_scan(values, name, width=group, inclusive=inclusive).to(torch.int64) + INIT
@@ -229,7 +237,9 @@ def test_initial_value_stays_out_of_the_aggregate():
     values = torch.ones(warp_threads, dtype=torch.int32, device="cuda")
     out = torch.zeros_like(values)
     agg = torch.zeros_like(values)
-    launch(values, out, agg, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, agg, stream=stream)
     torch.cuda.synchronize()
 
     # The scan carries init; the aggregate is the inputs alone.
@@ -262,7 +272,9 @@ def test_warp_scan_forms_agree():
     values = torch.arange(1, warp_threads + 1, dtype=torch.float32, device="cuda")
     inc = torch.zeros_like(values)
     exc = torch.zeros_like(values)
-    launch(values, inc, exc, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, inc, exc, stream=stream)
     torch.cuda.synchronize()
 
     # Each group of WIDTH lanes scans on its own; nothing crosses the boundary.
@@ -292,7 +304,9 @@ def test_warp_width_defaults_to_the_whole_warp():
     values = torch.arange(1, BLOCK + 1, dtype=torch.int32, device="cuda")
     total = torch.zeros_like(values)
     inc = torch.zeros_like(values)
-    launch(values, total, inc, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, total, inc, stream=stream)
     torch.cuda.synchronize()
 
     per_warp = values.cpu().reshape(-1, warp_threads)

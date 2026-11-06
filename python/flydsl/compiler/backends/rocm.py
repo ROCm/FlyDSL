@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import hashlib
 import os
+import sys
+from functools import lru_cache
+from pathlib import Path
 from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
@@ -13,6 +17,19 @@ def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
     if "ktrace" in compile_hints:
         return bool(compile_hints["ktrace"])
     return bool(env.ktrace.enable)
+
+
+@lru_cache(maxsize=None)
+def _hash_device_bitcode(root: str) -> str:
+    """SHA-256 of the device bitcode under ``root``; read once per root and process.
+
+    ROCDL links ocml/ockl from here into kernels that call them, so it changes the ISA.
+    ld.lld is not hashed: it only links the assembled object into the code object.
+    """
+    h = hashlib.sha256()
+    for path in sorted(Path(root, "amdgcn", "bitcode").glob("*.bc")):
+        h.update(path.name.encode() + b"\0" + path.read_bytes())
+    return h.hexdigest()
 
 
 class RocmBackend(BaseBackend):
@@ -181,6 +198,18 @@ class RocmBackend(BaseBackend):
 
     # -- cache / fingerprint ---------------------------------------------
 
+    def toolkit_fingerprint(self) -> str:
+        if os.name == "nt":
+            from ...runtime.device_runtime.rocm import _rocm_toolkit_root
+
+            root = str(_rocm_toolkit_root())
+        else:
+            # gpu-module-to-binary leaves toolkit= empty here, so ROCDL picks the root.
+            from ..._mlir._mlir_libs import _mlirDialectsFlyROCDL
+
+            root = _mlirDialectsFlyROCDL.rocm_path()
+        return f"rocm-bitcode:{_hash_device_bitcode(root)}"
+
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":
             return ["fly_jit_runtime.dll", "mlir_c_runner_utils.dll"]
@@ -191,6 +220,14 @@ class RocmBackend(BaseBackend):
 
     @classmethod
     def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        if sys.platform == "win32":
+            # The runtime ships as LLVM-dialect IR (fly_rocm_aot_runtime.mlir, not an
+            # archive); compiler/_aot.py merges it into each export.
+            return AOTRuntimeConfig(
+                archive_basename="fly_rocm_aot_runtime.mlir",
+                runtime_libraries=("amdhip64.lib",),
+                linker_flags=("amdhip64.lib",),
+            )
         return AOTRuntimeConfig(
             archive_basename="libfly_rocm_aot_runtime.a",
             runtime_libraries=("libamdhip64.so",),

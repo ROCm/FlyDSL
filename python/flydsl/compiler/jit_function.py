@@ -200,7 +200,9 @@ def _flydsl_key() -> str:
     env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
     if env_extra:
         extra.extend(d.strip() for d in env_extra.split(":") if d.strip())
-    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra))
+    return _flydsl_key_cached(
+        _use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra), get_backend().toolkit_fingerprint()
+    )
 
 
 def _is_native_library(name: str) -> bool:
@@ -253,7 +255,9 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
 
 
 @lru_cache(maxsize=4)
-def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = ()) -> str:
+def _flydsl_key_cached(
+    use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = (), toolkit_fingerprint: str = ""
+) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -261,6 +265,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
          flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Every native library in ``_mlir/_mlir_libs`` (build-time digests)
       3. flydsl.__version__
+      4. The backend's external toolkit (ROCm: the device bitcode)
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
@@ -300,6 +305,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
                 with open(py_file, "rb") as f:
                     contents.append(hashlib.sha256(f.read()).hexdigest())
 
+    contents.append(toolkit_fingerprint)
     contents.append(f"external_binary_codegen={use_external_binary}")
     if use_external_binary:
         from .external_llvm import external_llvm_fingerprint
@@ -1404,11 +1410,10 @@ class CompiledFunction:
         The object embeds its backend adapter and only needs the backend's
         system runtime libraries when linked into an executable or shared
         library; it does not require FlyDSL or Python at deployment time.
-        Host export currently requires 64-bit little-endian Linux ELF tools.
+        Host export requires 64-bit little-endian Linux ELF tools, or Windows
+        x64, where it writes a COFF ``.obj`` and needs no external tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
-        if os.name == "nt":
-            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):
