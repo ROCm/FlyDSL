@@ -131,7 +131,7 @@ class BaseBackend(metaclass=ABCMeta):
     def toolkit_fingerprint(self) -> str:
         """Identify external toolchain files that code generation reads (e.g. a linker).
 
-        Namespaces JIT disk cache entries only, so it is computed for disk lookups.
+        Namespaces JIT disk cache entries only; memory-only caching never computes it.
         """
         return ""
 

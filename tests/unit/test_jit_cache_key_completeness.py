@@ -347,22 +347,22 @@ def test_rocm_toolkit_files_namespace_disk_entries(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: seen.append(args[-1]) or "")
 
-    def key_after(write=None):
-        if write:
-            write[0].write_bytes(write[1])
+    def key():
         rocm._hash_toolkit.cache_clear()
         jf._flydsl_key()
         return seen[-1]
 
-    first = key_after()
-    assert str(toolkit) in first
-    assert key_after((ocml, b"v2")) != first
-    assert key_after((lld, b"v2")) not in seen[:-1]
+    first = key()
+    ocml.write_bytes(b"v2")
+    after_ocml = key()
+    lld.write_bytes(b"v2")
+    after_lld = key()
+    assert len({first, after_ocml, after_lld}) == 3
 
     # Files are read once per toolkit root and process.
     ocml.write_bytes(b"v3")
     jf._flydsl_key()
-    assert seen[-1] == seen[-2]
+    assert seen[-1] == after_lld
     rocm._hash_toolkit.cache_clear()
 
 

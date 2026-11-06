@@ -18,22 +18,6 @@ def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
     return bool(env.ktrace.enable)
 
 
-def _rocdl_toolkit_root() -> str:
-    """The root gpu-module-to-binary links against: llvm/bin/ld.lld and amdgcn/bitcode."""
-    if os.name == "nt":
-        from ...runtime.device_runtime.rocm import _rocm_toolkit_root
-
-        try:
-            return str(_rocm_toolkit_root())
-        except RuntimeError:
-            return ""
-    # mlir::ROCDL::getROCMPath(), whose build default (DEFAULT_ROCM_PATH) is /opt/rocm.
-    for var in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME"):
-        if var in os.environ:
-            return os.environ[var]
-    return "/opt/rocm"
-
-
 @lru_cache(maxsize=None)
 def _hash_toolkit(root: str) -> str:
     """SHA-256 of the linker and the device bitcode under ``root``; read once per root and process."""
@@ -217,8 +201,17 @@ class RocmBackend(BaseBackend):
     # -- cache / fingerprint ---------------------------------------------
 
     def toolkit_fingerprint(self) -> str:
-        root = _rocdl_toolkit_root()
-        return f"rocm-toolkit:{root}:{_hash_toolkit(root)}"
+        # The root gpu-module-to-binary links with; on Linux, mlir::ROCDL::getROCMPath()
+        # with its build default (DEFAULT_ROCM_PATH) /opt/rocm.
+        if os.name == "nt":
+            from ...runtime.device_runtime.rocm import _rocm_toolkit_root
+
+            root = str(_rocm_toolkit_root())
+        else:
+            root = next(
+                (os.environ[v] for v in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME") if v in os.environ), "/opt/rocm"
+            )
+        return f"rocm-toolkit:{_hash_toolkit(root)}"
 
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":
