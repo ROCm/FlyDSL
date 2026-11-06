@@ -13,7 +13,7 @@ from functools import lru_cache
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 
 from .common import (
@@ -21,7 +21,6 @@ from .common import (
     global_tensor,
     identity_tensor,
     magnitude_words,
-    swizzled_layout,
     tensor_load,
     tiled_wmma,
 )
@@ -42,9 +41,6 @@ def build_hybrid(
     operand_prefetch=2,
     cache_group_m=4,
     fragment_lds=True,
-    pad=8,
-    b_swizzle=None,
-    barrier_mode="lds",
     schedule="barrier",
     operand_schedule="none",
     epilogue_prefetch=False,
@@ -53,17 +49,15 @@ def build_hybrid(
     normal_only=False,
     separated_nibbles=False,
     output_dtype="bf16",
-    weight_bits=4,
-    fast_epilogue=True,
     device_id=0,
     aligned_m=False,
 ):
-    assert fold_mode in ("e4m3", "e5m2") and weight_bits in (4, 8)
+    assert fold_mode in ("e4m3", "e5m2")
     assert tile_m % (waves_m * 16) == 0 and tile_n % (waves_n * 16) == 0
     assert tile_k % 32 == 0 and k % tile_k == 0, "hybrid requires complete K tiles"
     assert stages in (1, 2) and 0 <= operand_prefetch < tile_k // 16
     assert schedule in ("none", "barrier", "groups")
-    assert barrier_mode in ("gpu", "lds") and operand_schedule in ("none", "barrier")
+    assert operand_schedule in ("none", "barrier")
     assert isinstance(cache_group_m, int) and cache_group_m > 0
     out_type = fx.BFloat16 if output_dtype == "bf16" else fx.Float16
     b_dtype = fx.Float8E5M2 if fold_mode == "e5m2" else fx.Float8E4M3FN
@@ -79,21 +73,11 @@ def build_hybrid(
         cache_group_m = min(cache_group_m, grid_m)
     slots = tile_n // 16 * nsteps * 32
     wslots = max(s for s in (1, 2, 4) if slots % (threads * s) == 0)
-    if weight_bits == 8:
-        wslots = min(wslots, 2)
-    word_width = weight_bits // 4
     w_thrs_k = min(threads, nsteps * 32 // wslots)
     w_thrs_n = threads // w_thrs_k
     wcount = slots // (threads * wslots)
     table_bias = 15 if fold_mode == "e5m2" else 8
-    if b_swizzle is not None:
-        assert len(b_swizzle) == 3 and b_swizzle[1] >= 3
-        assert tile_n * tile_k % (1 << (b_swizzle[0] + b_swizzle[1])) == 0
-    tile_bytes = (
-        tile_n * tile_k
-        if b_swizzle is not None
-        else (tile_n // 16) * nsteps * 34 * 8 if fragment_lds else tile_n * (tile_k + pad)
-    )
+    tile_bytes = (tile_n // 16) * nsteps * 34 * 8 if fragment_lds else tile_n * (tile_k + 8)
     arena = stages * tile_bytes
     assert arena <= 65536
 
@@ -138,8 +122,8 @@ def build_hybrid(
         gW = global_tensor(
             W,
             fx.Int32,
-            fx.make_layout((nt, k // 16 * 32 * word_width), (k // 16 * 32 * word_width, 1)),
-            npad * k * weight_bits // 8,
+            fx.make_layout((nt, k // 16 * 32), (k // 16 * 32, 1)),
+            npad * k // 2,
         )
         gS = global_tensor(
             S,
@@ -158,17 +142,17 @@ def build_hybrid(
         tA = fx.flat_divide(gA, fx.make_tile(tile_m, tile_k))[None, None, pm, None]
         tC = fx.flat_divide(gC, fx.make_tile(tile_m, tile_n))[None, None, pm, pn]
         tX = fx.flat_divide(gX, fx.make_tile(tile_m, tile_n))[None, None, pm, pn]
-        tW = fx.flat_divide(gW, fx.make_tile(tile_n // 16, nsteps * 32 * word_width))[None, None, pn, None]
+        tW = fx.flat_divide(gW, fx.make_tile(tile_n // 16, nsteps * 32))[None, None, pn, None]
         tS = fx.flat_divide(gS, fx.make_tile(tile_n // 16, nsteps * 32))[None, None, pn, None]
         tRef = fx.flat_divide(gRef, fx.make_tile(tile_n // 16, nsteps * 32))[None, None, pn, 0]
-        copy_w = fx.make_copy_atom(fx.rocdl.BufferCopy(32 * wslots * word_width), fx.Int32)
+        copy_w = fx.make_copy_atom(fx.rocdl.BufferCopy(32 * wslots), fx.Int32)
         copy_s = fx.make_copy_atom(fx.rocdl.BufferCopy(8 * wslots), fx.Uint8)
         copy_ref = fx.make_copy_atom(fx.rocdl.BufferCopy(32 * wslots), fx.Int32)
         thread_layout = fx.make_layout((w_thrs_n, w_thrs_k), (w_thrs_k, 1))
         word_plan = fx.make_tiled_copy_tv(
             copy_w,
             thread_layout,
-            fx.make_layout((1, wslots * word_width), (wslots * word_width, 1)),
+            fx.make_layout((1, wslots), (wslots, 1)),
         ).get_slice(tid)
         scale_plan = fx.make_tiled_copy_tv(copy_s, thread_layout, fx.make_layout((1, wslots), (wslots, 1))).get_slice(
             tid
@@ -182,19 +166,16 @@ def build_hybrid(
         load_W = fx.make_fragment_like(pW[None, None, None, 0])
         load_S = fx.make_fragment_like(pS[None, None, None, 0])
         load_Ref = fx.make_fragment_like(pRef)
-        if const_expr(weight_bits == 4):
-            fx.copy(copy_ref, pRef, load_Ref)
+        fx.copy(copy_ref, pRef, load_Ref)
         shared = fx.SharedAllocator().allocate(Shared).peek()
         bp = fx.recast_iter(b_dtype, shared.data.ptr)
-        if const_expr(b_swizzle is not None):
-            b_layout = swizzled_layout(fx.make_layout((tile_n, tile_k), (tile_k, 1)), b_swizzle)
-        elif const_expr(fragment_lds):
+        if const_expr(fragment_lds):
             b_layout = fx.make_layout(
                 ((16, tile_n // 16), (8, 2, nsteps)),
                 ((8, 34 * nsteps * 8), (1, 17 * 8, 34 * 8)),
             )
         else:
-            b_layout = fx.make_layout((tile_n, tile_k), (tile_k + pad, 1))
+            b_layout = fx.make_layout((tile_n, tile_k), (tile_k + 8, 1))
         sB = [fx.make_view(bp + stage * tile_bytes, b_layout) for stage in range_constexpr(stages)]
         a_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Float8E4M3FN)
         b_atom = fx.make_copy_atom(fx.UniversalCopy64b(), b_dtype)
@@ -220,30 +201,25 @@ def build_hybrid(
         def load_tile(block):
             block = fx.Int32(block)
             fx.copy(copy_w, pW[None, None, None, block], load_W)
-            if const_expr(weight_bits == 4):
-                fx.copy(copy_s, pS[None, None, None, block], load_S)
+            fx.copy(copy_s, pS[None, None, None, block], load_S)
             return [load_W.load(), load_S.load()]
 
         def write_tile(data, stage):
             load_W.store(data[0])
-            if const_expr(weight_bits == 4):
-                load_S.store(data[1])
+            load_S.store(data[1])
             for q in range_constexpr(fx.size(cW.shape).unpack()):
                 nf, kw = cW[q].unpack()
                 nf, kw = fx.Int32(nf), fx.Int32(kw)
                 nc = nf * 16 + kw % 16
                 kc = kw // 32 * 16 + kw % 32 // 16 * 8
-                if const_expr(weight_bits == 8):
-                    converted = Vec.from_elements([load_W[q * 2], load_W[q * 2 + 1]], fx.Int32)
+                exponent = fx.Int32(fx.Uint32(fx.Uint8(load_S[q])))
+                shift = exponent - fx.Int32(load_Ref[q])
+                if const_expr(table_mode == "alu"):
+                    t0, t1 = magnitude_words(shift, fold_mode, normal_only)
                 else:
-                    exponent = fx.Int32(fx.Uint32(fx.Uint8(load_S[q])))
-                    shift = exponent - fx.Int32(load_Ref[q])
-                    if const_expr(table_mode == "alu"):
-                        t0, t1 = magnitude_words(shift, fold_mode, normal_only)
-                    else:
-                        table = tensor_load(gLUT, ((shift + table_bias) * 2,), fx.Uint32, 2)
-                        t0, t1 = fx.Uint32(table[0]), fx.Uint32(table[1])
-                    converted = expand_nibbles(load_W[q], t0, t1, separated_nibbles)
+                    table = tensor_load(gLUT, ((shift + table_bias) * 2,), fx.Uint32, 2)
+                    t0, t1 = fx.Uint32(table[0]), fx.Uint32(table[1])
+                converted = expand_nibbles(load_W[q], t0, t1, separated_nibbles)
                 offset = fx.Int32(fx.crd2idx((nc, kc), b_layout).unpack())
                 target = fx.make_view(fx.get_iter(sB[stage]) + offset, fx.make_layout(8, 1))
                 decoded = fx.make_rmem_tensor(8, b_dtype)
@@ -275,14 +251,11 @@ def build_hybrid(
                     fx.rocdl.sched_barrier(0)
 
         def synchronize():
-            if const_expr(barrier_mode == "gpu"):
-                gpu.barrier()
-            else:
-                fx.rocdl.sched_barrier(0)
-                fx.rocdl.s_wait_dscnt(0)
-                fx.rocdl.s_barrier_signal(-1)
-                fx.rocdl.s_barrier_wait(-1)
-                fx.rocdl.sched_barrier(0)
+            fx.rocdl.sched_barrier(0)
+            fx.rocdl.s_wait_dscnt(0)
+            fx.rocdl.s_barrier_signal(-1)
+            fx.rocdl.s_barrier_wait(-1)
+            fx.rocdl.sched_barrier(0)
 
         def after_prefetch():
             if const_expr(schedule == "barrier"):
@@ -292,7 +265,7 @@ def build_hybrid(
             if const_expr(schedule == "barrier"):
                 fx.rocdl.sched_barrier(0)
             elif const_expr(schedule == "groups"):
-                fx.rocdl.sched_vmem((2 if weight_bits == 4 else 1) * wcount)
+                fx.rocdl.sched_vmem(2 * wcount)
                 fx.rocdl.sched_mfma(nsteps * rm * rn)
                 fx.rocdl.sched_barrier(0)
 
@@ -347,7 +320,7 @@ def build_hybrid(
         out_atom = fx.make_copy_atom(fx.rocdl.BufferCopy(out_type.width), out_type)
         out_plan = fx.make_tiled_copy_C(out_atom, mma).get_slice(tid)
         pC = out_plan.partition_S(tC)
-        if const_expr(fast_epilogue and (aligned_m or not dynamic_m and static_m % tile_m == 0) and n % tile_n == 0):
+        if const_expr((aligned_m or not dynamic_m and static_m % tile_m == 0) and n % tile_n == 0):
             fx.copy(out_atom, out_plan.retile(frag_out), pC)
         else:
             coordC = fx.flat_divide(identity_tensor((m, n)), fx.make_tile(tile_m, tile_n))[None, None, pm, pn]

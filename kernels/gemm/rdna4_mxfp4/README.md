@@ -46,6 +46,17 @@ load or learned model. `FLYDSL_AUTOTUNE` does not affect this kernel. The
 previous `tune_gemm` API has been removed; compare explicit configurations
 with the offline benchmark and use `gemm(config=...)` for an explicit override.
 
+Both strategies use bounded buffer I/O for global memory and 4-bit packed
+weights. Hybrid uses LDS synchronization, an eight-byte pad for its padded
+LDS layout, and alignment-based output masking. Its fragment and padded LDS
+layouts are selected by `fragment_lds`.
+
+Saved configuration dictionaries and warmup keys can contain the retired
+defaults `buffer_io=True` for register, or `pad=8`, `b_swizzle=None`,
+`barrier_mode="lds"` and `fast_epilogue=True` for hybrid, plus `weight_bits=4`
+for either strategy. Host normalization removes these fields before forming
+the executable key or calling a factory. Alternate values raise `ValueError`.
+
 ## Host selection
 
 `choose_config(M, N, K, mode, cache_policy=..., num_processors=...,
@@ -157,3 +168,8 @@ compares the refined host rules with the released analytical selector and the
 earlier profile selector. It separates development measurements, reserved unseen
 shapes, changed-input replay, compile-only coverage and model dispatch equivalence.
 The register and hybrid GPU implementations are unchanged by this refinement.
+
+The [implementation simplification evidence](../../../tests/perf/data/rdna4_mxfp4_simplification.json)
+records fixed-option removal, compatibility tests, selector equivalence and
+paired GPU timings against `ce625eb`. All 64 measured comparisons have matching
+instruction fingerprints and resource counts, including changed-input replay.

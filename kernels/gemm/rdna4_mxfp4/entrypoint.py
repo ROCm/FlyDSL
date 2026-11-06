@@ -15,7 +15,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from .heuristic import choose_config
+from .heuristic import _normalize_config, choose_config
 from .hybrid import build_hybrid
 from .register import build_register
 
@@ -211,8 +211,8 @@ def specialization_key(
     lds_size_bytes=65536,
 ):
     """Return the exact executable identity used by runtime and startup warmup."""
-    options = (
-        dict(config)
+    options = _normalize_config(
+        config
         if config
         else choose_config(
             m,
@@ -223,10 +223,10 @@ def specialization_key(
             num_processors=num_processors,
             cache_size_bytes=cache_size_bytes,
             lds_size_bytes=lds_size_bytes,
-        )
+        ),
+        m,
+        k,
     )
-    if options.get("weight_bits", 4) != 4:
-        raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
     options.update(
         fold_mode=mode,
         normal_only=normal_only,
@@ -234,11 +234,7 @@ def specialization_key(
         device_id=device_id,
         separated_nibbles=nibble_layout == "split",
     )
-    if options.get("b_swizzle") is not None:
-        options["b_swizzle"] = tuple(options["b_swizzle"])
-    engine = options.pop("engine", "register")
-    if engine not in ("register", "hybrid"):
-        raise ValueError("engine must be register or hybrid")
+    engine = options.pop("engine")
     if engine == "hybrid" and mode == "grouped":
         raise ValueError("hybrid requires losslessly folded FP8 weights")
     if engine == "hybrid" and (options.get("tile_k", 64) not in (32, 64, 128, 256) or k % options.get("tile_k", 64)):
@@ -251,10 +247,6 @@ def specialization_key(
             else 16 * options.get("waves_m", 1) * options.get("repeat_m", 1)
         )
         options["aligned_m"] = m % bm == 0
-        if engine == "register":
-            bn = 16 * options.get("waves_n", 2) * options.get("repeat_n", 2)
-            if not options["aligned_m"] or n % bn:
-                options["buffer_io"] = True
     return engine, kernel_m, n, k, tuple(sorted(options.items()))
 
 
@@ -342,8 +334,6 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         options = choose_config(
             m, n, k, weights.mode, cache_policy=cache_policy, **get_device_capabilities(x.device.index)
         )
-    if options.get("weight_bits", 4) != 4:
-        raise ValueError("prepared MXFP4 weights require the 4-bit kernel")
     key = specialization_key(
         m,
         n,
@@ -439,7 +429,8 @@ def compile_gemm(key):
     the already compiled artifact on its first use.
     """
     engine, kernel_m, n, k, parameters = key
-    options = dict(parameters)
+    options = _normalize_config(dict(parameters, engine=engine), kernel_m, k)
+    options.pop("engine")
     alignment = _m_alignment(engine, options)
     if kernel_m:
         m = kernel_m

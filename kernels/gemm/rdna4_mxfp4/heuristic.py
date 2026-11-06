@@ -17,7 +17,6 @@ REGISTER_DEFAULTS = dict(
     repeat_n=2,
     k_unroll=1,
     table_mode="alu",
-    buffer_io=True,
     fast_epilogue=True,
 )
 
@@ -32,35 +31,38 @@ HYBRID_DEFAULTS = dict(
     operand_prefetch=2,
     cache_group_m=4,
     fragment_lds=True,
-    pad=8,
-    b_swizzle=None,
-    barrier_mode="lds",
     schedule="barrier",
     operand_schedule="none",
     epilogue_prefetch=False,
     table_mode="alu",
-    fast_epilogue=True,
 )
+
+# Accept fixed defaults from previously saved configurations.
+_RETIRED_DEFAULTS = {
+    "register": dict(buffer_io=True, weight_bits=4),
+    "hybrid": dict(pad=8, b_swizzle=None, barrier_mode="lds", fast_epilogue=True, weight_bits=4),
+}
 
 
 def _normalize_config(config, m, k):
-    """Resolve defaults, legal K divisors and inactive layout options."""
-    engine = config["engine"]
+    """Resolve factory defaults and accept retired options at their fixed values."""
+    engine = config.get("engine", "register")
+    if engine not in _RETIRED_DEFAULTS:
+        raise ValueError("engine must be register or hybrid")
     defaults = REGISTER_DEFAULTS if engine == "register" else HYBRID_DEFAULTS
     result = dict(defaults, **config)
-    result.pop("weight_bits", None)
+    for name, value in _RETIRED_DEFAULTS[engine].items():
+        if result.pop(name, value) != value:
+            raise ValueError(f"{engine} fixes {name} to {value!r}")
     if engine == "register":
         request = result["k_unroll"]
-        result["k_unroll"] = max(d for d in range(1, request + 1) if k // 32 % d == 0)
-    elif engine == "hybrid":
+        if not isinstance(request, int) or not 1 <= request <= 16:
+            raise ValueError("k_unroll must be an integer from 1 to 16")
+        if k // 32 % request:
+            result["k_unroll"] = max(d for d in range(1, request + 1) if k // 32 % d == 0)
+    elif m:
+        # M=0 identifies a dynamic-row warmup key with an already chosen group.
         result["cache_group_m"] = min(result["cache_group_m"], (m + result["tile_m"] - 1) // result["tile_m"])
-        if result["b_swizzle"] is not None:
-            result["b_swizzle"] = tuple(result["b_swizzle"])
-            result["fragment_lds"] = True
-        if result["fragment_lds"] or result["b_swizzle"] is not None:
-            result["pad"] = 8
-    else:
-        raise ValueError("unknown kernel engine")
     return result
 
 
@@ -70,13 +72,7 @@ def _geometry(config):
         rm, rn = config["repeat_m"], config["repeat_n"]
         return wm * rm * 16, wn * rn * 16, 32 * config["k_unroll"], wm, wn, rm, rn, 0
     bm, bn, bk = (config[name] for name in ("tile_m", "tile_n", "tile_k"))
-    bb = (
-        bn * bk
-        if config["b_swizzle"]
-        else bn // 16 * (bk // 16) * 34 * 8
-        if config["fragment_lds"]
-        else bn * (bk + config["pad"])
-    )
+    bb = bn // 16 * (bk // 16) * 34 * 8 if config["fragment_lds"] else bn * (bk + 8)
     return bm, bn, bk, wm, wn, bm // (16 * wm), bn // (16 * wn), bb * config["stages"]
 
 
@@ -92,7 +88,7 @@ def _legal_config(config, m, n, k):
         if config["engine"] == "register":
             if rm * rn * 8 > REGISTER_MAX_ACCUMULATORS:
                 return False
-            return 1 <= config["k_unroll"] <= 16 and k % bk == 0 and (config["buffer_io"] or m % bm == n % bn == 0)
+            return 1 <= config["k_unroll"] <= 16 and k % bk == 0
         if config["engine"] != "hybrid":
             return False
         if (
@@ -106,8 +102,7 @@ def _legal_config(config, m, n, k):
             or (bn // 16 * (bk // 16) * 32) % threads
         ):
             return False
-        sw = config["b_swizzle"]
-        return not sw or (sw[1] >= 3 and bn * bk % (1 << (sw[0] + sw[1])) == 0)
+        return True
     except (KeyError, ZeroDivisionError, ValueError):
         return False
 
@@ -628,7 +623,7 @@ def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
             operand_schedule="barrier" if n < processors * 32 else "none",
             epilogue_prefetch=False,
         )
-    return _normalize_config(cfg, m, k)
+    return cfg
 
 
 @lru_cache(maxsize=4096)

@@ -42,8 +42,6 @@ def build_register(
     separated_nibbles=False,
     k_unroll=1,
     output_dtype="bf16",
-    buffer_io=True,
-    weight_bits=4,
     fast_epilogue=True,
     device_id=0,
     aligned_m=False,
@@ -52,7 +50,6 @@ def build_register(
         raise ValueError("register repeats exceed the supported accumulator budget")
     assert fold_mode in ("grouped", "e4m3", "e5m2")
     assert isinstance(k_unroll, int) and 1 <= k_unroll <= 16
-    assert weight_bits in (4, 8) and (weight_bits == 4 or fold_mode != "grouped")
     assert k % 32 == 0 and m >= 0 and n > 0
     dynamic_m = m == 0
     static_m = m
@@ -65,7 +62,6 @@ def build_register(
     nt, groups = npad // 16, k // 32
     grid_m, grid_n = (m + bm - 1) // bm, (n + bn - 1) // bn
     k_unroll = max(d for d in range(1, k_unroll + 1) if groups % d == 0)
-    word_width = weight_bits // 4
     table_bias = 15 if fold_mode == "e5m2" else 8
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
@@ -87,52 +83,38 @@ def build_register(
         pm, pn = pid // grid_n, pid % grid_n
         tiled_mma = tiled_wmma(waves_m, waves_n, repeat_m, repeat_n, b_dtype)
         thr_mma = tiled_mma.thr_slice(tid)
-        gA = global_tensor(A, fx.Float8E4M3FN, fx.make_layout((m, k), (k, 1)), m * k, buffer_io)
-        gC = global_tensor(Y, out_type, fx.make_layout((m, n), (n, 1)), m * n * 2, buffer_io)
+        gA = global_tensor(A, fx.Float8E4M3FN, fx.make_layout((m, k), (k, 1)), m * k)
+        gC = global_tensor(Y, out_type, fx.make_layout((m, n), (n, 1)), m * n * 2)
         gW = global_tensor(
             W,
             fx.Int32,
-            fx.make_layout(
-                (nt, k // 16, 2, 16, word_width),
-                (
-                    (k // 16) * 32 * word_width,
-                    32 * word_width,
-                    16 * word_width,
-                    word_width,
-                    1,
-                ),
-            ),
-            npad * k * weight_bits // 8,
-            buffer_io,
+            fx.make_layout((nt, k // 16, 2, 16), ((k // 16) * 32, 32, 16, 1)),
+            npad * k // 2,
         )
         gS = global_tensor(
             S,
             fx.Uint8,
             fx.make_layout((nt, groups, 16), (groups * 16, 16, 1)),
             npad * groups,
-            buffer_io,
         )
-        gRef = global_tensor(Ref, fx.Int32, fx.make_layout(npad, 1), npad * 4, buffer_io)
+        gRef = global_tensor(Ref, fx.Int32, fx.make_layout(npad, 1), npad * 4)
         gLUT = global_tensor(
             LUT,
             fx.Uint32,
             fx.make_layout((29 if fold_mode == "e5m2" else 15) * 2, 1),
             (29 if fold_mode == "e5m2" else 15) * 8,
-            buffer_io,
         )
         gX = global_tensor(
             XScale,
             fx.Float32,
             fx.make_layout((m, n), (0 if static_m == 1 else 1, 0)),
             m * 4,
-            buffer_io,
         )
         tA = fx.flat_divide(gA, fx.make_tile(bm, 16))[None, None, pm, None]
         tC = fx.flat_divide(gC, fx.make_tile(bm, bn))[None, None, pm, pn]
         tX = fx.flat_divide(gX, fx.make_tile(bm, bn))[None, None, pm, pn]
         cB = thr_mma.partition_B(identity_tensor((bn, 16)))
-        copy_op = fx.rocdl.BufferCopy if const_expr(buffer_io) else fx.UniversalCopy
-        copy_a = fx.make_copy_atom(copy_op(64), fx.Float8E4M3FN)
+        copy_a = fx.make_copy_atom(fx.rocdl.BufferCopy(64), fx.Float8E4M3FN)
         thr_copy_a = fx.make_tiled_copy_A(copy_a, tiled_mma).get_slice(tid)
         pA = thr_copy_a.partition_S(tA)
         frag_A = thr_mma.make_fragment_A(tA[None, None, 0])
@@ -146,7 +128,7 @@ def build_register(
         if const_expr(folded):
             for j in range_constexpr(repeat_n):
                 nc, _ = cB[0, j, 0].unpack()
-                refs.append(tensor_load(gRef, (pn * bn + fx.Int32(nc),), fx.Int32, buffer_io=buffer_io))
+                refs.append(tensor_load(gRef, (pn * bn + fx.Int32(nc),), fx.Int32))
         frag_C.fill(0)
         for gbase, carried in range(0, groups, k_unroll, init=[frag_C.load()]):
             frag_C.store(carried[0])
@@ -156,7 +138,7 @@ def build_register(
                     total = Vec(frag_C.load())
                     frag_C.fill(0)
                 tables = []
-                if const_expr(folded and weight_bits == 4):
+                if const_expr(folded):
                     for j in range_constexpr(repeat_n):
                         nc, _ = cB[0, j, 0].unpack()
                         nc = pn * bn + fx.Int32(nc)
@@ -165,7 +147,6 @@ def build_register(
                                 gS,
                                 (nc // 16, group, nc % 16),
                                 fx.Uint8,
-                                buffer_io=buffer_io,
                             )
                         )
                         if const_expr(table_mode == "alu"):
@@ -173,7 +154,7 @@ def build_register(
                             tables.append(Vec.from_elements([t0, t1], fx.Uint32))
                         else:
                             ti = (exponent - refs[j] + table_bias) * 2
-                            tables.append(tensor_load(gLUT, (ti,), fx.Uint32, 2, buffer_io))
+                            tables.append(tensor_load(gLUT, (ti,), fx.Uint32, 2))
                 for step in range_constexpr(2):
                     fx.copy(copy_a, pA[None, None, None, group * 2 + step], copy_frag_A)
                     for j in range_constexpr(repeat_n):
@@ -181,14 +162,10 @@ def build_register(
                         nc, kc = pn * bn + fx.Int32(nc), fx.Int32(kc)
                         raw = tensor_load(
                             gW,
-                            (nc // 16, group * 2 + step, kc // 8, nc % 16, 0),
+                            (nc // 16, group * 2 + step, kc // 8, nc % 16),
                             fx.Int32,
-                            word_width,
-                            buffer_io,
                         )
-                        if const_expr(weight_bits == 8):
-                            decoded = Vec(raw)
-                        elif const_expr(folded):
+                        if const_expr(folded):
                             decoded = expand_nibbles(
                                 raw,
                                 fx.Uint32(tables[j][0]),
@@ -214,7 +191,6 @@ def build_register(
                                 gS,
                                 (nc // 16, group, nc % 16),
                                 fx.Uint8,
-                                buffer_io=buffer_io,
                             )
                         )
                         sf = (exponent << 23).bitcast(fx.Float32)
@@ -237,14 +213,14 @@ def build_register(
                 for i in range_constexpr(repeat_m):
                     scales[None, i, j].fill((refs[j] << 23).bitcast(fx.Float32))
             frag_C.store(Vec(frag_C.load()) * Vec(scales.load()))
-        copy_x = fx.make_copy_atom(copy_op(32), fx.Float32)
+        copy_x = fx.make_copy_atom(fx.rocdl.BufferCopy(32), fx.Float32)
         thr_copy_x = fx.make_tiled_copy_C(copy_x, tiled_mma).get_slice(tid)
         frag_X = fx.make_fragment_like(frag_C)
         fx.copy(copy_x, thr_copy_x.partition_S(tX), thr_copy_x.retile(frag_X))
         values = Vec(frag_C.load()) * Vec(frag_X.load())
         frag_out = fx.make_fragment_like(frag_C, out_type)
         frag_out.store(values.to(out_type))
-        copy_out = fx.make_copy_atom(copy_op(out_type.width), out_type)
+        copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy(out_type.width), out_type)
         thr_copy_c = fx.make_tiled_copy_C(copy_out, tiled_mma).get_slice(tid)
         pC = thr_copy_c.partition_S(tC)
         if const_expr(fast_epilogue and (aligned_m or not dynamic_m and static_m % bm == 0) and n % bn == 0):
