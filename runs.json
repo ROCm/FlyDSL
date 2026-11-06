@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-06T00:11:38Z",
+ "updated": "2026-11-06T00:41:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42137797835,
+   "pr": 1378,
+   "commit": "0f700fab1cbbaadd0105e4b51574787b219de6f4",
+   "branch": "fix/test-stream-waits",
+   "event": "pull_request",
+   "title": "[Tests] Fix missing stream waits in multi-stream tests",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835",
+   "created_at": "2026-11-06T00:34:22Z",
+   "updated_at": "2026-11-06T00:36:22Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 42104489721,
    "pr": 1377,
@@ -1829,49 +1844,6 @@
    "updated_at": "2026-11-05T06:08:17Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 41456310182,
-   "pr": 1192,
-   "commit": "b298be823c202e860ccc2468a50a38f6d6db1730",
-   "branch": "add-security-scanning",
-   "event": "pull_request",
-   "title": "chore: add security scanning workflows",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182",
-   "created_at": "2026-11-02T13:49:28Z",
-   "updated_at": "2026-11-02T22:41:10Z",
-   "actor": "cgoea",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-02T18:22:48Z",
-     "completed_at": "2026-11-02T18:37:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484564"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-02T20:10:58Z",
-     "completed_at": "2026-11-02T20:17:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484574"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-02T18:15:28Z",
-     "completed_at": "2026-11-02T18:17:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41456310182/job/125460484588"
-    }
-   ]
   }
  ]
 }
