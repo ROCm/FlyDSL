@@ -371,9 +371,10 @@ mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32,
 
 **2:4 structured-sparse SWMMAC (RDNA4)** — `rocdl.SWMMAC(m, n, k, elem_ty_ab,
 elem_ty_acc=None, **kwargs)` builds `MmaOpGFX120X_SWMMACType` (`V_SWMMAC_*`) on
-`gfx1200` / `gfx1201`: `16x16x32` f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B
-combination accumulating to f32, plus `16x16x32` iu8 and `16x16x32` / `16x16x64`
-iu4 accumulating to i32 (`sign_a`, `sign_b`, `clamp`). Pass operand A as
+`gfx1200` / `gfx1201`: `16x16x32` f16 accumulating to f32 or f16, bf16
+accumulating to f32 or bf16, and every fp8(E4M3FN)/bf8(E5M2) A/B combination
+accumulating to f32, plus `16x16x32` iu8 and `16x16x32` / `16x16x64` iu4
+accumulating to i32 (`sign_a`, `sign_b`, `clamp`). Pass operand A as
 `[frag_A_compressed, frag_sparse_idx]`, where `frag_A_compressed` holds the
 `(M, K/2)` non-zero values (`K/4` elements per lane) and `frag_sparse_idx` holds
 one `i32` 2:4 selector mask per lane. Because generic `TiledMma` operand-A

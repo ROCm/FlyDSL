@@ -42,15 +42,17 @@ def test_swmmac_fp_and_integer_construct():
         ui8 = ir.IntegerType.get_unsigned(8)
         i32 = ir.IntegerType.get_signless(32)
 
-        for elem_a, elem_b in (
-            (f16, f16),
-            (bf16, bf16),
-            (fp8, fp8),
-            (fp8, bf8),
-            (bf8, fp8),
-            (bf8, bf8),
+        for elem_a, elem_b, acc in (
+            (f16, f16, f32),
+            (f16, f16, f16),
+            (bf16, bf16, f32),
+            (bf16, bf16, bf16),
+            (fp8, fp8, f32),
+            (fp8, bf8, f32),
+            (bf8, fp8, f32),
+            (bf8, bf8, f32),
         ):
-            t = MmaOpGFX120X_SWMMACType.get(16, 16, 32, elem_a, elem_b, f32)
+            t = MmaOpGFX120X_SWMMACType.get(16, 16, 32, elem_a, elem_b, acc)
             assert "16x16x32" in str(t)
             assert _parse(str(t)) == t
 
@@ -85,6 +87,22 @@ def test_swmmac_fp_and_integer_construct():
         (
             "!fly_rocdl.gfx120x.swmmac<16x16x32, (f16, bf16) -> f32, signA = false, signB = false, clamp = false>",
             r"unsupported GFX120X SWMMAC configuration",
+        ),
+        (
+            "!fly_rocdl.gfx120x.swmmac<16x16x32, (f8E4M3FN, f8E4M3FN) -> f16, signA = false, signB = false, clamp = false>",
+            r"unsupported GFX120X SWMMAC configuration",
+        ),
+        (
+            "!fly_rocdl.gfx120x.swmmac<16x16x32, (f16, f16) -> bf16, signA = false, signB = false, clamp = false>",
+            r"unsupported GFX120X SWMMAC configuration",
+        ),
+        (
+            "!fly_rocdl.gfx120x.swmmac<16x16x32, (bf16, bf16) -> f16, signA = false, signB = false, clamp = false>",
+            r"unsupported GFX120X SWMMAC configuration",
+        ),
+        (
+            "!fly_rocdl.gfx120x.swmmac<16x16x32, (f16, f16) -> f16, signA = true, signB = false, clamp = false>",
+            r"floating-point path does not accept signA/signB/clamp",
         ),
         (
             "!fly_rocdl.gfx120x.swmmac<16x16x32, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>",
@@ -221,5 +239,31 @@ def test_swmmac_iu4_k64_thrval_rdna4_contiguous(gfx120_frontend):
             for v in fx.range_constexpr(32):
                 pos_b = layout_b((l16, g), v).get_static_leaf_int
                 assert pos_b == l16 + (32 * g + v) * 16
+
+    pin()
+
+
+def test_swmmac_16bit_acc_thrval_rdna4_contiguous(gfx120_frontend):
+    with ir.Context(), ir.Location.unknown():
+        f16 = ir.F16Type.get()
+        bf16 = ir.BF16Type.get()
+        for elem in (f16, bf16):
+            a, b, c = _pin_printed_layouts(32, elem, elem, elem)
+            assert a == "!fly.layout<((16,2),8):((1,128),16)>"
+            assert b == "!fly.layout<((16,2),16):((1,256),16)>"
+            assert c == "!fly.layout<((16,2),8):((16,8),1)>"
+            # Must not use gfx1250's (4,2):(2,1) 16-bit C/D val-mode layout.
+            assert "(4,2)" not in c
+
+    @flyc.jit
+    def pin():
+        for elem_cls in (fx.Float16, fx.BFloat16):
+            atom = fx.make_mma_atom(fx.rocdl.SWMMAC(16, 16, 32, elem_cls, elem_cls))
+            layout_c = atom.layout_C_tv
+            for lane in fx.range_constexpr(32):
+                l16, g = lane % 16, lane // 16
+                for v in fx.range_constexpr(8):
+                    pos_c = layout_c((l16, g), v).get_static_leaf_int
+                    assert pos_c == l16 * 16 + 8 * g + v
 
     pin()

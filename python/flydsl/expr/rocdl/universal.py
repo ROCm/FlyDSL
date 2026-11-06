@@ -237,8 +237,9 @@ def SWMMAC(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create a 2:4 structured-sparse SWMMAC atom (RDNA4 gfx120x wave32).
 
     Supported shapes and types on gfx120x:
-        * 16x16x32: f16, bf16, and every FP8(E4M3FN)/BF8(E5M2) A/B combination
-          -> f32 accumulator (sign_a/sign_b/clamp must be False).
+        * 16x16x32: f16 -> f32 or f16, bf16 -> f32 or bf16, and every
+          FP8(E4M3FN)/BF8(E5M2) A/B combination -> f32 accumulator
+          (sign_a/sign_b/clamp must be False).
         * 16x16x32: iu8 -> i32 accumulator (accepts sign_a/sign_b/clamp).
         * 16x16x32 and 16x16x64: iu4 -> i32 accumulator (accepts sign_a/sign_b/clamp).
 

@@ -41,10 +41,19 @@ func.func @bad_mixed_16bit(
 
 // -----
 
-// Same-type 16-bit accumulators are not exposed by GFX120X SWMMAC.
-// CHECK: unsupported GFX120X SWMMAC configuration: 16x16x32 with A='f16', B='f16', Acc='f16'
-func.func @bad_f16_accumulator(
-    %a: !fly.mma_atom<!fly_rocdl.gfx120x.swmmac<16x16x32, (f16, f16) -> f16, signA = false, signB = false, clamp = false>>) {
+// RDNA4 FP8/BF8 SWMMAC accumulates only to f32 (fp8 -> f16 is gfx1250-only).
+// CHECK: unsupported GFX120X SWMMAC configuration: 16x16x32 with A='f8E4M3FN', B='f8E4M3FN', Acc='f16'
+func.func @bad_fp8_f16_accumulator(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.swmmac<16x16x32, (f8E4M3FN, f8E4M3FN) -> f16, signA = false, signB = false, clamp = false>>) {
+  return
+}
+
+// -----
+
+// RDNA4 16-bit SWMMAC accumulators must match the input type (no f16 -> bf16 or bf16 -> f16).
+// CHECK: unsupported GFX120X SWMMAC configuration: 16x16x32 with A='f16', B='f16', Acc='bf16'
+func.func @bad_cross_16bit_accumulator(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.swmmac<16x16x32, (f16, f16) -> bf16, signA = false, signB = false, clamp = false>>) {
   return
 }
 

@@ -279,8 +279,8 @@ def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wm
 //===----------------------------------------------------------------------===//
 //
 // 2:4 structured sparse WMMA on RDNA4 wave32 (`V_SWMMAC_*`).
-//   * Floating-point (16x16x32 -> f32): f16, bf16, and every fp8(f8E4M3FN) /
-//     bf8(f8E5M2) A/B combination.
+//   * Floating-point (16x16x32): f16 -> f32/f16, bf16 -> f32/bf16, and every
+//     fp8(f8E4M3FN) / bf8(f8E5M2) A/B combination -> f32.
 //   * Integer (-> i32): iu8 16x16x32, and iu4 16x16x32 or 16x16x64.
 // A stores the compressed non-zero elements (16 x K/2, indexed by `tv_layout_a`);
 // B stores the dense elements (16 x K, indexed by `tv_layout_b`). The 32-bit

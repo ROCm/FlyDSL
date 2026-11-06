@@ -3,9 +3,10 @@
 
 """Device correctness tests for the RDNA4 (gfx120x) 2:4 sparse SWMMAC MMA atom.
 
-Covers all 9 ``gfx120x.swmmac`` hardware instructions on wave32:
-  * 16x16x32 floating-point (-> f32): f16, bf16, fp8_fp8, fp8_bf8, bf8_fp8, bf8_bf8
-    via ``fx.make_tiled_mma`` / ``fx.make_tiled_copy_{B,C}`` / variadic ``fx.gemm``.
+Covers all 11 ``gfx120x.swmmac`` hardware instructions on wave32:
+  * 16x16x32 floating-point: f16 -> f32/f16, bf16 -> f32/bf16, and
+    fp8_fp8 / fp8_bf8 / bf8_fp8 / bf8_bf8 -> f32 via ``fx.make_tiled_mma`` /
+    ``fx.make_tiled_copy_{B,C}`` / variadic ``fx.gemm``.
   * 16x16x32 iu8 and 16x16x32 / 16x16x64 iu4 (-> i32): signed, unsigned, mixed-sign,
     and saturating clamp via ``fly.mma_atom_call_ssa``.
 """
@@ -65,11 +66,10 @@ def _expand_2to4_and_pack_indices(a_compressed_cpu: torch.Tensor, k: int):
     return a_dense, sparse_idx
 
 
-def _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b):
+def _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b, elem_cls_acc):
     """One wave, one 16x16x32 SWMMAC atom via variadic fx.gemm + tiled B/C copies."""
     k = 32
     k_comp = k // 2
-    f32 = fx.Float32
 
     @flyc.kernel
     def swmmac_fp_kernel(A_comp: fx.Tensor, Idx: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
@@ -82,7 +82,7 @@ def _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b):
         bB = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(B)), fx.make_layout((N, k), (k, 1)))
         bC = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(C)), fx.make_layout((M, N), (N, 1)))
 
-        mma_atom = fx.make_mma_atom(fx.rocdl.SWMMAC(M, N, k, elem_cls_a, f32, elem_ty_b=elem_cls_b))
+        mma_atom = fx.make_mma_atom(fx.rocdl.SWMMAC(M, N, k, elem_cls_a, elem_cls_acc, elem_ty_b=elem_cls_b))
         tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((1, 1, 1), (0, 0, 0)))
         thr_mma = tiled_mma.thr_slice(tid)
 
@@ -96,12 +96,12 @@ def _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b):
         frag_idx[(0, 0, 0)] = bIdx[tid]
 
         copy_b = fx.make_copy_atom(fx.rocdl.BufferCopy(elem_cls_b.width), elem_cls_b)
-        copy_c = fx.make_copy_atom(fx.rocdl.BufferCopy(f32.width), f32)
+        copy_c = fx.make_copy_atom(fx.rocdl.BufferCopy(elem_cls_acc.width), elem_cls_acc)
         thr_copy_B = fx.make_tiled_copy_B(copy_b, tiled_mma).get_slice(tid)
         thr_copy_C = fx.make_tiled_copy_C(copy_c, tiled_mma).get_slice(tid)
 
         fx.copy(copy_b, thr_copy_B.partition_S(bB), thr_copy_B.retile(frag_B))
-        frag_C.fill(0.0)
+        fx.copy(copy_c, thr_copy_C.partition_S(bC), thr_copy_C.retile(frag_C))
         fx.gemm(tiled_mma, frag_C, [frag_A, frag_idx], frag_B, frag_C)
         fx.copy(copy_c, thr_copy_C.retile(frag_C), thr_copy_C.partition_S(bC))
 
@@ -113,34 +113,47 @@ def _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b):
 
 
 @pytest.mark.parametrize(
-    "elem_cls_a, elem_cls_b, torch_dtype_a, torch_dtype_b",
+    "elem_cls_a, elem_cls_b, elem_cls_acc, torch_dtype_a, torch_dtype_b, torch_dtype_acc",
     [
-        (fx.BFloat16, fx.BFloat16, torch.bfloat16, torch.bfloat16),
-        (fx.Float16, fx.Float16, torch.float16, torch.float16),
-        (fx.Float8E4M3FN, fx.Float8E4M3FN, torch.float8_e4m3fn, torch.float8_e4m3fn),
-        (fx.Float8E4M3FN, fx.Float8E5M2, torch.float8_e4m3fn, torch.float8_e5m2),
-        (fx.Float8E5M2, fx.Float8E4M3FN, torch.float8_e5m2, torch.float8_e4m3fn),
-        (fx.Float8E5M2, fx.Float8E5M2, torch.float8_e5m2, torch.float8_e5m2),
+        (fx.BFloat16, fx.BFloat16, fx.Float32, torch.bfloat16, torch.bfloat16, torch.float32),
+        (fx.BFloat16, fx.BFloat16, fx.BFloat16, torch.bfloat16, torch.bfloat16, torch.bfloat16),
+        (fx.Float16, fx.Float16, fx.Float32, torch.float16, torch.float16, torch.float32),
+        (fx.Float16, fx.Float16, fx.Float16, torch.float16, torch.float16, torch.float16),
+        (fx.Float8E4M3FN, fx.Float8E4M3FN, fx.Float32, torch.float8_e4m3fn, torch.float8_e4m3fn, torch.float32),
+        (fx.Float8E4M3FN, fx.Float8E5M2, fx.Float32, torch.float8_e4m3fn, torch.float8_e5m2, torch.float32),
+        (fx.Float8E5M2, fx.Float8E4M3FN, fx.Float32, torch.float8_e5m2, torch.float8_e4m3fn, torch.float32),
+        (fx.Float8E5M2, fx.Float8E5M2, fx.Float32, torch.float8_e5m2, torch.float8_e5m2, torch.float32),
     ],
-    ids=["bf16", "f16", "fp8_fp8", "fp8_bf8", "bf8_fp8", "bf8_bf8"],
+    ids=[
+        "bf16_f32",
+        "bf16_bf16",
+        "f16_f32",
+        "f16_f16",
+        "fp8_fp8_f32",
+        "fp8_bf8_f32",
+        "bf8_fp8_f32",
+        "bf8_bf8_f32",
+    ],
 )
-def test_rdna4_swmmac_fp_atom(elem_cls_a, elem_cls_b, torch_dtype_a, torch_dtype_b):
+def test_rdna4_swmmac_fp_atom(elem_cls_a, elem_cls_b, elem_cls_acc, torch_dtype_a, torch_dtype_b, torch_dtype_acc):
     torch.manual_seed(1201)
     k = 32
-    a_comp_cpu = (torch.randn(M, k // 2) * 3).round().to(torch_dtype_a)
-    b_cpu = (torch.randn(N, k) * 3).round().to(torch_dtype_b)
+    # Keep magnitudes small so 16-term partial sums + C_init stay exact in bf16/f16/f32.
+    a_comp_cpu = (torch.randn(M, k // 2) * 1.5).round().clamp(-2, 2).to(torch_dtype_a)
+    b_cpu = (torch.randn(N, k) * 1.5).round().clamp(-2, 2).to(torch_dtype_b)
+    c_init_cpu = (torch.randint(-8, 9, (M, N), dtype=torch.float32) * 0.5).to(torch_dtype_acc)
     a_dense_cpu, sparse_idx_cpu = _expand_2to4_and_pack_indices(a_comp_cpu, k)
 
     a_comp = a_comp_cpu.contiguous().to("cuda")
     sparse_idx = sparse_idx_cpu.to("cuda")
     b = b_cpu.contiguous().to("cuda")
-    c = torch.full((M, N), -1.0, dtype=torch.float32, device="cuda")
+    c = c_init_cpu.contiguous().to("cuda")
 
-    launch = _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b)
+    launch = _compile_fp_swmmac_gemm(elem_cls_a, elem_cls_b, elem_cls_acc)
     launch(a_comp, sparse_idx, b, c, stream=torch.cuda.current_stream())
     torch.cuda.synchronize()
 
-    ref = a_dense_cpu.float() @ b_cpu.float().T
+    ref = (a_dense_cpu.float() @ b_cpu.float().T + c_init_cpu.float()).to(torch_dtype_acc)
     torch.testing.assert_close(c.cpu(), ref, atol=0, rtol=0)
 
 
