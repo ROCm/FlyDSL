@@ -27,7 +27,7 @@ rg --files aiter/ops/flydsl/kernels/mega_moe aiter/aot/flydsl \
   op_tests/multigpu_tests op_tests/flydsl_tests | sort
 ```
 
-As of the #5346 snapshot, the principal files are:
+The staged #5346 lineage uses these principal files:
 
 ```text
 aiter/ops/flydsl/kernels/mega_moe/
@@ -49,6 +49,33 @@ op_tests/multigpu_tests/test_mega_moe_v2.py
 op_tests/multigpu_tests/bench_mega_moe_v2.py
 op_tests/flydsl_tests/test_mega_moe_config.py
 ```
+
+At audited main `4ecfecb2d` (2026-11-06), merged #6881 additionally uses:
+
+```text
+aiter/ops/flydsl/kernels/mega_moe/
+  mega_moe_small_m.py
+  mega_moe_large_m.py
+  mega_moe_fused_gemm.py
+  weights.py
+  envs.py
+op_tests/multigpu_tests/test_mega_moe_small_m.py
+
+aiter/ops/flydsl/mega_moe_tp.py
+aiter/ops/flydsl/kernels/mega_moe_tp/
+aiter/configs/mega_moe_tp_tuned.csv
+aiter/configs/mega_moe_tp_bigm_tuned.csv
+op_tests/multigpu_tests/test_mega_moe_tp.py
+```
+
+EP and TP have different ownership, shape and Graph contracts; do not identify
+one from the generic name "MegaMoE". Read their dedicated references before
+sharing an entry selector or workspace.
+
+At this same main SHA, setup.py, requirements.txt and pyproject.toml pin
+FlyDSL0.4.2. The November4 experiment used FlyDSL0.4.1 on an earlier base.
+Do not reuse that older runtime for current-main acceptance without proving
+compatibility; align to the execution-time main pin and recapture a baseline.
 
 Related code can live outside the directory:
 

@@ -33,6 +33,17 @@ Do not inherit a previous conversation's permission to kill processes. Only
 stop PIDs started by the current runner or targets explicitly authorized in the
 current task. Prefer a runner that records child PIDs and cleans only those.
 
+## Connection metadata is local, not reusable authority
+
+Read current SSH aliases with ssh -G and inspect the relevant local config
+before naming a login user, jump host, port or key path. Host and container
+aliases are different endpoints; a 2222 alias need not still reach the intended
+container. Recheck container name, image, network, mounts and process ownership.
+Do not publish private identities/keys in this reference PR, invent a container
+from an old runbook, or treat an accessible remote transfer machine as an
+authorized GPU test machine. Record private connection details only in a
+user-requested local handoff, never private-key contents.
+
 ## Known machine profiles
 
 Historical work used eight-MI355X nodes referred to as host46 and host47, with

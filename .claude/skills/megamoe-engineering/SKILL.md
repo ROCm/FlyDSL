@@ -47,12 +47,18 @@ of the provenance needed in steps 3 and 6.
 | Establish baselines, interpret Stage1/Stage2/E2E time, capture ATT/PMC or tune a shape | [performance-and-tracing.md](references/performance-and-tracing.md) |
 | Diagnose a hang, race, silent error, buffer overflow or cross-rank protocol mismatch | [correctness-and-debugging.md](references/correctness-and-debugging.md) |
 | Add a model/network or reason about V4-Pro, M13, GLM-5.2 or Kimi-K3 geometry | [models-and-shapes.md](references/models-and-shapes.md) |
+| Understand merged EP full fusion, small/large-M, runtime max_tokens, capacity expansion or path unification | [ep-fusion-and-unification.md](references/ep-fusion-and-unification.md) |
+| Inspect TP MegaMoE entry selection or borrow TP design without importing its restrictions | [tp-megamoe-entry.md](references/tp-megamoe-entry.md) |
+| Review a PR or perform behavior-preserving DSL/helper cleanup | [review-and-cleanup.md](references/review-and-cleanup.md) |
+| Integrate a framework, reuse cross-layer workspace or compare MORI EP fairly | [serving-and-workspace.md](references/serving-and-workspace.md) |
 | Locate prior runbooks, performance tables, traces, reviews and incident reports | [evidence-index.md](references/evidence-index.md) |
+| Take over the 2026-11-06 EP fusion refactor | [ep-fusion-refactor-handoff.md](references/ep-fusion-refactor-handoff.md) |
 
-For a PR review, read architecture, validation, correctness and the evidence
-index. For performance tuning, read architecture, validation, performance and
-the relevant model section. For a serving regression, also read environment
-and repository map.
+For a PR review, read architecture, validation, correctness and review/cleanup;
+use the evidence index to find revision-specific findings. For performance
+tuning, read architecture, validation, performance and the relevant model
+section. For a serving regression, also read environment, repository map and
+serving/workspace. Add EP fusion or TP entry references only for those paths.
 
 ## Source-of-truth order
 
@@ -74,9 +80,11 @@ results or describe a workaround as a root-cause fix.
 - Preserve the exact mathematical order of quantization, routing, GEMM,
   routing-weight application and combine. A faster non-equivalent pipeline is
   a correctness bug.
-- Cross-rank wire fields must be derived from rank-invariant inputs. Local
-  token buckets may select compute geometry, but may not silently select a
-  different payload layout, ready protocol or P2P dtype.
+- Cross-rank wire fields must follow a rank-consistent contract. Local token
+  buckets may select compute geometry, but may not silently change payload
+  layout, ready protocol or P2P interpretation. A self-describing mixed-dtype
+  transport is valid only when the receiver explicitly implements its tags;
+  do not impose an older untagged dtype rule on it.
 - A zero-token rank must still enter the collective protocol when peers have
   work. Returning early can strand the EP group.
 - A ready flag does not make prior P2P writes visible. Audit release, publish,
@@ -86,6 +94,10 @@ results or describe a workaround as a root-cause fix.
 - Treat `max_tok_per_rank`/MTPR as an ABI and capacity choice, not only a tune
   hint. Validate runtime tokens, source encoding, buffer sizes and the
   fixed/compact boundary.
+- Keep capacity, the EP-wide runtime row bound and local TPR distinct. Never
+  select incompatible small/large protocols independently from local shapes.
+- One public object is not proof of one allocation. Account for every child
+  runtime, symmetric payload arena, intermediate buffer and in-flight state.
 - Do not claim AOT from a warm JIT cache. Build the declared profile and prove
   a fresh process succeeds with run-only/cache-miss enforcement.
 - Do not add Stage1 and Stage2 event times and call the result E2E. Kernels,
@@ -102,6 +114,9 @@ results or describe a workaround as a root-cause fix.
 - Keep production defaults free of experimental environment switches and dead
   configurations. Use temporary overrides only to establish causality, then
   either encode a validated selector rule or remove the experiment.
+- Separate mechanical cleanup from changes to protocol, buffer layout or
+  scheduling architecture. Report those design changes before implementing
+  them when the task authorizes only cleanup or tuning.
 
 ## Standard work loops
 
@@ -150,7 +165,9 @@ A completed change reports:
 - image/runtime/FlyDSL/AITER/MORI/PyTorch/HIP/GPU provenance;
 - exact command and raw-log location;
 - functional matrix with eager, reference error, Graph replay and stress;
-- Stage1, Stage2/combine and E2E rank-mean/rank-max data;
+- Stage1, Stage2/combine and E2E rank-mean/rank-max data where separately
+  measurable; label fused-kernel attribution from traces instead of inventing
+  independent stage timings;
 - base-versus-candidate delta for every requested shape;
 - AOT/JIT and serving results when those paths are affected;
 - cleanup status, known limitations and processes/artifacts left behind.
@@ -166,3 +183,14 @@ a new validated invariant, incident root cause, model geometry or canonical
 runner, update the relevant reference in a dedicated documentation change.
 Record the validating commit and date. Never promote an unverified experiment
 or an active worktree path into a universal rule.
+
+The November references audit AITER main at
+`4ecfecb2dcc014a471f7d5c376d1fdfeb58cbe00`, including merged EP #6881.
+They distinguish source observations, historical GPU evidence and proposed
+refactors. They do not supersede later source or certify a new implementation.
+The original September pipeline remains a labeled historical reference.
+
+This is a private-use, **DO NOT MERGE** reference PR (#1111), not a production
+kernel patch. Keep raw traces, large logs, credentials, private keys and
+machine-specific SSH identities out of it. A local handoff may name SSH
+aliases; discover their current settings from the user's local SSH config.

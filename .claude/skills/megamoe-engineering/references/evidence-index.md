@@ -52,7 +52,41 @@ different machine. Their dates, branches and environments bound every claim.
 | `/data/ghu/flydsl_pr972_review_20260831.md` | A4W4 PR review, including Stage1 queue race and A8W4 interaction analysis. | Tie every finding to its reviewed revision. |
 | `/data/ghu/aiter_pr4980_review_20260909.md` | Independent AITER PR review and MegaMoE compatibility notes. | Draft evidence until review commit and reproducer are recorded. |
 
-## Trace helpers and raw traces
+## November source and refactor evidence
+
+The following newer records supplement, not silently replace, the September
+history. They are optional local artifacts; portable conclusions and their
+limits are embedded in the skill's topical references.
+
+| Artifact | Use | Boundary |
+|---|---|---|
+| `/data/ghu/aiter_pr6881_aot_env_review_20261103.md` | Real cold compile, cropped-profile omission and fresh run-only lookup; separates existing/new envs | CPU/FakeTensor compile and lookup are not eight-GPU execution |
+| `/data/ghu/aiter_pr6881_review_20261104.md` | Latest reviewed PR head, confirmed issues and validation scope | Tie findings to its SHA, not all later main versions |
+| `/data/ghu/pr6881_full_matrix_compare_20261104.md` | Broad main/PR/MORI matrix and curated public tables | Earlier PR revision than the capacity experiment; verify table provenance |
+| `/data/ghu/pr6881_matrix_20261104/MORI_CALLCHAIN.md` | Actual framework-aligned quant/dispatch/trim/fused_moe/combine and matched kernels | ATOM/CSV/phase configuration is dated; not universal MORI defaults |
+| `/data/ghu/pr6881_mtpr_unrestricted_compare_20261104.md` | 88-pair capacity experiment, 32K regressions and receive-memory accounting | Base0a85ae56 plus uncommitted/unpushed patch; no whole-model or full strict-AOT GPU claim |
+| `/data/ghu/pr6881_mtpr_unrestricted_20261104/capacity_expansion.patch` | Exact earlier five-file capacity experiment | A reference, not an automatically applicable current-main fix |
+| `/data/ghu/dsv41_ep4_tp4_20261104/STATE.md` | EP4 tuning checkpoint, exact capacity labels and accepted/rejected knobs | TP task canceled; v1 remained uncommitted/unpushed, offline AOT is not runtime validation |
+| `/data/ghu/dsv41_skew_perf_compare_20261029.md` | DSV4.1 routing/tuning history | Re-check main ancestry and fresh same-stack baseline |
+| `/data/ghu/m13_mx_a8w4_stage2_rca_20260910.md` | Stage2 includes combine; single-device striding failed EP8 acceptance | Rejected experiments are not production optimizations |
+| `/data/ghu/m13_mx_a8w4_stage2_tuning_20261029.md` | Native MX Stage2 scheduling/scatter, physical write amplification, ATT/PMC evidence | Candidate was unpushed in that report; distinct stack from September |
+| `/data/ghu/m13_megamoe_shared_runtime_20260911.md` | shared_instance API, cross-layer ownership and newer Oct27 epoch findings | Read newest status first; follow-up full GPU acceptance incomplete |
+| `/data/ghu/aiter_gfx1250_mori_vs_mega_dispatch_analysis_20261012.md` | Token-peer dedup versus expert-major dispatch and work-equivalent comparison | Source analysis only, no gfx1250 GPU benchmark |
+| `/data/ghu/fused_moe_ci_local_validation_20261012.md` | Authentic MiniMax TP4 fault, isolated CSV rollback and queue attribution | Rollback startup success is not a complete trigger/root-cause proof |
+| `/data/ghu/SGLANG_MEGAMOE_FIXED_AGENTX_RUNBOOK_20260911.md` | Direct fixed-length/AgentX reproduction commands and historical data | Read subsequent reproduction notes for changed image/runtime provenance |
+| `/data/ghu/SGLANG_AGENTX_DOCKER_VALIDATION_20260916.md` | Self-contained image validation evidence | Check exact image digest, installed source and benchmark before export |
+
+Public upstream anchors:
+
+- FlyDSL #1111 is the private-use **DO NOT MERGE** skill branch, not a kernel
+  baseline. Updating it must not merge it or alter production code.
+- EP #6881 is merged at audited main4ecfecb2d. The current fusion/refactor
+  reference, not an old cached PR page, describes this source observation.
+- AITER #7127 is the DSV4.1 EP8 tuning lineage; check predicates before
+  extending its geometry to EP4/EPR96.
+- The current refactor handoff is a **proposal/task**, not a passed test result.
+
+## Trace helpers and raw traces (discovery hints)
 
 Useful local helpers:
 

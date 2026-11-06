@@ -31,7 +31,7 @@ The result must return in the original source-rank/token order. A source map
 therefore needs source rank, source token and top-k slot even when payload rows
 are deduplicated.
 
-## Production AITER snapshot
+## Historical staged AITER snapshot (2026-09-09)
 
 As of 2026-09-09, AITER main contains the architecture restored by AITER #5346
 (the corrected successor of #5001). Verify the current tree under
@@ -53,7 +53,7 @@ The host wrapper may call Stage2 and combine as one logical operation while
 they remain distinct GPU kernels. Confirm launch count and overlap from the
 trace rather than from the Python function name.
 
-Current production concepts include:
+Production concepts at that snapshot included:
 
 - paired Stage1/Stage2 bundle selection and AOT preload;
 - compact prepare outside the high-LDS GEMM1 kernel;
@@ -70,6 +70,12 @@ Current production concepts include:
 These are related protocol pieces, not independent flags. Moving only one part
 between branches can create a build that compiles but has mismatched buffer or
 ready semantics.
+
+Main later merged EP #6881, adding optional full-fusion small/large runtimes
+alongside this staged implementation. See
+[EP fusion and unification](ep-fusion-and-unification.md) for the audited
+November source, ownership model, capacity experiment and proposed refactor.
+Do not report the historical staged launch sequence as the only current path.
 
 ## Customer FlyDSL-universe paths
 
@@ -223,8 +229,11 @@ strided/skew and aligned-pair variants are scheduling choices; the source map
 and scatter wire format are common contracts.
 
 Large-MTPR paths can quantize P2P Stage2 output to FP8 blockwise 1x32 plus E8M0
-scales. Smaller paths can scatter BF16. This choice must be identical across
-ranks for the operator instance and included in Stage2/bundle identity.
+scales. Smaller paths can scatter BF16. The staged implementation requires a
+rank-consistent dtype choice in its bundle identity. The newer small-M kernel
+also has an explicitly tagged mixed-dtype transport: preserve its receiver
+decoding instead of assuming every sender has the same dtype. The globally
+agreed requirement is the protocol/schema, including how tags are interpreted.
 
 The final result is the sum of top-k slots. When timing, distinguish:
 

@@ -52,6 +52,11 @@ number alone can hide load imbalance. Synchronize only where required by the
 declared timing method; adding synchronization can destroy the overlap being
 measured.
 
+Even same-stream stages can overlap across ranks: a fast rank may scatter
+while a slow rank finishes Stage1. max(Stage1_r)+max(Stage2_r) can also use two
+different ranks and exceed max(Stage1_r+Stage2_r). Record a per-rank timeline
+before interpreting arithmetic mismatch as invalid data.
+
 Use the framework's CUDA Graph/event timing path for decode whenever possible.
 An ATT/profile trace is for attribution, not automatically a replacement for
 the acceptance timing path.
@@ -182,7 +187,60 @@ Always scan both `MTPR=tokens` and the fixed deployment MTPR requested by the
 serving stack. A selector that keys on runtime tokens while changing a wire
 field is invalid even when every equal-token microbenchmark passes.
 
+## Lessons from Stage2 and wave-specialization experiments
+
+Two times less GEMM arithmetic does not guarantee two times less Stage2 wall
+time: quant/scatter/combine, tile padding, cache reuse and remote-store
+backpressure are different costs. The customer's desired Stage2/Stage1 ratio
+is an optimization target, not a correctness invariant or a measured bandwidth
+ceiling. Confirm whether the reported Stage2 includes terminal combine.
+
+In native M13 MX A8W4, Stage2 FP8/E8M0 communication quantization is fused in
+the weighted GEMM2 scatter epilogue. Linear Stage2 growth alone does not prove
+that this quantization is disabled. Do not switch to lossy INT4/MXFP4 wire
+formats to claim a native-A8W4 improvement without explicit authorization.
+
+A 2026-09-10 same-device screen improved W2 locality with global striding, but
+its EP8 A/B regressed Stage2 about 22%. This rejects transferring a single-GPU
+winner directly into an all-to-all selector. A later 2026-10-29 candidate on
+Byte base d16f86b5 used shared-body N-major/M-major traversal and bounded FP8
+scatter draining according to existing load counts. Its documented 32K
+Stage2 changed 3718->3531 us and BF16 E2E 7499.2->7282.9 us, with unchanged
+payload request count, lower GMI credit stalls and better L2 locality. That
+candidate was still unpushed in its report; these are dated evidence, not
+current-branch performance or a claim that bandwidth was saturated.
+
+Count physical transactions as well as logical row bytes. That 32K profile
+had 3696 logical bytes/row but 4032 physical write bytes/row because fragmented
+scale stores amplify traffic. A wider BN reduced request count yet added
+LDS/VGPR cost and did not yield a reliable extra E2E gain. Neither fewer memory
+instructions nor lower registers alone proves a better distributed pipeline.
+
+For WS compare producer/loader/compute roles and exposed critical spans,
+not just fused kernel count. Track ring occupancy, G1-ready/G2-ready stalls,
+barrier participation, polling/sleep, MFMA gaps and HBM/XGMI issue. Preserve
+the best validated source/config separately from the latest experiment; a
+rejected branch must not overwrite a working checkpoint or its provenance.
+
+gfx1250 uses different wave/copy/WMMA/TDM contracts. A MORI token-peer-dedup
+dispatch and Mega's expert-major compact_plan+dispatch do different work;
+include receive-side sorting/scale layout and quant before comparing costs.
+Code analysis can identify hypotheses there without proving performance on
+unavailable hardware.
+
 ## Interpreting a claimed win
+
+Use unambiguous formulas and labels:
+
+```text
+latency speedup = base_us / candidate_us
+performance gain (%) = (base_us / candidate_us - 1) * 100
+time reduction (%) = (1 - candidate_us / base_us) * 100
+throughput gain (%) = (candidate_tok_s / base_tok_s - 1) * 100
+```
+
+Do not label time reduction as performance gain. Prefer base, this PR and
+Speedup in public tables rather than internal experiment IDs.
 
 A credible performance conclusion includes:
 

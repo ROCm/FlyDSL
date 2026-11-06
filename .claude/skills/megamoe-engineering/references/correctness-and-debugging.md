@@ -63,7 +63,8 @@ Then verify these invariants:
 - readers acquire visibility after observing readiness;
 - epoch/generation prevents a later launch from satisfying an earlier wait;
 - a slot is not reused until all readers that require it are finished;
-- all ranks choose the same wire layout, P2P dtype and ready protocol;
+- all ranks implement the same wire schema and ready protocol, including any
+  explicitly supported per-sender dtype tags;
 - local compute geometry does not change the cross-rank ABI;
 - padding/sentinel entries cannot be interpreted as real routes;
 - zero-token ranks still publish/participate as required;

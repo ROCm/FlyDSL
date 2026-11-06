@@ -5,15 +5,18 @@ geometry and verify it against the exact model revision and serving stack.
 
 ## Dated geometry anchors
 
-The following values are working anchors collected during 2026 MegaMoE work.
-Re-check official config/model code before adding production support.
+The following are test/integration anchors, not independently verified claims
+about every similarly named checkpoint. November rows are checked against
+`NETWORKS` in AITER `test_mega_moe_v2.py` at main `4ecfecb2d`.
+Re-check the exact official config/model revision before production support.
 
 | Model/path | Hidden | Per-expert intermediate | Routed experts | Top-k | EP | Experts/rank | Important semantics |
 |---|---:|---:|---:|---:|---:|---:|---|
 | DeepSeek V4-Pro | 7168 | 3072 | 384 | 6 | 8 | 48 | SwiGLU limit historically 10; production AITER/ATOM anchor. |
+| DeepSeek V4.1 Flash | 5120 | 2304 | 384 | 6 | 8 / 4 | 48 / 96 | Native `v41_flash` test anchor, SwiGLU limit 10. EP4 does not automatically inherit EP8 configs or fixed-slot eligibility. |
 | ByteDance M13 | 3584 | 1280 | 384 | 8 | 8 | 48 | Native MX A8W4 and customer SmoothQuant A8W4 are distinct input/scale paths. |
 | GLM-5.2 routed MoE | 6144 | 2048 | 256 | 8 | 8 | 32 | Shared expert is outside the routed MegaMoE result and must be integrated separately. |
-| Kimi-K3 routing anchor | 3584 | 512 | 896 | 16 | 8 | 112 | Top-k and EPR exceed older bitmap/fixed assumptions; activation/integration must be verified. |
+| Kimi-K3 routing anchor | 3584 | 3072 | 896 | 16 | 8 | 112 | Current `kimi_k3_route` uses SiTUv2, beta=4 and linear_beta=25, no hard SwiGLU clamp; validate checkpoint/framework integration separately. |
 
 Do not call a shape supported because the selector compiles. Routing semantics,
 activation/clamp, shared experts, scale layout, weight format and framework
@@ -127,6 +130,19 @@ is `7168x3072`, EPR48, top-k6. Verify both fixed and compact modes and the
 serving concurrency matrix; microbenchmark improvements can lose overlap in a
 61-layer graph.
 
+### V4.1 Flash
+
+EP4 doubles EPR from 48 to 96 without changing H5120/I2304/top-k6. At the
+November snapshot its native EP4 path is compact even for MTPR=TPR; equality
+of TPR and capacity does not itself imply fixed-slot. EP8 tune predicates
+must be checked for explicit EP/EPR guards before assuming EP4 benefits.
+
+In TP4 the logical expert intermediate shard is 2304/4=576. The inspected TP
+small engine requires local intermediate divisibility by 128, so this is not
+automatically a supported native geometry. Do not silently pad to 640, switch
+A8W4 to A4W4, or count a separate shared expert as routed work to make a
+comparison run. Such changes need explicit numerical and fairness analysis.
+
 ### ByteDance M13
 
 Keep three labels distinct in reports:
@@ -155,7 +171,9 @@ compile.
 Top-k16 and EPR112 invalidate assumptions tailored to top-k6/EPR48. Runtime
 pair IDs/fanout metadata should be range-checked end to end. A routing-only
 microbenchmark is useful for protocol coverage but does not establish complete
-model activation or quantization support.
+model support. Use the current SiTUv2 reference rather than substituting
+SwiGLU. The older skill's I512 row was a stale anchor and is not the current
+test registry geometry.
 
 ## Model-support acceptance record
 

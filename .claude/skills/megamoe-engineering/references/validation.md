@@ -98,6 +98,13 @@ midpoint used by nearest-bucket logic.
 - fixed deployment MTPR (commonly 256, 8192 or 32768): actual tokens vary while
   buffer/wire protocol remains fixed.
 
+When promising all-capacity support, add the intermediate valid TPR<=MTPR
+combinations; diagonal plus one MAX column is not the full matrix. Log actual
+capacities: some native runners clamp tiny instances to a minimum such as 16,
+which is not strict MTPR=TPR for TPR 1/2/4/8. Add explicit tiny-capacity cases
+or label the minimum honestly. Fixedslot is a selector/protocol property, not
+an alias for MTPR=TPR; for example the inspected Flash EP4 path is compact.
+
 ### Routing and rank distribution
 
 - uniform/random;
@@ -157,6 +164,13 @@ Capture/replay is mandatory for decode. In addition to one replay, test:
 - runtime fanout metadata changes across epochs;
 - same-stream ordered reuse of the same operator instance.
 
+For fused-path/resource refactors also test small256->small512->compact and
+back, alternating weights/layer slots, saved output lifetime and
+slice_output=False. Capture separate graphs for separate host-selected plans;
+do not claim one replay dynamically reevaluates a Python max_tokens argument.
+For mechanical changes compare each existing variant to itself before/after;
+small-M versus staged need not already be bitwise identical.
+
 If concurrent multi-stream/TBO use is intended, it needs its own test with
 independent state. A same-stream pass does not authorize multi-stream re-entry.
 
@@ -203,6 +217,18 @@ Do not test only the PR head if CI will merge it with a newer base. A prior AOT
 failure escaped because head CI did not exercise the synthetic merge state and
 a later API required `ep_size`. Reproduce both head and merge-result semantics
 when interfaces changed on main.
+
+Enumerate child runtimes independently of the parent capacity. In the audited
+#6881 lineage, small256/512 can be reachable from a 16384/32768 parent while
+the AOT enablement condition only covers 8192 jobs. A default all-profile build
+can hide that gap by compiling small artifacts through the 8192 job. Include
+a 16384-only or 32768-only cropped build and a deliberate missing-child check.
+Cache identities should include the actual child ABI/code inputs, not an
+irrelevant parent capacity that prevents legitimate artifact reuse.
+
+Report compile-only, fresh cache lookup, actual GPU run-only, Graph accuracy
+and serving preload as distinct gates. A CPU/FakeTensor lookup is not
+eight-GPU AOT runtime validation.
 
 ## CI reachability
 
