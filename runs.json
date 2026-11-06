@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-11-06T00:41:28Z",
+ "updated": "2026-11-06T01:25:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42143427947,
+   "pr": 1379,
+   "commit": "65ae2c1276860e75bc23f4ce573afef1cd4f2488",
+   "branch": "fix/test-triton-optional",
+   "event": "pull_request",
+   "title": "[Tests] Drop the hard triton import from kernel test helpers",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947",
+   "created_at": "2026-11-06T01:22:41Z",
+   "updated_at": "2026-11-06T01:24:08Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 42139991350,
+   "pr": 1379,
+   "commit": "8321d978fc2085c1eb0346487f4a2695a4206c9f",
+   "branch": "fix/test-triton-optional",
+   "event": "pull_request",
+   "title": "[Tests] Drop the hard triton import from kernel test helpers",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350",
+   "created_at": "2026-11-06T00:52:49Z",
+   "updated_at": "2026-11-06T01:23:47Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-06T01:08:50Z",
+     "completed_at": "2026-11-06T01:19:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592284"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-06T01:21:34Z",
+     "completed_at": "2026-11-06T01:23:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592297"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-06T01:10:50Z",
+     "completed_at": "2026-11-06T01:23:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592328"
+    }
+   ]
+  },
   {
    "run_id": 42137797835,
    "pr": 1378,
@@ -14,9 +72,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835",
    "created_at": "2026-11-06T00:34:22Z",
-   "updated_at": "2026-11-06T00:36:22Z",
+   "updated_at": "2026-11-06T01:06:49Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T00:50:57Z",
+     "completed_at": "2026-11-06T01:24:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735199",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T00:50:49Z",
+     "completed_at": "2026-11-06T01:06:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735249"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-06T00:51:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735301"
+    }
+   ]
   },
   {
    "run_id": 42104489721,
@@ -1785,64 +1874,6 @@
    "created_at": "2026-11-02T15:45:25Z",
    "updated_at": "2026-11-02T15:53:35Z",
    "actor": "RElbers",
-   "jobs": []
-  },
-  {
-   "run_id": 41464989095,
-   "pr": null,
-   "commit": "c3ce77f64006ba8c067550d48ae5969a55e0679e",
-   "branch": "cache-ast-rewrite",
-   "event": "pull_request",
-   "title": "[DSL] Reuse the AST rewrite when a kernel factory is built again",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095",
-   "created_at": "2026-11-02T14:45:34Z",
-   "updated_at": "2026-11-02T19:09:02Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-02T18:11:58Z",
-     "completed_at": "2026-11-02T19:09:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832000"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-02T18:11:58Z",
-     "completed_at": "2026-11-02T19:09:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832024"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-02T18:12:39Z",
-     "completed_at": "2026-11-02T18:30:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41464989095/job/125458832188"
-    }
-   ]
-  },
-  {
-   "run_id": 41457501609,
-   "pr": null,
-   "commit": "3e97049beb385f98c445f3ddcb6aed35278a3a6e",
-   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41457501609",
-   "created_at": "2026-11-02T13:57:40Z",
-   "updated_at": "2026-11-05T06:08:17Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
