@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-06T06:33:02Z",
+ "updated": "2026-11-06T06:53:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42176823970,
+   "pr": 1111,
+   "commit": "028ac1e6f2bda4f23b5ff250ac412984ff7e9e10",
+   "branch": "ghu/megamoe-engineering-skill",
+   "event": "pull_request",
+   "title": "[DO NOT MERGE] Add MegaMoE engineering skill",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42176823970",
+   "created_at": "2026-11-06T06:48:54Z",
+   "updated_at": "2026-11-06T06:51:04Z",
+   "actor": "GwilliamHu",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T06:51:00Z",
+     "completed_at": "2026-11-06T06:51:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42176823970/job/127757719178"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T06:51:00Z",
+     "completed_at": "2026-11-06T06:51:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42176823970/job/127757719182"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-06T06:51:00Z",
+     "completed_at": "2026-11-06T06:51:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42176823970/job/127757719246",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 42169022044,
    "pr": 1374,
@@ -1766,52 +1812,6 @@
      "started_at": "2026-11-03T06:23:30Z",
      "completed_at": "2026-11-03T06:59:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807565"
-    }
-   ]
-  },
-  {
-   "run_id": 41578091447,
-   "pr": 901,
-   "commit": "3d52c197cd08ec5a4063213a5e4c676791d65669",
-   "branch": "moe_sorting_optimization",
-   "event": "pull_request",
-   "title": "Add Optimized MoE Routing Path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41578091447",
-   "created_at": "2026-11-03T04:25:57Z",
-   "updated_at": "2026-11-03T05:54:02Z",
-   "actor": "amd-wsung102",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T05:11:07Z",
-     "completed_at": "2026-11-03T05:54:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41578091447/job/125732203581"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T05:02:37Z",
-     "completed_at": "2026-11-03T05:19:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41578091447/job/125732203588"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T04:46:00Z",
-     "completed_at": "2026-11-03T05:11:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41578091447/job/125732203621",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
