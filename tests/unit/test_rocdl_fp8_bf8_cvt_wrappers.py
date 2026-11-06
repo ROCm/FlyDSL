@@ -67,7 +67,7 @@ def test_pack_fp8_bf8_accept_dsl_values_and_literals():
     assert "rocdl.cvt.pkrtz" in ir_text
 
 
-def test_scalar_unpack_fp8_bf8_accept_dsl_int32_and_literals():
+def test_scalar_and_packed_unpack_accept_dsl_int32_and_literals():
     def build(packed_raw):
         packed = fx.Int32(packed_raw)
 
@@ -75,7 +75,9 @@ def test_scalar_unpack_fp8_bf8_accept_dsl_int32_and_literals():
         bf8_b3 = fx.rocdl.cvt_f32_bf8(T.f32, packed, 3)
         fp8_lit = fx.rocdl.cvt_f32_fp8(T.f32, 0x3C003C00, 0)
         bf8_lit = fx.rocdl.cvt_f32_bf8(T.f32, 0x3C003C00, 2)
-        return fp8_b1, bf8_b3, fp8_lit, bf8_lit
+        pk_fp8_lo = fx.rocdl.cvt_pk_f32_fp8(T.f32x2, packed, False)
+        perm = fx.rocdl.perm_b32(packed, 0x3F800000, 0x07060302)
+        return fp8_b1, bf8_b3, fp8_lit, bf8_lit, pk_fp8_lo, perm
 
     ir_text = _build_module(
         build,
@@ -85,10 +87,14 @@ def test_scalar_unpack_fp8_bf8_accept_dsl_int32_and_literals():
             lambda: T.f32,
             lambda: T.f32,
             lambda: T.f32,
+            lambda: T.f32x2,
+            lambda: T.i32,
         ],
     )
     assert "rocdl.cvt.f32.fp8" in ir_text
     assert "rocdl.cvt.f32.bf8" in ir_text
+    assert "rocdl.cvt.pk.f32.fp8" in ir_text
+    assert "llvm.amdgcn.perm" in ir_text
 
 
 def test_fdot2_wrappers_accept_vectors_and_packed_i32():
@@ -203,17 +209,20 @@ def test_cvt_and_dot_wrappers_remain_omitted_from_stable_all():
     for name in (
         "cvt_pk_fp8_f32",
         "cvt_pk_bf8_f32",
-        "cvt_f32_fp8",
-        "cvt_f32_bf8",
         "cvt_sr_fp8_f32",
         "cvt_sr_bf8_f32",
         "cvt_pkrtz",
+        "cvt_f32_fp8",
+        "cvt_f32_bf8",
+        "cvt_pk_f32_fp8",
+        "rcp",
         "exp2",
         "rsq",
+        "perm_b32",
         "fdot2",
         "fdot2_f32_bf16",
-        "fdot2_bf16_bf16",
         "fdot2_f16_f16",
+        "fdot2_bf16_bf16",
         "sdot4",
         "udot4",
         "sudot4",

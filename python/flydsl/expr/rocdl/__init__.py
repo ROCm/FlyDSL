@@ -670,6 +670,31 @@ def _to_ir(v):
     return v
 
 
+def _to_ir_typed(v, ty):
+    """Coerce DSL Numeric or Python scalar literal to ``ir.Value`` of ``ty``."""
+    from ..._mlir import ir as _ir
+    from .. import arith as _arith_ext
+
+    if isinstance(v, (int, float)):
+        val = int(v) if isinstance(ty, _ir.IntegerType) else float(v)
+        return _arith_ext.unwrap(_arith_ext.constant(val, type=ty))
+    if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
+        return v.ir_value()
+    return v
+
+
+def _coerce_fdot2_vec(v, elem_ty):
+    """Coerce a 2-element half/bf16 vector or packed 32-bit integer to ``vector<2xelem_ty>``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects import llvm as _llvm
+
+    v_ir = _to_ir(v)
+    vec_ty = _ir.VectorType.get([2], elem_ty)
+    if v_ir.type != vec_ty:
+        v_ir = _llvm.bitcast(vec_ty, v_ir)
+    return v_ir
+
+
 @dsl_loc_tracing
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux=None, **kw):
     from ..._mlir import ir as _ir
@@ -725,6 +750,60 @@ def cvt_pk_bf8_f32(res, src_a, src_b, old, word_sel, **kw):
         word_sel=word_sel,
         **kw,
     )
+
+
+@dsl_loc_tracing
+def cvt_sr_fp8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_fp8_f32``: stochastic-round ``src_a`` with ``src_b`` into fp8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_fp8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_sr_bf8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_bf8_f32``: stochastic-round ``src_a`` with ``src_b`` into bf8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_pkrtz(res, src_a, src_b, **kw):
+    """ROCDL ``cvt_pkrtz``: pack two f32 values into ``vector<2xf16>`` with round-toward-zero."""
+    from ..._mlir.dialects.rocdl import cvt_pkrtz as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_fp8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_fp8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from fp8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_fp8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_bf8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_bf8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from bf8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_bf8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
 
 
 @dsl_loc_tracing
@@ -830,60 +909,6 @@ def cvt_pk_f32_fp8(res, src, word_sel, **kw):
 
 
 @dsl_loc_tracing
-def cvt_f32_fp8(res, src_a, byte_sel, **kw):
-    """ROCDL ``cvt_f32_fp8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from fp8 to ``f32``."""
-    from ..._mlir.dialects.rocdl import cvt_f32_fp8 as _op
-
-    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
-
-
-@dsl_loc_tracing
-def cvt_f32_bf8(res, src_a, byte_sel, **kw):
-    """ROCDL ``cvt_f32_bf8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from bf8 to ``f32``."""
-    from ..._mlir.dialects.rocdl import cvt_f32_bf8 as _op
-
-    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
-
-
-@dsl_loc_tracing
-def cvt_sr_fp8_f32(res, src_a, src_b, old, byte_sel, **kw):
-    """ROCDL ``cvt_sr_fp8_f32``: stochastic-round ``src_a`` with ``src_b`` into fp8 byte ``byte_sel`` of ``old``."""
-    from ..._mlir.dialects.rocdl import cvt_sr_fp8_f32 as _op
-
-    return _op(
-        res=res,
-        src_a=_to_ir(src_a),
-        src_b=_to_ir(src_b),
-        old=_to_ir(old),
-        byte_sel=byte_sel,
-        **kw,
-    )
-
-
-@dsl_loc_tracing
-def cvt_sr_bf8_f32(res, src_a, src_b, old, byte_sel, **kw):
-    """ROCDL ``cvt_sr_bf8_f32``: stochastic-round ``src_a`` with ``src_b`` into bf8 byte ``byte_sel`` of ``old``."""
-    from ..._mlir.dialects.rocdl import cvt_sr_bf8_f32 as _op
-
-    return _op(
-        res=res,
-        src_a=_to_ir(src_a),
-        src_b=_to_ir(src_b),
-        old=_to_ir(old),
-        byte_sel=byte_sel,
-        **kw,
-    )
-
-
-@dsl_loc_tracing
-def cvt_pkrtz(res, src_a, src_b, **kw):
-    """ROCDL ``cvt_pkrtz``: pack two f32 values into ``vector<2xf16>`` with round-toward-zero."""
-    from ..._mlir.dialects.rocdl import cvt_pkrtz as _op
-
-    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), **kw)
-
-
-@dsl_loc_tracing
 def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     """ROCDL ``cvt_scalef32_pk_f32_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
     fp4 elems) into ``vector<2xf32>``, multiplied by ``scale``.
@@ -972,31 +997,6 @@ def perm_b32(src_hi, src_lo, sel, **kw):
     )
 
 
-def _coerce_fdot2_vec(v, elem_ty):
-    """Coerce a 2-element half/bf16 vector or packed 32-bit integer to ``vector<2xelem_ty>``."""
-    from ..._mlir import ir as _ir
-    from ..._mlir.dialects import llvm as _llvm
-
-    v_ir = _to_ir(v)
-    vec_ty = _ir.VectorType.get([2], elem_ty)
-    if v_ir.type != vec_ty:
-        v_ir = _llvm.bitcast(vec_ty, v_ir)
-    return v_ir
-
-
-def _to_ir_typed(v, ty):
-    """Coerce DSL Numeric or Python scalar literal to ``ir.Value`` of ``ty``."""
-    from ..._mlir import ir as _ir
-    from .. import arith as _arith_ext
-
-    if isinstance(v, (int, float)):
-        val = int(v) if isinstance(ty, _ir.IntegerType) else float(v)
-        return _arith_ext.unwrap(_arith_ext.constant(val, type=ty))
-    if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
-        return v.ir_value()
-    return v
-
-
 @dsl_loc_tracing
 def fdot2(res, a, b, c, clamp=False, **kw):
     """ROCDL ``fdot2``: intra-lane ``vector<2xf16>`` dot-accumulate into ``f32``."""
@@ -1032,22 +1032,6 @@ def fdot2_f32_bf16(res, a, b, c, clamp=False, **kw):
 
 
 @dsl_loc_tracing
-def fdot2_bf16_bf16(res, a, b, c, **kw):
-    """ROCDL ``fdot2_bf16_bf16``: intra-lane ``vector<2xbf16>`` dot-accumulate into ``bf16``."""
-    from ..._mlir import ir as _ir
-    from ..._mlir.dialects.rocdl import fdot2_bf16_bf16_ as _op
-
-    bf16 = _ir.BF16Type.get()
-    return _op(
-        res=res,
-        a=_coerce_fdot2_vec(a, bf16),
-        b=_coerce_fdot2_vec(b, bf16),
-        c=_to_ir_typed(c, res),
-        **kw,
-    )
-
-
-@dsl_loc_tracing
 def fdot2_f16_f16(res, a, b, c, **kw):
     """ROCDL ``fdot2_f16_f16``: intra-lane ``vector<2xf16>`` dot-accumulate into ``f16``."""
     from ..._mlir import ir as _ir
@@ -1058,6 +1042,22 @@ def fdot2_f16_f16(res, a, b, c, **kw):
         res=res,
         a=_coerce_fdot2_vec(a, f16),
         b=_coerce_fdot2_vec(b, f16),
+        c=_to_ir_typed(c, res),
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def fdot2_bf16_bf16(res, a, b, c, **kw):
+    """ROCDL ``fdot2_bf16_bf16``: intra-lane ``vector<2xbf16>`` dot-accumulate into ``bf16``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import fdot2_bf16_bf16_ as _op
+
+    bf16 = _ir.BF16Type.get()
+    return _op(
+        res=res,
+        a=_coerce_fdot2_vec(a, bf16),
+        b=_coerce_fdot2_vec(b, bf16),
         c=_to_ir_typed(c, res),
         **kw,
     )
