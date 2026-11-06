@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-06T08:29:50Z",
+ "updated": "2026-11-06T08:55:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42190209931,
+   "pr": 1381,
+   "commit": "328c170b0fcbaf5b917e5dbecb0ea11afd7d4904",
+   "branch": "fix/jit-key-rocm-toolkit",
+   "event": "pull_request",
+   "title": "[JIT] Key disk cache entries by the ROCm device bitcode",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42190209931",
+   "created_at": "2026-11-06T08:47:29Z",
+   "updated_at": "2026-11-06T08:48:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42187643718,
    "pr": 1380,
@@ -25,11 +40,11 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "cancelled",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42187314772",
    "created_at": "2026-11-06T08:23:21Z",
-   "updated_at": "2026-11-06T08:26:06Z",
+   "updated_at": "2026-11-06T08:29:23Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1736,21 +1751,6 @@
    "created_at": "2026-11-03T08:06:45Z",
    "updated_at": "2026-11-05T05:41:42Z",
    "actor": "edjson",
-   "jobs": []
-  },
-  {
-   "run_id": 41598329030,
-   "pr": 1343,
-   "commit": "19e769400cb4f441426be98e5f5136140bae09c2",
-   "branch": "fix/debug-call-chain-scopes",
-   "event": "pull_request",
-   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41598329030",
-   "created_at": "2026-11-03T07:44:36Z",
-   "updated_at": "2026-11-03T19:38:19Z",
-   "actor": "jhinpan",
    "jobs": []
   }
  ]
