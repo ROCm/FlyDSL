@@ -114,9 +114,14 @@ def test_scaled_wmma_matches_reference(block_size, varying):
 
     # One exponent per K block. Every row shares the word, which is what a single
     # scale operand can express; that is enough to separate the blocks.
+    #
+    # A and B are phase-shifted, not mirrored: the hardware applies both scales
+    # to the same product, so exponents that cancel per block (sa[j] + sb[j] a
+    # constant) leave every block with the same total factor and a misplaced
+    # scale is invisible -- the check would pass under a wrong layout too.
     if varying:
         exps_a = [127 + (j % 3) - 1 for j in range(nblk)]
-        exps_b = [127 - (j % 3) + 1 for j in range(nblk)]
+        exps_b = [127 + ((j + 1) % 3) - 1 for j in range(nblk)]
     else:
         exps_a = [127] * nblk
         exps_b = [127] * nblk
