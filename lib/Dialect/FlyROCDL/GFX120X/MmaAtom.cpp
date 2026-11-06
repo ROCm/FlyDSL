@@ -426,35 +426,35 @@ FailureOr<Value> MmaOpGFX120X_SWMMACType::emitAtomCallSSA(
     sparseIdx = LLVM::BitcastOp::create(builder, loc, i32Ty, sparseIdx);
 
   Value res;
-  if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32() && k == 32)
+  if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32() && k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_f16::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16() && k == 32)
+  } else if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16() && k == 32) {
     res = ROCDL::swmmac_f16_16x16x32_f16::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32() && k == 32)
+  } else if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32() && k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_bf16::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16() && k == 32)
+  } else if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16() && k == 32) {
     res = ROCDL::swmmac_bf16_16x16x32_bf16::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (isa<Float8E4M3FNType>(elemTyA) && isa<Float8E4M3FNType>(elemTyB) && elemTyAcc.isF32() &&
-           k == 32)
+  } else if (isa<Float8E4M3FNType>(elemTyA) && isa<Float8E4M3FNType>(elemTyB) &&
+             elemTyAcc.isF32() && k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_fp8_fp8::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (isa<Float8E4M3FNType>(elemTyA) && isa<Float8E5M2Type>(elemTyB) && elemTyAcc.isF32() &&
-           k == 32)
+  } else if (isa<Float8E4M3FNType>(elemTyA) && isa<Float8E5M2Type>(elemTyB) && elemTyAcc.isF32() &&
+             k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_fp8_bf8::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (isa<Float8E5M2Type>(elemTyA) && isa<Float8E4M3FNType>(elemTyB) && elemTyAcc.isF32() &&
-           k == 32)
+  } else if (isa<Float8E5M2Type>(elemTyA) && isa<Float8E4M3FNType>(elemTyB) && elemTyAcc.isF32() &&
+             k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_bf8_fp8::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else if (isa<Float8E5M2Type>(elemTyA) && isa<Float8E5M2Type>(elemTyB) && elemTyAcc.isF32() &&
-           k == 32)
+  } else if (isa<Float8E5M2Type>(elemTyA) && isa<Float8E5M2Type>(elemTyB) && elemTyAcc.isF32() &&
+             k == 32) {
     res = ROCDL::swmmac_f32_16x16x32_bf8_bf8::create(builder, loc, rawAccTy, a, b, c, sparseIdx)
               .getResult();
-  else {
+  } else {
     StringRef opName;
     if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32) && k == 32)
       opName = ROCDL::swmmac_i32_16x16x32_iu8::getOperationName();
