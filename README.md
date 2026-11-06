@@ -147,7 +147,8 @@ $env:FLY_BUILD_DIR = "$PWD\build-fly"; .venv\Scripts\python setup.py bdist_wheel
 ```
 
 Without a torch that sees the GPU, set `FLYDSL_GPU_ARCH` (for example `gfx1201`).
-AOT export (`export_to_c`) is Linux-only.
+AOT export (`export_to_c`) writes a COFF `.obj`; link it with `amdhip64.lib`
+(see [docs/api/compiler.rst](docs/api/compiler.rst)).
 
 ### Run tests
 

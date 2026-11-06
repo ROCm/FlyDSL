@@ -1404,11 +1404,10 @@ class CompiledFunction:
         The object embeds its backend adapter and only needs the backend's
         system runtime libraries when linked into an executable or shared
         library; it does not require FlyDSL or Python at deployment time.
-        Host export currently requires 64-bit little-endian Linux ELF tools.
+        Host export requires 64-bit little-endian Linux ELF tools, or Windows
+        x64, where it writes a COFF ``.obj`` and needs no external tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
-        if os.name == "nt":
-            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):

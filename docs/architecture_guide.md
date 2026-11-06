@@ -298,7 +298,8 @@ rewrites a fresh copy of the already-lowered module for standalone linkage. It:
 2. selects the backend GPU object and attaches the AOT module handler;
 3. emits a packed `int32_t entry(void **args)` wrapper and ABI metadata;
 4. emits a position-independent host object and matching C header; and
-5. embeds the backend AOT runtime archive into the host object. Only backend
+5. embeds the backend AOT runtime archive into the host object (on Windows,
+   merges the runtime's LLVM-dialect IR into the module instead). Only backend
    system libraries remain as link-time dependencies.
 
 This export path reuses the same GPU binary as the compiled specialization; it

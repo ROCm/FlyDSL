@@ -9,7 +9,9 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -34,7 +36,7 @@ from .jit_argument import (
     _LayoutPlan,
     is_type_param_annotation,
 )
-from .jit_function import _create_mlir_context
+from .jit_function import FileLock, _create_mlir_context
 from .protocol import c_abi_spec
 
 _SCHEMA_VERSION = 2
@@ -416,8 +418,13 @@ def _emit_export_object(
     metadata: bytes,
     backend_cls,
     arch: str,
+    runtime_ir: Optional[str] = None,
 ) -> bytes:
-    """Rewrite a fresh copy of the lowered module for export and emit its host object."""
+    """Rewrite a fresh copy of the lowered module for export and emit its host object.
+
+    ``runtime_ir`` (Windows) is the backend AOT runtime as LLVM-dialect IR, merged in
+    as internal definitions.
+    """
     with _create_mlir_context():
         module = ir.Module.parse(ir_text)
         renamed = _namespace_symbols(module, function_name)
@@ -436,6 +443,8 @@ def _emit_export_object(
                 op.operation.attributes["offloadingHandler"] = handler
         _add_entry_wrapper(module, function_name, renamed[entry], abi, _AOT_TAKE_ERROR_SYMBOL)
         _add_metadata_global(module, metadata_symbol, metadata)
+        if runtime_ir is not None:
+            _merge_aot_runtime(module, runtime_ir)
         module.operation.verify()
         return _emit_host_object(module.operation, _HOST_OPT_LEVEL)
 
@@ -499,6 +508,114 @@ def _embed_aot_runtime(host_object: bytes, runtime_object: bytes) -> bytes:
         return output_path.read_bytes()
 
 
+def _load_aot_runtime_ir(path: Path) -> Tuple[str, frozenset[str]]:
+    """Windows: the LLVM-dialect AOT runtime and every symbol it defines or uses."""
+    text = path.read_text(encoding="utf-8")
+    with _create_mlir_context():
+        runtime = ir.Module.parse(text)
+        symbols = frozenset(
+            ir.StringAttr(op.operation.attributes["sym_name"]).value
+            for op in runtime.body.operations
+            if "sym_name" in op.operation.attributes and op.operation.name != "llvm.comdat"
+        )
+    return text, symbols
+
+
+def _merge_aot_runtime(module: ir.Module, runtime_ir: str) -> None:
+    """Windows: define the AOT runtime inside ``module``, internal to it.
+
+    COFF has no relocatable link (``ld -r``), so instead of embedding an archive,
+    the runtime's definitions join the module before code generation, which keeps
+    one private runtime copy per export, as ``--localize-hidden`` does on Linux.
+    Module flags, comdats and linker options stay behind: internal symbols need no
+    comdat, and the options are MSVC runtime-library checks that would reject
+    consumers built with another CRT.
+    """
+    runtime = ir.Module.parse(runtime_ir)
+    present = {
+        ir.StringAttr(op.operation.attributes["sym_name"]).value: op.operation
+        for op in module.body.operations
+        if "sym_name" in op.operation.attributes
+    }
+    for op in list(runtime.body.operations):
+        op = op.operation
+        if "sym_name" not in op.attributes or op.name == "llvm.comdat":
+            continue
+        name = ir.StringAttr(op.attributes["sym_name"]).value
+        existing = present.get(name)
+        if _is_definition(op):
+            if existing is not None:
+                if _is_definition(existing):
+                    raise RuntimeError(f"export_to_c: {name!r} is defined by both the export and the AOT runtime")
+                existing.erase()
+            # Internal linkage requires default visibility (0).
+            op.attributes["linkage"] = _linkage("internal")
+            if "comdat" in op.attributes:
+                del op.attributes["comdat"]
+            if "visibility_" in op.attributes:
+                op.attributes["visibility_"] = ir.IntegerAttr.get(ir.IntegerType.get_signless(64), 0)
+        elif existing is not None:
+            continue
+        module.body.append(op)
+
+
+_COFF_HEADER = struct.Struct("<HHIIIHH")
+_COFF_SECTION = struct.Struct("<8sIIIIIIHHI")
+_COFF_SYMBOL = struct.Struct("<8sIhHBB")
+_COFF_SECTION_AUX = struct.Struct("<IHHIHB3x")
+_COFF_MACHINE_AMD64 = 0x8664
+_COFF_SCN_LNK_COMDAT = 0x1000
+_COFF_CLASS_EXTERNAL = 2
+_COFF_CLASS_STATIC = 3
+_COFF_SELECT_ANY = 2
+
+
+def _coff_unpack(fmt: struct.Struct, data: bytes, offset: int) -> tuple:
+    if offset < 0 or offset + fmt.size > len(data):
+        raise ValueError("COFF structure out of file bounds")
+    return fmt.unpack_from(data, offset)
+
+
+def _coff_defined_global_symbols(source: Union[str, Path, bytes]) -> List[str]:
+    """Windows counterpart of ``_defined_global_symbols``: what an x86-64 COFF object exports.
+
+    Symbols in select-any COMDAT sections are left out: the linker keeps one copy of
+    each by name, so they cannot clash (LLVM's ``__real@...`` constants).
+    """
+    data = source if isinstance(source, bytes) else Path(source).read_bytes()
+    machine, nsections, _time, symtab, nsymbols, opt_size, _flags = _coff_unpack(_COFF_HEADER, data, 0)
+    if machine != _COFF_MACHINE_AMD64 or opt_size:
+        raise ValueError("not an x86-64 COFF object file")
+    sections = [_coff_unpack(_COFF_SECTION, data, _COFF_HEADER.size + i * _COFF_SECTION.size) for i in range(nsections)]
+    strtab = symtab + nsymbols * _COFF_SYMBOL.size
+    symbols, select_any, index = [], set(), 0
+    while index < nsymbols:
+        offset = symtab + index * _COFF_SYMBOL.size
+        raw, value, section, sym_type, storage, naux = _coff_unpack(_COFF_SYMBOL, data, offset)
+        if storage == _COFF_CLASS_EXTERNAL and section > 0:
+            symbols.append((raw, section))
+        # A section's definition symbol carries the COMDAT selection in its aux record.
+        elif storage == _COFF_CLASS_STATIC and naux and not value and not sym_type and 0 < section <= nsections:
+            if sections[section - 1][9] & _COFF_SCN_LNK_COMDAT:
+                if _coff_unpack(_COFF_SECTION_AUX, data, offset + _COFF_SYMBOL.size)[5] == _COFF_SELECT_ANY:
+                    select_any.add(section)
+        index += 1 + naux
+
+    names = []
+    for raw, section in symbols:
+        if section in select_any:
+            continue
+        if raw[:4] != b"\0\0\0\0":
+            names.append(raw.rstrip(b"\0").decode("utf-8"))
+            continue
+        start = strtab + struct.unpack_from("<I", raw, 4)[0]
+        end = data.find(b"\0", start) if start < len(data) else -1
+        if end < 0:
+            raise ValueError("string table offset out of range")
+        names.append(data[start:end].decode("utf-8"))
+    return names
+
+
 def _temporary_sibling(path: Path) -> Path:
     return path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
 
@@ -506,7 +623,12 @@ def _temporary_sibling(path: Path) -> Path:
 def _write_atomically(path: Path, data: bytes) -> None:
     """Replace ``path`` with ``data`` atomically; permissions follow the umask."""
     tmp = _temporary_sibling(path)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o666)
+    if sys.platform == "win32":
+        # No O_CLOEXEC there (Python fds are not inherited anyway); without O_BINARY
+        # the C runtime would write every LF as CRLF.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY, 0o666)
+    else:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o666)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -518,9 +640,21 @@ def _write_atomically(path: Path, data: bytes) -> None:
         raise
 
 
+_WINDOWS_OUTPUT_LOCK = ".flydsl_export.lock"
+
+
 @contextmanager
 def _output_directory_lock(directory: Path):
-    import fcntl  # not at module level: Windows has none, and export is Linux-only
+    if sys.platform == "win32":
+        # A directory handle cannot be locked here, so exporters lock one file inside
+        # the directory: every process that can publish there reaches the same file,
+        # whatever its user, session or TEMP. It is never removed, or two exporters
+        # could end up holding locks on two different files.
+        with FileLock(directory / _WINDOWS_OUTPUT_LOCK, timeout=600):
+            yield
+        return
+
+    import fcntl  # not at module level: Windows has none
 
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
@@ -594,7 +728,9 @@ def _resolve_export_paths(file_path, file_name, function_prefix):
     if not isinstance(file_name, str) or not file_name or file_name in (".", "..") or Path(file_name).name != file_name:
         raise ValueError(f"export_to_c: file_name must be a non-empty base name, got {file_name!r}")
     symbol = file_name if function_prefix in (None, "") else function_prefix
-    return directory / f"{file_name}.o", symbol, directory / f"{file_name}.h"
+    # cl warns about every input named .o on Windows.
+    suffix = ".obj" if sys.platform == "win32" else ".o"
+    return directory / f"{file_name}{suffix}", symbol, directory / f"{file_name}.h"
 
 
 def _render_header(metadata: _ExportMetadata) -> str:
@@ -629,10 +765,19 @@ def _render_header(metadata: _ExportMetadata) -> str:
                 fields.append(f"int{slot.shape_bits}_t shape[{len(slot.shape_dims)}];")
             if slot.stride_dims:
                 fields.append(f"int{slot.stride_bits}_t stride[{len(slot.stride_dims)}];")
+            if sys.platform == "win32":
+                # MSVC has no __attribute__; cl, clang-cl and GCC all take #pragma pack.
+                typedef = [
+                    "#pragma pack(push, 1)",
+                    f"typedef struct {{ {' '.join(fields)} }} {tname};",
+                    "#pragma pack(pop)",
+                ]
+            else:
+                typedef = [f"typedef struct __attribute__((packed)) {{ {' '.join(fields)} }} {tname};"]
             types += [
                 f"/* Dynamic shape dims {list(slot.shape_dims)} and stride dims {list(slot.stride_dims)} of "
                 f"'{slot.arg_name}'. */",
-                f"typedef struct __attribute__((packed)) {{ {' '.join(fields)} }} {tname};",
+                *typedef,
                 f'FLYDSL_AOT_STATIC_ASSERT(sizeof({tname}) == {slot.size}, "ABI size of {tname}");',
             ]
             name = param_name(f"{base}_layout")
@@ -725,7 +870,7 @@ class _AOTCompiledFunction:
         file_name: str,
         function_prefix: str = "",
     ) -> None:
-        """Write ``<file_name>.o`` and ``<file_name>.h`` into ``file_path``."""
+        """Write ``<file_name>.o`` (``.obj`` on Windows) and ``<file_name>.h`` into ``file_path``."""
         import flydsl
 
         object_path, function_name, header_path = _resolve_export_paths(file_path, file_name, function_prefix)
@@ -747,7 +892,11 @@ class _AOTCompiledFunction:
         exported_symbols = {function_name, metadata_symbol, *lifecycle.values()}
         _check_output_path_collisions(object_path, header_path)
         runtime_archive = _find_aot_runtime_archive(self._backend)
-        runtime_object, runtime_symbols = _materialize_aot_runtime(runtime_archive)
+        runtime_ir = None
+        if sys.platform == "win32":
+            runtime_ir, runtime_symbols = _load_aot_runtime_ir(runtime_archive)
+        else:
+            runtime_object, runtime_symbols = _materialize_aot_runtime(runtime_archive)
         clashes = sorted(exported_symbols & runtime_symbols)
         if clashes:
             raise ValueError(f"export_to_c: exported symbols collide with the backend AOT runtime: {clashes}")
@@ -780,9 +929,13 @@ class _AOTCompiledFunction:
             metadata,
             backend_cls,
             self._arch,
+            runtime_ir=runtime_ir,
         )
-        data = _embed_aot_runtime(data, runtime_object)
-        exported = set(_defined_global_symbols(data))
+        if runtime_ir is None:
+            data = _embed_aot_runtime(data, runtime_object)
+            exported = set(_defined_global_symbols(data))
+        else:
+            exported = set(_coff_defined_global_symbols(data))
         if exported != exported_symbols:
             raise RuntimeError(
                 f"export_to_c: object exports {sorted(exported)}, expected exactly {sorted(exported_symbols)}"
