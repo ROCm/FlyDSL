@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-06T08:09:22Z",
+ "updated": "2026-11-06T08:23:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42186745834,
+   "pr": null,
+   "commit": "640056b5349c086595dbe6645cf1d64ff9e9314d",
+   "branch": "main",
+   "event": "push",
+   "title": "[Windows] AOT export support for Windows x64 (#1369)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42186745834",
+   "created_at": "2026-11-06T08:18:35Z",
+   "updated_at": "2026-11-06T08:19:55Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42176823970,
    "pr": 1111,
@@ -791,7 +806,7 @@
   },
   {
    "run_id": 41980469238,
-   "pr": 1369,
+   "pr": null,
    "commit": "6e1e4bdf98122251ec84704676bab0ac720c9680",
    "branch": "feat/windows-aot",
    "event": "pull_request",
@@ -837,7 +852,7 @@
   },
   {
    "run_id": 41980011706,
-   "pr": 1369,
+   "pr": null,
    "commit": "d49e26b2fafa03259bbb347e14ffb0f48398c57f",
    "branch": "feat/windows-aot",
    "event": "pull_request",
@@ -1766,52 +1781,6 @@
      "started_at": "2026-11-03T08:09:15Z",
      "completed_at": "2026-11-03T08:28:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41589785101/job/125773645935"
-    }
-   ]
-  },
-  {
-   "run_id": 41585963468,
-   "pr": null,
-   "commit": "3cc26273aac8c2737ec2a75675c6350f952cd1e2",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Restore gfx1250-strict chipset parse and SMEM mapping (#1362)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468",
-   "created_at": "2026-11-03T05:47:34Z",
-   "updated_at": "2026-11-03T08:04:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T06:23:16Z",
-     "completed_at": "2026-11-03T06:54:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807488",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T06:23:18Z",
-     "completed_at": "2026-11-03T06:48:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807537"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T06:23:30Z",
-     "completed_at": "2026-11-03T06:59:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41585963468/job/125762807565"
     }
    ]
   }
