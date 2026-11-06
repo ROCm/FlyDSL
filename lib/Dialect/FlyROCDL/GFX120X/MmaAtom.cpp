@@ -35,8 +35,6 @@ namespace mlir::fly_rocdl {
 //     16-bit (f16/bf16) accumulators.
 //===----------------------------------------------------------------------===//
 
-namespace {
-
 static LayoutAttr getThrValLayoutAB(MLIRContext *ctx, int32_t kStored) {
   auto getContext = [&]() { return ctx; };
   int32_t valsPerLane = kStored / 2;
@@ -113,8 +111,6 @@ static Type getSwmmacAccRawType(MLIRContext *ctx, Type elemTyAcc) {
     return VectorType::get({8}, IntegerType::get(ctx, 16));
   return nullptr;
 }
-
-} // namespace
 
 //===----------------------------------------------------------------------===//
 // MmaOpGFX120X_WMMA (dense)
@@ -343,9 +339,8 @@ LogicalResult MmaOpGFX120X_SWMMACType::verify(function_ref<InFlightDiagnostic()>
                                               int32_t m, int32_t n, int32_t k, Type elemTyA,
                                               Type elemTyB, Type elemTyAcc, bool signA, bool signB,
                                               bool clamp) {
-  if (m != 16 || n != 16) {
+  if (m != 16 || n != 16)
     return emitError() << "GFX120X SWMMAC requires M=N=16, got " << m << "x" << n;
-  }
 
   const bool isFp16 =
       elemTyA.isF16() && elemTyB.isF16() && (elemTyAcc.isF32() || elemTyAcc.isF16());
@@ -375,9 +370,8 @@ LogicalResult MmaOpGFX120X_SWMMACType::verify(function_ref<InFlightDiagnostic()>
     }
   }
 
-  if (isI8 && k != 32) {
+  if (isI8 && k != 32)
     return emitError() << "GFX120X SWMMAC IU8 requires K=32, got " << m << "x" << n << "x" << k;
-  }
   if (isI4 && k != 32 && k != 64) {
     return emitError() << "GFX120X SWMMAC IU4 requires K=32 or K=64, got " << m << "x" << n << "x"
                        << k;

@@ -89,7 +89,8 @@ def test_swmmac_fp_and_integer_construct():
             r"unsupported GFX120X SWMMAC configuration",
         ),
         (
-            "!fly_rocdl.gfx120x.swmmac<16x16x32, (f8E4M3FN, f8E4M3FN) -> f16, signA = false, signB = false, clamp = false>",
+            "!fly_rocdl.gfx120x.swmmac<16x16x32, (f8E4M3FN, f8E4M3FN) -> f16, "
+            "signA = false, signB = false, clamp = false>",
             r"unsupported GFX120X SWMMAC configuration",
         ),
         (

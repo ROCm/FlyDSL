@@ -176,9 +176,9 @@ struct PyMmaOpGFX120X_SWMMACType : PyConcreteType<PyMmaOpGFX120X_SWMMACType> {
         "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
         "Create a MmaOpGFX120X_SWMMACType with m, n, k dimensions and element types "
         "(RDNA4 gfx1200 / gfx1201 wave32 2:4 structured-sparse SWMMAC: 16x16x32 plus "
-        "IU4 16x16x64). Floating-point forms (fp16, bf16, every fp8(E4M3FN)/bf8(E5M2) "
-        "A/B combination) require sign_a/sign_b/clamp false. Integer IU8 (K=32) and "
-        "IU4 (K=32 or 64) accept sign_a/sign_b/clamp.");
+        "IU4 16x16x64). Floating-point forms (f16 -> f32/f16, bf16 -> f32/bf16, every "
+        "fp8(E4M3FN)/bf8(E5M2) A/B combination -> f32) require sign_a/sign_b/clamp "
+        "false. Integer IU8 (K=32) and IU4 (K=32 or 64) accept sign_a/sign_b/clamp.");
   }
 };
 

@@ -301,13 +301,20 @@ def FlyROCDL_MmaOpGFX120X_SWMMAC : FlyROCDL_MmaOp<"MmaOpGFX120X_SWMMAC", "gfx120
     "bool":$signB,
     "bool":$clamp
   );
-  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` "
+                       "`(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` "
+                       "`signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
 
   let builders = [
-    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+    TypeBuilderWithInferredContext<
+        (ins "int32_t":$m, "int32_t":$n, "int32_t":$k,
+             "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
     }]>,
-    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
+    TypeBuilderWithInferredContext<
+        (ins "int32_t":$m, "int32_t":$n, "int32_t":$k,
+             "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
+             "bool":$signA, "bool":$signB, "bool":$clamp), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
     }]>
   ];
