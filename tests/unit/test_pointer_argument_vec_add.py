@@ -52,6 +52,7 @@ def test_pointer_argument_vector_add():
     b_dev = torch.randn(size, device="cuda", dtype=torch.float32)
     c_dev = torch.empty_like(a_dev)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
 
     pointer_vec_add(
         flyc.from_c_void_p(fx.Float32, a_dev.data_ptr()),

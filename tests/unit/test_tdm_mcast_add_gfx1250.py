@@ -204,6 +204,7 @@ def _run_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y, n_warmup=0, n_iters
 
     launch_fn = _compile_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
 
     def launch():
         launch_fn(a_dev, b_dev, c_dev, stream=stream)

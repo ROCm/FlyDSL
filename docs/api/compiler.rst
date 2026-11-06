@@ -117,6 +117,20 @@ requires HIP and pthread. Exported objects are tied to the host ABI and GPU
 target used during compilation. They can be moved and linked independently,
 but must run on a compatible backend and GPU architecture.
 
+On Windows x64, ``export_to_c`` writes a COFF ``<file_name>.obj`` instead and
+needs no external tools: the adapter is compiled into the object itself. Link
+it with MSVC ``cl`` (C callers need ``/std:c11``) or ``clang-cl`` against the
+HIP SDK's ``amdhip64.lib``, the link flag the header records::
+
+   cl /std:c11 main.c vector_add.obj amdhip64.lib /link /LIBPATH:<rocm>\lib
+
+``<rocm>`` is the ROCm SDK root, for example ``rocm-sdk path --root`` for
+TheRock wheels. The program loads ``amdhip64_7.dll`` at run time. Like objects
+compiled with ``/Zl``, the exported object names no C runtime library and takes
+the one the program's other objects use; a DLL linked from exported objects
+alone needs one named, for example ``msvcrt.lib``. Exports into one directory
+take turns on an empty ``.flydsl_export.lock`` file that stays in that directory.
+
 Tensor arguments
 -----------------
 

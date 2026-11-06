@@ -84,7 +84,14 @@ def _file_hash(path: Path) -> str:
 def external_llvm_fingerprint(llvm_dir: Optional[str] = None) -> str:
     prefix = Path(llvm_dir).expanduser().resolve() if llvm_dir else _llvm_dir()
     mlir_opt = _tool(prefix, "mlir-opt")
-    return f"external-binary:{prefix}:{_file_hash(mlir_opt)}"
+    # A shared-library LLVM build keeps its code generator in these, not in mlir-opt.
+    libs = sorted(
+        p for p in (prefix / "lib").glob("lib*.so*") if p.name.startswith(("libLLVM", "libMLIR")) and not p.is_symlink()
+    )
+    h = hashlib.sha256(_file_hash(mlir_opt).encode())
+    for lib in libs:
+        h.update(f"{lib.name}:{_file_hash(lib)}".encode())
+    return f"external-binary:{prefix}:{h.hexdigest()}"
 
 
 def _single_top_level_op(module: ir.Module, op_name: str) -> ir.Operation:
