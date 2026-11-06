@@ -129,7 +129,7 @@ class BaseBackend(metaclass=ABCMeta):
         return f"{self.target}"
 
     def toolkit_fingerprint(self) -> str:
-        """Identify external toolchain files that code generation reads (e.g. a linker).
+        """Identify external toolchain files that code generation reads (e.g. device libraries).
 
         Namespaces JIT disk cache entries only; memory-only caching never computes it.
         """

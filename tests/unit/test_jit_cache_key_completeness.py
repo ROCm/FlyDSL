@@ -333,37 +333,33 @@ def test_memory_only_cache_never_fingerprints_the_toolchain(frontend, monkeypatc
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows resolves the toolkit from the installed ROCm SDK")
-def test_rocm_toolkit_files_namespace_disk_entries(monkeypatch, tmp_path):
+def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
     from flydsl.compiler.backends import rocm
 
     toolkit = tmp_path / "rocm"
-    lld = toolkit / "llvm" / "bin" / "ld.lld"
     ocml = toolkit / "amdgcn" / "bitcode" / "ocml.bc"
-    for path in (lld, ocml):
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b"v1")
+    ocml.parent.mkdir(parents=True)
+    ocml.write_bytes(b"v1")
     monkeypatch.setenv("ROCM_PATH", str(toolkit))
     monkeypatch.setenv("ARCH", "gfx942")
     seen = []
     monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: seen.append(args[-1]) or "")
 
     def key():
-        rocm._hash_toolkit.cache_clear()
+        rocm._hash_device_bitcode.cache_clear()
         jf._flydsl_key()
         return seen[-1]
 
     first = key()
     ocml.write_bytes(b"v2")
-    after_ocml = key()
-    lld.write_bytes(b"v2")
-    after_lld = key()
-    assert len({first, after_ocml, after_lld}) == 3
+    changed = key()
+    assert changed != first
 
     # Files are read once per toolkit root and process.
     ocml.write_bytes(b"v3")
     jf._flydsl_key()
-    assert seen[-1] == after_lld
-    rocm._hash_toolkit.cache_clear()
+    assert seen[-1] == changed
+    rocm._hash_device_bitcode.cache_clear()
 
 
 def test_waves_per_eu_hint_reaches_the_ir(frontend):

@@ -19,18 +19,15 @@ def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
 
 
 @lru_cache(maxsize=None)
-def _hash_toolkit(root: str) -> str:
-    """SHA-256 of the linker and the device bitcode under ``root``; read once per root and process."""
-    lld = Path(root, "llvm", "bin", "ld.lld.exe" if os.name == "nt" else "ld.lld")
+def _hash_device_bitcode(root: str) -> str:
+    """SHA-256 of the device bitcode under ``root``; read once per root and process.
+
+    ROCDL links ocml/ockl from here into kernels that call them, so it changes the ISA.
+    ld.lld is not hashed: it only links the assembled object into the code object.
+    """
     h = hashlib.sha256()
-    for path in [lld, *sorted(Path(root, "amdgcn", "bitcode").glob("*.bc"))]:
-        h.update(path.name.encode() + b"\0")
-        try:
-            with open(path, "rb") as f:
-                while chunk := f.read(1024 * 1024):
-                    h.update(chunk)
-        except OSError:
-            h.update(b"missing")
+    for path in sorted(Path(root, "amdgcn", "bitcode").glob("*.bc")):
+        h.update(path.name.encode() + b"\0" + path.read_bytes())
     return h.hexdigest()
 
 
@@ -211,7 +208,7 @@ class RocmBackend(BaseBackend):
             root = next(
                 (os.environ[v] for v in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME") if v in os.environ), "/opt/rocm"
             )
-        return f"rocm-toolkit:{_hash_toolkit(root)}"
+        return f"rocm-bitcode:{_hash_device_bitcode(root)}"
 
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":

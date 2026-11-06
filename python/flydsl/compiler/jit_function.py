@@ -265,7 +265,7 @@ def _flydsl_key_cached(
          flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Every native library in ``_mlir/_mlir_libs`` (build-time digests)
       3. flydsl.__version__
-      4. The backend's external toolkit (ROCm: ld.lld and the device bitcode)
+      4. The backend's external toolkit (ROCm: the device bitcode)
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
