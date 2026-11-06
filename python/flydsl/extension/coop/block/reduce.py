@@ -11,7 +11,7 @@ from ....expr.llvm import atomic_add
 from ....expr.numeric import Int32, Integer
 from ....expr.primitive import const_expr, range_constexpr
 from ....expr.struct import Struct
-from ....expr.typing import Array
+from ....expr.typing import Array, ReductionOp
 from .. import warp as _dispatched_warp
 from .._common import (
     _combine,
@@ -377,3 +377,15 @@ class BlockReduce(metaclass=_BlockReduceMeta):
         if cls.block_threads is None:
             raise TypeError(f"specialize {cls.__name__} first, e.g. {cls.__name__}[dtype, block_size]")
         return type(cls).__call__(cls, value, op, storage=storage, valid_items=valid_items, identity=identity)
+
+    @classmethod
+    def sum(
+        cls,
+        value,
+        *,
+        storage,
+        valid_items: int | Integer | None = None,
+        identity=None,
+    ):
+        """Shorthand for ``BlockReduce[...](value, fx.ReductionOp.ADD, ...)``."""
+        return cls(value, ReductionOp.ADD, storage=storage, valid_items=valid_items, identity=identity)

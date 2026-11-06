@@ -433,3 +433,53 @@ class BlockRadixSort(BlockPrimitive, metaclass=_BlockRadixSortMeta):
             radix_bits=radix_bits,
             blocked_to_striped=True,
         )
+
+    @classmethod
+    def sort_descending(
+        cls,
+        keys,
+        values=None,
+        *,
+        storage,
+        begin_bit: int = 0,
+        end_bit: int | None = None,
+        decomposer=None,
+        radix_bits: int | None = None,
+        blocked_to_striped: bool = False,
+    ):
+        """Shorthand for ``BlockRadixSort[...](keys, values, descending=True, ...)``."""
+        return cls(
+            keys,
+            values,
+            storage=storage,
+            descending=True,
+            begin_bit=begin_bit,
+            end_bit=end_bit,
+            decomposer=decomposer,
+            radix_bits=radix_bits,
+            blocked_to_striped=blocked_to_striped,
+        )
+
+    @classmethod
+    def sort_descending_blocked_to_striped(
+        cls,
+        keys,
+        values=None,
+        *,
+        storage,
+        begin_bit: int = 0,
+        end_bit: int | None = None,
+        decomposer=None,
+        radix_bits: int | None = None,
+    ):
+        """Shorthand for ``sort_blocked_to_striped(keys, values, descending=True, ...)``."""
+        return cls.sort_blocked_to_striped(
+            keys,
+            values,
+            storage=storage,
+            descending=True,
+            begin_bit=begin_bit,
+            end_bit=end_bit,
+            decomposer=decomposer,
+            radix_bits=radix_bits,
+        )

@@ -471,7 +471,9 @@ def run_reduction(kernel, count, *extra):
     values = extra[0] if extra else inputs(count)
     out = torch.zeros_like(values)
     agg = torch.zeros(count, dtype=torch.int32, device="cuda")
-    launch(values, out, agg, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, agg, stream=stream)
     torch.cuda.synchronize()
     return values.cpu(), out.cpu(), agg.cpu()
 
@@ -716,7 +718,9 @@ def run_numeric(kernel, block, columns):
         kernel(Out).launch(grid=(1, 1, 1), block=(block, 1, 1), stream=stream)
 
     out = torch.zeros(block * columns, dtype=torch.int64, device="cuda")
-    launch(out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(out, stream=stream)
     torch.cuda.synchronize()
     return out.cpu().reshape(block, columns)
 

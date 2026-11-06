@@ -37,7 +37,7 @@ try:
     _arch = str(get_rocm_arch())
 except RuntimeError as error:
     pytest.skip(f"ROCm architecture unavailable: {error}", allow_module_level=True)
-if _arch != "gfx1250":
+if not _arch.startswith("gfx1250"):
     pytest.skip(f"Cluster launch requires gfx1250, got {_arch}", allow_module_level=True)
 
 
@@ -180,6 +180,7 @@ def _run_vec_add_cluster(cluster_x, cluster_y, use_barrier=False):
         )
 
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
     launch(tA, b_dev, c_dev, size, stream=stream)
     torch.cuda.synchronize()

@@ -45,9 +45,23 @@ def _arch_from_rocminfo() -> Optional[str]:
     return None
 
 
+def _arch_from_torch() -> str:
+    """Device 0's arch from a ROCm torch; "" when there is no torch or no GPU."""
+    try:
+        import torch
+
+        return torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+    except Exception:
+        return ""
+
+
 @functools.lru_cache(maxsize=None)
 def _arch_from_hardware() -> str:
     """Cache hardware detection, including failures, to avoid repeated slow probes."""
+    if os.name == "nt":
+        # Windows ROCm ships no rocm_agent_enumerator, and guessing gfx942 there
+        # would compile for the wrong GPU.
+        return _arch_from_torch()
     arch = _arch_from_rocm_agent_enumerator() or _arch_from_rocminfo()
     if arch:
         return arch.split(":", 1)[0]
@@ -87,7 +101,12 @@ def get_rocm_device_count() -> int:
 
     The default query avoids duplicate ISAs but may ignore runtime visibility filters.
     Returns 0 when the tool is unavailable or no discrete GPU agents are reported.
+    Windows has no such tool: there HIP's ``hipGetDeviceCount`` answers.
     """
+    if os.name == "nt":
+        from .device_runtime.rocm import _hip_device_count
+
+        return _hip_device_count()
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator"],
@@ -149,6 +168,7 @@ SMEM_CAPACITY_MAP = {
     "gfx1151": 65536,
     "gfx1201": 65536,
     "gfx1250": 327680,
+    "gfx1250-strict": 327680,
 }
 
 

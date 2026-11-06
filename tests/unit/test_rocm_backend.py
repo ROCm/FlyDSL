@@ -90,3 +90,21 @@ def test_rocm_lower_wpe_rejects_invalid_values(value, error):
         module = ir.Module.create()
         with pytest.raises(error, match="waves_per_eu"):
             backend.lower_compile_hints(module, compile_hints={"waves_per_eu": value})
+
+
+@pytest.mark.parametrize(
+    ("arch", "expect_chipset", "expect_chip"),
+    [
+        ("gfx1250", "gfx1250", "gfx1250"),
+        ("gfx1250-strict", "gfx1250", "gfx1250-strict"),
+    ],
+)
+def test_pipeline_strips_chipset_suffix_but_keeps_llvm_chip(arch, expect_chipset, expect_chip):
+    """convert-gpu-to-rocdl needs bare gfxNNNN; LLVM attach-target keeps full arch."""
+    backend = RocmBackend(RocmBackend.make_target(arch))
+    fragments = backend.pipeline_fragments(compile_hints={})
+    joined = ",".join(fragments)
+    assert f"convert-gpu-to-rocdl{{chipset={expect_chipset} " in joined
+    assert f"chip={expect_chip}" in joined
+    # Suffix must not leak into the MLIR chipset option.
+    assert "chipset=gfx1250-strict" not in joined

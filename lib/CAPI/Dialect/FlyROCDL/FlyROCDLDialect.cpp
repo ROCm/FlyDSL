@@ -8,6 +8,8 @@
 #include "flydsl/Dialect/FlyROCDL/Transforms/Passes.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
+#include "mlir/CAPI/Support.h"
+#include "mlir/Target/LLVM/ROCDL/Utils.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
 
@@ -27,3 +29,5 @@ void flydsl_register_rocdl_passes(void) {
   mlir::fly_rocdl::registerFlyROCDLPasses();
   mlirRegisterFlyKtraceToROCDLConversionPass();
 }
+
+MlirStringRef mlirFlyROCDLGetROCMPath(void) { return wrap(mlir::ROCDL::getROCMPath()); }

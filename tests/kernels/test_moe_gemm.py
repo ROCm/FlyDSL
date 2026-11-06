@@ -683,6 +683,7 @@ def _run_mxfp_moe_e2e(
         # A-scale (and a_quant) are unused, so skip the moe sort (also undefined at BM<32).
         x_scale_sort = x_scale.view(torch.uint8).contiguous()
     else:
+        pytest.importorskip("triton")  # moe_mxfp4_sort is a triton kernel
         x_scale_sort = (
             gcu.moe_mxfp4_sort(
                 x_scale[:tokens].view(tokens, 1, -1),

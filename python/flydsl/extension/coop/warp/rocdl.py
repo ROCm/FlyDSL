@@ -27,8 +27,13 @@ from .reduce import warp_reduce as _portable_warp_reduce
 
 __all__ = [
     "warp_reduce",
+    "warp_sum",
+    "warp_max",
+    "warp_min",
     "warp_inclusive_scan",
     "warp_exclusive_scan",
+    "warp_inclusive_sum",
+    "warp_exclusive_sum",
     "warp_scan",
     "warp_scan_with_aggregate",
 ]
@@ -251,6 +256,21 @@ def warp_reduce(
     return _butterfly_reduce(value, op, width)
 
 
+def warp_sum(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.ADD``."""
+    return warp_reduce(value, ReductionOp.ADD, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_max(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.MAX``."""
+    return warp_reduce(value, ReductionOp.MAX, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_min(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
+    """``warp_reduce`` with ``ReductionOp.MIN``."""
+    return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
 # -- scan -------------------------------------------------------------------
 
 
@@ -406,6 +426,20 @@ def warp_exclusive_scan(
             _dtype=_dtype,
         )
     return _seed(_shift_up(_inclusive_scan(value, op, width), op, width), op, init)
+
+
+def warp_inclusive_sum(
+    value, *, width: int | None = None, init=None, valid_items: int | Integer | None = None, _dtype=None
+):
+    """``warp_inclusive_scan`` with ``ReductionOp.ADD``."""
+    return warp_inclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_exclusive_sum(
+    value, *, width: int | None = None, init=None, valid_items: int | Integer | None = None, _dtype=None
+):
+    """``warp_exclusive_scan`` with ``ReductionOp.ADD``."""
+    return warp_exclusive_scan(value, ReductionOp.ADD, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
 
 
 def warp_scan(
