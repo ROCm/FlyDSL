@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-06T08:57:28Z",
+ "updated": "2026-11-06T09:05:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42192214528,
+   "pr": null,
+   "commit": "226cde8d2a84bc2687c8d69587607fddf0c16f2f",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Key disk cache entries by the ROCm device bitcode and external \u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42192214528",
+   "created_at": "2026-11-06T09:04:07Z",
+   "updated_at": "2026-11-06T09:04:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42191416781,
+   "pr": 1374,
+   "commit": "355e7c5950a38c973b0acd30a45c71f36f8a43bc",
+   "branch": "rdna4-mxfp4-upstream",
+   "event": "pull_request",
+   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42191416781",
+   "created_at": "2026-11-06T08:57:37Z",
+   "updated_at": "2026-11-06T08:57:37Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 42190974208,
    "pr": 1381,
@@ -20,7 +50,7 @@
   },
   {
    "run_id": 42190209931,
-   "pr": 1381,
+   "pr": null,
    "commit": "328c170b0fcbaf5b917e5dbecb0ea11afd7d4904",
    "branch": "fix/jit-key-rocm-toolkit",
    "event": "pull_request",
@@ -70,11 +100,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Windows] AOT export support for Windows x64 (#1369)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42186745834",
    "created_at": "2026-11-06T08:18:35Z",
-   "updated_at": "2026-11-06T08:19:55Z",
+   "updated_at": "2026-11-06T09:04:09Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -126,7 +156,7 @@
   },
   {
    "run_id": 42169022044,
-   "pr": 1374,
+   "pr": null,
    "commit": "5f78a17bc342fb6abb93cd3fe50c1b349aad7650",
    "branch": "rdna4-mxfp4-upstream",
    "event": "pull_request",
@@ -1658,98 +1688,6 @@
      "started_at": "2026-11-03T18:08:27Z",
      "completed_at": "2026-11-03T18:16:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/41684387101/job/126096274491"
-    }
-   ]
-  },
-  {
-   "run_id": 41618409851,
-   "pr": 1350,
-   "commit": "d7c163a59ef46b4005472bb3da7efe6c1762b436",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851",
-   "created_at": "2026-11-03T10:20:14Z",
-   "updated_at": "2026-11-03T12:13:25Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T10:49:35Z",
-     "completed_at": "2026-11-03T11:12:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267713"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T10:49:42Z",
-     "completed_at": "2026-11-03T11:22:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267737",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-03T11:15:00Z",
-     "completed_at": "2026-11-03T12:08:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41618409851/job/125871267767"
-    }
-   ]
-  },
-  {
-   "run_id": 41600871411,
-   "pr": 1352,
-   "commit": "fe8b27e6144646d8d5ab5dff52c0f0e2340a9332",
-   "branch": "fix-1323-wmmascale-fp4-fp6-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP4/FP6 A/B register layout",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411",
-   "created_at": "2026-11-03T08:06:47Z",
-   "updated_at": "2026-11-05T07:26:17Z",
-   "actor": "edjson",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T06:05:41Z",
-     "completed_at": "2026-11-05T07:26:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411/job/127081353026"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T06:25:36Z",
-     "completed_at": "2026-11-05T07:08:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411/job/127081353148"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T06:05:20Z",
-     "completed_at": "2026-11-05T06:29:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/41600871411/job/127081353156",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
