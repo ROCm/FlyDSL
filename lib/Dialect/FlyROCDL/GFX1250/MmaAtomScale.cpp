@@ -14,7 +14,6 @@
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
-
 using namespace mlir;
 using namespace mlir::fly;
 
@@ -45,8 +44,7 @@ struct KChunkRule {
 
 constexpr int kNoKChunkRule = -1;
 
-template <size_t N>
-constexpr int lookupChunkK(const KChunkRule (&rules)[N], int elemBits) {
+template <size_t N> constexpr int lookupChunkK(const KChunkRule (&rules)[N], int elemBits) {
   for (const KChunkRule &rule : rules)
     if (rule.elemBits == elemBits)
       return rule.chunkK;
@@ -153,20 +151,20 @@ static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t rows, int32_t k, Type 
   auto getContext = [&]() { return ctx; };
   const int chunk = lookupChunkK(kScaledKChunks, elemTy.getIntOrFloatBitWidth());
   assert(chunk != kNoKChunkRule && "no scaled K hand-over rule for this element width");
-  const int kStride = rows;                               // step K by one
-  const int chunkStride = chunk * kStride;                // skip one chunk of K
+  const int kStride = rows;                                   // step K by one
+  const int chunkStride = chunk * kStride;                    // skip one chunk of K
   const int roundStride = gfx1250::kLaneHalves * chunkStride; // skip both halves' chunks
   const int chunksPerLane = k / (gfx1250::kLaneHalves * chunk);
-  const int rowBlocks = rows / gfx1250::kRowsPerBlock;    // 1, or 2 for the 32-row A
+  const int rowBlocks = rows / gfx1250::kRowsPerBlock; // 1, or 2 for the 32-row A
   if (rowBlocks == 1) {
     return FxLayout(
         FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves), FxVal(chunk, chunksPerLane)),
         FxStride(FxThr(1, chunkStride), FxVal(kStride, roundStride)));
   }
-  return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
-                          FxVal(chunk, chunksPerLane, rowBlocks)),
-                  FxStride(FxThr(1, chunkStride),
-                           FxVal(kStride, roundStride, gfx1250::kRowsPerBlock)));
+  return FxLayout(
+      FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+              FxVal(chunk, chunksPerLane, rowBlocks)),
+      FxStride(FxThr(1, chunkStride), FxVal(kStride, roundStride, gfx1250::kRowsPerBlock)));
 }
 
 // C/D accumulator for the block-scaled form; always f32 (see verify()).
@@ -178,17 +176,16 @@ static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t rows, int32_t k, Type 
 // Reference (M, N) space is column-major with stride (1, rows).
 static Attribute scaledLayoutC(MLIRContext *ctx, int32_t rows) {
   auto getContext = [&]() { return ctx; };
-  const int nStride = rows;                               // step N by one
+  const int nStride = rows; // step N by one
   const int rowBlocks = rows / gfx1250::kRowsPerBlock;
   if (rowBlocks == 1) {
-    return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
-                            FxVal(gfx1250::kAccChunkM)),
-                    FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1)));
+    return FxLayout(
+        FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves), FxVal(gfx1250::kAccChunkM)),
+        FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1)));
   }
   return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
                           FxVal(gfx1250::kAccChunkM, rowBlocks)),
-                  FxStride(FxThr(nStride, gfx1250::kAccChunkM),
-                           FxVal(1, gfx1250::kRowsPerBlock)));
+                  FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1, gfx1250::kRowsPerBlock)));
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutA() const {
