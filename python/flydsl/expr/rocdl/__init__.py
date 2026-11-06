@@ -808,12 +808,11 @@ def cvt_f32_bf8(res, src_a, byte_sel, **kw):
 
 @dsl_loc_tracing
 def cvt_pk_f32_fp8(res, src, word_sel, **kw):
-    """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8 / UE4M3 bytes) into ``vector<2xf32>``.
+    """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
 
     ``word_sel=False`` decodes the low half (fp8 elems 0,1); ``word_sel=True`` the
-    high half (fp8 elems 2,3) — used both for 4x E4M3 data unpack and for 2-at-a-time
-    NVFP4 ``UE4M3`` micro-block scale unpack. A full v4f32 unpack requires both halves
-    stitched via a shuffle.
+    high half (fp8 elems 2,3). A full v4f32 unpack requires both halves stitched
+    via a shuffle.
 
     .. note::
        Works today on ``gfx942``/``gfx950`` (``HasCvtFP8SDWASrcSel``). On
@@ -853,13 +852,12 @@ def cvt_pk_f32_fp8(res, src, word_sel, **kw):
 #
 # @dsl_loc_tracing
 # def fp8x4_to_bf16x2_pair(src, **kw):
-#     """Losslessly unpack one i32 (4 packed E4M3 / UE4M3 bytes) into two bf16x2 i32 words.
+#     """Losslessly unpack one i32 (4 packed fp8 bytes) into two bf16x2 i32 words.
 #
 #     Unpacks both halves via ``cvt_pk_f32_fp8`` and packs the upper 16 bits of each
-#     f32 pair via ``perm_b32(..., 0x07060302)`` (used for 4x E4M3 weights/activations
-#     and NVFP4 ``UE4M3`` block scales). Because E4M3 has 3 mantissa bits, every
-#     unpacked IEEE f32 value has 20 trailing zero mantissa bits, so extracting the
-#     upper 16 bits is bit-exact with RNE bf16 conversion.
+#     f32 pair via ``perm_b32(..., 0x07060302)``. Because E4M3 has 3 mantissa bits,
+#     every unpacked IEEE f32 value has 20 trailing zero mantissa bits, so extracting
+#     the upper 16 bits is bit-exact with RNE bf16 conversion.
 #     """
 #     from ..._mlir import ir as _ir
 #     from ..._mlir.dialects import llvm as _llvm
