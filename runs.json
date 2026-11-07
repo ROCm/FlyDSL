@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-07T03:23:37Z",
+ "updated": "2026-11-07T03:55:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,20 +29,23 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-07T02:01:55Z",
+     "started_at": "2026-11-07T03:53:45Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903259"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T02:53:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903372"
+     "completed_at": "2026-11-07T03:26:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903372",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -72,10 +75,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-07T02:55:21Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T03:32:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195/job/128264193812"
     },
     {
@@ -430,11 +433,11 @@
    "branch": "pr2-gfx120x-swmmac",
    "event": "pull_request",
    "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901",
    "created_at": "2026-11-06T17:30:33Z",
-   "updated_at": "2026-11-07T02:53:16Z",
+   "updated_at": "2026-11-07T03:54:09Z",
    "actor": "dimitri91209",
    "jobs": [
     {
@@ -452,10 +455,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T02:53:16Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T03:23:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276765"
     },
     {
