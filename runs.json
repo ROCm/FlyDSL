@@ -1,15 +1,60 @@
 {
  "schema": 1,
- "updated": "2026-11-07T12:29:27Z",
+ "updated": "2026-11-07T14:03:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 42371970732,
+   "run_id": 42376187205,
+   "pr": 1384,
+   "commit": "ca0c98b892f9221eef3b4b35099a60ce2f5cd2bd",
+   "branch": "ext-coop-ballot-rdna-argmax",
+   "event": "pull_request",
+   "title": "[Feature][DSL] Add warp vote collectives, RDNA DPP, and warp argmax/argmin",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42376187205",
+   "created_at": "2026-11-07T13:16:18Z",
+   "updated_at": "2026-11-07T13:16:18Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 42374889390,
+   "pr": 1383,
+   "commit": "8e0d4f1123cb8814acc94b8e25e98896fe18780d",
+   "branch": "ext-quant-codecs",
+   "event": "pull_request",
+   "title": "[Feature][DSL] Add quantization codecs extension (fx.quant)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42374889390",
+   "created_at": "2026-11-07T12:59:39Z",
+   "updated_at": "2026-11-07T12:59:39Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 42374394872,
    "pr": 1385,
+   "commit": "3469de7cfb7362fed34671df285947ae33580167",
+   "branch": "ext-hadamard-fwht",
+   "event": "pull_request",
+   "title": "[Feature][DSL] Add Fast Walsh-Hadamard Transform (fx.hadamard)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42374394872",
+   "created_at": "2026-11-07T12:52:33Z",
+   "updated_at": "2026-11-07T12:52:33Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 42371970732,
+   "pr": null,
    "commit": "249306149110d9a6674887e68da7e613986ad40b",
    "branch": "ext-hadamard-fwht",
    "event": "pull_request",
-   "title": "[Ext][Hadamard] Add warp- and block-scope Fast Walsh-Hadamard Transform (fx.hadamard)",
+   "title": "[Feature][DSL] Add Fast Walsh-Hadamard Transform (fx.hadamard)",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42371970732",
@@ -20,11 +65,11 @@
   },
   {
    "run_id": 42370462792,
-   "pr": 1384,
+   "pr": null,
    "commit": "1e128ccbbca202f871977f4f52104e2e898f72ee",
    "branch": "ext-coop-ballot-rdna-argmax",
    "event": "pull_request",
-   "title": "[Ext][Coop] Add wave-portable vote/ballot collectives, RDNA wave32 VALU overrides, and warp argmax/argmin",
+   "title": "[Feature][DSL] Add warp vote collectives, RDNA DPP, and warp argmax/argmin",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42370462792",
@@ -35,11 +80,11 @@
   },
   {
    "run_id": 42368590873,
-   "pr": 1383,
+   "pr": null,
    "commit": "89c269012f9b027a8bb55ec7ce9ca6f8d80473ff",
    "branch": "ext-quant-codecs",
    "event": "pull_request",
-   "title": "[Ext][Quant] Add micro-scaled and sub-byte quantization codecs (fx.quant)",
+   "title": "[Feature][DSL] Add quantization codecs extension (fx.quant)",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42368590873",
@@ -1223,82 +1268,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592328"
     }
    ]
-  },
-  {
-   "run_id": 42137797835,
-   "pr": 1378,
-   "commit": "0f700fab1cbbaadd0105e4b51574787b219de6f4",
-   "branch": "fix/test-stream-waits",
-   "event": "pull_request",
-   "title": "[Windows][Tests] Fix missing stream waits in multi-stream tests",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835",
-   "created_at": "2026-11-06T00:34:22Z",
-   "updated_at": "2026-11-06T02:20:20Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T00:50:57Z",
-     "completed_at": "2026-11-06T01:24:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735199",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T00:50:49Z",
-     "completed_at": "2026-11-06T01:06:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735249"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T00:51:34Z",
-     "completed_at": "2026-11-06T01:49:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42137797835/job/127636735301"
-    }
-   ]
-  },
-  {
-   "run_id": 42104489721,
-   "pr": null,
-   "commit": "c66c47b71c486850be5f59574b27cc01a0dfe699",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42104489721",
-   "created_at": "2026-11-05T20:33:30Z",
-   "updated_at": "2026-11-05T20:33:30Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42104401095,
-   "pr": null,
-   "commit": "45e10467b2d617c52acf215ecbe8a9464d55ffdf",
-   "branch": "pr1-rocdl-fp8-bf8-cvt",
-   "event": "pull_request",
-   "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42104401095",
-   "created_at": "2026-11-05T20:32:56Z",
-   "updated_at": "2026-11-05T20:32:56Z",
-   "actor": "dimitri91209",
-   "jobs": []
   }
  ]
 }
