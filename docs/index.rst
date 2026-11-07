@@ -38,6 +38,7 @@ to GPU/ROCDL.
 
    .. grid-item-card:: Extension
 
+      * :doc:`Cooperative algorithms <extension/coop>`
       * :doc:`Random number generation <extension/rand>`
 
    .. grid-item-card:: Guides

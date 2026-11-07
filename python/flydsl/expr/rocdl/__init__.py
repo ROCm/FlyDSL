@@ -1215,6 +1215,14 @@ def ds_bpermute(res, index, src, **kw):
 
 
 @dsl_loc_tracing
+def ds_swizzle(res, src, offset, **kw):
+    """ROCDL ``ds_swizzle``: intra-wave 32-lane crossbar shuffle via ``ds_swizzle_b32``."""
+    from ..._mlir.dialects.rocdl import ds_swizzle as _op
+
+    return _op(res=res, src=_to_ir(src), offset=_to_ir(offset), **kw)
+
+
+@dsl_loc_tracing
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
@@ -1236,6 +1244,22 @@ def ballot(res, pred, **kw):
 
 
 @dsl_loc_tracing
+def mbcnt_lo(res, in0, in1, **kw):
+    """ROCDL ``mbcnt_lo``: count set bits in ``in0`` below ``lane_id`` (lanes 0..31), plus ``in1``."""
+    from ..._mlir.dialects.rocdl import mbcnt_lo as _op
+
+    return _op(res=res, in0=_to_ir(in0), in1=_to_ir(in1), **kw)
+
+
+@dsl_loc_tracing
+def mbcnt_hi(res, in0, in1, **kw):
+    """ROCDL ``mbcnt_hi``: count set bits in ``in0`` below ``lane_id - 32`` (lanes 32..63), plus ``in1``."""
+    from ..._mlir.dialects.rocdl import mbcnt_hi as _op
+
+    return _op(res=res, in0=_to_ir(in0), in1=_to_ir(in1), **kw)
+
+
+@dsl_loc_tracing
 def readlane(res, src, lane, **kw):
     """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
     return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)
@@ -1254,5 +1278,22 @@ def update_dpp(res, old, src, dpp_ctrl, row_mask=0xF, bank_mask=0xF, bound_ctrl=
         row_mask=row_mask,
         bank_mask=bank_mask,
         bound_ctrl=bound_ctrl,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def permlanex16(res, old, src0, src1, src2, fi=False, bound_control=False, **kw):
+    """ROCDL ``permlanex16``: cross-row 16-lane permute (``v_permlanex16_b32``)."""
+    from ..._mlir.dialects.rocdl import permlanex16 as _op
+
+    return _op(
+        res=res,
+        old=_to_ir(old),
+        src0=_to_ir(src0),
+        src1=_to_ir(src1),
+        src2=_to_ir(src2),
+        fi=fi,
+        bound_control=bound_control,
         **kw,
     )

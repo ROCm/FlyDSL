@@ -4,9 +4,12 @@
 """Warp-wide reduction — the portable form."""
 
 from ....compiler import jit
+from ....expr.arith import max as _max
+from ....expr.arith import min as _min
 from ....expr.gpu import lane_id, shuffle_down
-from ....expr.numeric import Int32, Integer
+from ....expr.numeric import Boolean, Float32, Int32, Integer, Numeric, Uint32
 from ....expr.primitive import range_constexpr
+from ....expr.struct import Empty
 from ....expr.typing import ReductionOp
 from .._common import (
     _combine,
@@ -15,7 +18,7 @@ from .._common import (
     _thread_partial,
     _validate_valid_items,
 )
-from .._values import _as_items, _is_items
+from .._values import _as_items, _is_items, _normalize_value
 from ._spec import WarpPrimitive
 from .scan import _hillis_steele
 
@@ -25,6 +28,13 @@ __all__ = [
     "warp_sum",
     "warp_max",
     "warp_min",
+    "warp_argmax",
+    "warp_argmin",
+    # Disabled until ROCm/FlyDSL#1376 (llvm/llvm-project#231721) lands; see below.
+    # "warp_reduce_e4m3x4",
+    # "warp_reduce_e5m2x4",
+    # "warp_argmax_e4m3x4",
+    # "warp_argmin_e4m3x4",
     "warp_head_segmented_reduce",
     "warp_tail_segmented_reduce",
     "warp_head_segmented_sum",
@@ -66,6 +76,121 @@ def _segmented_reduce(value, tail_flag, op, width, dtype=None):
             value = _combine(op, value, other)
         ended = take.select(other_end, ended)
     return value
+
+
+def _argext_promote(item: Numeric) -> Numeric:
+    """Promote narrow scalar numerics losslessly to 32-bit for VALU DPP and shuffle folds."""
+    dtype = item.dtype
+    if dtype is Boolean:
+        return item.select(Int32(1), Int32(0))
+    if dtype.width < 32:
+        if dtype.is_float:
+            return Float32(item)
+        return Int32(item) if dtype.signed else Uint32(item)
+    return item
+
+
+def _argext_unpromote(value: Numeric, dtype: type[Numeric]) -> Numeric:
+    if dtype is Boolean:
+        return value != Int32(0)
+    if value.dtype is dtype:
+        return value
+    return dtype(value)
+
+
+def _combine_argext(
+    is_max: bool,
+    a_val: Numeric,
+    a_idx: Int32,
+    b_val: Numeric,
+    b_idx: Int32,
+) -> tuple[Numeric, Int32]:
+    """Combine two ``(value, index)`` candidates with NaN propagation and lowest-index tie-break."""
+    if a_val.dtype.is_float:
+        a_nan = a_val != a_val
+        b_nan = b_val != b_val
+        b_better = (b_val > a_val) if is_max else (b_val < a_val)
+        take_b = (b_nan & (~a_nan | (b_idx < a_idx))) | (~a_nan & (b_better | ((b_val == a_val) & (b_idx < a_idx))))
+    else:
+        b_better = (b_val > a_val) if is_max else (b_val < a_val)
+        take_b = b_better | ((b_val == a_val) & (b_idx < a_idx))
+    best_val = _max(a_val, b_val) if is_max else _min(a_val, b_val)
+    best_idx = take_b.select(b_idx, a_idx)
+    return best_val, best_idx
+
+
+def _argext_local_fold(
+    value: object,
+    is_max: bool,
+    width: int,
+    dtype: type[Numeric] | None = None,
+) -> tuple[Numeric, Int32, type[Numeric], int]:
+    """Validate and fold one lane's items into ``(promoted_val, local_blocked_idx, orig_dtype, count)``."""
+    if dtype is not None and not issubclass(dtype, Numeric):
+        raise TypeError("warp_argmax and warp_argmin require scalar Numeric elements")
+    value = _normalize_value(value)
+    items = _as_items(value, dtype)
+    if not items or not isinstance(items[0], Numeric):
+        raise TypeError("warp_argmax and warp_argmin require scalar Numeric elements")
+    orig_dtype = items[0].dtype if dtype is None else dtype
+    count = len(items)
+    lane = lane_id() % width
+    base_idx = lane if count == 1 else lane * count
+    best_val = _argext_promote(orig_dtype(items[0]) if items[0].dtype is not orig_dtype else items[0])
+    best_idx = Int32(base_idx)
+    for j in range_constexpr(1, count):
+        cand = orig_dtype(items[j]) if items[j].dtype is not orig_dtype else items[j]
+        best_val, best_idx = _combine_argext(is_max, best_val, best_idx, _argext_promote(cand), Int32(base_idx + j))
+    return best_val, best_idx, orig_dtype, count
+
+
+@jit
+def _argext_valid(
+    value: object,
+    is_max: bool,
+    width: int,
+    valid_items: int | Integer,
+    dtype: type[Numeric] | None = None,
+) -> tuple[Numeric, Int32]:
+    best_val, best_idx, orig_dtype, _ = _argext_local_fold(value, is_max, width, dtype)
+    lane = lane_id() % width
+    for stage in range_constexpr(width.bit_length() - 1):
+        offset = 1 << stage
+        other_val = _shuffle_value(best_val, offset, width, mode="up")
+        other_idx = _shuffle_value(best_idx, offset, width, mode="up")
+        if (lane < valid_items) & (lane >= offset):
+            best_val, best_idx = _combine_argext(is_max, other_val, other_idx, best_val, best_idx)
+    count = Int32(valid_items)
+    last = (count > 0).select(count - 1, Int32(0))
+    base = (lane_id() // width) * width
+    out_val = _shuffle_value(best_val, base + last, width)
+    out_idx = _shuffle_value(best_idx, base + last, width)
+    return _argext_unpromote(out_val, orig_dtype), out_idx
+
+
+def _portable_argext(
+    value: object,
+    is_max: bool,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype: type[Numeric] | None = None,
+) -> tuple[Numeric, Int32]:
+    what = "warp_argmax width" if is_max else "warp_argmin width"
+    width = _resolve_warp_width(width, what)
+    _validate_valid_items(valid_items, width)
+    if valid_items is not None:
+        if _is_items(value, _dtype):
+            raise TypeError("valid_items is supported only for a single item per lane")
+        return _argext_valid(value, is_max, width, valid_items, _dtype)
+    best_val, best_idx, orig_dtype, _ = _argext_local_fold(value, is_max, width, _dtype)
+    offset = 1
+    while offset < width:
+        other_val = _shuffle_value(best_val, offset, width, mode="xor")
+        other_idx = _shuffle_value(best_idx, offset, width, mode="xor")
+        best_val, best_idx = _combine_argext(is_max, best_val, best_idx, other_val, other_idx)
+        offset <<= 1
+    return _argext_unpromote(best_val, orig_dtype), best_idx
 
 
 def warp_reduce(
@@ -181,6 +306,149 @@ def warp_min(
 ):
     """Shorthand for ``warp_reduce(value, fx.ReductionOp.MIN, ...)``."""
     return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_argmax(
+    value: object,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype: type[Numeric] | None = None,
+) -> tuple[Numeric, Int32]:
+    """Return ``(max_value, winning_index)`` across a logical warp with lowest-index tie-breaking.
+
+    All lanes of each logical warp must participate. Multi-item per-lane inputs use
+    blocked linear group indices ``(lane_id() % width) * items_per_lane + item``.
+    ``NaN`` inputs propagate matching ``warp_max`` and tie-break to the lowest ``NaN``
+    index; equal values (including ``-0.0`` and ``+0.0``) select the lowest index.
+
+    Args:
+        value: Scalar ``Numeric`` or nonempty per-lane item range of scalar ``Numeric`` values.
+        width: Compile-time power-of-two logical width, at most the native warp width.
+            ``None`` uses the native width.
+        valid_items: Uniform number of leading contributing lanes in ``[0, width]`` for
+            single-item inputs, or ``None`` for all lanes. Empty groups have unspecified results.
+
+    Returns:
+        Tuple ``(max_value, winning_index)`` in every lane of the logical warp, where
+        ``max_value`` has the input element type and ``winning_index`` is ``Int32``.
+    """
+    return _portable_argext(value, True, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+def warp_argmin(
+    value: object,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+    _dtype: type[Numeric] | None = None,
+) -> tuple[Numeric, Int32]:
+    """Return ``(min_value, winning_index)`` across a logical warp with lowest-index tie-breaking.
+
+    All lanes of each logical warp must participate. Multi-item per-lane inputs use
+    blocked linear group indices ``(lane_id() % width) * items_per_lane + item``.
+    ``NaN`` inputs propagate matching ``warp_min`` and tie-break to the lowest ``NaN``
+    index; equal values (including ``-0.0`` and ``+0.0``) select the lowest index.
+
+    Args:
+        value: Scalar ``Numeric`` or nonempty per-lane item range of scalar ``Numeric`` values.
+        width: Compile-time power-of-two logical width, at most the native warp width.
+            ``None`` uses the native width.
+        valid_items: Uniform number of leading contributing lanes in ``[0, width]`` for
+            single-item inputs, or ``None`` for all lanes. Empty groups have unspecified results.
+
+    Returns:
+        Tuple ``(min_value, winning_index)`` in every lane of the logical warp, where
+        ``min_value`` has the input element type and ``winning_index`` is ``Int32``.
+    """
+    return _portable_argext(value, False, width=width, valid_items=valid_items, _dtype=_dtype)
+
+
+# NOTE: Packed OCP FP8 warp reductions and argmax/argmin (``warp_reduce_e4m3x4``,
+# ``warp_reduce_e5m2x4``, ``warp_argmax_e4m3x4``, ``warp_argmin_e4m3x4``) are
+# intentionally commented out until upstream LLVM PR
+# https://github.com/llvm/llvm-project/pull/231721 lands and FlyDSL's pinned LLVM
+# commit includes it (tracked in https://github.com/ROCm/FlyDSL/issues/1376).
+# Their ROCDL counterparts in ``coop/warp/rocdl.py`` unpack 4 FP8/BF8 bytes per
+# lane via 2-instruction ``cvt_pk_f32_{fp8,bf8}``, which in unmodified LLVM
+# (``AMDGPU/VOP1Instructions.td``) maps ``HasCvtFP8ByteSel`` only to ``_fake16``
+# pseudos and fails MC assembly under ``+real-true16`` (gfx117x/gfx120x/gfx125x).
+#
+# def _unpack_ocp_e4m3_byte_f32(byte_val: Uint32) -> Float32:
+#     sign = (byte_val & Uint32(0x80)) << Uint32(24)
+#     mag = byte_val & Uint32(0x7F)
+#     exp = (mag >> Uint32(3)) & Uint32(0x0F)
+#     mant = mag & Uint32(0x07)
+#     is_nan = mag == Uint32(0x7F)
+#     is_sub = exp == Uint32(0)
+#     norm_bits = sign | ((exp + Uint32(120)) << Uint32(23)) | (mant << Uint32(20))
+#     sub_f32 = (Float32(mant) * Float32(1.0 / 512.0)).bitcast(Uint32) | sign
+#     nan_bits = sign | Uint32(0x7FC00000)
+#     return is_nan.select(nan_bits, is_sub.select(sub_f32, norm_bits)).bitcast(Float32)
+#
+#
+# def _unpack_ocp_e5m2_byte_f32(byte_val: Uint32) -> Float32:
+#     sign = (byte_val & Uint32(0x80)) << Uint32(24)
+#     mag = byte_val & Uint32(0x7F)
+#     exp = (mag >> Uint32(2)) & Uint32(0x1F)
+#     mant = mag & Uint32(0x03)
+#     is_inf = mag == Uint32(0x7C)
+#     is_nan = mag > Uint32(0x7C)
+#     is_sub = exp == Uint32(0)
+#     norm_bits = sign | ((exp + Uint32(112)) << Uint32(23)) | (mant << Uint32(21))
+#     sub_f32 = (Float32(mant) * Float32(1.0 / 65536.0)).bitcast(Uint32) | sign
+#     inf_bits = sign | Uint32(0x7F800000)
+#     nan_bits = sign | Uint32(0x7FC00000)
+#     return is_nan.select(nan_bits, is_inf.select(inf_bits, is_sub.select(sub_f32, norm_bits))).bitcast(Float32)
+#
+#
+# def _unpack_ocp_fp8x4_f32(packed: Int32 | Uint32, *, is_bf8: bool) -> tuple[Float32, Float32, Float32, Float32]:
+#     word = packed if isinstance(packed, Uint32) else Uint32(packed)
+#     decode = _unpack_ocp_e5m2_byte_f32 if is_bf8 else _unpack_ocp_e4m3_byte_f32
+#     return (
+#         decode(word & Uint32(0xFF)),
+#         decode((word >> Uint32(8)) & Uint32(0xFF)),
+#         decode((word >> Uint32(16)) & Uint32(0xFF)),
+#         decode((word >> Uint32(24)) & Uint32(0xFF)),
+#     )
+#
+#
+# def warp_reduce_e4m3x4(
+#     packed: Int32 | Uint32,
+#     op: ReductionOp,
+#     *,
+#     width: int | None = None,
+# ) -> Float32:
+#     """Reduce four packed OCP ``E4M3FN`` bytes per lane into one ``Float32`` aggregate."""
+#     return warp_reduce(_unpack_ocp_fp8x4_f32(packed, is_bf8=False), op, width=width)
+#
+#
+# def warp_reduce_e5m2x4(
+#     packed: Int32 | Uint32,
+#     op: ReductionOp,
+#     *,
+#     width: int | None = None,
+# ) -> Float32:
+#     """Reduce four packed OCP ``E5M2`` bytes per lane into one ``Float32`` aggregate."""
+#     return warp_reduce(_unpack_ocp_fp8x4_f32(packed, is_bf8=True), op, width=width)
+#
+#
+# def warp_argmax_e4m3x4(
+#     packed: Int32 | Uint32,
+#     *,
+#     width: int | None = None,
+# ) -> tuple[Float32, Int32]:
+#     """Return ``(max_value, winning_index)`` across four packed OCP ``E4M3FN`` bytes per lane."""
+#     return warp_argmax(_unpack_ocp_fp8x4_f32(packed, is_bf8=False), width=width)
+#
+#
+# def warp_argmin_e4m3x4(
+#     packed: Int32 | Uint32,
+#     *,
+#     width: int | None = None,
+# ) -> tuple[Float32, Int32]:
+#     """Return ``(min_value, winning_index)`` across four packed OCP ``E4M3FN`` bytes per lane."""
+#     return warp_argmin(_unpack_ocp_fp8x4_f32(packed, is_bf8=False), width=width)
 
 
 def warp_head_segmented_reduce(
@@ -410,6 +678,34 @@ class WarpReduce(WarpPrimitive):
         """Shorthand for ``reduce(value, fx.ReductionOp.MIN, ...)``."""
         value = cls._prepare(value)
         return cls._invoke(warp_min, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def argmax(
+        cls,
+        value: object,
+        *,
+        valid_items: int | Integer | None = None,
+        storage: Empty | None = None,
+    ) -> tuple[Numeric, Int32]:
+        """Return ``(max_value, winning_index)`` with lowest-index tie-breaking."""
+        if cls.dtype is not None and not issubclass(cls.dtype, Numeric):
+            raise TypeError(f"WarpReduce.argmax requires a scalar Numeric dtype, got {cls.dtype.__name__}")
+        value = cls._prepare(value)
+        return cls._invoke(warp_argmax, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
+
+    @classmethod
+    def argmin(
+        cls,
+        value: object,
+        *,
+        valid_items: int | Integer | None = None,
+        storage: Empty | None = None,
+    ) -> tuple[Numeric, Int32]:
+        """Return ``(min_value, winning_index)`` with lowest-index tie-breaking."""
+        if cls.dtype is not None and not issubclass(cls.dtype, Numeric):
+            raise TypeError(f"WarpReduce.argmin requires a scalar Numeric dtype, got {cls.dtype.__name__}")
+        value = cls._prepare(value)
+        return cls._invoke(warp_argmin, value, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def head_segmented_reduce(

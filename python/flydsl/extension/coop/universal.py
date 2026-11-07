@@ -37,6 +37,7 @@ from .block.topk import BlockTopK as _BlockTopK
 from .block.topk import BlockTopKAlgorithm as BlockTopKAlgorithm
 from .warp import reduce as _warp_reduce
 from .warp import scan as _warp_scan
+from .warp import vote as _warp_vote
 from .warp.bitonic_sort import *
 from .warp.exchange import *
 from .warp.load import *
@@ -46,6 +47,7 @@ from .warp.store import *
 
 WarpReduce = _warp_reduce.WarpReduce
 WarpScan = _warp_scan.WarpScan
+WarpVote = _warp_vote.WarpVote
 
 warp_head_segmented_reduce = _warp_reduce.warp_head_segmented_reduce
 warp_tail_segmented_reduce = _warp_reduce.warp_tail_segmented_reduce
@@ -56,12 +58,24 @@ warp_reduce = _warp_reduce.warp_reduce
 warp_sum = _warp_reduce.warp_sum
 warp_max = _warp_reduce.warp_max
 warp_min = _warp_reduce.warp_min
+warp_argmax = _warp_reduce.warp_argmax
+warp_argmin = _warp_reduce.warp_argmin
+# Disabled until ROCm/FlyDSL#1376 (llvm/llvm-project#231721) lands; see warp/reduce.py.
+# warp_reduce_e4m3x4 = _warp_reduce.warp_reduce_e4m3x4
+# warp_reduce_e5m2x4 = _warp_reduce.warp_reduce_e5m2x4
+# warp_argmax_e4m3x4 = _warp_reduce.warp_argmax_e4m3x4
+# warp_argmin_e4m3x4 = _warp_reduce.warp_argmin_e4m3x4
 warp_inclusive_scan = _warp_scan.warp_inclusive_scan
 warp_exclusive_scan = _warp_scan.warp_exclusive_scan
 warp_inclusive_sum = _warp_scan.warp_inclusive_sum
 warp_exclusive_sum = _warp_scan.warp_exclusive_sum
 warp_scan = _warp_scan.warp_scan
 warp_scan_with_aggregate = _warp_scan.warp_scan_with_aggregate
+warp_any = _warp_vote.warp_any
+warp_all = _warp_vote.warp_all
+warp_ballot = _warp_vote.warp_ballot
+warp_count = _warp_vote.warp_count
+warp_ballot_rank = _warp_vote.warp_ballot_rank
 
 
 # What the block classes below fold through, in place of the dispatched warp
