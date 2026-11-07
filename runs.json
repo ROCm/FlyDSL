@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-11-07T14:37:10Z",
+ "updated": "2026-11-07T15:08:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42384640282,
+   "pr": 1386,
+   "commit": "b7fab662c399f2b30534686242f3d61df3b693ff",
+   "branch": "drop-arch-env",
+   "event": "pull_request",
+   "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42384640282",
+   "created_at": "2026-11-07T15:05:11Z",
+   "updated_at": "2026-11-07T15:07:01Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42382668301,
+   "pr": 1343,
+   "commit": "1b98a594789782541108dff1561fc81ae064edaa",
+   "branch": "fix/debug-call-chain-scopes",
+   "event": "pull_request",
+   "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301",
+   "created_at": "2026-11-07T14:40:06Z",
+   "updated_at": "2026-11-07T15:06:56Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T15:06:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772671"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T15:06:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772708"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T15:07:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772733"
+    }
+   ]
+  },
   {
    "run_id": 42382253939,
    "pr": null,
@@ -14,9 +72,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939",
    "created_at": "2026-11-07T14:34:42Z",
-   "updated_at": "2026-11-07T14:36:03Z",
+   "updated_at": "2026-11-07T14:48:31Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T14:48:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355444"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T14:48:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355477"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T14:48:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355487"
+    }
+   ]
   },
   {
    "run_id": 42376187205,
@@ -1179,67 +1265,6 @@
    "updated_at": "2026-11-06T03:28:15Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 42152686457,
-   "pr": null,
-   "commit": "e4358103c38d70ec62bd75cdeb3d438df0ac8b6d",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42152686457",
-   "created_at": "2026-11-06T02:48:52Z",
-   "updated_at": "2026-11-06T02:48:52Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42143427947,
-   "pr": null,
-   "commit": "65ae2c1276860e75bc23f4ce573afef1cd4f2488",
-   "branch": "fix/test-triton-optional",
-   "event": "pull_request",
-   "title": "[Tests] Drop the hard triton import from kernel test helpers",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947",
-   "created_at": "2026-11-06T01:22:41Z",
-   "updated_at": "2026-11-06T03:46:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T01:49:04Z",
-     "completed_at": "2026-11-06T02:15:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127695740938"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T01:49:02Z",
-     "completed_at": "2026-11-06T02:22:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127695741093",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T01:48:45Z",
-     "completed_at": "2026-11-06T02:10:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127695766796"
-    }
-   ]
   }
  ]
 }
