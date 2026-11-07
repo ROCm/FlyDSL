@@ -7,8 +7,10 @@ import copy
 import difflib
 import functools
 import inspect
+import os
 import types
 import warnings
+import weakref
 from textwrap import dedent
 from typing import List
 
@@ -247,13 +249,48 @@ def _state_value_expr(name):
     )
 
 
+def _rewrite_cache_key(f, code):
+    """The key *f*'s rewrite is cached under, or None when the rewrite depends on more than *f*'s code."""
+
+    # The rewrite parses the wrapped function's source; every wrapper from one decorator shares its code.
+    if inspect.unwrap(f) is not f:
+        return None
+
+    # The rewrite picks the function out by name, which a renamed function no longer shares with its code.
+    if f.__name__ != code.co_name:
+        return None
+
+    # The AST diff is logged during the rewrite.
+    if env.debug.ast_diff:
+        return None
+
+    # The rewrite and the JIT cache key read the source file, not the loaded code. Reusing a rewrite after the
+    # file changed would store the old kernel under the new source's key.
+    try:
+        stat = os.stat(code.co_filename)
+    except OSError:
+        return None
+
+    # By id: code objects from different files can compare equal.
+    return (
+        id(code),
+        stat.st_size,
+        stat.st_mtime_ns,
+        env.debug.enable_debug_info,
+    )
+
+
 class ASTRewriter:
     transformers: List = []
     rewrite_globals: dict = {}
+    # A kernel factory creates the same nested functions again on every call, so their rewritten code is reused.
+    # An entry is dropped when its code object is freed, before the code's id can be reused.
+    _rewrite_cache: dict = {}
 
     @classmethod
     def register(cls, transformer):
         cls.transformers.append(transformer)
+        cls._rewrite_cache.clear()
         if hasattr(transformer, "rewrite_globals"):
             cls.rewrite_globals.update(transformer.rewrite_globals())
         return transformer
@@ -262,6 +299,14 @@ class ASTRewriter:
     def transform(cls, f):
         if not cls.transformers:
             return f
+
+        # The key and the entry stored at the end must hold the same code object, and another transform of f can
+        # replace f.__code__ in place meanwhile, so read it once.
+        code = f.__code__
+        key = _rewrite_cache_key(f, code)
+        cached = cls._rewrite_cache.get(key)
+        if cached is not None:
+            return cls._install_code(f, cached)
 
         f_src = dedent(inspect.getsource(f))
         module = ast.parse(f_src)
@@ -316,6 +361,14 @@ class ASTRewriter:
             log().warning("could not find rewritten function %s in code object", f.__name__)
             return f
 
+        if key is not None:
+            cls._rewrite_cache[key] = new_f_code_o
+            weakref.finalize(code, cls._rewrite_cache.pop, key, None)
+        return cls._install_code(f, new_f_code_o)
+
+    @classmethod
+    def _install_code(cls, f, new_f_code_o):
+        """Give *f* the rewritten code, rebuilding it when the rewrite dropped free variables."""
         for name, val in cls.rewrite_globals.items():
             f.__globals__[name] = val
 

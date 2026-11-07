@@ -15,6 +15,7 @@ import pytest
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly
 from flydsl._mlir.passmanager import PassManager
 from flydsl.compiler import jit_function
@@ -36,7 +37,8 @@ def frontend_only_jit(monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
 
-    def compile_layout_pipeline(cls, module, **_kwargs):
+    def compile_layout_pipeline(cls, asm, **_kwargs):
+        module = ir.Module.parse(asm)
         pm = PassManager.parse(FLY_PIPELINE)
         pm.run(module.operation)
         assert module.operation.verify()

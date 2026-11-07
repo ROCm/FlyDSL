@@ -22,6 +22,10 @@ MLIR_CAPI_EXPORTED void flydsl_register_rocdl_dialects(MlirDialectRegistry regis
 /// Backend plugin registration: register all ROCDL passes.
 MLIR_CAPI_EXPORTED void flydsl_register_rocdl_passes(void);
 
+/// The ROCm root gpu-module-to-binary uses when its toolkit option is empty
+/// (ROCM_PATH, ROCM_ROOT, ROCM_HOME, then the build's default).
+MLIR_CAPI_EXPORTED MlirStringRef mlirFlyROCDLGetROCMPath(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -30,7 +30,10 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
 # Dumps for gfx11 and later need prepare --clang with the clang of the LLVM FlyDSL
 # was built with; the ROCm clang this test assembles with cannot read them.
-_arch = str(get_rocm_arch())
+try:
+    _arch = str(get_rocm_arch())
+except RuntimeError as error:
+    pytest.skip(f"ROCm architecture unavailable: {error}", allow_module_level=True)
 if not _arch.startswith("gfx9"):
     pytest.skip(f"the ROCm clang cannot reassemble a {_arch} dump", allow_module_level=True)
 
@@ -50,6 +53,7 @@ b = torch.randn(SIZE, device="cuda", dtype=torch.float32)
 c = torch.zeros(SIZE, device="cuda", dtype=torch.float32)
 
 stream = torch.cuda.Stream()
+stream.wait_stream(torch.cuda.current_stream())
 tA = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
 vecAdd(tA, b, c, SIZE, SIZE, THREADS, VEC_WIDTH, stream=stream)
 torch.cuda.synchronize()

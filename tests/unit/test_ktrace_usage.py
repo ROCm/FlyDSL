@@ -11,16 +11,15 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
 from flydsl.expr import ktrace
-from flydsl.runtime.device import get_rocm_arch
 
-pytestmark = [
-    pytest.mark.l1b_target_dialect,
-    pytest.mark.rocm_lower,
-    pytest.mark.skipif(
-        not (get_rocm_arch() or "").startswith(("gfx942", "gfx950")),
-        reason="ktrace requires gfx942 or gfx950",
-    ),
-]
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
+
+
+@pytest.fixture(autouse=True)
+def _requires_cdna(rocm_arch):
+    """Skip device tests when no launch-capable CDNA target is available."""
+    if not rocm_arch.startswith(("gfx942", "gfx950")):
+        pytest.skip(f"ktrace requires gfx942 or gfx950, got {rocm_arch}")
 
 
 @flyc.kernel

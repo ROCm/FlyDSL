@@ -569,7 +569,7 @@ def compile_bigm_kernel(
     MoE output (y), and with tailq res_out = y + res_in, the next-layer norm + FP8 rows of every
     rank (q gather).
     """
-    # every compile argument (the disk cache key, _bigm_cached)
+    # every compile argument (named in _warn_spills)
     spec = repr(sorted(locals().items()))
     assert H % 256 == 0 and 0 < E < 512 and K <= 64 and act in ("swiglu", "silu")
     RG = UNIT_ROWS  # (one CTA of NW waves per CU)

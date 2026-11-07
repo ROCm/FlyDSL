@@ -34,7 +34,10 @@ if torch is None or not torch.cuda.is_available():
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
-_arch = str(get_rocm_arch())
+try:
+    _arch = str(get_rocm_arch())
+except RuntimeError as error:
+    pytest.skip(f"ROCm architecture unavailable: {error}", allow_module_level=True)
 if not _arch.startswith("gfx1250"):
     pytest.skip(f"TDM multicast requires gfx1250, got {_arch}", allow_module_level=True)
 
@@ -204,6 +207,7 @@ def _run_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y, n_warmup=0, n_iters
 
     launch_fn = _compile_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y)
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
 
     def launch():
         launch_fn(a_dev, b_dev, c_dev, stream=stream)

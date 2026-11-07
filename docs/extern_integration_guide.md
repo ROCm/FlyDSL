@@ -107,9 +107,10 @@ serialisation rules are:
   `functools.partial`, and bound methods cannot be represented and will
   cause `__getstate__` to raise `pickle.PicklingError` **at cache-write
   time**.
-* Extern-linked artifacts are not written to the on-disk cache. Their external
-  bitcode is a compilation input, so the in-memory cache is used for
-  same-process reuse while avoiding stale fatbins across processes.
+* Artifacts with `post_load_processors` are not written to the on-disk cache;
+  the in-memory cache is used for same-process reuse. Artifacts that only link
+  external bitcode are cached on disk: the SHA-256 of every linked bitcode file
+  is part of the cache key, so editing a `.bc` file compiles again.
 
 Silent drops are intentionally not allowed: a cached kernel that round-tripped
 without its initialiser would later GPU-fault on uninitialised device globals,

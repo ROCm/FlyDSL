@@ -266,17 +266,21 @@ outlining happens during Python tracing, when `@flyc.kernel` emits
 
 ### 3.3 JIT compilation flow
 
-When a `@flyc.jit` function is called:
+At decoration, `ASTRewriter.transform` rewrites Python control flow for MLIR
+tracing. Each ordinary `@flyc.jit` call then follows this path:
 
-1. **Cache check**: Look up by argument type signature (in-memory → disk).
-2. **AST rewriting**: `ASTRewriter.transform` converts Python `for`/`if` to MLIR `scf.for`/`scf.if`.
-3. **MLIR module creation**: Sets up `gpu.container_module` with target.
-4. **Argument conversion**: `convert_to_jit_arguments` maps Python args to IR types.
-5. **Function tracing**: Execute the transformed function body to generate MLIR ops.
-6. **GPU kernel emission**: `@kernel` calls emit `gpu.func` into `gpu.module`.
-7. **Pipeline compilation**: `MlirCompiler.compile()` runs the full pass pipeline.
-8. **Execution**: `CompiledArtifact` lazily creates an MLIR ExecutionEngine and invokes the compiled code.
-9. **Cache store**: Serialize the compiled function to disk for future runs.
+1. **Argument conversion**: Bind the signature and resolve JIT argument adapters.
+2. **Tracing**: Execute the launcher and kernels to create the complete MLIR module.
+3. **Preparation**: Apply compile hints and the debug-location policy; resolve the exact pass pipeline and LLVM options.
+4. **Artifact key**: Hash that prepared module text with its configuration and target.
+5. **Cache lookup**: Check memory, then the disk store (`FLYDSL_RUNTIME_CACHE_DIR`), whose key also fingerprints the toolchain. A disk miss is rechecked under a per-artifact compile lock.
+6. **Compilation on miss**: `MlirCompiler.compile()` lowers the prepared module using the same resolved configuration, then stores the artifact.
+7. **Execution**: Build the argument adapter for this call, lazily create the artifact's execution engine, and launch.
+
+There is no compiled-artifact hit before tracing. Explicit `CompiledFunction`
+calls reuse a fixed specialization without tracing. See
+[compilation and caching](kernel_authoring_guide.md#9-compilation-and-caching)
+for invalidation boundaries, external inputs, and run-only behavior.
 
 ### 3.4 Precompilation and C export
 
@@ -294,7 +298,8 @@ rewrites a fresh copy of the already-lowered module for standalone linkage. It:
 2. selects the backend GPU object and attaches the AOT module handler;
 3. emits a packed `int32_t entry(void **args)` wrapper and ABI metadata;
 4. emits a position-independent host object and matching C header; and
-5. embeds the backend AOT runtime archive into the host object. Only backend
+5. embeds the backend AOT runtime archive into the host object (on Windows,
+   merges the runtime's LLVM-dialect IR into the module instead). Only backend
    system libraries remain as link-time dependencies.
 
 This export path reuses the same GPU binary as the compiled specialization; it
@@ -320,7 +325,7 @@ def launch(a: fx.Tensor, b: fx.Tensor, n: fx.Constexpr[int],
 ```
 
 Key behaviors:
-- The first call triggers compilation; subsequent calls with the same type signature use the cached binary.
+- Every ordinary call traces; matching MLIR and compilation configuration reuse a cached binary.
 - `Constexpr[T]` parameters become compile-time constants and affect the cache key.
 - `Tensor` parameters map to memref descriptors via DLPack.
 - `Stream` parameters pass a CUDA/HIP stream to the GPU runtime.
@@ -394,8 +399,8 @@ class DslType(Protocol):
 # JitArgument protocol — for values passed at the host boundary
 class JitArgument(Protocol):
     def __get_ir_types__(self) -> List[ir.Type]: ...
-    def __cache_signature__(self) -> object: ...
     def __c_abi_spec__(self) -> List[Tuple[type, Callable]]: ...
+    # Optional: def __cache_signature__(self) -> object, read only by cache_signature()
 ```
 
 Built-in types: `Tensor`, `Stream`, `Int32`, and `Constexpr[T]`
@@ -407,8 +412,8 @@ from flydsl.compiler import JitArgumentRegistry
 @JitArgumentRegistry.register(MyPythonType, dsl_type=MyDslType)
 class MyJitArg:
     def __get_ir_types__(self): ...
-    def __cache_signature__(self): ...
     def __c_abi_spec__(self): ...
+    def __cache_signature__(self): ...  # optional, for user-managed handle caches
 ```
 
 `__c_abi_spec__()` returns ordered `(ctype, fill)` slots for the packed C
@@ -462,8 +467,21 @@ Transforms Python control flow to MLIR ops at the AST level:
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `rocm_agent_enumerator` system tool
-4. Default: `gfx942`
+3. `ARCH` env var (the compile-time target, also set by `pytest --flydsl-compile-arch`)
+4. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
+5. `rocminfo` system tool
+
+If neither tool identifies a GPU and no explicit override is set, detection
+raises `RuntimeError` instead of assuming `gfx942`. On hosts without accessible
+ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` (or `ARCH`) to the
+intended target (for example, `ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
+Failed detection is cached to avoid repeated slow probes.
+
+Device counting uses the default `rocm_agent_enumerator` output instead:
+`-name` can list multiple supported ISAs per GPU and overcount devices. The
+physical count may ignore `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES`; use
+HIP's `hipGetDeviceCount` when visibility matters. Counting returns zero if the
+enumerator is unavailable or reports no GPU agents.
 
 ---
 
