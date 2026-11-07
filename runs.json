@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-07T09:22:52Z",
+ "updated": "2026-11-07T12:03:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42370462792,
+   "pr": 1384,
+   "commit": "1e128ccbbca202f871977f4f52104e2e898f72ee",
+   "branch": "ext-coop-ballot-rdna-argmax",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add wave-portable vote/ballot collectives, RDNA wave32 VALU overrides, and warp argmax/argmin",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42370462792",
+   "created_at": "2026-11-07T11:59:11Z",
+   "updated_at": "2026-11-07T11:59:11Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 42368590873,
+   "pr": 1383,
+   "commit": "89c269012f9b027a8bb55ec7ce9ca6f8d80473ff",
+   "branch": "ext-quant-codecs",
+   "event": "pull_request",
+   "title": "[Ext][Quant] Add micro-scaled and sub-byte quantization codecs (fx.quant)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42368590873",
+   "created_at": "2026-11-07T11:32:16Z",
+   "updated_at": "2026-11-07T11:32:16Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 42325999435,
    "pr": null,
@@ -1268,36 +1298,6 @@
    "created_at": "2026-11-05T19:16:41Z",
    "updated_at": "2026-11-05T19:20:32Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 42085614296,
-   "pr": null,
-   "commit": "d32cf3773f1bd9ff488847645e96e71479f7c99b",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42085614296",
-   "created_at": "2026-11-05T18:34:58Z",
-   "updated_at": "2026-11-05T18:34:58Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42085595901,
-   "pr": null,
-   "commit": "55f276a9d4a171f790df99e025a1d306daa7822e",
-   "branch": "pr1-rocdl-fp8-bf8-cvt",
-   "event": "pull_request",
-   "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42085595901",
-   "created_at": "2026-11-05T18:34:51Z",
-   "updated_at": "2026-11-05T18:34:51Z",
-   "actor": "dimitri91209",
    "jobs": []
   }
  ]
