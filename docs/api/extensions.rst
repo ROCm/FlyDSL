@@ -7,11 +7,12 @@ have canonical imports under ``flydsl.extension`` and lazy aliases under
 
 .. code-block:: python
 
-   from flydsl.extension import coop, random
+   from flydsl.extension import coop, hadamard, random
 
    # Equivalent inside traced code:
    import flydsl.expr as fx
    fx.coop.warp_reduce(...)
+   fx.hadamard.warp_fwht(...)
    fx.random.rand4x(...)
 
 The dispatcher selects a target-specific implementation when one exists while
@@ -143,6 +144,38 @@ Runnable examples:
 - ``examples/extension/coop/02-block_scan.py`` demonstrates a vector-valued
   block scan used for stream compaction.
 
+Fast Walsh-Hadamard transform
+-----------------------------
+
+``flydsl.extension.hadamard`` provides warp- and block-scope Sylvester Fast
+Walsh-Hadamard Transforms (FWHT) for activation rotation, outlier smoothing, and
+structured projections. Inputs are ``Float32``, ``Float16``, or ``BFloat16``
+scalars or power-of-two blocked item sequences; internal butterfly arithmetic
+runs in ``Float32`` before converting back to the input element type.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 62
+
+   * - API
+     - Contract
+   * - ``warp_fwht(value, *, width=None, normalize=False)``
+     - Compute the FWHT across a power-of-two logical warp width
+       ``width <= num_warp_threads()`` and an optional blocked per-lane item
+       sequence.
+   * - ``BlockFWHT[dtype, block_size, items_per_thread=1]``
+     - Cooperative block-wide FWHT over ``N = block_threads * items_per_thread``
+       elements. Single-warp specializations expose ``SharedStorage = Empty``
+       (zero LDS bytes and zero barriers); multi-warp specializations stage a
+       single bank-conflict-free padded LDS transpose.
+
+When ``normalize=True``, the result is scaled by ``1 / sqrt(N)`` so the
+transform is orthonormal and self-inverse (``H(H(x)) == x``).
+
+See :doc:`../extension/hadamard` and
+``examples/extension/hadamard/01-block_fwht.py`` for layout details and a
+complete kernel example.
+
 Random-number generation
 ------------------------
 
@@ -177,6 +210,6 @@ Stability and dispatch
 ----------------------
 
 An extension entry point, exported child namespace, and exported symbol form a
-stable path according to :doc:`../api_stability`. ``fx.coop``/``fx.random``
+stable path according to :doc:`../api_stability`. ``fx.coop``/``fx.hadamard``/``fx.random``
 aliases have the same stability as their canonical ``flydsl.extension`` paths.
 Target-specific implementations must preserve the same exported contract.

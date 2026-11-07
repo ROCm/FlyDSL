@@ -1215,6 +1215,14 @@ def ds_bpermute(res, index, src, **kw):
 
 
 @dsl_loc_tracing
+def ds_swizzle(res, src, offset, **kw):
+    """ROCDL ``ds_swizzle``: intra-wave 32-lane crossbar shuffle via ``ds_swizzle_b32``."""
+    from ..._mlir.dialects.rocdl import ds_swizzle as _op
+
+    return _op(res=res, src=_to_ir(src), offset=_to_ir(offset), **kw)
+
+
+@dsl_loc_tracing
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
@@ -1254,5 +1262,22 @@ def update_dpp(res, old, src, dpp_ctrl, row_mask=0xF, bank_mask=0xF, bound_ctrl=
         row_mask=row_mask,
         bank_mask=bank_mask,
         bound_ctrl=bound_ctrl,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def permlanex16(res, old, src0, src1, src2, fi=False, bound_control=False, **kw):
+    """ROCDL ``permlanex16``: cross-row 16-lane permute (``v_permlanex16_b32``)."""
+    from ..._mlir.dialects.rocdl import permlanex16 as _op
+
+    return _op(
+        res=res,
+        old=_to_ir(old),
+        src0=_to_ir(src0),
+        src1=_to_ir(src1),
+        src2=_to_ir(src2),
+        fi=fi,
+        bound_control=bound_control,
         **kw,
     )

@@ -36,4 +36,5 @@ EXAMPLE_ARCHITECTURES = {
     "07-ktrace_wave_timeline.py": ("gfx942", "gfx95*"),
     "extension/coop/01-warp_collectives.py": ("*",),
     "extension/coop/02-block_scan.py": ("*",),
+    "extension/hadamard/01-block_fwht.py": ("*",),
 }
