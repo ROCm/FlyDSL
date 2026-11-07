@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-07T15:22:06Z",
+ "updated": "2026-11-07T15:43:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -35,28 +35,31 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-07T15:06:56Z",
+     "started_at": "2026-11-07T15:42:24Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772671"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T15:08:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772708"
+     "completed_at": "2026-11-07T15:40:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772708",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T15:07:23Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T15:32:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772733"
     }
    ]
@@ -68,11 +71,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback (#1332)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939",
    "created_at": "2026-11-07T14:34:42Z",
-   "updated_at": "2026-11-07T15:12:05Z",
+   "updated_at": "2026-11-07T15:42:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
