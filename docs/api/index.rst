@@ -26,8 +26,9 @@ Primary namespaces
      - :doc:`compiler`
    * - ``flydsl.extension``
      - Libraries implemented on top of the expression language, currently
-       cooperative algorithms and random-number generation. They are also
-       lazily available as ``fx.coop`` and ``fx.random``.
+       cooperative algorithms, Fast Walsh-Hadamard transforms, and
+       random-number generation. They are also lazily available as ``fx.coop``,
+       ``fx.hadamard``, and ``fx.random``.
      - :doc:`extensions`
    * - ``flydsl.runtime.device``
      - Query the target ROCm architecture and distinguish RDNA from CDNA.
@@ -48,6 +49,7 @@ Recommended imports
 
    # Extension aliases are loaded only when first accessed.
    reduce_fn = fx.coop.warp_reduce
+   fwht_fn = fx.hadamard.warp_fwht
    random_fn = fx.random.rand4x
 
 Most kernel code needs only ``flyc`` and ``fx``. Import the runtime helpers only
