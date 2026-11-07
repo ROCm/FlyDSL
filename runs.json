@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-11-07T00:39:28Z",
+ "updated": "2026-11-07T01:50:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42325999435,
+   "pr": null,
+   "commit": "62d6dfab33f512a5ac0c409ae8c863a282d26487",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts (#1\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435",
+   "created_at": "2026-11-07T01:48:21Z",
+   "updated_at": "2026-11-07T01:48:52Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42325824195,
+   "pr": 1332,
+   "commit": "d1f38c9676d9baac419ad4a688a4ce9d2004f2d6",
+   "branch": "fix/rocm-gpu-detection",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195",
+   "created_at": "2026-11-07T01:46:19Z",
+   "updated_at": "2026-11-07T01:48:19Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42324769202,
+   "pr": null,
+   "commit": "e3a3e9db2263853021f0bc4dcd47d4657395f3e8",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Pull the published manylinux image tag from ghcr (#1382)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42324769202",
+   "created_at": "2026-11-07T01:34:13Z",
+   "updated_at": "2026-11-07T01:48:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42273897654,
    "pr": 1251,
@@ -326,13 +371,41 @@
    "branch": "pr2-gfx120x-swmmac",
    "event": "pull_request",
    "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901",
    "created_at": "2026-11-06T17:30:33Z",
-   "updated_at": "2026-11-06T17:30:33Z",
+   "updated_at": "2026-11-07T01:44:35Z",
    "actor": "dimitri91209",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:45:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276764"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:44:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276765"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:44:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276797"
+    }
+   ]
   },
   {
    "run_id": 42261098429,
@@ -341,13 +414,41 @@
    "branch": "pr1-rocdl-fp8-bf8-cvt",
    "event": "pull_request",
    "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429",
    "created_at": "2026-11-06T17:22:49Z",
-   "updated_at": "2026-11-06T17:22:49Z",
+   "updated_at": "2026-11-07T01:45:38Z",
    "actor": "dimitri91209",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:46:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564320"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:45:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564326"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:45:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564347"
+    }
+   ]
   },
   {
    "run_id": 42260441542,
@@ -427,7 +528,7 @@
   },
   {
    "run_id": 42238508706,
-   "pr": 1372,
+   "pr": null,
    "commit": "cbee49e05bb405a97164c04859b0df480348b309",
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
@@ -472,7 +573,7 @@
   },
   {
    "run_id": 42226974882,
-   "pr": 1372,
+   "pr": null,
    "commit": "66ed29630c180dcf30cd3459af47a30717153c50",
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
@@ -548,7 +649,7 @@
   },
   {
    "run_id": 42204305433,
-   "pr": 1372,
+   "pr": null,
    "commit": "de711d2ebf7ee6d182c30c226d9934190c1b1493",
    "branch": "fix-gfx1250-wmmascale-fp8-layout",
    "event": "pull_request",
@@ -606,7 +707,7 @@
   },
   {
    "run_id": 42195400772,
-   "pr": 1332,
+   "pr": null,
    "commit": "e9c6a41bfc432eb999434c7f61c3eefb2d5e8f30",
    "branch": "fix/rocm-gpu-detection",
    "event": "pull_request",
@@ -1129,82 +1230,6 @@
    "created_at": "2026-11-05T18:34:51Z",
    "updated_at": "2026-11-05T18:34:51Z",
    "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42043247621,
-   "pr": null,
-   "commit": "6ca2e6eeaadb29449dad4f960fac90208c7b1158",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42043247621",
-   "created_at": "2026-11-05T14:15:28Z",
-   "updated_at": "2026-11-05T14:15:28Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 42011342102,
-   "pr": 1369,
-   "commit": "b7b4750bc6c1492b0a941fd8e9c73a99561bf1a0",
-   "branch": "feat/windows-aot",
-   "event": "pull_request",
-   "title": "[Windows] AOT export support for Windows x64",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102",
-   "created_at": "2026-11-05T10:31:00Z",
-   "updated_at": "2026-11-06T00:08:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T23:21:06Z",
-     "completed_at": "2026-11-06T00:08:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930912"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T23:20:38Z",
-     "completed_at": "2026-11-05T23:38:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930916"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-05T23:20:48Z",
-     "completed_at": "2026-11-05T23:53:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42011342102/job/127599930924",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42009669746,
-   "pr": null,
-   "commit": "66f623145d05d8eae038e72fef8bec7578446101",
-   "branch": "main",
-   "event": "push",
-   "title": "[JIT] Key compiled artifacts by the traced MLIR (#1338)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42009669746",
-   "created_at": "2026-11-05T10:18:51Z",
-   "updated_at": "2026-11-05T10:50:17Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
