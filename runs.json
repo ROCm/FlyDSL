@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-07T01:50:21Z",
+ "updated": "2026-11-07T03:23:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts (#1\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435",
    "created_at": "2026-11-07T01:48:21Z",
-   "updated_at": "2026-11-07T01:48:52Z",
+   "updated_at": "2026-11-07T02:01:55Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T02:01:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903229"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T02:01:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903259"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T02:53:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325999435/job/128264903372"
+    }
+   ]
   },
   {
    "run_id": 42325824195,
@@ -25,13 +53,44 @@
    "branch": "fix/rocm-gpu-detection",
    "event": "pull_request",
    "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195",
    "created_at": "2026-11-07T01:46:19Z",
-   "updated_at": "2026-11-07T01:48:19Z",
+   "updated_at": "2026-11-07T01:59:21Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-07T01:59:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195/job/128264193797"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-07T02:55:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195/job/128264193812"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-07T02:19:45Z",
+     "completed_at": "2026-11-07T02:52:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42325824195/job/128264193819",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 42324769202,
@@ -371,38 +430,41 @@
    "branch": "pr2-gfx120x-swmmac",
    "event": "pull_request",
    "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901",
    "created_at": "2026-11-06T17:30:33Z",
-   "updated_at": "2026-11-07T01:44:35Z",
+   "updated_at": "2026-11-07T02:53:16Z",
    "actor": "dimitri91209",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T01:45:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276764"
+     "completed_at": "2026-11-07T02:19:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276764",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-07T01:44:35Z",
+     "started_at": "2026-11-07T02:53:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276765"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-07T01:44:53Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T02:01:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276797"
     }
    ]
@@ -414,38 +476,41 @@
    "branch": "pr1-rocdl-fp8-bf8-cvt",
    "event": "pull_request",
    "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429",
    "created_at": "2026-11-06T17:22:49Z",
-   "updated_at": "2026-11-07T01:45:38Z",
+   "updated_at": "2026-11-07T03:19:27Z",
    "actor": "dimitri91209",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T01:46:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564320"
+     "completed_at": "2026-11-07T02:17:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564320",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-07T01:45:38Z",
+     "started_at": "2026-11-07T03:19:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564326"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-07T01:45:38Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-07T02:16:58Z",
+     "completed_at": "2026-11-07T02:32:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/128260564347"
     }
    ]
