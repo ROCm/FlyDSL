@@ -191,7 +191,7 @@ where an empty ``.flydsl_export.lock`` also stays to serialize exports) and
 system libraries needed when linking the final binary, along with typed inline
 call helpers and module lifecycle entry points. On a build host
 without a visible GPU, select the architecture explicitly (for example,
-``ARCH=gfx950``) and compile with null pointer or non-device tensor
+``FLYDSL_GPU_ARCH=gfx950``) and compile with null pointer or non-device tensor
 placeholders. See :doc:`api/compiler` for the API contract and supported
 argument categories.
 

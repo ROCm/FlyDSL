@@ -75,7 +75,7 @@ def compile_env(monkeypatch):
     """Compile for gfx950 without a GPU: COMPILE_ONLY still writes the cache entry."""
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(REPO_ROOT), *sys.path, os.environ.get("PYTHONPATH", "")]))
     monkeypatch.setenv("COMPILE_ONLY", "1")
-    monkeypatch.setenv("ARCH", "gfx950")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx950")
     monkeypatch.delenv("FLYDSL_RUNTIME_RUN_ONLY", raising=False)
 
 

@@ -55,10 +55,10 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
 
 `FLYDSL_RUNTIME_ENABLE_CACHE=0` is **required, not optional** — see Pitfalls.
 
-For a target without local hardware, add `ARCH=<gfx> COMPILE_ONLY=1`:
+For a target without local hardware, add `FLYDSL_GPU_ARCH=<gfx> COMPILE_ONLY=1`:
 
 ```bash
-ARCH=gfx950 COMPILE_ONLY=1 \
+FLYDSL_GPU_ARCH=gfx950 COMPILE_ONLY=1 \
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
     python3 -m pytest tests/kernels/test_softmax.py -q
 ```

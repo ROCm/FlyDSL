@@ -77,7 +77,7 @@ def get_rocm_arch() -> str:
 
     Raises RuntimeError if neither an explicit override nor hardware supplies a target.
     """
-    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION") or os.environ.get("ARCH")
+    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         env = env.lower()
         if env.startswith("gfx"):
@@ -90,7 +90,7 @@ def get_rocm_arch() -> str:
     if not arch:
         raise RuntimeError(
             "Unable to detect a ROCm GPU architecture with rocm_agent_enumerator or rocminfo. "
-            "Set FLYDSL_GPU_ARCH (or ARCH) to the intended gfx target when hardware detection is unavailable."
+            "Set FLYDSL_GPU_ARCH to the intended gfx target when hardware detection is unavailable."
         )
     return arch.lower()
 

@@ -90,7 +90,7 @@ def check_block_case(entry, block, count, case):
 
 def check_compile_family(monkeypatch, arch, case):
 
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     block, count = 64, 4
@@ -229,7 +229,7 @@ def check_movement_io_policies(warp, policy, count, valid):
 
 def check_compile_movement_policies(monkeypatch, arch, case):
 
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block, count = (64 if case.startswith("warp") else 128), 4
 
@@ -427,7 +427,7 @@ def check_record_movement(case, policy, count):
 
 def check_compile_record_movement(monkeypatch, arch, case, policy):
 
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     warp_case = case.startswith("warp_") and policy not in ("SHARED_MEMORY", "WARP_TIME_SLICING")
     block, count = (64 if warp_case else 64), 3
@@ -677,7 +677,7 @@ def check_callback_first_physical_warp_and_state_across_tiles(block, algorithm):
 
 
 def check_reduce_scan_policies_compile(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     block = 128
@@ -1033,7 +1033,7 @@ def check_record_semigroup_exclusive_prefix_forms(policy, prefix):
 
 
 def check_record_collectives_compile(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block = 128
 
@@ -1312,7 +1312,7 @@ def check_neighborhood_contract_dtypes(dtype, name, method):
 
 
 def check_sequence_contracts_compile(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block, count = 128, 3
     if case == "histogram" and not full_matrix_enabled():
@@ -1793,7 +1793,7 @@ def check_wide_numeric_policies(dtype, name, case):
 
 def check_compile_sorting_policies(monkeypatch, arch, case):
 
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block, count = 128, 3
     if case in ("record_merge", "air") and not full_matrix_enabled():
@@ -2648,7 +2648,7 @@ def check_extracted_digit_wider_than_key(algorithm):
 
 
 def check_compile_noninteger_rank(monkeypatch, arch, kind, algorithm):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block, count = 128, 3
     transform = _transform(kind, algorithm, block, count, True, namespaces=(fx.coop.universal,))

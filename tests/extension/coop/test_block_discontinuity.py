@@ -149,7 +149,7 @@ def test_sequence_records(block, count, method, universal, compile_only=False):
 @pytest.mark.rocm_lower
 @pytest.mark.parametrize("arch,method", matrix_cases(ARCHES, ["heads"]))
 def test_record_sequence_compile(monkeypatch, arch, method):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     checks.check_sequence_records(192, 3, method, True, compile_only=True)
 
@@ -299,7 +299,7 @@ def test_flag_predicate_typeerror_is_not_retried(monkeypatch):
     from coop_test_utils import run_kernel
 
     monkeypatch.setenv("COMPILE_ONLY", "1")
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     calls = []
     error = TypeError("error inside the user's predicate")
 

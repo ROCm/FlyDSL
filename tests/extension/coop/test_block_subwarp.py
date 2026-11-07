@@ -95,7 +95,7 @@ def test_subwarp_block_collectives(shape, count, universal, family, policy, comp
 @pytest.mark.rocm_lower
 @pytest.mark.parametrize("arch,count", matrix_cases(ARCHES, [1, 3]))
 def test_subwarp_compile(monkeypatch, arch, count):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     for family, policy in (
         ("reduce", fx.coop.BlockReduceAlgorithm.RAKING),

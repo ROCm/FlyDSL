@@ -117,7 +117,7 @@ def pytest_addoption(parser):
         "--flydsl-compile-arch",
         action="store",
         default=None,
-        help="Set ARCH for this pytest session.",
+        help="Set FLYDSL_GPU_ARCH for this pytest session.",
     )
 
 
@@ -133,7 +133,7 @@ def pytest_configure(config):
     if backend:
         os.environ["FLYDSL_COMPILE_BACKEND"] = backend
     if arch:
-        os.environ["ARCH"] = arch
+        os.environ["FLYDSL_GPU_ARCH"] = arch
 
 
 def pytest_sessionfinish(session, exitstatus):
