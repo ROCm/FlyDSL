@@ -7,11 +7,12 @@ have canonical imports under ``flydsl.extension`` and lazy aliases under
 
 .. code-block:: python
 
-   from flydsl.extension import coop, random
+   from flydsl.extension import coop, quant, random
 
    # Equivalent inside traced code:
    import flydsl.expr as fx
    fx.coop.warp_reduce(...)
+   fx.quant.pack_e4m3x4(...)
    fx.random.rand4x(...)
 
 The dispatcher selects a target-specific implementation when one exists while
@@ -143,6 +144,50 @@ Runnable examples:
 - ``examples/extension/coop/02-block_scan.py`` demonstrates a vector-valued
   block scan used for stream compaction.
 
+Quantization codecs
+-------------------
+
+``flydsl.extension.quant`` provides register-scope micro-scaled and sub-byte
+quantization codecs with portable bit-exact implementations under
+``fx.quant.universal`` and target-specific hardware overrides under
+``fx.quant.rocdl``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - API
+     - Behavior
+   * - ``f32_to_e8m0`` / ``e8m0_to_f32``
+     - Encode and decode OCP MX ``E8M0`` shared-exponent block scales.
+   * - ``f32_to_ue4m3`` / ``ue4m3_to_f32``
+     - Encode and decode non-negative ``UE4M3`` micro-block scales.
+   * - ``pack_bf16x2`` / ``unpack_bf16x2``
+     - Round-to-nearest-even ``Float32`` pair pack/unpack for ``bf16x2`` words.
+   * - ``pack_e4m3x2`` / ``pack_e4m3x4`` / ``unpack_e4m3x4`` /
+       ``unpack_e4m3x4_bf16x2``
+     - OCP ``E4M3FN`` pack/unpack with optional block scale and lossless
+       ``bf16x2`` register bridge.
+   * - ``pack_e5m2x2`` / ``pack_e5m2x4`` / ``unpack_e5m2x4`` /
+       ``unpack_e5m2x4_bf16x2``
+     - OCP ``E5M2`` pack/unpack with optional block scale and lossless
+       ``bf16x2`` register bridge.
+   * - ``stoch_round_e4m3x4`` / ``stoch_round_e5m2x4``
+     - Stochastic rounding from four ``Float32`` values and 32-bit entropy into
+       packed OCP ``E4M3FN`` or ``E5M2``.
+   * - ``pack_e2m1x8`` / ``unpack_e2m1x4`` / ``unpack_e2m1x8``
+     - 8-way 4-bit ``E2M1`` (``MXFP4`` / ``NVFP4``) pack and ``Float32`` unpack.
+   * - ``unpack_e2m1x4_bf16x2`` / ``unpack_e2m1x4_e4m3x4`` /
+       ``unpack_e2m1x8_int4_pair``
+     - Lossless register bridges from ``E2M1`` nibbles to ``bf16x2``, OCP
+       ``E4M3FN``, and signed ``INT4`` ``(p, q)`` pairs (``p + q == 2 * w``).
+   * - ``pack_int4x8`` / ``unpack_int4x8`` / ``unpack_uint4x8``
+     - 8-way signed and unsigned 4-bit integer register pack/unpack.
+
+See :doc:`../extension/quant` for architecture dispatch rules, True16 notes, and
+``examples/extension/quant/01-microscaled_quant.py`` for a runnable ``MXFP4`` /
+``NVFP4`` example.
+
 Random-number generation
 ------------------------
 
@@ -177,6 +222,6 @@ Stability and dispatch
 ----------------------
 
 An extension entry point, exported child namespace, and exported symbol form a
-stable path according to :doc:`../api_stability`. ``fx.coop``/``fx.random``
+stable path according to :doc:`../api_stability`. ``fx.coop``/``fx.quant``/``fx.random``
 aliases have the same stability as their canonical ``flydsl.extension`` paths.
 Target-specific implementations must preserve the same exported contract.
