@@ -113,6 +113,26 @@ def check_compile_family(monkeypatch, arch, case):
             return
         elif case == "warp_reduce_batched":
             result = batched_columns(fx.coop, value, fx.ReductionOp.ADD, width=8)
+        elif case == "warp_argext":
+            max_v, max_i = fx.coop.warp_argmax(value)
+            min_v, min_i = fx.coop.WarpReduce[fx.Int32, 8].argmin(value)
+            result = fx.Vector.from_elements([max_v, max_i, min_v, min_i])
+        elif case == "warp_vote":
+            pred = value[0] > fx.Int32(0)
+            V = fx.coop.WarpVote[fx.Boolean]
+            any_v = V.any(pred)
+            all_v = V.all(pred)
+            mask = V.ballot(pred)
+            cnt = V.count(pred)
+            rank, total = V.ballot_rank(pred)
+            result = fx.Vector.from_elements(
+                [
+                    any_v.select(fx.Int32(1), fx.Int32(0)) + all_v.select(fx.Int32(2), fx.Int32(0)),
+                    fx.Uint32(mask).bitcast(fx.Int32),
+                    cnt,
+                    rank + total,
+                ]
+            )
         else:
             if case.endswith("sort"):
                 result = getattr(fx.coop, case)(value, width=8, compare_op=lambda a, b: a < b)

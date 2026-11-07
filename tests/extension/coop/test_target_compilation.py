@@ -83,6 +83,7 @@ def test_block_compile_sorting_policies(monkeypatch, arch, case):
     matrix_cases(
         ARCHES,
         [
+            "warp_argext",
             "warp_bitonic_sort",
             "warp_blocked_to_striped",
             "warp_striped_to_blocked",
@@ -90,6 +91,7 @@ def test_block_compile_sorting_policies(monkeypatch, arch, case):
             "warp_store",
             "warp_merge_sort",
             "warp_reduce_batched",
+            "warp_vote",
         ],
     ),
 )
