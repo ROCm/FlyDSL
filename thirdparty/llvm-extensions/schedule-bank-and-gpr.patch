@@ -69,7 +69,7 @@ diff --git a/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp b/clang/lib/CodeGen/Tar
 diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 --- a/clang/lib/Sema/SemaAMDGPU.cpp
 +++ b/clang/lib/Sema/SemaAMDGPU.cpp
-@@ -444,6 +444,53 @@
+@@ -444,6 +444,54 @@
                                             /*High=*/0) ||
             SemaRef.BuiltinConstantArgRange(TheCall, /*ArgNum=*/2, /*Low=*/0,
                                             /*High=*/0);
@@ -118,7 +118,8 @@ diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 +    case AMDGPU::BI__builtin_amdgcn_sched_agpr: MaxReg = 255;  break;
 +    default: llvm_unreachable("unexpected builtin");
 +    }
-+    return SemaRef.BuiltinConstantArgRange(TheCall, 1, 0, MaxReg);
++    // -1 asks for any register of the file.
++    return SemaRef.BuiltinConstantArgRange(TheCall, 1, -1, MaxReg);
 +  }
    default:
      return false;
@@ -126,7 +127,7 @@ diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 --- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 +++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-@@ -4362,4 +4362,38 @@
+@@ -4362,4 +4362,40 @@
  /// incoming block.
  def int_amdgcn_dead: DefaultAttrsIntrinsic<[llvm_any_ty], [],
      [IntrNoMem]>;
@@ -147,7 +148,9 @@ diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/Int
 +// register number. These are identity functions at the IR level; the register
 +// number and strict flag arguments are consumed by the pre-RA AMDGPUSchedBank
 +// pass which attaches a register allocation hint.
-+//   regnum: the target HW register index (e.g., 42 means v42/s42/a42).
++//   regnum: the target HW register index (e.g., 42 means v42/s42/a42), or -1
++//           for any register of that file. With -1 a strict pin only keeps
++//           the value in the file and a soft pin has no effect.
 +//   strict: 1 = allocator must obey if possible, 0 = advisory hint.
 +// For wide values (64/128/256 bit), regnum is the starting register index.
 +def int_amdgcn_sched_vgpr : DefaultAttrsIntrinsic<
@@ -601,7 +604,7 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SI
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 --- a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 +++ b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
-@@ -808,6 +808,115 @@
+@@ -808,6 +808,122 @@
    }];
  }
  
@@ -644,16 +647,17 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +class ROCDL_ScheduleGPROp<string mnemonic, string intrName, string gprKind>
 +  : ROCDL_IntrOp<mnemonic, [], [0],
 +    [AllTypesMatch<["res", "value"]>], 1, 0, 0, 0, [], []>,
-+  Arguments<(ins LLVM_Type:$value, I32Attr:$regnum,
++  Arguments<(ins LLVM_Type:$value, OptionalAttr<I32Attr>:$regnum,
 +             OptionalAttr<UnitAttr>:$soft)> {
 +  let results = (outs LLVM_Type:$res);
 +  let assemblyFormat = [{
-+    $value `,` $regnum (`soft` $soft^)? attr-dict `:` type($value)
++    $value (`,` $regnum^)? (`soft` $soft^)? attr-dict `:` type($value)
 +  }];
 +  string llvmBuilder = [{
 +    auto schedOp = cast<ROCDL::Schedule}] # gprKind # [{Op>(opInst);
 +    auto *value = moduleTranslation.lookupValue(schedOp.getValue());
-+    int32_t regnum = schedOp.getRegnum();
++    // An omitted regnum is encoded as -1: any register of the file.
++    int32_t regnum = static_cast<int32_t>(schedOp.getRegnum().value_or(-1));
 +    int32_t strict = schedOp.getSoftAttr() ? 0 : 1;
 +    auto *fn = llvm::Intrinsic::getOrInsertDeclaration(
 +        moduleTranslation.getLLVMModule(),
@@ -671,12 +675,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    allocator to place `value` in the specified VGPR register number.
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in VGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.vgpr %val, 42 : f32        // strict: allocate to v42
 +    %1 = rocdl.sched.vgpr %val, 10 soft : f32   // soft: prefer v10
++    %2 = rocdl.sched.vgpr %val : f32            // strict: any VGPR
 +    ```
 +  }];
 +}
@@ -687,12 +693,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    allocator to place `value` in the specified SGPR register number.
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in SGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.sgpr %val, 10 : i32        // strict: allocate to s10
 +    %1 = rocdl.sched.sgpr %val, 4 soft : i32    // soft: prefer s4
++    %2 = rocdl.sched.sgpr %val : i32            // strict: any SGPR
 +    ```
 +  }];
 +}
@@ -704,12 +712,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    Only valid on targets with MAI instructions (e.g., gfx90a, gfx940).
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in AGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.agpr %val, 8 : f32         // strict: allocate to a8
 +    %1 = rocdl.sched.agpr %val, 0 soft : f32    // soft: prefer a0
++    %2 = rocdl.sched.agpr %val : f32            // strict: any AGPR
 +    ```
 +  }];
 +}
@@ -720,7 +730,7 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocdl.mlir
 --- a/mlir/test/Dialect/LLVMIR/rocdl.mlir
 +++ b/mlir/test/Dialect/LLVMIR/rocdl.mlir
-@@ -168,6 +168,38 @@
+@@ -168,6 +168,44 @@
    llvm.return
  }
  
@@ -737,6 +747,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.vgpr %val, 42 : f32
 +  // CHECK: rocdl.sched.vgpr %{{.*}}, 10 soft : i32
 +  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  // CHECK: rocdl.sched.vgpr %{{.*}} : f32
++  %2 = rocdl.sched.vgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -745,6 +757,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.sgpr %val, 20 : f32
 +  // CHECK: rocdl.sched.sgpr %{{.*}}, 5 soft : i32
 +  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  // CHECK: rocdl.sched.sgpr %{{.*}} : f32
++  %2 = rocdl.sched.sgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -753,6 +767,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.agpr %val, 8 : f32
 +  // CHECK: rocdl.sched.agpr %{{.*}}, 0 soft : i32
 +  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  // CHECK: rocdl.sched.agpr %{{.*}} : f32
++  %2 = rocdl.sched.agpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -762,7 +778,7 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.mlir
 --- a/mlir/test/Target/LLVMIR/rocdl.mlir
 +++ b/mlir/test/Target/LLVMIR/rocdl.mlir
-@@ -451,6 +451,46 @@
+@@ -451,6 +451,55 @@
    llvm.return
  }
  
@@ -785,6 +801,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  // soft: regnum 10, strict 0
 +  // CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 10, i32 0)
 +  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.vgpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.vgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -794,6 +813,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  %0 = rocdl.sched.sgpr %val, 20 : f32
 +  // CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 5, i32 0)
 +  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.sgpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.sgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -803,6 +825,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  %0 = rocdl.sched.agpr %val, 8 : f32
 +  // CHECK: call i32 @llvm.amdgcn.sched.agpr.i32(i32 %{{.*}}, i32 0, i32 0)
 +  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.agpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.agpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -914,7 +939,7 @@ diff --git a/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl b/clang/test/
 new file mode 100644
 --- /dev/null
 +++ b/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,75 @@
 +// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
 +// RUN: %clang_cc1 -cl-std=CL2.0 -O0 -triple amdgcn-unknown-unknown -target-cpu gfx1250 -emit-llvm -o - %s | FileCheck %s
 +// REQUIRES: amdgpu-registered-target
@@ -964,6 +989,13 @@ new file mode 100644
 +  *out = __builtin_amdgcn_sched_vgpr(x, 42);
 +}
 +
++// CHECK-LABEL: @test_sched_vgpr_any
++// CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 -1, i32 1)
++void test_sched_vgpr_any(global int *out, int x) {
++  // regnum -1: any VGPR
++  *out = __builtin_amdgcn_sched_vgpr(x, -1);
++}
++
 +// === sched_sgpr tests ===
 +
 +// CHECK-LABEL: @test_sched_sgpr_i32
@@ -987,7 +1019,7 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU
 new file mode 100644
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,286 @@
 +//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1126,6 +1158,7 @@ new file mode 100644
 +      unsigned HintKind;
 +      unsigned HintValue;
 +      bool Strict = false;
++      bool AnyReg = false;
 +
 +      if (Kind == SHK_Bank) {
 +        // Bank pseudos are only valid on targets with 1024 addressable VGPRs.
@@ -1156,8 +1189,11 @@ new file mode 100644
 +                          << " strict " << Strict << '\n');
 +      } else {
 +        // Exact register pseudos: operand 2 = regnum, operand 3 = strict.
++        // regnum -1 pins only the register file, which the pseudo's operand
++        // class already enforces, so there is no register index to hint.
 +        unsigned RegNum = MI.getOperand(2).getImm();
 +        Strict = MI.getOperand(3).getImm() != 0;
++        AnyReg = RegNum == ~0u;
 +
 +        switch (Kind) {
 +        case SHK_VGPR:
@@ -1196,17 +1232,17 @@ new file mode 100644
 +      // The strict variant is always HintKind | 1 for each category.
 +      unsigned StrictVariant = HintKind | 1;
 +
-+      if (DstReg.isVirtual() &&
++      if (!AnyReg && DstReg.isVirtual() &&
 +          (IsStrict ||
 +           MRI.getRegAllocationHint(DstReg).first != StrictVariant))
 +        MRI.setRegAllocationHint(DstReg, HintKind, HintValue);
-+      if (SrcReg.isVirtual() &&
++      if (!AnyReg && SrcReg.isVirtual() &&
 +          (IsStrict ||
 +           MRI.getRegAllocationHint(SrcReg).first != StrictVariant))
 +        MRI.setRegAllocationHint(SrcReg, HintKind, HintValue);
 +
 +      SmallDenseSet<unsigned, 32> Visited;
-+      if (DstReg.isVirtual())
++      if (!AnyReg && DstReg.isVirtual())
 +        propagateHint(MRI, DstReg, HintValue, HintKind, Visited);
 +
 +      // A strict exact-register pin must keep its own def until after RA:
@@ -1379,7 +1415,7 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AM
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,85 @@
 +# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
 +
 +# The AMDGPUSchedBank pass attaches exact register allocation hints (not
@@ -1445,11 +1481,31 @@ new file mode 100644
 +    $sgpr0_sgpr1 = COPY %1
 +    SI_RETURN_TO_EPILOG $sgpr0_sgpr1
 +...
++
++---
++# regnum -1 (any register of the file): a strict pin keeps the pseudo, a soft
++# pin is a plain COPY.
++# CHECK-LABEL: name: lower_sched_vgpr_any
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1
++# CHECK: %2:vgpr_32 = COPY %0
++# CHECK-NOT: V_SCHEDULE_VGPR_B32
++name: lower_sched_vgpr_any
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0
++    %0:vgpr_32 = COPY $vgpr0
++    %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1, implicit $exec
++    %2:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 0, implicit $exec
++    %3:vgpr_32 = V_ADD_U32_e32 %1, %2, implicit $exec
++    $vgpr0 = COPY %3
++    SI_RETURN_TO_EPILOG $vgpr0
++...
 diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,153 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
 +
 +; Verify that llvm.amdgcn.schedule.{vgpr,sgpr} steer register allocation to
@@ -1461,6 +1517,8 @@ new file mode 100644
 +declare i64 @llvm.amdgcn.sched.vgpr.i64(i64, i32, i32)
 +declare <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float>, i32, i32)
 +declare <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float>, i32, i32)
++declare i32 @llvm.amdgcn.sched.sgpr.i32(i32, i32, i32)
++declare i32 @llvm.amdgcn.workitem.id.x()
 +
 +; --------------------------------------------------------------------------
 +; sched_vgpr: strict hint to v42
@@ -1561,6 +1619,31 @@ new file mode 100644
 +}
 +
 +; --------------------------------------------------------------------------
++; regnum -1: any register of the file. No index is forced, so the allocator
++; keeps the default low-numbered registers.
++
++; GCN-LABEL: {{^}}vgpr_any:
++; GCN-NOT: v42
++; GCN: v_add_nc_u32_e32 v{{[0-9]}}, 1, v{{[0-9]}}
++define amdgpu_kernel void @vgpr_any(ptr addrspace(1) %out, i32 %x) #0 {
++  %v = call i32 @llvm.amdgcn.workitem.id.x()
++  %s = add i32 %v, %x
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %s, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; GCN-LABEL: {{^}}sgpr_any:
++; GCN: s_add_co_i32 s{{[0-9]+}}, s{{[0-9]+}}, 1
++define amdgpu_kernel void @sgpr_any(ptr addrspace(1) %out, i32 inreg %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %x, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
 +; Without hint: register allocator uses default low-numbered registers.
 +; Verify no high-numbered VGPRs appear.
 +
@@ -1619,7 +1702,7 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr.ll b/llvm/test/CodeGen/AMDGPU/s
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-agpr.ll
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,92 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx942 < %s | FileCheck -check-prefix=GCN %s
 +
 +; sched_agpr's regnum is an architectural AGPR index (aN), not a unified-file
@@ -1686,6 +1769,31 @@ new file mode 100644
 +  ret void
 +}
 +
++; --------------------------------------------------------------------------
++; regnum -1 keeps the value in the AGPR file without fixing the index. A soft
++; pin with regnum -1 has no effect.
++
++; GCN-LABEL: {{^}}agpr_any_as_vgpr:
++; GCN: v_accvgpr_write_b32 [[A:a[0-9]+]],
++; GCN: v_accvgpr_read_b32 v{{[0-9]+}}, [[A]]
++; GCN: v_add_u32_e32
++define amdgpu_kernel void @agpr_any_as_vgpr(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; GCN-LABEL: {{^}}agpr_any_soft:
++; GCN-NOT: v_accvgpr_write
++; GCN: .Lagpr_any_soft.num_agpr, 0
++define amdgpu_kernel void @agpr_any_soft(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 -1, i32 0)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
 +attributes #0 = { "amdgpu-flat-work-group-size"="64,64" "amdgpu-waves-per-eu"="1,1" }
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
 --- a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
@@ -1714,7 +1822,7 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll b/llvm/test/CodeGe
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,64 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx950 -stop-after=finalize-isel < %s | FileCheck -check-prefix=ISEL %s
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
 +
@@ -1743,6 +1851,21 @@ new file mode 100644
 +  %r2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %b, <4 x half> %a, <4 x float> %cin2, i32 0, i32 0, i32 0)
 +  %rp2 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r2, i32 8, i32 1)
 +  store <4 x float> %rp2, ptr addrspace(1) %out
++  ret void
++}
++
++; A strict pin with regnum -1 also selects the AGPR form; the allocator picks
++; the AGPRs.
++; ISEL-LABEL: name: any_pin
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL-NOT: V_MFMA_F32_16X16X16F16_vgprcd_e64
++; GCN-LABEL: {{^}}any_pin:
++; GCN: v_mfma_f32_16x16x16_f16 a[{{[0-9:]+}}], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[{{[0-9:]+}}]
++define amdgpu_kernel void @any_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 -1, i32 1)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  %rp = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 -1, i32 1)
++  store <4 x float> %rp, ptr addrspace(1) %out
 +  ret void
 +}
 +
