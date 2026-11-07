@@ -375,7 +375,7 @@ diff --git a/llvm/lib/Target/AMDGPU/CMakeLists.txt b/llvm/lib/Target/AMDGPU/CMak
 diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/SIInstructions.td
 --- a/llvm/lib/Target/AMDGPU/SIInstructions.td
 +++ b/llvm/lib/Target/AMDGPU/SIInstructions.td
-@@ -129,6 +129,39 @@
+@@ -129,6 +129,40 @@
    let usesCustomInserter = 1;
  }
  
@@ -397,7 +397,8 @@ diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/S
 +
 +// Exact VGPR register hint pseudos. Identity copies carrying a target VGPR
 +// register number and strict flag. The pre-RA AMDGPUSchedBank pass reads
-+// these operands, sets a register allocation hint, and replaces with COPY.
++// these operands and sets a register allocation hint. Soft pins become a COPY;
++// strict pins stay until expandPostRAPseudo.
 +let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
 +    mayLoad = 0, mayStore = 0, Size = 0 in {
 +  def V_SCHEDULE_VGPR_B32  : VPseudoInstSI<(outs VGPR_32:$vdst),
@@ -415,7 +416,7 @@ diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/S
  // 64-bit vector move instruction. This is mainly used by the
  // SIFoldOperands pass to enable folding of inline immediates.
  def V_MOV_B64_PSEUDO : VPseudoInstSI <(outs VReg_64:$vdst),
-@@ -217,6 +250,37 @@
+@@ -217,6 +251,37 @@
  
  } // End let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [EXEC]
  
@@ -986,7 +987,7 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU
 new file mode 100644
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,282 @@
 +//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1208,9 +1209,11 @@ new file mode 100644
 +      if (DstReg.isVirtual())
 +        propagateHint(MRI, DstReg, HintValue, HintKind, Visited);
 +
-+      // A strict AGPR pin must keep its AGPR operand constraint until after
-+      // RA. expandPostRAPseudo turns the pseudo into a physreg copy.
-+      if (Kind == SHK_AGPR && Strict) {
++      // A strict exact-register pin must keep its own def until after RA:
++      // a plain COPY gets coalesced and the hint can be dropped with it. For
++      // AGPR it also keeps the AGPR operand constraint. expandPostRAPseudo
++      // turns the pseudo into a physreg copy.
++      if (Kind != SHK_Bank && Strict) {
 +        Changed = true;
 +        continue;
 +      }
@@ -1376,16 +1379,16 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AM
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,65 @@
 +# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
 +
 +# The AMDGPUSchedBank pass attaches exact register allocation hints (not
-+# printed in MIR) and lowers each schedule pseudo to a plain COPY.
++# printed in MIR). Soft pins are lowered to a plain COPY; strict pins keep the
++# pseudo until expandPostRAPseudo.
 +
 +---
 +# CHECK-LABEL: name: lower_sched_vgpr_b32
-+# CHECK: %1:vgpr_32 = COPY %0
-+# CHECK-NOT: V_SCHEDULE_VGPR_B32
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 42, 1
 +name: lower_sched_vgpr_b32
 +tracksRegLiveness: true
 +body: |
@@ -1415,8 +1418,7 @@ new file mode 100644
 +
 +---
 +# CHECK-LABEL: name: lower_sched_sgpr_b32
-+# CHECK: %1:sgpr_32 = COPY %0
-+# CHECK-NOT: S_SCHEDULE_SGPR_B32
++# CHECK: %1:sgpr_32 = S_SCHEDULE_SGPR_B32 %0, 10, 1
 +name: lower_sched_sgpr_b32
 +tracksRegLiveness: true
 +body: |
@@ -1447,7 +1449,7 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr.ll b/llvm/test/CodeGen/AMDGPU/sc
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,126 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
 +
 +; Verify that llvm.amdgcn.schedule.{vgpr,sgpr} steer register allocation to
@@ -1458,6 +1460,7 @@ new file mode 100644
 +declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
 +declare i64 @llvm.amdgcn.sched.vgpr.i64(i64, i32, i32)
 +declare <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float>, i32, i32)
 +
 +; --------------------------------------------------------------------------
 +; sched_vgpr: strict hint to v42
@@ -1523,11 +1526,37 @@ new file mode 100644
 +; sched_vgpr: 512-bit value (v16f32), strict hint to v[512:527]
 +
 +; GCN-LABEL: {{^}}vgpr512_v16f32:
-+; GCN: v[512:527]
++; GCN-DAG: v[524:527]
++; GCN-DAG: v[512:515]
 +define amdgpu_kernel void @vgpr512_v16f32(ptr addrspace(1) %out, ptr addrspace(1) %in) #0 {
 +  %x = load <16 x float>, ptr addrspace(1) %in
 +  %h = call <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float> %x, i32 512, i32 1)
 +  store <16 x float> %h, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: a strict pin on a value built from sub-register defs still holds
++; after coalescing, and every later use reads the pinned v[40:43].
++
++; GCN-LABEL: {{^}}vgpr40_shared_uses:
++; GCN-DAG: v_pk_add_f32 v[40:41],
++; GCN-DAG: v_pk_add_f32 v[42:43],
++; GCN-DAG: v_pk_add_f32 v[{{[0-9]+:[0-9]+}}], v[40:41],
++; GCN-DAG: v_pk_mul_f32 v[{{[0-9]+:[0-9]+}}], v[40:41],
++define amdgpu_kernel void @vgpr40_shared_uses(ptr addrspace(1) %out, ptr addrspace(1) %in) #0 {
++  %pb = getelementptr <4 x float>, ptr addrspace(1) %in, i32 1
++  %pe = getelementptr <4 x float>, ptr addrspace(1) %in, i32 2
++  %a = load volatile <4 x float>, ptr addrspace(1) %in
++  %b = load volatile <4 x float>, ptr addrspace(1) %pb
++  %e = load volatile <4 x float>, ptr addrspace(1) %pe
++  %c0 = fadd <4 x float> %a, %b
++  %c = call <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float> %c0, i32 40, i32 1)
++  %d = fadd <4 x float> %c, %e
++  %f = fmul <4 x float> %c, %e
++  %o2 = getelementptr <4 x float>, ptr addrspace(1) %out, i32 1
++  store <4 x float> %d, ptr addrspace(1) %out
++  store <4 x float> %f, ptr addrspace(1) %o2
 +  ret void
 +}
 +
@@ -1550,7 +1579,7 @@ new file mode 100644
 diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
 --- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
 +++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
-@@ -2550,6 +2550,24 @@
+@@ -2550,6 +2550,35 @@
      break;
    }
  
@@ -1558,8 +1587,19 @@ diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SII
 +  case AMDGPU::A_SCHEDULE_AGPR_B64:
 +  case AMDGPU::A_SCHEDULE_AGPR_B128:
 +  case AMDGPU::A_SCHEDULE_AGPR_B256:
-+  case AMDGPU::A_SCHEDULE_AGPR_B512: {
-+    // Strict AGPR pins are kept through RA so the operand class stays AGPR.
++  case AMDGPU::A_SCHEDULE_AGPR_B512:
++  case AMDGPU::V_SCHEDULE_VGPR_B32:
++  case AMDGPU::V_SCHEDULE_VGPR_B64:
++  case AMDGPU::V_SCHEDULE_VGPR_B128:
++  case AMDGPU::V_SCHEDULE_VGPR_B256:
++  case AMDGPU::V_SCHEDULE_VGPR_B512:
++  case AMDGPU::S_SCHEDULE_SGPR_B32:
++  case AMDGPU::S_SCHEDULE_SGPR_B64:
++  case AMDGPU::S_SCHEDULE_SGPR_B128:
++  case AMDGPU::S_SCHEDULE_SGPR_B256:
++  case AMDGPU::S_SCHEDULE_SGPR_B512: {
++    // Strict exact-register pins are kept through RA so the pinned value keeps
++    // its own def and hint (and, for AGPR, its operand class).
 +    // The immediates have already been consumed as allocation hints.
 +    Register Dst = MI.getOperand(0).getReg();
 +    Register Src = MI.getOperand(1).getReg();
