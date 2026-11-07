@@ -459,11 +459,10 @@ class Mfma16x16x128Fp4:
         a_op, b_op = b_op, a_op
         sa_v, sb_v = sb_v, sa_v
         ia, jb = jb, ia
-        # Same regnum on the source and the result asks RA to tie src2 and dst.
-        pinned_acc = self.zero_value if acc is None else sched_agpr(acc, regnum=agpr_regnum)
+        acc = self.zero_value if acc is None else acc
         result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
             self.res_ty,
-            [a_op, b_op, pinned_acc, _FP4_CBSZ, _FP4_BLGP, ia + 2 * ksub, sa_v, jb + 2 * ksub, sb_v],
+            [a_op, b_op, acc, _FP4_CBSZ, _FP4_BLGP, ia + 2 * ksub, sa_v, jb + 2 * ksub, sb_v],
         )
         return sched_agpr(result, regnum=agpr_regnum)
 

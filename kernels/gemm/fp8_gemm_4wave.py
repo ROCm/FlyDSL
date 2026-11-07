@@ -65,12 +65,7 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     def _do_mma_sched(self, a, b, c, agpr_regnum):
         a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
         b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
-        # The first K-step accumulates into the shared zero vector: feed it unpinned
-        # so src2 becomes the inline constant 0 instead of 64 AGPR initializations.
-        pinned_acc = c if c is self.zero_value else sched_agpr(c, regnum=agpr_regnum)
-        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-            _T.vec(4, _T.f32), [a_i32x8, b_i32x8, pinned_acc, 0, 0, 0, 0, 0, 0]
-        )
+        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(_T.vec(4, _T.f32), [a_i32x8, b_i32x8, c, 0, 0, 0, 0, 0, 0])
         result = sched_agpr(result, regnum=agpr_regnum)
         # The MFMA intrinsic has no side effects, so without this the scheduler moves
         # MFMAs across wait_barrier and bunches the interleaved loads at segment ends.
