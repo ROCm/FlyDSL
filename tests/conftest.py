@@ -93,6 +93,17 @@ def insert_point(ctx):
         yield InsertionPoint.current
 
 
+@pytest.fixture
+def rocm_arch():
+    """Resolve the target only for tests that require ROCm hardware."""
+    from flydsl.runtime.device import get_rocm_arch
+
+    try:
+        return get_rocm_arch()
+    except RuntimeError as error:
+        pytest.skip(str(error))
+
+
 def pytest_addoption(parser):
     """Add FlyDSL test-session options that map to env variables."""
     group = parser.getgroup("flydsl")
