@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-07T15:43:20Z",
+ "updated": "2026-11-07T16:34:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,20 +25,20 @@
    "branch": "fix/debug-call-chain-scopes",
    "event": "pull_request",
    "title": "[Bugfix] Keep every frame of an op's call chain in debug info; skip the standard library",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301",
    "created_at": "2026-11-07T14:40:06Z",
-   "updated_at": "2026-11-07T15:06:56Z",
+   "updated_at": "2026-11-07T16:33:39Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-07T15:42:24Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T16:06:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772671"
     },
     {
