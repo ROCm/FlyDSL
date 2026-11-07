@@ -14,10 +14,13 @@ from .reduce_batched import *
 from .scan import *
 from .scan import WarpScan as _WarpScan
 from .store import *
+from .vote import *
+from .vote import WarpVote as _WarpVote
 
 __all__ = [
     "WarpReduce",
     "WarpScan",
+    "WarpVote",
     "WarpReduceBatched",
     "WarpExchange",
     "WarpLoad",
@@ -43,6 +46,8 @@ __all__ = [
     "warp_sum",
     "warp_max",
     "warp_min",
+    "warp_argmax",
+    "warp_argmin",
     "warp_reduce_batched",
     "warp_inclusive_scan",
     "warp_exclusive_scan",
@@ -50,6 +55,11 @@ __all__ = [
     "warp_exclusive_sum",
     "warp_scan",
     "warp_scan_with_aggregate",
+    "warp_any",
+    "warp_all",
+    "warp_ballot",
+    "warp_count",
+    "warp_ballot_rank",
 ]
 
 _dispatch = Dispatcher(__name__, targets={"rocm": "rocdl"})
@@ -69,5 +79,11 @@ class WarpReduce(_WarpReduce):
 
 class WarpScan(_WarpScan):
     __doc__ = _WarpScan.__doc__
+
+    _dispatcher = _dispatch
+
+
+class WarpVote(_WarpVote):
+    __doc__ = _WarpVote.__doc__
 
     _dispatcher = _dispatch

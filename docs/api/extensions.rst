@@ -39,6 +39,9 @@ Warp functions
    * - ``warp_reduce(value, op, *, width=None, valid_items=None)``
      - Reduce one value or a per-lane item range. The aggregate is returned to
        every participating lane.
+   * - ``warp_argmax`` / ``warp_argmin``
+     - Return ``(extremum, winning_index)`` across a logical warp with
+       deterministic lowest-index tie-breaking.
    * - ``warp_head_segmented_reduce(value, head_flag, op, *, width=None)``
      - Reduce ascending-lane segments identified by a nonzero head flag;
        results are valid at segment heads.
@@ -55,6 +58,12 @@ Warp functions
    * - ``warp_scan_with_aggregate``
      - Return ``(inclusive, exclusive, aggregate)``; the aggregate excludes
        ``init``.
+   * - ``warp_any`` / ``warp_all`` / ``warp_ballot`` / ``warp_count``
+     - Wave-portable predicate votes, logical-warp ``Uint64`` ballot masks,
+       and active-lane population counts.
+   * - ``warp_ballot_rank(predicate, *, width=None)``
+     - Return ``(exclusive_rank, total_count)`` for warp-scope stream
+       compaction.
    * - ``warp_reduce_batched``
      - Reduce batched/thread-packed inputs with an explicit output layout.
    * - ``warp_reduce_batched_to_blocked`` /
@@ -79,9 +88,9 @@ Class forms make data movement and reusable specializations explicit:
 
    * - Class
      - Purpose
-   * - ``WarpReduce`` / ``WarpScan`` / ``WarpReduceBatched``
-     - Reusable reduction and scan specializations corresponding to the
-       function APIs.
+   * - ``WarpReduce`` / ``WarpScan`` / ``WarpVote`` / ``WarpReduceBatched``
+     - Reusable reduction, scan, and predicate-vote specializations
+       corresponding to the function APIs.
    * - ``WarpLoad`` / ``WarpStore``
      - Move blocked/striped/transpose-oriented per-lane item arrays between
        memory and registers.
