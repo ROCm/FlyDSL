@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""ThrVal pins for the gfx1250 block-scaled WMMA A/B layouts (issue #1323).
+"""ThrVal pins for the gfx1250 block-scaled WMMA layouts (issue #1323).
 
 No GPU. V_WMMA_SCALE applies E8M0 scale byte j to the registers the ISA assigns
 to K block j, so the A/B ThrVal layouts must match the CDNA5 ISA (7.12.6.1)
 lane/slot -> K mapping exactly:
 
   FP4/FP6: lanes 0-15 hold K 0-31, 64-95; lanes 16-31 hold K 32-63, 96-127
-  FP8:     8-wide K blocks interleaved between the two lane groups
+  FP8:     lanes 0-15 hold K 0-15, 32-47, ...; lanes 16-31 hold K 16-31, 48-63, ...
 
-Reference (M, K) space is column-major with stride (1, 16).
+The 32x16x128 FP4 form stacks two 16-row operands (A) and two 16x16 halves (C)
+in consecutive VGPRs. Reference (M, K) space is column-major with stride (1, M).
 """
 
 from __future__ import annotations
@@ -31,7 +32,9 @@ from flydsl.expr.rocdl import cdna5
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 _FP4_FP6_AB = "!fly.layout<((16,2),(32,2)):((1,512),(16,1024))>"
-_FP8_AB = "!fly.layout<((16,2),(8,8)):((1,128),(16,256))>"
+_FP8_AB = "!fly.layout<((16,2),(16,4)):((1,256),(16,512))>"
+_FP4_32ROW_A = "!fly.layout<((16,2),(32,2,2)):((1,1024),(32,2048,16))>"
+_32X16_C = "!fly.layout<((16,2),(8,2)):((32,8),(1,16))>"
 
 _FP4_FP6 = [fx.Float4E2M1FN, fx.Float6E2M3FN, fx.Float6E3M2FN]
 _FP8 = [fx.Float8E4M3FN, fx.Float8E5M2]
@@ -41,7 +44,7 @@ def _isa_k(lane, v, elem):
     g = lane // 16
     if elem in _FP4_FP6:
         return 32 * g + v % 32 + 64 * (v // 32)
-    return 8 * g + v % 8 + 16 * (v // 8)
+    return 16 * g + v % 16 + 32 * (v // 16)
 
 
 def _scale_atom_type(elem_a, elem_b=None, m=16):
@@ -100,10 +103,9 @@ def test_wmma_scale_16x16x128_printed(elem):
 def test_wmma_scale_32x16x128_fp4_printed():
     with ir.Context(), ir.Location.unknown():
         atom = _scale_atom_type(fx.Float4E2M1FN, m=32)
-        # A keeps the provisional 32-row layout; B is the 16-row FP4 layout.
-        assert str(atom.tv_layout_a) == "!fly.layout<(32,128):(1,32)>"
+        assert str(atom.tv_layout_a) == _FP4_32ROW_A
         assert str(atom.tv_layout_b) == _FP4_FP6_AB
-        assert str(atom.tv_layout_c) == "!fly.layout<((16,2),16):((16,16),1)>"
+        assert str(atom.tv_layout_c) == _32X16_C
 
 
 @pytest.mark.parametrize("elem_a,elem_b", [(fx.Float4E2M1FN, fx.Float8E4M3FN), (fx.Float8E4M3FN, fx.Float4E2M1FN)])
@@ -119,7 +121,7 @@ def test_wmma_scale_mixed_operands_pick_layout_per_operand(elem_a, elem_b):
     [
         (32, "i4", "i32", "!fly.layout<((16,2),(8,2)):((1,128),(16,256))>"),
         (64, "f8E4M3FN", "f32", "!fly.layout<((16,2),(8,4)):((1,128),(16,256))>"),
-        (128, "f8E4M3FN", "f32", _FP8_AB),
+        (128, "f8E4M3FN", "f32", "!fly.layout<((16,2),(8,8)):((1,128),(16,256))>"),
     ],
     ids=["iu4_k32", "fp8_k64", "fp8_k128"],
 )
@@ -143,31 +145,66 @@ def test_wmma_scale_every_lane_slot_matches_isa(gfx1250_frontend, elem):
     assert sorted(pos_a.ravel().tolist()) == list(range(16 * 128))
 
 
-def _emulate_wmma_scale(regs_a, regs_b, scale_a, scale_b, elem):
+def test_wmma_scale_32x16x128_every_lane_slot_matches_isa(gfx1250_frontend):
+    pos_a, pos_c = np.zeros((32, 128), np.int64), np.zeros((32, 16), np.int64)
+
+    @flyc.jit
+    def pin():
+        atom = fx.make_mma_atom(cdna5.WMMAScale(32, 16, 128, fx.Float4E2M1FN, fx.Float4E2M1FN))
+        layout_a = atom.layout_A_tv
+        layout_c = atom.layout_C_tv
+        for lane in fx.range_constexpr(32):
+            for v in fx.range_constexpr(128):
+                pos_a[lane, v] = layout_a((lane % 16, lane // 16), v).get_static_leaf_int
+            for v in fx.range_constexpr(16):
+                pos_c[lane, v] = layout_c((lane % 16, lane // 16), v).get_static_leaf_int
+
+    pin()
+    for lane in range(32):
+        for v in range(128):
+            assert pos_a[lane, v] % 32 == lane % 16 + 16 * (v // 64), (lane, v)
+            assert pos_a[lane, v] // 32 == _isa_k(lane, v % 64, fx.Float4E2M1FN), (lane, v)
+        for v in range(16):
+            assert pos_c[lane, v] % 32 == 16 * (v // 8) + 8 * (lane // 16) + v % 8, (lane, v)
+            assert pos_c[lane, v] // 32 == lane % 16, (lane, v)
+    assert sorted(pos_a.ravel().tolist()) == list(range(32 * 128))
+    assert sorted(pos_c.ravel().tolist()) == list(range(32 * 16))
+
+
+def _emulate_wmma_scale(regs_a, regs_b, scale_a, scale_b, elem_a, elem_b, block):
     """CPU model of V_WMMA_SCALE: the hardware reads lane/slot (l, v) as row l%16,
-    K = ISA k(l, v), and scales it by that row's E8M0 byte for K block k // 32."""
+    K = ISA k(l, v) of that operand's format, and scales it by that row's E8M0 byte
+    for K block k // block."""
     a = np.zeros((16, 128))
     b = np.zeros((16, 128))
     for lane in range(32):
         for v in range(64):
-            k = _isa_k(lane, v, elem)
-            a[lane % 16, k] = regs_a[lane, v] * 2.0 ** scale_a[lane % 16, k // 32]
-            b[lane % 16, k] = regs_b[lane, v] * 2.0 ** scale_b[lane % 16, k // 32]
+            k = _isa_k(lane, v, elem_a)
+            a[lane % 16, k] = regs_a[lane, v] * 2.0 ** scale_a[lane % 16, k // block]
+            k = _isa_k(lane, v, elem_b)
+            b[lane % 16, k] = regs_b[lane, v] * 2.0 ** scale_b[lane % 16, k // block]
     return a @ b.T
 
 
-@pytest.mark.parametrize("elem", _FP4_FP6, ids=lambda e: e.__name__)
+@pytest.mark.parametrize(
+    "elem_a,elem_b",
+    [(e, e) for e in _FP4_FP6 + _FP8]
+    + [(fx.Float4E2M1FN, fx.Float8E4M3FN), (fx.Float8E4M3FN, fx.Float4E2M1FN), (fx.Float6E2M3FN, fx.Float8E5M2)],
+    ids=lambda e: e.__name__,
+)
+@pytest.mark.parametrize("block", [32, 16], ids=["scale32", "scale16"])
 @pytest.mark.parametrize("varying", [False, True], ids=["uniform_scales", "varying_scales"])
-def test_wmma_scale_model_matches_reference(gfx1250_frontend, elem, varying):
+def test_wmma_scale_model_matches_reference(gfx1250_frontend, elem_a, elem_b, block, varying):
     rng = np.random.default_rng(1323)
     a = rng.integers(-6, 7, (16, 128)).astype(np.float64)
     b = rng.integers(-6, 7, (16, 128)).astype(np.float64)
-    scale_a = rng.integers(-3, 4, (16, 4)) if varying else np.zeros((16, 4), np.int64)
-    scale_b = rng.integers(-3, 4, (16, 4)) if varying else np.zeros((16, 4), np.int64)
-    ref = (a * 2.0 ** np.repeat(scale_a, 32, axis=1)) @ (b * 2.0 ** np.repeat(scale_b, 32, axis=1)).T
+    nblk = 128 // block
+    scale_a = rng.integers(-3, 4, (16, nblk)) if varying else np.zeros((16, nblk), np.int64)
+    scale_b = rng.integers(-3, 4, (16, nblk)) if varying else np.zeros((16, nblk), np.int64)
+    ref = (a * 2.0 ** np.repeat(scale_a, block, axis=1)) @ (b * 2.0 ** np.repeat(scale_b, block, axis=1)).T
 
     # Load registers the way make_fragment_A/B + make_tiled_copy_A/B would: by the atom's layout.
-    pos_a, pos_b = _ab_positions(elem)
+    pos_a, pos_b = _ab_positions(elem_a, elem_b)
     regs_a = a.ravel(order="F")[pos_a]
     regs_b = b.ravel(order="F")[pos_b]
-    np.testing.assert_array_equal(_emulate_wmma_scale(regs_a, regs_b, scale_a, scale_b, elem), ref)
+    np.testing.assert_array_equal(_emulate_wmma_scale(regs_a, regs_b, scale_a, scale_b, elem_a, elem_b, block), ref)
