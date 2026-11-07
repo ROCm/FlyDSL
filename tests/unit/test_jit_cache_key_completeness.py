@@ -27,7 +27,7 @@ pytestmark = pytest.mark.l1a_compile_no_target_dialect
 
 @pytest.fixture
 def frontend(monkeypatch, tmp_path):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "0")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
@@ -299,14 +299,14 @@ def test_lowering_inputs_outside_the_ir_split_artifacts(frontend, monkeypatch):
     keys.append(_compile(launch, 3)[0])
     monkeypatch.setattr(backend_type, "hash", lambda self: "updated-backend-toolchain")
     keys.append(_compile(launch, 3)[0])
-    monkeypatch.setenv("ARCH", "gfx1250")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
     keys.append(_compile(launch, 3)[0])
     for xnack in ("0", "1"):
         monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", xnack)
         keys.append(_compile(launch, 3)[0])
     assert len(set(keys)) == len(keys) == len(frontend)
     # The xnack variable only affects gfx1250 codegen.
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     assert _compile(launch, 3)[0] == keys[3]
 
     # The loaded toolchain cannot change in-process; it namespaces disk entries.
@@ -341,7 +341,7 @@ def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
     ocml.parent.mkdir(parents=True)
     ocml.write_bytes(b"v1")
     monkeypatch.setenv("ROCM_PATH", str(toolkit))
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     seen = []
     monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: seen.append(args[-1]) or "")
 
@@ -695,7 +695,7 @@ def test_shared_disk_cache_observes_cross_directory_nested_helper(tmp_path, gpu)
         "FLYDSL_COMPILE_LLVM_DIR": "",
     }
     if not gpu:
-        env["ARCH"] = "gfx942"  # Compile-only; a GPU run targets its own device.
+        env["FLYDSL_GPU_ARCH"] = "gfx942"  # Compile-only; a GPU run targets its own device.
     results = []
     for value in (1, 7, 7):
         child = subprocess.run(

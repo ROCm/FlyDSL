@@ -22,7 +22,7 @@ misses a shipped cache; under-keying serves a stale binary.
 
 **A1 — Over-keying: an input already captured elsewhere, or with no effect, enters the key** ⚠️/🔴
 The canonical case is an arch env var: AOT precompilation runs on a GPU-less build host with
-`ARCH=gfx950` injected, while runtime detects the arch from the device. The resolved target is
+`FLYDSL_GPU_ARCH=gfx950` injected, while runtime detects the arch from the device. The resolved target is
 identical, but the raw `_env_` segment differs, so every shipped cache misses.
 Real example (PR #624): `ARCH`, `FLYDSL_GPU_ARCH` and `HSA_OVERRIDE_GFX_VERSION` were removed
 from the invalidating env vars after aiter hit `RuntimeError: AOT cache miss`.
@@ -163,7 +163,8 @@ which kills the Python process with no traceback.
 Real examples: PR #544 (restrict a WMMA atom to gfx11 so older RDNA targets do not select it);
 PR #943 (narrowed `gfx12` to `gfx120` so it no longer overlaps gfx1250); PR #1122
 (`buffer_load ... lds` has no gfx11 hardware path; the fix raises `ValueError` at the kernel line,
-reading `ARCH` before `get_rocm_arch()` so cross-compilation gates the right target).
+gating on the compile target rather than the installed device so cross-compilation gates the
+right target).
 Severity: 🔴 when the target aborts or computes wrong values; ⚠️ for a predicate that selects an
 unsupported but failing-loudly path.
 → `🔴/⚠️ C2: [predicate] [also matches / does not gate] [arch], which lacks [feature] — [abort / wrong atom]; narrow or add the gate`
