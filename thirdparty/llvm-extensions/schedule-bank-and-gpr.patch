@@ -1019,7 +1019,7 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU
 new file mode 100644
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,296 @@
 +//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1245,6 +1245,16 @@ new file mode 100644
 +      if (!AnyReg && DstReg.isVirtual())
 +        propagateHint(MRI, DstReg, HintValue, HintKind, Visited);
 +
++      // The kept pseudo is not a COPY, so nothing else asks RA to give both
++      // sides the same register; without that it expands to a real copy.
++      if (AnyReg && Strict && DstReg.isVirtual() && SrcReg.isVirtual() &&
++          !SrcMO.getSubReg()) {
++        if (MRI.getRegAllocationHint(DstReg).first == 0)
++          MRI.addRegAllocationHint(DstReg, SrcReg);
++        if (MRI.getRegAllocationHint(SrcReg).first == 0)
++          MRI.addRegAllocationHint(SrcReg, DstReg);
++      }
++
 +      // A strict exact-register pin must keep its own def until after RA:
 +      // a plain COPY gets coalesced and the hint can be dropped with it. For
 +      // AGPR it also keeps the AGPR operand constraint. expandPostRAPseudo
@@ -1415,7 +1425,7 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AM
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,90 @@
 +# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
 +
 +# The AMDGPUSchedBank pass attaches exact register allocation hints (not
@@ -1484,8 +1494,13 @@ new file mode 100644
 +
 +---
 +# regnum -1 (any register of the file): a strict pin keeps the pseudo, a soft
-+# pin is a plain COPY.
++# pin is a plain COPY. The strict pin's source and result prefer each other so
++# the kept pseudo expands to nothing.
 +# CHECK-LABEL: name: lower_sched_vgpr_any
++# CHECK: registers:
++# CHECK-NEXT: - { id: 0, class: vgpr_32, preferred-register: '%1'
++# CHECK-NEXT: - { id: 1, class: vgpr_32, preferred-register: '%0'
++# CHECK-NEXT: - { id: 2, class: vgpr_32, preferred-register: ''
 +# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1
 +# CHECK: %2:vgpr_32 = COPY %0
 +# CHECK-NOT: V_SCHEDULE_VGPR_B32
