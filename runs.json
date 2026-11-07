@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-07T15:08:21Z",
+ "updated": "2026-11-07T15:22:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -44,9 +44,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-07T15:06:56Z",
+     "started_at": "2026-11-07T15:08:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382668301/job/128439772708"
     },
@@ -68,38 +68,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback (#1332)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939",
    "created_at": "2026-11-07T14:34:42Z",
-   "updated_at": "2026-11-07T14:48:31Z",
+   "updated_at": "2026-11-07T15:12:05Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T14:48:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355444"
+     "completed_at": "2026-11-07T15:19:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355444",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-07T14:48:53Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T15:13:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355477"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-07T14:48:41Z",
-     "completed_at": null,
+     "completed_at": "2026-11-07T15:11:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939/job/128435355487"
     }
    ]
