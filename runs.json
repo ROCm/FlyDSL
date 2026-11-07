@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-07T14:03:52Z",
+ "updated": "2026-11-07T14:35:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42382253939,
+   "pr": null,
+   "commit": "ae8f35dfab1b39156d6fb1ff78ae58424c84dcc7",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback (#1332)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42382253939",
+   "created_at": "2026-11-07T14:34:42Z",
+   "updated_at": "2026-11-07T14:34:57Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42376187205,
    "pr": 1384,
@@ -1223,49 +1238,6 @@
      "started_at": "2026-11-06T01:48:45Z",
      "completed_at": "2026-11-06T02:10:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42143427947/job/127695766796"
-    }
-   ]
-  },
-  {
-   "run_id": 42139991350,
-   "pr": null,
-   "commit": "8321d978fc2085c1eb0346487f4a2695a4206c9f",
-   "branch": "fix/test-triton-optional",
-   "event": "pull_request",
-   "title": "[Tests] Drop the hard triton import from kernel test helpers",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350",
-   "created_at": "2026-11-06T00:52:49Z",
-   "updated_at": "2026-11-06T01:23:47Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-06T01:08:50Z",
-     "completed_at": "2026-11-06T01:19:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592284"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-06T01:21:34Z",
-     "completed_at": "2026-11-06T01:23:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592297"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-06T01:10:50Z",
-     "completed_at": "2026-11-06T01:23:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42139991350/job/127643592328"
     }
    ]
   }
