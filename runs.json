@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-08T01:18:35Z",
+ "updated": "2026-11-08T01:21:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173",
    "created_at": "2026-11-08T00:20:20Z",
-   "updated_at": "2026-11-08T01:02:17Z",
+   "updated_at": "2026-11-08T01:21:01Z",
    "actor": "Phil-amd",
    "jobs": [
     {
