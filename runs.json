@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-08T09:22:30Z",
+ "updated": "2026-11-08T11:15:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42474847091,
+   "pr": 1368,
+   "commit": "3b50ba9153cfbc00a6a9a5157011b3559532b9f1",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091",
+   "created_at": "2026-11-08T11:14:15Z",
+   "updated_at": "2026-11-08T11:14:29Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 42474847018,
+   "pr": 1368,
+   "commit": "3b50ba9153cfbc00a6a9a5157011b3559532b9f1",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847018",
+   "created_at": "2026-11-08T11:14:15Z",
+   "updated_at": "2026-11-08T11:14:17Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 42429293173,
    "pr": 1380,
@@ -1237,36 +1267,6 @@
    "created_at": "2026-11-06T08:53:52Z",
    "updated_at": "2026-11-06T09:21:43Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 42190209931,
-   "pr": null,
-   "commit": "328c170b0fcbaf5b917e5dbecb0ea11afd7d4904",
-   "branch": "fix/jit-key-rocm-toolkit",
-   "event": "pull_request",
-   "title": "[JIT] Key disk cache entries by the ROCm device bitcode and external LLVM libs",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42190209931",
-   "created_at": "2026-11-06T08:47:29Z",
-   "updated_at": "2026-11-06T08:53:54Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 42187643718,
-   "pr": 1380,
-   "commit": "f8a41b27eb18739a6ad373a12eebde50946c78d4",
-   "branch": "feat/windows-ci",
-   "event": "pull_request",
-   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42187643718",
-   "created_at": "2026-11-06T08:26:04Z",
-   "updated_at": "2026-11-06T08:26:24Z",
-   "actor": "Phil-amd",
    "jobs": []
   }
  ]
