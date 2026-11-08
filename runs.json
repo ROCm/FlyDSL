@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-08T00:43:34Z",
+ "updated": "2026-11-08T01:18:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,39 +10,42 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173",
    "created_at": "2026-11-08T00:20:20Z",
-   "updated_at": "2026-11-08T00:33:12Z",
+   "updated_at": "2026-11-08T01:02:17Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-08T00:33:36Z",
-     "completed_at": null,
+     "completed_at": "2026-11-08T01:15:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388776"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-08T00:33:23Z",
-     "completed_at": null,
+     "completed_at": "2026-11-08T01:02:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388795"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-08T00:33:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388855"
+     "completed_at": "2026-11-08T01:00:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388855",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
