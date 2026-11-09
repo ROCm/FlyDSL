@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T03:09:21Z",
+ "updated": "2026-11-09T03:23:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42555911754,
+   "pr": 1388,
+   "commit": "392f7de19fcb861b553cf8d7cddf294785579880",
+   "branch": "pr/ci-kernels-labeler",
+   "event": "pull_request",
+   "title": "[CI] Label kernel-only pull requests automatically",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42555911754",
+   "created_at": "2026-11-09T03:21:01Z",
+   "updated_at": "2026-11-09T03:22:16Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 42549883558,
    "pr": 1313,
@@ -29,19 +44,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T02:33:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582045"
+     "completed_at": "2026-11-09T03:17:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582045",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T02:33:13Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T03:11:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582163"
     }
    ]
@@ -1405,21 +1423,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42199794703/job/127839706787"
     }
    ]
-  },
-  {
-   "run_id": 42195400772,
-   "pr": null,
-   "commit": "e9c6a41bfc432eb999434c7f61c3eefb2d5e8f30",
-   "branch": "fix/rocm-gpu-detection",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix ROCm GPU counting and architecture fallback",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42195400772",
-   "created_at": "2026-11-06T09:29:11Z",
-   "updated_at": "2026-11-06T09:55:58Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
