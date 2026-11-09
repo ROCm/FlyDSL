@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-09T00:44:14Z",
+ "updated": "2026-11-09T01:12:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42541783953,
+   "pr": 1387,
+   "commit": "ca924876b3887891ed226f4719d8bac7a4d63afc",
+   "branch": "ci/aiter-a4w4-fmoe-csv",
+   "event": "pull_request",
+   "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953",
+   "created_at": "2026-11-09T00:44:10Z",
+   "updated_at": "2026-11-09T01:05:42Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:06:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996594"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:05:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996631"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:06:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996680"
+    }
+   ]
+  },
   {
    "run_id": 42541213607,
    "pr": 1368,
@@ -10,13 +53,41 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607",
    "created_at": "2026-11-09T00:37:40Z",
-   "updated_at": "2026-11-09T00:39:35Z",
+   "updated_at": "2026-11-09T01:07:11Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:10:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404533"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:07:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404542"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T01:07:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404557"
+    }
+   ]
   },
   {
    "run_id": 42540907774,
@@ -40,38 +111,41 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477",
    "created_at": "2026-11-09T00:15:42Z",
-   "updated_at": "2026-11-09T00:38:30Z",
+   "updated_at": "2026-11-09T01:11:38Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T00:38:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554050"
+     "completed_at": "2026-11-09T01:11:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554050",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-09T00:38:39Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T00:53:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554052"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T00:39:00Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T01:09:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554079"
     }
    ]
@@ -1310,21 +1384,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194468255",
    "created_at": "2026-11-06T09:21:47Z",
    "updated_at": "2026-11-06T09:54:37Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 42194370011,
-   "pr": null,
-   "commit": "e59f49132f2364ff9cf918d24725410c57d0b563",
-   "branch": "main",
-   "event": "push",
-   "title": "[Tests] Fix missing stream waits in multi-stream tests (#1378)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194370011",
-   "created_at": "2026-11-06T09:21:01Z",
-   "updated_at": "2026-11-06T09:22:44Z",
    "actor": "coderfeli",
    "jobs": []
   }
