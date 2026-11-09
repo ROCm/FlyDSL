@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T06:40:21Z",
+ "updated": "2026-11-09T06:58:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42574978076,
+   "pr": 1350,
+   "commit": "8bd64c51cffed6046f28b22ac2f062445c6ef236",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076",
+   "created_at": "2026-11-09T06:45:09Z",
+   "updated_at": "2026-11-09T06:46:52Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 42556892116,
    "pr": 1388,
@@ -1440,21 +1455,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42221380599",
    "created_at": "2026-11-06T12:55:29Z",
    "updated_at": "2026-11-06T12:55:29Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42220879395,
-   "pr": null,
-   "commit": "afac505a5bdaeed7d9cba6ef278de625d0ab4a42",
-   "branch": "pr1-rocdl-fp8-bf8-cvt",
-   "event": "pull_request",
-   "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42220879395",
-   "created_at": "2026-11-06T12:51:32Z",
-   "updated_at": "2026-11-06T12:51:32Z",
    "actor": "dimitri91209",
    "jobs": []
   }
