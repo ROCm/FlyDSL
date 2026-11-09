@@ -472,7 +472,41 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
  std::array<std::vector<int16_t>, 32> SIRegisterInfo::RegSplitParts;
  std::array<std::array<uint16_t, 32>, 9> SIRegisterInfo::SubRegFromChannelTable;
  
-@@ -4159,6 +4164,122 @@
+@@ -4098,6 +4103,33 @@
+   return AMDGPUGenRegisterInfo::getRegUnitPressureSets(RegUnit);
+ }
+ 
++static bool isSchedRegHint(unsigned Kind) {
++  return Kind >= AMDGPURI::VGPRRegHint && Kind <= AMDGPURI::StrictAGPRRegHint;
++}
++
++// Keep a sched pin hint when the coalescer merges Reg into NewReg, e.g. into
++// the register PHI elimination created for a loop-carried value.
++void SIRegisterInfo::updateRegAllocHint(Register Reg, Register NewReg,
++                                        MachineFunction &MF) const {
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  if (!Reg.isVirtual() || !NewReg.isVirtual())
++    return;
++  std::pair<unsigned, Register> Hint = MRI.getRegAllocationHint(Reg);
++  if (!isSchedRegHint(Hint.first))
++    return;
++  std::pair<unsigned, Register> Existing = MRI.getRegAllocationHint(NewReg);
++  bool Upgrade = isSchedRegHint(Existing.first) &&
++                 Existing.first == (Hint.first & ~1u) &&
++                 Existing.second == Hint.second;
++  if ((Existing.first || Existing.second) && !Upgrade)
++    return;
++  SmallVector<Register, 4> Partners(
++      drop_begin(MRI.getRegAllocationHints(Reg)->second));
++  MRI.setRegAllocationHint(NewReg, Hint.first, Hint.second);
++  for (Register Partner : Partners)
++    MRI.addRegAllocationHint(NewReg, Partner);
++}
++
+ bool SIRegisterInfo::getRegAllocationHints(Register VirtReg,
+                                            ArrayRef<MCPhysReg> Order,
+                                            SmallVectorImpl<MCPhysReg> &Hints,
+@@ -4159,6 +4191,122 @@
      }
      return false;
    }
@@ -623,6 +657,16 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SI
  
  } // end namespace AMDGPURI
  
+@@ -364,6 +380,9 @@
+                              const MachineFunction &MF, const VirtRegMap *VRM,
+                              const LiveRegMatrix *Matrix) const override;
+ 
++  void updateRegAllocHint(Register Reg, Register NewReg,
++                          MachineFunction &MF) const override;
++
+   const int *getRegUnitPressureSets(MCRegUnit RegUnit) const override;
+ 
+   MCRegister getReturnAddressReg(const MachineFunction &MF) const;
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 --- a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 +++ b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
@@ -2166,3 +2210,299 @@ new file mode 100644
 +}
 +
 +attributes #0 = { "amdgpu-flat-work-group-size"="256,256" "amdgpu-waves-per-eu"="1" }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp b/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
+--- a/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
+@@ -16,6 +16,7 @@
+ #include "AMDGPUMemoryUtils.h"
+ #include "AMDGPUTargetMachine.h"
+ #include "SIModeRegisterDefaults.h"
++#include "llvm/ADT/EquivalenceClasses.h"
+ #include "llvm/ADT/SetVector.h"
+ #include "llvm/Analysis/AssumptionCache.h"
+ #include "llvm/Analysis/ConstantFolding.h"
+@@ -26,6 +27,7 @@
+ #include "llvm/CodeGen/TargetPassConfig.h"
+ #include "llvm/IR/Dominators.h"
+ #include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/InstIterator.h"
+ #include "llvm/IR/InstVisitor.h"
+ #include "llvm/IR/IntrinsicsAMDGPU.h"
+ #include "llvm/IR/PatternMatch.h"
+@@ -293,9 +295,103 @@
+ 
+ } // end anonymous namespace
+ 
++static bool isStrictSchedPin(const Value *V) {
++  const auto *II = dyn_cast<IntrinsicInst>(V);
++  if (!II || (II->getIntrinsicID() != Intrinsic::amdgcn_sched_vgpr &&
++              II->getIntrinsicID() != Intrinsic::amdgcn_sched_sgpr &&
++              II->getIntrinsicID() != Intrinsic::amdgcn_sched_agpr))
++    return false;
++  const auto *Strict = dyn_cast<ConstantInt>(II->getArgOperand(2));
++  return Strict && !Strict->isZero() && isa<ConstantInt>(II->getArgOperand(1));
++}
++
++/// A strict sched pin applies to the whole variable it starts: every value
++/// that replaces it through a PHI or as the accumulator of an MFMA gets the
++/// same pin, so a loop-carried variable or an MFMA accumulator keeps one
++/// register without a pin at each update.
++static bool propagateLoopPins(Function &F, const UniformityInfo &UA) {
++  auto IsMFMA = [](const Value *V) {
++    const auto *II = dyn_cast<IntrinsicInst>(V);
++    return II && II->getCalledFunction()->getName().starts_with(
++                     "llvm.amdgcn.mfma.");
++  };
++  // A value shared by several accumulators (e.g. one initial value) must not
++  // join them into one variable.
++  auto HasOnePHIUser = [](const Value *V) {
++    return count_if(V->users(), [](const User *U) { return isa<PHINode>(U); }) ==
++           1;
++  };
++  auto HasOneAccUser = [&](const Value *V) {
++    return count_if(V->uses(), [&](const Use &U) {
++             return IsMFMA(U.getUser()) && U.getOperandNo() == 2;
++           }) == 1;
++  };
++
++  EquivalenceClasses<Value *> Chains;
++  SmallVector<IntrinsicInst *, 16> Pins;
++  for (Instruction &I : instructions(F)) {
++    if (auto *Phi = dyn_cast<PHINode>(&I)) {
++      for (Value *In : Phi->incoming_values())
++        if (isa<Instruction>(In) && HasOnePHIUser(In))
++          Chains.unionSets(In, Phi);
++    } else if (isStrictSchedPin(&I)) {
++      Pins.push_back(cast<IntrinsicInst>(&I));
++      if (isa<Instruction>(I.getOperand(0)))
++        Chains.unionSets(I.getOperand(0), &I);
++      else
++        Chains.insert(&I);
++    } else if (IsMFMA(&I) && isa<Instruction>(I.getOperand(2)) &&
++               HasOneAccUser(I.getOperand(2))) {
++      Chains.unionSets(I.getOperand(2), &I);
++    }
++  }
++
++  struct ChainPin {
++    IntrinsicInst *Pin;
++    int64_t RegNum;
++    bool Conflict = false;
++  };
++  DenseMap<Value *, ChainPin> Info;
++  for (IntrinsicInst *P : Pins) {
++    int64_t RegNum = cast<ConstantInt>(P->getArgOperand(1))->getSExtValue();
++    auto [It, Inserted] =
++        Info.try_emplace(Chains.getLeaderValue(P), ChainPin{P, RegNum});
++    ChainPin &C = It->second;
++    if (Inserted)
++      continue;
++    if (C.Pin->getIntrinsicID() != P->getIntrinsicID())
++      C.Conflict = true;
++    else if (C.RegNum == -1)
++      C.RegNum = RegNum;
++    else if (RegNum != -1 && RegNum != C.RegNum)
++      C.Conflict = true;
++  }
++
++  bool Changed = false;
++  for (auto [Leader, C] : Info) {
++    if (C.Conflict)
++      continue;
++    for (Value *V : Chains.members(Leader)) {
++      auto *I = dyn_cast<Instruction>(V);
++      if (!I || isa<PHINode>(I) || isStrictSchedPin(I) ||
++          any_of(I->users(), isStrictSchedPin) ||
++          (C.Pin->getIntrinsicID() == Intrinsic::amdgcn_sched_sgpr &&
++           UA.isDivergentAtDef(I)))
++        continue;
++      IRBuilder<> B(I->getNextNode());
++      Value *Pin = B.CreateIntrinsic(
++          C.Pin->getIntrinsicID(), {I->getType()},
++          {I, B.getInt32(C.RegNum), C.Pin->getArgOperand(2)});
++      I->replaceUsesWithIf(Pin, [&](Use &U) { return U.getUser() != Pin; });
++      Changed = true;
++    }
++  }
++  return Changed;
++}
++
+ bool AMDGPUCodeGenPrepareImpl::run() {
+   BreakPhiNodesCache.clear();
+-  bool MadeChange = false;
++  bool MadeChange = propagateLoopPins(F, UA);
+ 
+   // Need to use make_early_inc_range because integer division expansion is
+   // handled by Transform/Utils, and it can delete instructions such as the
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll
+@@ -0,0 +1,167 @@
++; RUN: opt -mtriple=amdgcn -mcpu=gfx950 -passes=amdgpu-codegenprepare -S < %s | FileCheck -check-prefix=IR %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
++
++; A strict pin of a loop's initial value covers the whole loop-carried
++; variable: the updates inside the loop need no pin of their own and the
++; variable keeps one register across iterations.
++
++declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float, float, <4 x float>, i32, i32, i32)
++declare i32 @llvm.amdgcn.workitem.id.x()
++
++; IR-LABEL: @vgpr_numbered(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 12, i32 1)
++; IR: %d1 = xor i32 %d, %y
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %d1, i32 13, i32 1)
++
++; GCN-LABEL: vgpr_numbered:
++; GCN: .LBB0_1:
++; GCN-NOT: v_mov
++; GCN: v_add_u32_e32 v12, v12, v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: v_xor_b32_e32 v13, v13, v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: s_cbranch_scc1 .LBB0_1
++define amdgpu_kernel void @vgpr_numbered(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %y = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %w = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 12, i32 1)
++  %d0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %w, i32 13, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c1, %loop]
++  %d = phi i32 [%d0, %entry], [%d1, %loop]
++  %c1 = add i32 %c, %x
++  %d1 = xor i32 %d, %y
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c1, ptr addrspace(1) %q
++  store volatile i32 %d1, ptr addrspace(1) %q
++  ret void
++}
++
++; IR-LABEL: @vgpr_any(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 -1, i32 1)
++
++; GCN-LABEL: vgpr_any:
++; GCN: .LBB1_1:
++; GCN-NOT: v_mov
++; GCN: v_add_u32_e32 [[C:v[0-9]+]], [[C]], v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: v_xor_b32_e32 [[D:v[0-9]+]], [[D]], v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: s_cbranch_scc1 .LBB1_1
++define amdgpu_kernel void @vgpr_any(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %y = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %w = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 -1, i32 1)
++  %d0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %w, i32 -1, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c1, %loop]
++  %d = phi i32 [%d0, %entry], [%d1, %loop]
++  %c1 = add i32 %c, %x
++  %d1 = xor i32 %d, %y
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c1, ptr addrspace(1) %q
++  store volatile i32 %d1, ptr addrspace(1) %q
++  ret void
++}
++
++; Two MFMAs per iteration accumulate into each AGPR chain.
++
++; IR-LABEL: @agpr_any(
++; IR: %e2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(
++; IR-NEXT: call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %e2, i32 -1, i32 1)
++; IR: %e3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(
++; IR-NEXT: call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %e3, i32 -1, i32 1)
++
++; GCN-LABEL: agpr_any:
++; GCN-NOT: v_accvgpr_mov
++; GCN: .LBB2_1:
++; GCN: v_mfma_f32_16x16x4_f32 a[0:3], v{{[0-9]+}}, v{{[0-9]+}}, a[0:3]
++; GCN: v_mfma_f32_16x16x4_f32 a[4:7], v{{[0-9]+}}, v{{[0-9]+}}, a[4:7]
++; GCN-NOT: v_accvgpr_mov
++; GCN: v_mfma_f32_16x16x4_f32 a[0:3], v{{[0-9]+}}, v{{[0-9]+}}, a[0:3]
++; GCN: v_mfma_f32_16x16x4_f32 a[4:7], v{{[0-9]+}}, v{{[0-9]+}}, a[4:7]
++; GCN-NOT: v_accvgpr_mov
++; GCN: s_cbranch_scc1 .LBB2_1
++define amdgpu_kernel void @agpr_any(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr float, ptr addrspace(1) %in, i32 %tid
++  %a = load volatile float, ptr addrspace(1) %p
++  %b = load volatile float, ptr addrspace(1) %p
++  %m0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %b, <4 x float> zeroinitializer, i32 0, i32 0, i32 0)
++  %e0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %m0, i32 -1, i32 1)
++  %n0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %a, <4 x float> zeroinitializer, i32 0, i32 0, i32 0)
++  %f0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %n0, i32 -1, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %e = phi <4 x float> [%e0, %entry], [%e3, %loop]
++  %f = phi <4 x float> [%f0, %entry], [%f3, %loop]
++  %e2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %b, <4 x float> %e, i32 0, i32 0, i32 0)
++  %f2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %a, <4 x float> %f, i32 0, i32 0, i32 0)
++  %e3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %b, <4 x float> %e2, i32 0, i32 0, i32 0)
++  %f3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %a, <4 x float> %f2, i32 0, i32 0, i32 0)
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr <4 x float>, ptr addrspace(1) %out, i32 %tid
++  store volatile <4 x float> %e3, ptr addrspace(1) %q
++  store volatile <4 x float> %f3, ptr addrspace(1) %q
++  ret void
++}
++
++; Pins with different register numbers in one variable conflict: nothing is
++; added.
++
++; IR-LABEL: @conflict(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: %c2 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 13, i32 1)
++; IR-NEXT: %i1 = add i32 %i, 1
++define amdgpu_kernel void @conflict(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 12, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c2, %loop]
++  %c1 = add i32 %c, %x
++  %c2 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 13, i32 1)
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c2, ptr addrspace(1) %q
++  ret void
++}
