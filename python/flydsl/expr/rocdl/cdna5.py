@@ -159,15 +159,23 @@ def check_index_rows(index_bits, count, what):
         raise ValueError(f"{what} carries 1 to {limit} rows at {index_bits}-bit indices, got {count}")
 
 
-def static_length(index_list):
-    """Entry count of a row list whose length is static, else None."""
-    from ..primitive import size
+def check_index_tensor_shape(index_tensor):
+    """A row list in memory is shaped like the data it indexes.
 
-    try:
-        value = size(index_list if is_index_tuple(index_list) else index_list.layout).unpack()
-    except Exception:
-        return None
-    return value if isinstance(value, int) else None
+    It carries one index per row and the same index for every column, so it is 2D with
+    the contiguous dimension broadcast. Tiling it with the data's tiler then yields one
+    row list per tile, which is what lets a single coordinate address a tile and its
+    rows together.
+    """
+    layout = getattr(index_tensor, "layout", None)
+    if layout is None or layout.rank != 2:
+        raise ValueError(f"index_tensor must be 2D, shaped like the tensor it indexes, got {layout}")
+    if layout.stride[1].unpack() != 0:
+        raise ValueError(
+            "index_tensor must be broadcast along the contiguous dimension (stride 0 there), " f"got {layout}"
+        )
+    if layout.stride[0].unpack() == 0:
+        raise ValueError(f"index_tensor's row dimension must carry the indices, got {layout}")
 
 
 class TensorLoadGather(TensorLoad):
@@ -413,7 +421,8 @@ def make_tiled_tdm_atom(
         if tile_rank is not None:
             rows = tdm_tile[0]
             check_index_rows(index_bits, rows if isinstance(rows, int) else None, "one indexed issue")
-        check_index_rows(index_bits, static_length(index_tensor) if index_tensor is not None else None, "index_tensor")
+        if index_tensor is not None:
+            check_index_tensor_shape(index_tensor)
 
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
@@ -500,6 +509,30 @@ def tdm_partition(
 
     if index is None:
         return apply(stensor), apply(gtensor)
-    # The row list is already one issue wide per warp, so it is selected rather than
-    # composed: the partition layout describes the data tile, not the index vector.
-    return apply(stensor), apply(gtensor), (index if n_warps == 1 else index[warp_id])
+    return apply(stensor), apply(gtensor), _partition_index(index, n_warps, warp_id)
+
+
+def _partition_index(index, n_warps, warp_id):
+    """Cut a tiled row list down to the rows of one issue, keeping its rest modes.
+
+    The list arrives tiled like the data -- same tiler, same slice -- so its tile mode
+    is ``(rows, width)`` with the width broadcast. Only the rows carry indices, so the
+    broadcast half is selected away and the rest modes survive. That is what lets one
+    coordinate address a tile and its row list together: ``tAg[None, k]`` and
+    ``tAi[None, k]`` step in lockstep.
+    """
+    layout = index.layout
+    if layout.rank < 1:
+        raise ValueError("tdm_partition: the row list must be tiled before partitioning")
+    tile = layout[0]
+    if tile.rank != 2:
+        raise ValueError(f"tdm_partition: the row list's tile must be 2D, like the data tile, got {tile}")
+    # The gathered dimension is the outer one; the other is broadcast across the tile.
+    if tile.stride[1].unpack() != 0:
+        raise ValueError(
+            "tdm_partition: the row list must be broadcast along the contiguous dimension "
+            f"(stride 0 there), got {tile}"
+        )
+    n_rest = layout.rank - 1
+    rows = index[((None, 0), *([None] * n_rest))]
+    return rows if n_warps == 1 else rows[(warp_id, *([None] * n_rest))]

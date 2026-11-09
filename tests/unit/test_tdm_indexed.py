@@ -91,12 +91,19 @@ def _build(
         # A static shape keeps the geometry out of the kernel arguments, so the only
         # loads left are the ones the row list costs.
         g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
+        # A row list in memory is shaped like the data and broadcast along the
+        # contiguous dimension, so the same tiler cuts both.
+        gI = fx.Tensor(fx.make_view(idx.iter, fx.make_layout((M, N), (1, 0))))
         atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-            make_op(), g, box, tile, index_tensor=idx if atom_list else None
+            make_op(), g, box, tile, index_tensor=gI if atom_list else None
         )
         blk = fx.zipped_divide(coord, (rows, width))[None, (0, None)]
-        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
-        row_list = idx if fx.const_expr(copy_list == "tensor") else fx.make_int_tuple(row_entries)
+        if fx.const_expr(copy_list == "tensor"):
+            blkI = fx.zipped_divide(gI, (rows, width))[None, (0, None)]
+            tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, blkI])
+        else:
+            tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
+        row_list = tAi[None, 0] if fx.const_expr(copy_list == "tensor") else fx.make_int_tuple(row_entries)
         # The global side is the source of a gather and the destination of a scatter,
         # and the row list travels with it either way.
         if fx.const_expr(storing):
@@ -112,7 +119,7 @@ def _build(
     # CPU tensors suffice for target compilation; this does not launch on a GPU.
     j(
         torch.empty(M * N, dtype=torch.float16, device="cpu"),
-        torch.empty(max(rows, 1), dtype=index_dtype, device="cpu"),
+        torch.empty(M, dtype=index_dtype, device="cpu"),
     )
 
 
@@ -325,12 +332,15 @@ def _two_copies(tmp_path):
         box = fx.make_layout((8, WIDTH), (WIDTH, 1))
         smem = fx.make_view(lds.ptr, fx.make_layout(((8, WIDTH), 2), ((WIDTH, 1), 8 * WIDTH)))
         g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
+        gI = fx.Tensor(fx.make_view(idx.iter, fx.make_layout((M, N), (1, 0))))
         atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-            fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=idx
+            fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=gI
         )
         blk = fx.zipped_divide(coord, (8, WIDTH))[None, (0, None)]
-        tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx])
-        fx.copy(atom, [tAg[None, 0], tAi], tAs[None, 0])
+        blkI = fx.zipped_divide(gI, (8, WIDTH))[None, (0, None)]
+        tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, blkI])
+        # The same coordinate addresses the tile and its row list.
+        fx.copy(atom, [tAg[None, 0], tAi[None, 0]], tAs[None, 0])
         fx.copy(atom, [tAg[None, 0], fx.make_int_tuple(SECOND_LIST)], tAs[None, 1])
         fx.rocdl.s_wait_tensorcnt(0)
 
@@ -340,9 +350,50 @@ def _two_copies(tmp_path):
 
     j(
         torch.empty(M * N, dtype=torch.float16, device="cpu"),
-        torch.empty(8, dtype=torch.int32, device="cpu"),
+        torch.empty(M, dtype=torch.int32, device="cpu"),
     )
     return _isa(tmp_path)
+
+
+def _regs(group):
+    """Register names a descriptor group spans, e.g. ``s[4:7]`` -> {s4..s7}."""
+    body = group.strip().strip("s[]")
+    if ":" in body:
+        lo, hi = (int(x) for x in body.split(":"))
+        return {f"s{n}" for n in range(lo, hi + 1)}
+    return {f"s{int(body)}"}
+
+
+def _written_between(isa, first_line, second_line):
+    """Scalar registers written by the instructions between two issues."""
+    out = set()
+    for line in isa.splitlines()[first_line + 1 : second_line]:
+        m = re.match(r"\s*(s_[a-z0-9_]+)\s+(s\[?\d+(?::\d+)?\]?)", line)
+        if m and not m.group(1).startswith(("s_wait", "s_delay", "s_cmp", "s_branch")):
+            out |= _regs(m.group(2))
+    return out
+
+
+def _tdm_lines(isa):
+    return [i for i, line in enumerate(isa.splitlines()) if line.strip().startswith("tensor_load_to_lds")]
+
+
+def test_no_index_register_is_written_between_the_two_issues(monkeypatch, tmp_path):
+    """The sharp runtime question: once the first copy is issued, can the second
+    overwrite the rows it is about to move?
+
+    It cannot, because the two lists occupy different registers and both are live
+    across both issues. This checks that directly: nothing written between the two
+    instructions lands in either one's index groups.
+    """
+    _target_env(monkeypatch, tmp_path)
+    isa = _two_copies(tmp_path)
+    first, second = _tdm_operands(isa)
+    a, b = _tdm_lines(isa)
+    clobbered = _written_between(isa, a, b)
+    index_regs = _regs(first[2]) | _regs(first[3]) | _regs(second[2]) | _regs(second[3])
+    overlap = clobbered & index_regs
+    assert not overlap, f"index registers rewritten between the two issues: {sorted(overlap)}"
 
 
 def test_two_copies_issue_two_instructions(monkeypatch, tmp_path):
@@ -419,11 +470,12 @@ def test_partition_rejects_a_malformed_pair():
             box = fx.make_layout((8, WIDTH), (WIDTH, 1))
             smem = fx.make_view(lds.ptr, fx.make_layout(((8, WIDTH), 1), ((WIDTH, 1), 8 * WIDTH)))
             g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
+            gI = fx.Tensor(fx.make_view(idx.iter, fx.make_layout((M, N), (1, 0))))
             atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-                fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=idx
+                fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=gI
             )
             blk = fx.zipped_divide(coord, (8, WIDTH))[None, (0, None)]
-            fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, idx, idx])
+            fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, [blk, gI, gI])
 
         @flyc.jit
         def j(src: fx.Tensor, idx: fx.Tensor):
@@ -431,5 +483,5 @@ def test_partition_rejects_a_malformed_pair():
 
         j(
             torch.empty(M * N, dtype=torch.float16, device="cpu"),
-            torch.empty(8, dtype=torch.int32, device="cpu"),
+            torch.empty(M, dtype=torch.int32, device="cpu"),
         )

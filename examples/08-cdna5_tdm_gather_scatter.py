@@ -30,6 +30,7 @@ import flydsl.expr as fx
 ROWS = 8  # rows per issue; 32-bit indices carry at most 8
 WIDTH = 128  # elements per row, must span whole 4-byte units
 N = 256  # row width of the tensors
+M_ROWS = 64  # rows of the tensors
 
 
 @flyc.kernel
@@ -38,22 +39,29 @@ def gather_scatter(src: fx.Tensor, dst: fx.Tensor, rows: fx.Tensor):
     tile = fx.make_layout((ROWS, WIDTH), (WIDTH, 1))
     smem = fx.make_view(lds.ptr, fx.make_layout(((ROWS, WIDTH), 1), ((WIDTH, 1), ROWS * WIDTH)))
 
-    # Gather: the atom reads `rows` to learn which source rows to collect.
+    # The row list, shaped like the data it indexes: one index per row, the same index
+    # for every column. The data's tiler then cuts the list too.
+    gI = fx.Tensor(fx.make_view(rows.iter, fx.make_layout((M_ROWS, N), (1, 0))))
+
+    # Gather: the atom reads `gI` to learn which source rows to collect.
     load_atom, load_coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorLoadGather(), src, tile, (ROWS, WIDTH), index_tensor=rows
+        fx.rocdl.TensorLoadGather(), src, tile, (ROWS, WIDTH), index_tensor=gI
     )
     load_blk = fx.zipped_divide(load_coord, (ROWS, WIDTH))[None, (0, None)]
-    tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(load_atom, 0, fx.make_layout(1, 1), smem, [load_blk, rows])
-    fx.copy(load_atom, [tAg[None, 0], tAi], tAs[None, 0])
+    load_blkI = fx.zipped_divide(gI, (ROWS, WIDTH))[None, (0, None)]
+    tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(load_atom, 0, fx.make_layout(1, 1), smem, [load_blk, load_blkI])
+    # One coordinate addresses the tile and its row list together.
+    fx.copy(load_atom, [tAg[None, 0], tAi[None, 0]], tAs[None, 0])
     fx.rocdl.s_wait_tensorcnt(0)
 
     # Scatter: the same row list, now naming where the tile lands.
     store_atom, store_coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
-        fx.rocdl.TensorStoreScatter(), dst, tile, (ROWS, WIDTH), index_tensor=rows
+        fx.rocdl.TensorStoreScatter(), dst, tile, (ROWS, WIDTH), index_tensor=gI
     )
     store_blk = fx.zipped_divide(store_coord, (ROWS, WIDTH))[None, (0, None)]
-    tBs, tBg, tBi = fx.rocdl.cdna5.tdm_partition(store_atom, 0, fx.make_layout(1, 1), smem, [store_blk, rows])
-    fx.copy(store_atom, tBs[None, 0], [tBg[None, 0], tBi])
+    store_blkI = fx.zipped_divide(gI, (ROWS, WIDTH))[None, (0, None)]
+    tBs, tBg, tBi = fx.rocdl.cdna5.tdm_partition(store_atom, 0, fx.make_layout(1, 1), smem, [store_blk, store_blkI])
+    fx.copy(store_atom, tBs[None, 0], [tBg[None, 0], tBi[None, 0]])
     fx.rocdl.s_wait_tensorcnt(0)
 
 
