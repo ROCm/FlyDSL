@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T07:39:02Z",
+ "updated": "2026-11-09T07:52:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42581801474,
+   "pr": null,
+   "commit": "affc0d40881586f1905f3df95b2e3534f062560c",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Label kernel-only pull requests automatically (#1388)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42581801474",
+   "created_at": "2026-11-09T07:50:03Z",
+   "updated_at": "2026-11-09T07:51:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42574978076,
    "pr": 1350,
@@ -143,7 +158,7 @@
   },
   {
    "run_id": 42555911754,
-   "pr": 1388,
+   "pr": null,
    "commit": "392f7de19fcb861b553cf8d7cddf294785579880",
    "branch": "pr/ci-kernels-labeler",
    "event": "pull_request",
@@ -1473,21 +1488,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42226974882/job/127932336893"
     }
    ]
-  },
-  {
-   "run_id": 42221380599,
-   "pr": null,
-   "commit": "796a5a299fc752d7bc622115a9d22106baecb4b9",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42221380599",
-   "created_at": "2026-11-06T12:55:29Z",
-   "updated_at": "2026-11-06T12:55:29Z",
-   "actor": "dimitri91209",
-   "jobs": []
   }
  ]
 }
