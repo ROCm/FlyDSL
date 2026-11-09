@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T07:52:58Z",
+ "updated": "2026-11-09T07:54:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42582084523,
+   "pr": 1386,
+   "commit": "362dd7c9d0e9e3a5b15f28073dd1dbfa895bdb3b",
+   "branch": "drop-arch-env",
+   "event": "pull_request",
+   "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523",
+   "created_at": "2026-11-09T07:52:46Z",
+   "updated_at": "2026-11-09T07:53:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42581801474,
    "pr": null,
@@ -1442,52 +1457,6 @@
    "updated_at": "2026-11-06T13:50:03Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 42226974882,
-   "pr": null,
-   "commit": "66ed29630c180dcf30cd3459af47a30717153c50",
-   "branch": "fix-gfx1250-wmmascale-fp8-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42226974882",
-   "created_at": "2026-11-06T13:37:18Z",
-   "updated_at": "2026-11-06T14:26:26Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T13:58:22Z",
-     "completed_at": "2026-11-06T14:22:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42226974882/job/127932336559",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T14:13:18Z",
-     "completed_at": "2026-11-06T14:26:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42226974882/job/127932336712"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T13:58:25Z",
-     "completed_at": "2026-11-06T14:26:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42226974882/job/127932336893"
-    }
-   ]
   }
  ]
 }
