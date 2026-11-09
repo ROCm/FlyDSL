@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T01:12:58Z",
+ "updated": "2026-11-09T02:17:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42549883558,
+   "pr": 1313,
+   "commit": "19a53cff1a1b4461d426e33103f93e6bac07fe25",
+   "branch": "pr/feat-core-layout-replacement",
+   "event": "pull_request",
+   "title": "[Core] Replace the Fly layout implementation with the Core library",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558",
+   "created_at": "2026-11-09T02:15:09Z",
+   "updated_at": "2026-11-09T02:15:19Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 42541783953,
    "pr": 1387,
@@ -10,38 +25,41 @@
    "branch": "ci/aiter-a4w4-fmoe-csv",
    "event": "pull_request",
    "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953",
    "created_at": "2026-11-09T00:44:10Z",
-   "updated_at": "2026-11-09T01:05:42Z",
+   "updated_at": "2026-11-09T02:15:41Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T01:06:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996594"
+     "completed_at": "2026-11-09T01:36:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996594",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-09T01:05:42Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-09T01:33:20Z",
+     "completed_at": "2026-11-09T01:57:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996631"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T01:06:03Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T01:35:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996680"
     }
    ]
@@ -53,39 +71,42 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607",
    "created_at": "2026-11-09T00:37:40Z",
-   "updated_at": "2026-11-09T01:07:11Z",
+   "updated_at": "2026-11-09T02:15:34Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-09T01:10:52Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T01:33:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404533"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T01:07:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T01:36:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404542"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T01:07:30Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404557"
+     "completed_at": "2026-11-09T01:42:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404557",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -111,33 +132,21 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477",
    "created_at": "2026-11-09T00:15:42Z",
-   "updated_at": "2026-11-09T01:11:38Z",
+   "updated_at": "2026-11-09T02:15:38Z",
    "actor": "Phil-amd",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T00:38:54Z",
-     "completed_at": "2026-11-09T01:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554050",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-09T00:38:39Z",
-     "completed_at": "2026-11-09T00:53:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554052"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T02:15:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943004776"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -146,7 +155,19 @@
      "conclusion": "success",
      "started_at": "2026-11-09T00:39:00Z",
      "completed_at": "2026-11-09T01:09:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128916554079"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943006139"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T00:38:54Z",
+     "completed_at": "2026-11-09T01:11:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943006689",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1369,21 +1390,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42195400772",
    "created_at": "2026-11-06T09:29:11Z",
    "updated_at": "2026-11-06T09:55:58Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 42194468255,
-   "pr": null,
-   "commit": "1c1a2b0e8aaf48de43aa3e993c2beb76b33a48a8",
-   "branch": "main",
-   "event": "push",
-   "title": "[Tests] Drop the hard triton import from kernel test helpers (#1379)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42194468255",
-   "created_at": "2026-11-06T09:21:47Z",
-   "updated_at": "2026-11-06T09:54:37Z",
    "actor": "coderfeli",
    "jobs": []
   }
