@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T15:58:25Z",
+ "updated": "2026-11-09T18:39:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "pr/enh-compile-only",
    "event": "pull_request",
    "title": "[JIT] Add compile_only to flyc.compile",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014",
    "created_at": "2026-11-09T12:18:41Z",
-   "updated_at": "2026-11-09T13:11:34Z",
+   "updated_at": "2026-11-09T16:50:33Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -78,19 +78,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T15:29:05Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T16:50:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014/job/129180604649"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-09T13:11:34Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T16:20:51Z",
+     "completed_at": "2026-11-09T16:34:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014/job/129180604836"
     }
    ]
@@ -767,7 +767,8 @@
      "conclusion": "success",
      "started_at": "2026-11-08T11:50:00Z",
      "completed_at": "2026-11-08T12:13:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128971838201"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128971838201",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
