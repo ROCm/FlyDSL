@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-09T11:59:40Z",
+ "updated": "2026-11-09T12:28:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42615941014,
+   "pr": 1392,
+   "commit": "dcda0ab47c8430d88a3a65cee9814e7d920c7285",
+   "branch": "pr/enh-compile-only",
+   "event": "pull_request",
+   "title": "[JIT] Add compile_only to flyc.compile",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014",
+   "created_at": "2026-11-09T12:18:41Z",
+   "updated_at": "2026-11-09T12:19:58Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 42614089800,
+   "pr": 1391,
+   "commit": "e19839429c15f12e137e5d45ae375d7af92c54ab",
+   "branch": "fix-log1p-expm1",
+   "event": "pull_request",
+   "title": "Fix log1p and expm1 returning 0 for tiny arguments",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42614089800",
+   "created_at": "2026-11-09T12:05:18Z",
+   "updated_at": "2026-11-09T12:06:36Z",
+   "actor": "amd-songpiao",
+   "jobs": []
+  },
   {
    "run_id": 42613118876,
    "pr": 1390,
@@ -10,11 +40,11 @@
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
    "title": "[Coop] Optimize warp-level prims on the rocdl",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876",
    "created_at": "2026-11-09T11:57:52Z",
-   "updated_at": "2026-11-09T11:58:05Z",
+   "updated_at": "2026-11-09T11:59:10Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1365,98 +1395,6 @@
    "updated_at": "2026-11-06T18:47:13Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 42262263901,
-   "pr": 1377,
-   "commit": "0fcafb2afeac367b1224ed04f9e9468bd5969d84",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901",
-   "created_at": "2026-11-06T17:30:33Z",
-   "updated_at": "2026-11-07T03:54:09Z",
-   "actor": "dimitri91209",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-07T01:45:01Z",
-     "completed_at": "2026-11-07T02:19:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276764",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-07T02:53:16Z",
-     "completed_at": "2026-11-07T03:23:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276765"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-07T01:44:53Z",
-     "completed_at": "2026-11-07T02:01:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42262263901/job/128260276797"
-    }
-   ]
-  },
-  {
-   "run_id": 42261098429,
-   "pr": 1375,
-   "commit": "124b83f5b2b36e2880b3f1592c5696fadd60fdf5",
-   "branch": "pr1-rocdl-fp8-bf8-cvt",
-   "event": "pull_request",
-   "title": "[DSL] Add ROCDL wrappers for FP8/BF8/F16 conversion, dot, math, and DPP ops",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429",
-   "created_at": "2026-11-06T17:22:49Z",
-   "updated_at": "2026-11-09T07:37:21Z",
-   "actor": "dimitri91209",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-09T07:36:34Z",
-     "completed_at": "2026-11-09T07:36:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/129031794237"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-07T03:19:26Z",
-     "completed_at": "2026-11-07T04:15:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/129031839464"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-07T01:46:01Z",
-     "completed_at": "2026-11-07T02:17:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42261098429/job/129031846189",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
