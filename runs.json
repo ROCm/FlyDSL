@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T07:55:53Z",
+ "updated": "2026-11-09T08:06:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "drop-arch-env",
    "event": "pull_request",
    "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523",
    "created_at": "2026-11-09T07:52:46Z",
-   "updated_at": "2026-11-09T07:54:01Z",
+   "updated_at": "2026-11-09T07:58:04Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076",
    "created_at": "2026-11-09T06:45:09Z",
-   "updated_at": "2026-11-09T07:17:35Z",
+   "updated_at": "2026-11-09T08:04:28Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -71,10 +71,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T07:01:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T08:04:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076/job/129025674826"
     }
    ]
@@ -239,33 +239,21 @@
    "branch": "ci/aiter-a4w4-fmoe-csv",
    "event": "pull_request",
    "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953",
    "created_at": "2026-11-09T00:44:10Z",
-   "updated_at": "2026-11-09T02:36:23Z",
+   "updated_at": "2026-11-09T07:56:40Z",
    "actor": "coderfeli",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T01:06:06Z",
-     "completed_at": "2026-11-09T01:36:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996594",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-09T01:33:20Z",
-     "completed_at": "2026-11-09T01:57:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996631"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T07:56:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/129044331400"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -274,7 +262,19 @@
      "conclusion": "success",
      "started_at": "2026-11-09T01:06:03Z",
      "completed_at": "2026-11-09T01:35:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/128923996680"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/129044332199"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T01:06:06Z",
+     "completed_at": "2026-11-09T01:36:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/129044332825",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
