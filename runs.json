@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T08:06:03Z",
+ "updated": "2026-11-09T08:35:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -239,20 +239,20 @@
    "branch": "ci/aiter-a4w4-fmoe-csv",
    "event": "pull_request",
    "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953",
    "created_at": "2026-11-09T00:44:10Z",
-   "updated_at": "2026-11-09T07:56:40Z",
+   "updated_at": "2026-11-09T08:34:11Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T07:56:51Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T08:19:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/129044331400"
     },
     {
