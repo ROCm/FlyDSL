@@ -639,6 +639,9 @@ public:
       if (failed(offsetScalar))
         return failure();
       offsetVal = *offsetScalar;
+      // A fast-divmod divisor used as an offset is its divisor.
+      if (offsetInt.hasFastDivMod())
+        offsetVal = ctx.getHooks().getFastDivModDivisor(ctx, offsetVal);
     }
 
     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
@@ -1186,7 +1189,7 @@ public:
   }
 };
 
-/// Calls pass and return lowered carriers; discardable attributes are kept.
+/// Calls pass and return lowered carriers; no_inline and discardable attributes are kept.
 class CallOpTypeConversion : public OpConversionPattern<func::CallOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -1203,6 +1206,7 @@ public:
     }
     auto call = func::CallOp::create(rewriter, op.getLoc(), op.getCallee(), resultTypes,
                                      flattenValues(adaptor.getOperands()));
+    call.setNoInline(op.getNoInline());
     call->setDiscardableAttrs(op->getDiscardableAttrDictionary());
     SmallVector<ValueRange> replacements;
     unsigned offset = 0;
