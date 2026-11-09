@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T11:42:03Z",
+ "updated": "2026-11-09T11:59:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42613118876,
+   "pr": 1390,
+   "commit": "7720e8ac405d64b0d20332897d791ab4b3efe353",
+   "branch": "pr/enh-coop-warp-rocdl",
+   "event": "pull_request",
+   "title": "[Coop] Optimize warp-level prims on the rocdl",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876",
+   "created_at": "2026-11-09T11:57:52Z",
+   "updated_at": "2026-11-09T11:58:05Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 42610918296,
    "pr": 1390,
@@ -10,11 +25,11 @@
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
    "title": "[Coop] Optimize warp-level prims on the rocdl",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42610918296",
    "created_at": "2026-11-09T11:40:38Z",
-   "updated_at": "2026-11-09T11:40:48Z",
+   "updated_at": "2026-11-09T11:57:54Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1442,21 +1457,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 42260441542,
-   "pr": null,
-   "commit": "ee783c9106b8279675a5943f4176d14fd0535799",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42260441542",
-   "created_at": "2026-11-06T17:18:37Z",
-   "updated_at": "2026-11-06T17:18:37Z",
-   "actor": "dimitri91209",
-   "jobs": []
   }
  ]
 }
