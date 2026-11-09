@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T03:29:16Z",
+ "updated": "2026-11-09T03:33:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42556892116,
+   "pr": 1388,
+   "commit": "736a80cf66581e1a4884a8d390c18db5690db4f8",
+   "branch": "pr/ci-kernels-labeler",
+   "event": "pull_request",
+   "title": "[CI] Label kernel-only pull requests automatically",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116",
+   "created_at": "2026-11-09T03:31:43Z",
+   "updated_at": "2026-11-09T03:32:10Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 42556429320,
    "pr": 1313,
@@ -10,11 +25,11 @@
    "branch": "pr/feat-core-layout-replacement",
    "event": "pull_request",
    "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320",
    "created_at": "2026-11-09T03:26:37Z",
-   "updated_at": "2026-11-09T03:27:58Z",
+   "updated_at": "2026-11-09T03:28:20Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "pr/ci-kernels-labeler",
    "event": "pull_request",
    "title": "[CI] Label kernel-only pull requests automatically",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42555911754",
    "created_at": "2026-11-09T03:21:01Z",
-   "updated_at": "2026-11-09T03:22:36Z",
+   "updated_at": "2026-11-09T03:32:01Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1379,21 +1394,6 @@
    "created_at": "2026-11-06T12:51:32Z",
    "updated_at": "2026-11-06T12:51:32Z",
    "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42204305433,
-   "pr": null,
-   "commit": "de711d2ebf7ee6d182c30c226d9934190c1b1493",
-   "branch": "fix-gfx1250-wmmascale-fp8-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix gfx1250 WMMAScale FP8 and 32x16x128 register layouts",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42204305433",
-   "created_at": "2026-11-06T10:39:14Z",
-   "updated_at": "2026-11-06T10:40:36Z",
-   "actor": "xudoyuan",
    "jobs": []
   }
  ]
