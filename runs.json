@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T14:42:56Z",
+ "updated": "2026-11-09T15:23:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -285,11 +285,11 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862",
    "created_at": "2026-11-09T09:07:07Z",
-   "updated_at": "2026-11-09T13:05:40Z",
+   "updated_at": "2026-11-09T14:57:27Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -307,19 +307,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-09T13:05:39Z",
+     "started_at": "2026-11-09T14:48:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862/job/129177706207"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-09T13:05:39Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T14:57:26Z",
+     "completed_at": "2026-11-09T15:12:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862/job/129177706209"
     }
    ]
