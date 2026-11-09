@@ -655,7 +655,10 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   int32_t indexBits = cfg.indexBits;
   if (indexBits) {
     if (!index)
-      return mlir::emitError(loc) << "cdna5 TDM: an indexed atom needs an index operand";
+      return mlir::emitError(loc)
+             << "cdna5 TDM: an indexed copy needs a row list, and none reached it; hand one "
+                "to the copy as [tensor, index], or give the atom an index_tensor to start "
+                "from";
     // `tileShape` is outermost-first, so its leading dim is the row count.
     int32_t rows = tileShape.front();
 
