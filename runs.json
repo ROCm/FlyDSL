@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-09T08:35:39Z",
+ "updated": "2026-11-09T09:26:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42590913862,
+   "pr": 1368,
+   "commit": "60dfc19f9eb24933c1b72c5552b133e4cba08882",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862",
+   "created_at": "2026-11-09T09:07:07Z",
+   "updated_at": "2026-11-09T09:08:25Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 42582084523,
    "pr": 1386,
@@ -10,13 +25,44 @@
    "branch": "drop-arch-env",
    "event": "pull_request",
    "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523",
    "created_at": "2026-11-09T07:52:46Z",
-   "updated_at": "2026-11-09T07:58:04Z",
+   "updated_at": "2026-11-09T09:17:17Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T08:50:55Z",
+     "completed_at": "2026-11-09T09:17:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065103770",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T08:50:32Z",
+     "completed_at": "2026-11-09T09:15:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065103891"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T09:17:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065104623"
+    }
+   ]
   },
   {
    "run_id": 42581801474,
@@ -280,7 +326,7 @@
   },
   {
    "run_id": 42541213607,
-   "pr": 1368,
+   "pr": null,
    "commit": "80f6e1f0c55916ccb1f6a2c912526c9c64bc44ef",
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
@@ -1440,21 +1486,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42229204334",
    "created_at": "2026-11-06T13:53:50Z",
    "updated_at": "2026-11-06T13:53:50Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42228688739,
-   "pr": null,
-   "commit": "167d77ad52ad3b5fde1813ad868bbe6abba4ca7d",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42228688739",
-   "created_at": "2026-11-06T13:50:03Z",
-   "updated_at": "2026-11-06T13:50:03Z",
    "actor": "dimitri91209",
    "jobs": []
   }
