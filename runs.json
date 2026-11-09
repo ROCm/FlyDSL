@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T15:30:37Z",
+ "updated": "2026-11-09T15:58:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "fix-log1p-expm1",
    "event": "pull_request",
    "title": "Fix log1p and expm1 returning 0 for tiny arguments",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42621344417",
    "created_at": "2026-11-09T12:57:51Z",
-   "updated_at": "2026-11-09T13:10:32Z",
+   "updated_at": "2026-11-09T15:56:42Z",
    "actor": "amd-songpiao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T14:22:37Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T15:29:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42621344417/job/129180091210"
     },
     {
@@ -41,10 +41,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-09T13:10:32Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T15:36:04Z",
+     "completed_at": "2026-11-09T15:56:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42621344417/job/129180091300"
     }
    ]
@@ -285,11 +285,11 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862",
    "created_at": "2026-11-09T09:07:07Z",
-   "updated_at": "2026-11-09T14:57:27Z",
+   "updated_at": "2026-11-09T15:48:20Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -307,10 +307,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T14:48:07Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T15:48:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862/job/129177706207"
     },
     {
