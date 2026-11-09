@@ -8,7 +8,6 @@ import enum
 from ....compiler import jit
 from ....expr.gpu import barrier
 from ....expr.numeric import Int32, Integer
-from ....expr.primitive import range_constexpr
 from ....expr.struct import Struct
 from ....expr.typing import Array, ReductionOp, Vector
 from .._common import _linear_thread_id
@@ -21,7 +20,7 @@ from .._values import (
     _shared_load,
     _shared_store,
 )
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
 from .scan import BlockScan
 
 __all__ = [
@@ -56,17 +55,25 @@ def _publish_thread_ends(end, storage, tid):
     barrier()
 
 
-@jit
 def _find_run(position, ends, runs):
-    low = Int32(0)
-    high = Int32(runs)
-    for step in range_constexpr(runs.bit_length()):
-        mid = (low + high) // 2
-        end = ends[(mid < runs).select(mid, Int32(runs - 1))].to(position.dtype)
-        advance = (mid < runs) & (end <= position)
-        low = advance.select(mid + 1, low)
-        high = advance.select(high, mid)
-    return (low < runs).select(low, Int32(runs - 1))
+    """Index of the first of the *runs* nondecreasing ends above *position*, clamped to the last.
+
+    A branchless binary search over the power-of-two range covering *runs*:
+    each step reads one end and advances the base by the step when that end
+    is at most *position* -- one read, one compare and one select, where a
+    low/high/midpoint search updates three values. Ends past the last run read
+    as the last end, which keeps the clamp to ``runs - 1`` exact.
+    """
+    padded = 1 << (runs - 1).bit_length()
+    base = Int32(0)
+    step = padded // 2
+    while step:
+        index = base + (step - 1)
+        if padded > runs:
+            index = (index < runs).select(index, Int32(runs - 1))
+        base = (ends[index].to(position.dtype) <= position).select(base + step, base)
+        step //= 2
+    return (base < runs).select(base, Int32(runs - 1))
 
 
 def _storage(dtype, threads, warp, count):
@@ -98,7 +105,7 @@ class _Decoder:
         storage: Shared scratch storage used by decoding calls.
     """
 
-    def __init__(self, cls, values, starts, ends, total, storage):
+    def __init__(self, cls, values, starts, ends, total, storage, first_start):
         """Retain initialized run values and boundaries for later windows.
 
         Args:
@@ -108,9 +115,10 @@ class _Decoder:
             ends: Per-thread vector of exclusive run ending offsets.
             total: Exclusive global decoded-position bound.
             storage: Shared instance of the specialized ``SharedStorage``.
+            first_start: Start of the block's first run, uniform across threads.
         """
         self.cls, self.values, self.starts, self.ends = cls, values, starts, ends
-        self.total, self.storage = total, storage
+        self.total, self.storage, self.first_start = total, storage, first_start
 
     def decode(self, *, decoded_items_per_thread: int = 1, offset: int | Integer = 0, default=0):
         """Decode a blocked output window without rescanning run lengths.
@@ -145,13 +153,17 @@ class _Decoder:
             dtype(offset) + (tid * decoded_items_per_thread + i).to(dtype) for i in range(decoded_items_per_thread)
         ]
         owners = [_find_run(position, storage.thread_ends, cls.block_threads) for position in positions]
+        # Runs are contiguous: a run starts where the previous one in blocked
+        # order ends, so starts are never published. The owner's first run
+        # starts at the previous thread's last end, read before the run loop
+        # (which publishes into the other arrays) needs it.
+        starts = [
+            (owner > 0).select(storage.thread_ends[(owner > 0).select(owner - 1, Int32(0))].to(dtype), self.first_start)
+            for owner in owners
+        ]
         out = [_record_default(cls.dtype, default) for _ in positions]
         relative = [dtype(-1) for _ in positions]
         for run in range(cls.runs_per_thread):
-            _publish(self.values[run], self.starts[run], storage, tid)
-            starts = [storage.ends[owner].to(dtype) for owner in owners]
-            # All reads must finish before the same scratch slots hold ends.
-            barrier()
             _publish(self.values[run], self.ends[run], storage, tid)
             for i, position in enumerate(positions):
                 end = storage.ends[owners[i]].to(dtype)
@@ -160,6 +172,7 @@ class _Decoder:
                     valid, _record_default(cls.dtype, _shared_load(storage.values, owners[i])), out[i]
                 )
                 relative[i] = valid.select(position - starts[i], relative[i])
+                starts[i] = end
             barrier()
         return _from_items(out), Vector.from_elements(relative), self.total
 
@@ -264,7 +277,7 @@ class BlockRunLengthDecode(BlockPrimitive, metaclass=_BlockRunLengthDecodeMeta):
         # Reusable states initialized from lengths or offsets give the same later window.
     """
 
-    scan_type = BlockScan
+    scan_type = _Public("BlockScan")
 
     @classmethod
     def __call__(
@@ -346,7 +359,7 @@ class BlockRunLengthDecode(BlockPrimitive, metaclass=_BlockRunLengthDecodeMeta):
         ends, total = scan.inclusive_with_aggregate(lengths, ReductionOp.ADD, storage=storage.scan)
         starts = Vector.from_elements([ends[i] - lengths[i] for i in range(cls.runs_per_thread)])
         barrier()
-        return _Decoder(cls, values, starts, ends, total, storage)
+        return _Decoder(cls, values, starts, ends, total, storage, dtype(0))
 
     @classmethod
     def init_with_run_offsets(
@@ -384,7 +397,8 @@ class BlockRunLengthDecode(BlockPrimitive, metaclass=_BlockRunLengthDecodeMeta):
         tid = _linear_thread_id(cls.block_size)
         _publish_thread_ends(starts[0], storage, tid)
         next_start = storage.thread_ends[(tid + 1) % cls.block_threads].to(dtype)
+        first_start = storage.thread_ends[0].to(dtype)
         end = (tid == cls.block_threads - 1).select(total, next_start)
         ends = Vector.from_elements([*list(starts)[1:], end])
         barrier()
-        return _Decoder(cls, values, starts, ends, total, storage)
+        return _Decoder(cls, values, starts, ends, total, storage, first_start)

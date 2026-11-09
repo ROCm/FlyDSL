@@ -74,21 +74,46 @@ def _prefix_warp_scans_full(partial, tid, slots, op, warp_scan_with_aggregate, w
         if lane == warp_threads - 1:
             _shared_store(slots, warp_id, inclusive)
         barrier()
-        # Highest warp first, so the operands stay in block order: a thread in
-        # warp w ends up with slots[0] ⊕ ... ⊕ slots[w-1] ⊕ its own warp prefix.
-
-        # TODO: this and the aggregate below are linear in num_warps, and every
-        # thread walks both — 2 * (num_warps - 1) folds each, so 30 at a
-        # 1024-thread wave64 block. Scanning *slots* in one warp instead would
-        # make it logarithmic: warp 0 scans the num_warps totals, and each
-        # thread then reads the single entry in front of its own warp.
-        for i in range_constexpr(num_warps - 2, -1, -1):
-            prefix = _select_value(warp_id > i, _combine(op, _shared_load(slots, i), prefix), prefix)
-        # Same slots, folded unconditionally: that is the whole block.
-        aggregate = _shared_load(slots, 0)
-        for i in range_constexpr(1, num_warps):
-            aggregate = _combine(op, aggregate, _shared_load(slots, i))
+        if const_expr(num_warps >= _LANE_SCAN_MIN_WARPS):
+            front, aggregate = _scan_slots_across_lanes(
+                slots, lane, warp_id, op, warp_scan_with_aggregate, warp_threads, num_warps
+            )
+            prefix = _select_value(warp_id > 0, _combine(op, front, prefix), prefix)
+        else:
+            # Highest warp first, so the operands stay in block order: a thread in
+            # warp w ends up with slots[0] ⊕ ... ⊕ slots[w-1] ⊕ its own warp prefix.
+            for i in range_constexpr(num_warps - 2, -1, -1):
+                prefix = _select_value(warp_id > i, _combine(op, _shared_load(slots, i), prefix), prefix)
+            # Same slots, folded unconditionally: that is the whole block.
+            aggregate = _shared_load(slots, 0)
+            for i in range_constexpr(1, num_warps):
+                aggregate = _combine(op, aggregate, _shared_load(slots, i))
     return prefix, aggregate
+
+
+# From this many warps on, every thread reading every warp total (twice) costs
+# more than one total per lane, a narrow warp scan and one shuffle (gfx1201:
+# 154 -> 144 instructions at 16 warps, 240 -> 101 at 32; fewer warps lose).
+_LANE_SCAN_MIN_WARPS = 16
+
+
+def _scan_slots_across_lanes(slots, lane, warp_id, op, warp_scan_with_aggregate, warp_threads, num_warps):
+    """Scan the warp totals across lanes: (fold of the totals before *warp_id*, block aggregate).
+
+    Lane ``i`` of each power-of-two group reads total ``i`` (the identity pads
+    the group), so one narrow warp scan leaves the exclusive prefix of warp
+    ``i`` in lane ``i`` and the aggregate in every lane. Warp 0's front is
+    never used. Only the ReductionOp fast path calls this, so an identity exists.
+    """
+    group = 1 << (num_warps - 1).bit_length()
+    index = lane % group
+    if num_warps == group:
+        total = _shared_load(slots, index)
+    else:
+        total = _shared_load(slots, (index < num_warps).select(index, Int32(num_warps - 1)))
+        total = _select_value(index < num_warps, total, _identity(op, _item_dtype(total)))
+    _, exclusive, aggregate = warp_scan_with_aggregate(total, op, width=group, _dtype=_item_dtype(total))
+    return _shuffle_value(exclusive, warp_id, warp_threads), aggregate
 
 
 @jit
@@ -121,14 +146,40 @@ def _prefix_warp_scans(partial, tid, storage, op, warp_inclusive_scan, warp_thre
     return prefix, aggregate
 
 
-def _segment_prefixes(slots, base, segment, block_threads, op):
+def _raking_pad(block_threads, warp_threads):
+    """Whether the raking policies pad their staging arrays: lane t rakes words t*S .. t*S+S-1.
+
+    An even stride S puts 32/gcd(S, 32) lanes on each bank (PMC: ~19 conflict
+    cycles per LDS instruction at 1024 threads). One padding word per 32 shifts
+    each group of 32 words by a bank, which makes a power-of-two S
+    conflict-free. An odd S is conflict-free already, and S=2 conflicts too
+    little (0.8 cycles per instruction) to pay for the index math.
+    """
+    segment = (block_threads + warp_threads - 1) // warp_threads
+    # Measured on wave64 (gfx942: up to 2.3x at 1024 threads). On wave32 it
+    # costs 4-10 instructions of index math (gfx1201) for an unmeasured gain.
+    return warp_threads == 64 and segment >= 4 and segment & (segment - 1) == 0
+
+
+def _padded(index, pad):
+    return index + (index >> 5) if pad else index
+
+
+def _segment_slot(base, i, block_threads, pad):
+    """Word of segment item *i*: a padded power-of-two segment never straddles a padding word."""
+    if pad:
+        return _padded(base, pad) + i
+    index = base + i
+    return (index < block_threads).select(index, Int32(block_threads - 1))
+
+
+def _segment_prefixes(slots, base, segment, block_threads, op, pad):
     """Register memoization used only by RAKING_MEMOIZE."""
     values = []
     running = None
     for i in range(segment):
         index = base + i
-        safe = (index < block_threads).select(index, Int32(block_threads - 1))
-        item = _shared_load(slots, safe)
+        item = _shared_load(slots, _segment_slot(base, i, block_threads, pad))
         if running is None:
             running = item
         else:
@@ -141,22 +192,20 @@ def _segment_prefixes(slots, base, segment, block_threads, op):
 def _prefix_raking(partial, tid, storage, op, warp_inclusive_scan, warp_threads, block_threads, memoize):
     segment = (block_threads + warp_threads - 1) // warp_threads
     segments = (block_threads + segment - 1) // segment
-    _shared_store(storage.slots, tid, partial)
+    pad = _raking_pad(block_threads, warp_threads)
+    _shared_store(storage.slots, _padded(tid, pad), partial)
     barrier()
     if tid < warp_threads:
         base = tid * segment
         if const_expr(memoize):
-            saved = _segment_prefixes(storage.slots, base, segment, block_threads, op)
+            saved = _segment_prefixes(storage.slots, base, segment, block_threads, op, pad)
             total = saved[segment - 1]
         else:
-            safe = (base < block_threads).select(base, Int32(block_threads - 1))
-            total = _shared_load(storage.slots, safe)
+            total = _shared_load(storage.slots, _segment_slot(base, 0, block_threads, pad))
             for i in range_constexpr(1, segment):
                 index = base + i
-                safe = (index < block_threads).select(index, Int32(block_threads - 1))
-                total = _select_value(
-                    index < block_threads, _combine(op, total, _shared_load(storage.slots, safe)), total
-                )
+                item = _shared_load(storage.slots, _segment_slot(base, i, block_threads, pad))
+                total = _select_value(index < block_threads, _combine(op, total, item), total)
         scanned = warp_inclusive_scan(total, op, width=warp_threads, _dtype=_item_dtype(total))
         preceding = _shuffle_value(scanned, 1, warp_threads, mode="up")
         aggregate = _shuffle_value(scanned, segments - 1, warp_threads)
@@ -169,23 +218,26 @@ def _prefix_raking(partial, tid, storage, op, warp_inclusive_scan, warp_threads,
                     local_prefix = saved[i]
                     _shared_store(
                         storage.output,
-                        index,
+                        _segment_slot(base, i, block_threads, pad),
                         _select_value(tid > 0, _combine(op, preceding, local_prefix), local_prefix),
                     )
         else:
-            safe = (base < block_threads).select(base, Int32(block_threads - 1))
-            running = _shared_load(storage.slots, safe)
+            running = _shared_load(storage.slots, _segment_slot(base, 0, block_threads, pad))
             for i in range_constexpr(segment):
                 index = base + i
                 if index < block_threads:
                     if const_expr(i > 0):
-                        running = _combine(op, running, _shared_load(storage.slots, index))
+                        running = _combine(
+                            op, running, _shared_load(storage.slots, _segment_slot(base, i, block_threads, pad))
+                        )
                     _shared_store(
-                        storage.output, index, _select_value(tid > 0, _combine(op, preceding, running), running)
+                        storage.output,
+                        _segment_slot(base, i, block_threads, pad),
+                        _select_value(tid > 0, _combine(op, preceding, running), running),
                     )
     barrier()
     previous = (tid > 0).select(tid - 1, Int32(0))
-    return _shared_load(storage.output, previous), _shared_load(storage.aggregate, 0)
+    return _shared_load(storage.output, _padded(previous, pad)), _shared_load(storage.aggregate, 0)
 
 
 @jit
@@ -215,9 +267,10 @@ def _storage_warp_scans(dtype, block_threads, warp_threads):
 
 
 def _storage_raking(dtype, block_threads, warp_threads):
+    padded = block_threads + (block_threads >> 5 if _raking_pad(block_threads, warp_threads) else 0)
     return Struct[
-        "slots" : _shared_array(dtype, block_threads),
-        "output" : _shared_array(dtype, block_threads),
+        "slots" : _shared_array(dtype, padded),
+        "output" : _shared_array(dtype, padded),
         "aggregate" : _shared_array(dtype, 1),
         "callback" : _shared_array(dtype, 1),
     ]
@@ -685,8 +738,9 @@ class BlockScan(metaclass=_BlockScanMeta):
             init = _cast_value(cls.dtype, init)
         tid = _linear_thread_id(cls.block_size)
         items = _as_items(value, cls.dtype)
+        # A single warp has no cross-warp phase, so every policy is the warp scan.
         if (
-            cls.algorithm is BlockScanAlgorithm.WARP_SCANS
+            (cls.algorithm is BlockScanAlgorithm.WARP_SCANS or cls.num_warps == 1)
             and isinstance(op, ReductionOp)
             and valid_items is None
             and identity is None
@@ -697,15 +751,7 @@ class BlockScan(metaclass=_BlockScanMeta):
             scanned = [items[0]]
             for item in items[1:]:
                 scanned.append(_combine(op, scanned[-1], item))
-            prefix, aggregate = _prefix_warp_scans_full(
-                scanned[-1],
-                tid,
-                storage.slots,
-                op,
-                cls.warp_ops.warp_scan_with_aggregate,
-                cls.warp_threads,
-                cls.num_warps,
-            )
+            prefix, aggregate = cls._scan_warp_totals(scanned[-1], tid, storage.slots, op)
             prefix = _seed(prefix, op, init)
             heads = scanned if inclusive else scanned[:-1]
             output = [_combine(op, prefix, head) for head in heads]
@@ -744,9 +790,27 @@ class BlockScan(metaclass=_BlockScanMeta):
         return result, aggregate
 
     @classmethod
+    def _scan_warp_totals(cls, partial, tid, slots, op):
+        """Warp scans and the cross-warp prefix of a ReductionOp scan (a backend hook).
+
+        Returns ``(prefix, aggregate)``: the exclusive block prefix of this
+        thread's partial (the identity in thread 0) and the block aggregate.
+        """
+        return _prefix_warp_scans_full(
+            partial, tid, slots, op, cls.warp_ops.warp_scan_with_aggregate, cls.warp_threads, cls.num_warps
+        )
+
+    @classmethod
     def _block_prefix(cls, partial, op, storage):
         tid = _linear_thread_id(cls.block_size)
-        if cls.algorithm is BlockScanAlgorithm.WARP_SCANS:
+        # One warp needs no shared memory under any policy: the raking forms
+        # would stage, rake and reload a single segment per thread.
+        if cls.algorithm is BlockScanAlgorithm.WARP_SCANS or cls.num_warps == 1:
+            if isinstance(op, ReductionOp):
+                # A ReductionOp has an identity, so the warp scan's exclusive
+                # output is defined in every lane and the fast path's prefix
+                # phase applies to guarded and callback scans as well.
+                return cls._scan_warp_totals(partial, tid, storage.slots, op)
             return _prefix_warp_scans(
                 partial, tid, storage, op, cls.warp_ops.warp_inclusive_scan, cls.warp_threads, cls.block_threads
             )

@@ -259,3 +259,72 @@ def test_block_size_rule(monkeypatch, warp):
     for threads in (True, False, 0, -1):
         with pytest.raises(TypeError, match="positive Python int"):
             Pinned[fx.Int32, threads]
+
+
+# ── backend dispatch ───────────────────────────────────────────────────────
+
+
+# Collectives that contain other collectives, and the attribute naming each part.
+DEPENDENCIES = {
+    "BlockRadixRank": {"scan_type": "BlockScan"},
+    "BlockRadixSort": {"scan_type": "BlockScan"},
+    "BlockRunLengthDecode": {"scan_type": "BlockScan"},
+    "BlockTopK": {"scan_type": "BlockScan", "sort_type": "BlockMergeSort"},
+    "BlockHistogram": {"sort_type": "BlockMergeSort"},
+    "BlockLoad": {"exchange_type": "BlockExchange"},
+    "BlockStore": {"exchange_type": "BlockExchange"},
+}
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_rocm_overrides_are_public_names_on_the_portable_classes():
+    """Each ROCm override extends the portable class its public name specializes into."""
+    from flydsl.extension.coop import block
+    from flydsl.extension.coop.block import rocdl
+
+    assert set(rocdl.__all__) <= set(block.__all__)
+    for name in rocdl.__all__:
+        public = getattr(block, name)
+        assert public.__dict__.get("_dispatch_class"), name
+        assert issubclass(getattr(rocdl, name), public.__mro__[1]), name
+        assert not getattr(fx.coop.universal, name).__dict__.get("_dispatch_class"), name
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("name", DEPENDENCIES)
+def test_parts_follow_the_namespace(name):
+    """Public collectives contain dispatched parts; universal ones contain portable parts."""
+    for attribute, part in DEPENDENCIES[name].items():
+        assert getattr(getattr(fx.coop, name), attribute) is getattr(fx.coop, part)
+        universal_part = getattr(getattr(fx.coop.universal, name), attribute)
+        assert not universal_part.__dict__.get("_dispatch_class"), (name, attribute)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_an_override_whose_base_lost_the_hook_fails_at_definition():
+    """A renamed portable hook turns a stale override into an error, not a silent no-op."""
+    from flydsl.extension._dispatch import check_overrides, override
+
+    class Portable:
+        @classmethod
+        def _hook(cls):
+            return "portable"
+
+    class Current(Portable):
+        @override
+        @classmethod
+        def _hook(cls):
+            return "override"
+
+    check_overrides(Current)
+    with pytest.raises(TypeError, match="marked override"):
+
+        class Stale(Portable):
+            @override
+            @classmethod
+            def _renamed_hook(cls):
+                return "override"
+
+        check_overrides(Stale)

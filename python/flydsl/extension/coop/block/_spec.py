@@ -8,9 +8,30 @@ so the parsing lives here once and each algorithm supplies only what differs:
 its policy enum, its default policy, and the shared storage each policy needs.
 """
 
+import importlib
+
 from ....compiler.backends import current_target
 from ....expr.gpu import num_warp_threads
+from ..._dispatch import check_overrides
+from ..._dispatch import dispatch_target as _dispatch_target
 from .._common import _require_power_of_two
+
+
+class _Public:
+    """A part one collective contains (``scan_type`` and the like), named by its public spelling.
+
+    It is read from the ``block`` package when used, so a portable collective
+    -- and every backend override of it, which inherits the attribute --
+    reaches the override of its part too, and the portable modules need not
+    import the package that defines the public names. ``fx.coop.universal``
+    pins its collectives' parts to the portable classes instead.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def __get__(self, instance, owner):
+        return getattr(importlib.import_module(__name__.rpartition(".")[0]), self.name)
 
 
 def _block_shape(block_size):
@@ -68,6 +89,9 @@ class BlockAlgorithmMeta(type):
         return cls._specialize(dtype, block_size, algorithm)
 
     def _specialize(cls, dtype, block_size, algorithm, items_per_thread=None):
+        target = _dispatch_target(cls)
+        if target is not cls:
+            return target._specialize(dtype, block_size, algorithm, items_per_thread)
         if not isinstance(algorithm, cls._algorithms):
             raise TypeError(f"expected a {cls._algorithms.__name__}, got {algorithm!r}")
         block_size = _block_shape(block_size)
@@ -183,6 +207,10 @@ class BlockPrimitive:
     warp_threads = None
     num_warps = None
     SharedStorage = None
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        check_overrides(cls)
 
     @classmethod
     def _check(cls, value=None):

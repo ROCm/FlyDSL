@@ -42,9 +42,11 @@ class BlockReduceAlgorithm(enum.Enum):
             a callable declaring ``commutative = True``.
         WARP_REDUCTIONS: Reduce each warp, then combine warp totals in thread
             order. This is the default policy.
-        WARP_REDUCTIONS_NONDETERMINISTIC: Assign shared slots to warp totals
-            with atomic arrival tickets and fold them in ticket order. Requires
-            a commutative operator; floating-point results may vary across runs.
+        WARP_REDUCTIONS_NONDETERMINISTIC: Fold warp totals in an unspecified
+            order. The portable form assigns shared slots with atomic arrival
+            tickets and folds in ticket order; a backend may pick any order
+            (gfx9 folds a built-in operator in slot order). Requires a
+            commutative operator; floating-point results may vary across runs.
     """
 
     RAKING = "raking"
@@ -93,15 +95,44 @@ def _reduce_warps(partial, tid, storage, op, warp_reduce, warp_threads, block_th
             if lane == 0:
                 _shared_store(storage.slots, warp_id, aggregate)
         barrier()
-        total = _shared_load(storage.slots, 0)
-        for i in range_constexpr(1, num_warps):
-            if const_expr(valid_threads is not None):
-                # Do not load uninitialized arrival slots for empty warps.
-                if i * warp_threads < valid_threads:
+        if const_expr(valid_threads is None and 2 * num_warps > warp_threads):
+            total = _fold_slots_across_lanes(storage.slots, lane, op, warp_reduce, num_warps)
+        else:
+            total = _shared_load(storage.slots, 0)
+            for i in range_constexpr(1, num_warps):
+                if const_expr(valid_threads is not None):
+                    # Do not load uninitialized arrival slots for empty warps.
+                    if i * warp_threads < valid_threads:
+                        total = _combine(op, total, _shared_load(storage.slots, i))
+                else:
                     total = _combine(op, total, _shared_load(storage.slots, i))
-            else:
-                total = _combine(op, total, _shared_load(storage.slots, i))
     return total
+
+
+def _fold_slots_across_lanes(slots, lane, op, warp_reduce, num_warps):
+    """Fold the warp totals with one slot per lane instead of every slot per thread.
+
+    Used when the totals fill more than half a warp (a 1024-thread wave32
+    block), so the fold is one full-width warp reduction: lane ``i`` reads
+    slot ``i`` and every lane ends with the ordered fold of all slots. Each
+    warp folds the same data the same way, so the whole block agrees on the
+    result even where regrouping changes rounding. (Narrower groups cost more
+    in portable shuffles than the reads they replace; wave64 targets with DPP
+    override this phase.)
+    """
+    group = 1 << (num_warps - 1).bit_length()
+    index = lane % group
+    if num_warps == group:
+        total = _shared_load(slots, index)
+        return warp_reduce(total, op, width=group, _dtype=_item_dtype(total))
+    total = _shared_load(slots, (index < num_warps).select(index, Int32(num_warps - 1)))
+    dtype = _item_dtype(total)
+    neutral = _optional_identity(op, dtype)
+    if neutral is None:
+        return warp_reduce(total, op, width=group, valid_items=num_warps, _dtype=dtype)
+    # Padding with the identity keeps a full-width group, which the target
+    # warp reduction may accelerate where a valid_items prefix would not.
+    return warp_reduce(_select_value(index < num_warps, total, neutral), op, width=group, _dtype=dtype)
 
 
 @jit
@@ -111,11 +142,12 @@ def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_t
         # manufacture a valid_items argument: that would disable the DPP path.
         if const_expr(block_threads == warp_threads):
             return warp_reduce(partial, op, width=warp_threads, _dtype=_item_dtype(partial))
+        pad = _raking_pad(block_threads, warp_threads)
         if const_expr(commutative):
             if tid >= warp_threads:
                 _shared_store(storage.slots, tid, partial)
         else:
-            _shared_store(storage.slots, tid, partial)
+            _shared_store(storage.slots, _padded(tid, pad), partial)
         barrier()
         if tid < warp_threads:
             if const_expr(commutative):
@@ -124,7 +156,8 @@ def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_t
                     raked = _combine(op, raked, _shared_load(storage.slots, tid + offset))
             else:
                 segment = block_threads // warp_threads
-                base = tid * segment
+                # A power-of-two segment never straddles a padding word.
+                base = _padded(tid * segment, pad)
                 raked = _shared_load(storage.slots, base)
                 for i in range_constexpr(1, segment):
                     raked = _combine(op, raked, _shared_load(storage.slots, base + i))
@@ -137,11 +170,12 @@ def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_t
     if const_expr(block_threads == warp_threads):
         total = warp_reduce(partial, op, width=warp_threads, valid_items=limit, _dtype=_item_dtype(partial))
     else:
+        pad = _raking_pad(block_threads, warp_threads)
         if const_expr(commutative):
             if tid >= warp_threads:
                 _shared_store(storage.slots, tid, partial)
         else:
-            _shared_store(storage.slots, tid, partial)
+            _shared_store(storage.slots, _padded(tid, pad), partial)
         barrier()
         if tid < warp_threads:
             if const_expr(commutative):
@@ -156,11 +190,13 @@ def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_t
                 segment = (block_threads + warp_threads - 1) // warp_threads
                 base = tid * segment
                 safe = (base < block_threads).select(base, Int32(block_threads - 1))
-                raked = _shared_load(storage.slots, safe)
+                raked = _shared_load(storage.slots, _padded(safe, pad))
                 for i in range_constexpr(1, segment):
                     index = base + i
                     safe = (index < block_threads).select(index, Int32(block_threads - 1))
-                    raked = _select_value(index < limit, _combine(op, raked, _shared_load(storage.slots, safe)), raked)
+                    raked = _select_value(
+                        index < limit, _combine(op, raked, _shared_load(storage.slots, _padded(safe, pad))), raked
+                    )
                 raked = warp_reduce(
                     raked,
                     op,
@@ -185,8 +221,29 @@ def _storage_nondeterministic(dtype, block_threads, warp_threads):
     ]
 
 
+def _raking_pad(block_threads, warp_threads):
+    """Whether ordered raking pads its slots: lane t reads words t*S .. t*S+S-1.
+
+    An even stride S puts 32/gcd(S, 32) lanes on each bank (2-way at S=2, 16-way
+    at S=16, PMC: ~12 conflict cycles per LDS instruction at 1024 threads). One
+    padding word per 32 shifts each group of 32 words by a bank, which makes a
+    power-of-two S conflict-free. An odd S is conflict-free already, and S=2
+    conflicts too little (0.7 cycles per instruction) to pay for the index math.
+    """
+    segment = (block_threads + warp_threads - 1) // warp_threads
+    # Measured on wave64 (gfx942: up to 2.3x at 1024 threads). On wave32 it
+    # costs 4-10 instructions of index math (gfx1201) for an unmeasured gain.
+    return warp_threads == 64 and segment >= 4 and segment & (segment - 1) == 0
+
+
+def _padded(index, pad):
+    return index + (index >> 5) if pad else index
+
+
 def _storage_raking(dtype, block_threads, warp_threads):
     slots = block_threads if block_threads > warp_threads else 1
+    if _raking_pad(block_threads, warp_threads):
+        slots += block_threads >> 5
     return Struct["slots" : _shared_array(dtype, slots), "result" : _shared_array(dtype, 1)]
 
 
@@ -241,17 +298,7 @@ class _BlockReduceMeta(BlockAlgorithmMeta):
             BlockReduceAlgorithm.WARP_REDUCTIONS,
             BlockReduceAlgorithm.WARP_REDUCTIONS_NONDETERMINISTIC,
         ):
-            return _reduce_warps(
-                partial,
-                tid,
-                storage,
-                op,
-                cls.warp_ops.warp_reduce,
-                cls.warp_threads,
-                cls.block_threads,
-                nondeterministic,
-                valid_threads,
-            )
+            return cls._reduce_warp_totals(partial, tid, storage, op, nondeterministic, valid_threads)
         return _reduce_raking(
             partial,
             tid,
@@ -389,3 +436,22 @@ class BlockReduce(metaclass=_BlockReduceMeta):
     ):
         """Shorthand for ``BlockReduce[...](value, fx.ReductionOp.ADD, ...)``."""
         return cls(value, ReductionOp.ADD, storage=storage, valid_items=valid_items, identity=identity)
+
+    @classmethod
+    def _reduce_warp_totals(cls, partial, tid, storage, op, nondeterministic, valid_threads):
+        """The warp-reduction policies once each thread holds its partial (a backend hook).
+
+        Every thread receives the block aggregate. *valid_threads* is set only
+        for a guarded semigroup without an identity.
+        """
+        return _reduce_warps(
+            partial,
+            tid,
+            storage,
+            op,
+            cls.warp_ops.warp_reduce,
+            cls.warp_threads,
+            cls.block_threads,
+            nondeterministic,
+            valid_threads,
+        )

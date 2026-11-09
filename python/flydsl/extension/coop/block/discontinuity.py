@@ -153,7 +153,8 @@ class BlockDiscontinuity(BlockShuffle):
     @classmethod
     def _flags(cls, value, flag_op, storage, predecessor, successor, heads, tails, return_predecessors=False):
         indexed = _indexed(flag_op)
-        items, tid, left, right = cls._neighbors(value, storage)
+        # A head needs the left neighbor; returned predecessors read it too.
+        items, tid, left, right = cls._neighbors(value, storage, left=heads or return_predecessors, right=tails)
         if predecessor is not None:
             left = _record_select(tid == 0, _record_default(cls.dtype, predecessor), left)
         if successor is not None:

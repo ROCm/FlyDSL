@@ -5,12 +5,13 @@
 
 import enum
 
+from ...._mlir.dialects import gpu
 from ....compiler import jit
 from ....expr.arith import min as arith_min
 from ....expr.gpu import barrier
 from ....expr.primitive import range_constexpr
 from ....expr.struct import Struct
-from ....expr.typing import Vector
+from ....expr.typing import Array, Vector
 from .._common import _linear_thread_id
 from .._values import _as_items, _from_items, _is_items, _record_default, _shared_array, _shared_load, _shared_store
 from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
@@ -37,12 +38,24 @@ class BlockExchangeAlgorithm(enum.Enum):
     WarpTimeSlicing = WARP_TIME_SLICING
 
 
+# A thread's blocked items are contiguous. Aligning the tile lets the compiler
+# move them with 64/128-bit shared-memory accesses instead of 32-bit pairs.
+_SLOTS_ALIGN = 16
+
+
+def _slots(dtype, size):
+    layout = _shared_array(dtype, size)
+    if isinstance(layout, type) and issubclass(layout, Array._Base) and layout.align < _SLOTS_ALIGN:
+        return Array[layout.dtype, layout.size, _SLOTS_ALIGN]
+    return layout
+
+
 def _storage(dtype, threads, warp, count):
-    return Struct["slots" : _shared_array(dtype, threads * count)]
+    return Struct["slots" : _slots(dtype, threads * count)]
 
 
 def _timesliced_storage(dtype, threads, warp, count):
-    return Struct["slots" : _shared_array(dtype, warp * count)]
+    return Struct["slots" : _slots(dtype, warp * count)]
 
 
 def _warp_layout(tid, threads, warp, count):
@@ -175,7 +188,14 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
     """
 
     @classmethod
-    def _exchange(cls, value, destinations, sources, storage, flags=None, default=0):
+    def _exchange(cls, value, destinations, sources, storage, flags=None, default=0, warp_local=False):
+        """Move items from ``destinations`` to ``sources`` through ``storage``.
+
+        ``warp_local`` states that every logical warp writes and reads only its
+        own region of each window, so a subgroup barrier orders a window's
+        write and read. Time slicing still separates windows with a block
+        barrier, because consecutive windows reuse the same storage.
+        """
         cls._check(value)
         count = cls.items_per_thread
         template = value
@@ -183,22 +203,29 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
         tid = _linear_thread_id(cls.block_size)
         guarded = flags is not None
         flags = flags if guarded else Vector.filled(count, 1, destinations.dtype)
-        window = (
-            cls.warp_threads * count
-            if cls.algorithm is BlockExchangeAlgorithm.WARP_TIME_SLICING
-            else cls.block_threads * count
-        )
+        time_sliced = cls.algorithm is BlockExchangeAlgorithm.WARP_TIME_SLICING
+        window = cls.warp_threads * count if time_sliced else cls.block_threads * count
+        scope = gpu.BarrierScope.Subgroup if warp_local else gpu.BarrierScope.Workgroup
         out = [_record_default(cls.dtype, default) for _ in range(count)]
         for first in range(0, cls.block_threads * count, window):
             extent = min(window, cls.block_threads * count - first)
             if guarded:
                 _clear_window(storage.slots, tid, cls.block_threads, count, extent, _record_default(cls.dtype, default))
             _write_window(value, destinations, flags, storage.slots, count, first, extent)
-            barrier()
+            barrier(scope=scope)
             out = [_read_window(storage.slots, index, first, extent, prior) for index, prior in zip(sources, out)]
-            if cls.algorithm is BlockExchangeAlgorithm.WARP_TIME_SLICING:
+            if time_sliced:
                 barrier()
         return _from_items(out, dtype=cls.dtype, like=template) if _is_items(template, cls.dtype) else out[0]
+
+    @classmethod
+    def _layout_identity(cls, value):
+        """With one item per thread, blocked, striped and warp-striped orders coincide."""
+        cls._check(value)
+        if cls.items_per_thread != 1:
+            return None
+        items = _as_items(value, cls.dtype)
+        return _from_items(list(items), dtype=cls.dtype, like=value) if _is_items(value, cls.dtype) else items[0]
 
     @classmethod
     def _indices(cls, layout):
@@ -225,6 +252,9 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
             The calling thread's result in striped ownership order. A single T
             returns one T; an item sequence returns the same number of T items.
         """
+        same = cls._layout_identity(value)
+        if same is not None:
+            return same
         return cls._exchange(value, cls._indices("blocked"), cls._indices("striped"), storage)
 
     @classmethod
@@ -239,6 +269,9 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
         Returns:
             The calling thread's result value in blocked ownership order.
         """
+        same = cls._layout_identity(value)
+        if same is not None:
+            return same
         return cls._exchange(value, cls._indices("striped"), cls._indices("blocked"), storage)
 
     @classmethod
@@ -254,7 +287,10 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
             A result value in warp-striped ownership order,
             using the target warp width.
         """
-        return cls._exchange(value, cls._indices("blocked"), cls._indices("warp_striped"), storage)
+        same = cls._layout_identity(value)
+        if same is not None:
+            return same
+        return cls._exchange(value, cls._indices("blocked"), cls._indices("warp_striped"), storage, warp_local=True)
 
     @classmethod
     def warp_striped_to_blocked(cls, value, *, storage):
@@ -269,7 +305,10 @@ class BlockExchange(BlockPrimitive, metaclass=_BlockExchangeMeta):
             A result value in blocked ownership order,
             using the target warp width.
         """
-        return cls._exchange(value, cls._indices("warp_striped"), cls._indices("blocked"), storage)
+        same = cls._layout_identity(value)
+        if same is not None:
+            return same
+        return cls._exchange(value, cls._indices("warp_striped"), cls._indices("blocked"), storage, warp_local=True)
 
     @classmethod
     def _scatter(cls, value, ranks, storage, striped, flags=None, default=0, guarded=False):

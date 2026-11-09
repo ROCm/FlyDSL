@@ -11,9 +11,12 @@ result: an override's float ADD fold may return +0.0 where the exact result is
 -0.0 (for example a one-lane segment, or the first inclusive prefix, holding
 -0.0). The two compare equal.
 
-The block subclasses in this module also route their internal warp operations
-and scans through portable implementations. This namespace supports explicit
-implementation selection and comparison in correctness tests and benchmarks.
+The block subclasses in this module also route their internal warp operations,
+and the collectives they contain (``scan_type``, ``sort_type``,
+``exchange_type``), through portable implementations; the portable classes
+name those parts by their public, dispatched spelling, so every container is
+pinned here. This namespace supports explicit implementation selection and
+comparison in correctness tests and benchmarks.
 """
 
 from types import SimpleNamespace
@@ -26,7 +29,9 @@ from .block.adjacent_difference import *
 from .block.discontinuity import *
 from .block.exchange import *
 from .block.histogram import *
+from .block.histogram import BlockHistogram as _BlockHistogram
 from .block.load import *
+from .block.load import BlockLoad as _BlockLoad
 from .block.merge_sort import *
 from .block.radix_rank import BlockRadixRank as _BlockRadixRank
 from .block.radix_rank import BlockRadixRankAlgorithm as BlockRadixRankAlgorithm
@@ -36,6 +41,7 @@ from .block.run_length_decode import BlockRunLengthDecode as _BlockRunLengthDeco
 from .block.run_length_decode import BlockRunLengthDecodeAlgorithm as BlockRunLengthDecodeAlgorithm
 from .block.shuffle import *
 from .block.store import *
+from .block.store import BlockStore as _BlockStore
 from .block.topk import BlockTopK as _BlockTopK
 from .block.topk import BlockTopKAlgorithm as BlockTopKAlgorithm
 from .warp import reduce as _warp_reduce
@@ -378,6 +384,7 @@ class BlockTopK(_BlockTopK):
     """
 
     scan_type = BlockScan
+    sort_type = BlockMergeSort
 
 
 class BlockRunLengthDecode(_BlockRunLengthDecode):
@@ -433,6 +440,24 @@ class BlockRunLengthDecode(_BlockRunLengthDecode):
     """
 
     scan_type = BlockScan
+
+
+class BlockHistogram(_BlockHistogram):
+    __doc__ = _BlockHistogram.__doc__
+
+    sort_type = BlockMergeSort
+
+
+class BlockLoad(_BlockLoad):
+    __doc__ = _BlockLoad.__doc__
+
+    exchange_type = BlockExchange
+
+
+class BlockStore(_BlockStore):
+    __doc__ = _BlockStore.__doc__
+
+    exchange_type = BlockExchange
 
 
 __all__ = [

@@ -5,6 +5,7 @@
 
 import enum
 
+from ...._mlir.dialects import gpu
 from ....compiler import jit
 from ....compiler.protocol import dsl_size_of
 from ....expr.gpu import barrier
@@ -15,7 +16,6 @@ from ....expr.typing import Array, Vector
 from .._common import _linear_thread_id, _validate_valid_items
 from .._sorting import _local_sort, _pack, _prepare, _unpack, _valid_before
 from .._values import (
-    _from_items,
     _item_dtype,
     _record_cast,
     _record_default,
@@ -48,6 +48,8 @@ class BlockMergeSortAlgorithm(enum.Enum):
 def _storage(dtype, threads, warp, count):
     key_dtype, value_dtype = dtype if isinstance(dtype, tuple) else (dtype, None)
     size = threads * count
+    # The threshold still counts the 4-byte validity word every item once kept
+    # in shared memory, so exactly the tiles that were compact stay compact.
     footprint = (
         dsl_size_of(_shared_array(key_dtype, size))
         + size * 4
@@ -58,40 +60,54 @@ def _storage(dtype, threads, warp, count):
     return Struct[
         "slots" : _shared_array(key_dtype, slots),
         "values" : _shared_array(value_dtype or key_dtype, slots if value_dtype else 1),
-        "valid" : Array[Int32, slots],
         "permutation" : Array[Uint16 if size <= 65536 else Int32, size if compact else 1],
     ]
 
 
+def _valid_at(position, valid_items):
+    """Whether tile position *position* holds a valid entry.
+
+    Invalid entries order after every valid one without consulting the
+    comparator, and the valid entries start as the blocked prefix
+    ``[0, valid_items)``. Every run therefore keeps its valid entries in
+    front, so after the local sort and after every merge pass the valid set is
+    that same prefix: validity is a function of position and never has to be
+    stored. Without a count every entry is valid and the checks fold away.
+    """
+    return Int32(1) if valid_items is None else Int32(position < valid_items)
+
+
+def _scope(run, warp, count):
+    """Merging runs of *run* items stays inside one logical warp's tile when ``2 * run <= warp * count``."""
+    return gpu.BarrierScope.Subgroup if 2 * run <= warp * count else gpu.BarrierScope.Workgroup
+
+
 @jit
-def _stage_column(key, value, valid, storage, tid):
+def _stage_column(key, value, storage, tid):
     _shared_store(storage.slots, tid, key)
-    storage.valid[tid] = valid
     if const_expr(value is not None):
         _shared_store(storage.values, tid, value)
     barrier()
 
 
-def _gather_columns(items, payload, valid, queries, storage, tid):
+def _gather_columns(items, payload, queries, storage, tid):
     """Gather register tiles with one shared slot per thread, not per item."""
     count = len(items)
     keys = [_record_default(_item_dtype(items[0]))] * count
-    validity = [Int32(0)] * count
     values = [_record_default(_item_dtype(payload[0]))] * count if payload is not None else None
     for item in range(count):
-        _stage_column(items[item], payload[item] if payload is not None else None, valid[item], storage, tid)
+        _stage_column(items[item], payload[item] if payload is not None else None, storage, tid)
         for q, query in enumerate(queries):
             source, selected = query // count, (query % count) == item
             keys[q] = _record_select(
                 selected, _record_cast(_shared_load(storage.slots, source), _item_dtype(items[0])), keys[q]
             )
-            validity[q] = selected.select(Int32(storage.valid[source]), validity[q])
             if payload is not None:
                 values[q] = _record_select(
                     selected, _record_cast(_shared_load(storage.values, source), _item_dtype(payload[0])), values[q]
                 )
         barrier()
-    return keys, values, validity
+    return keys, values
 
 
 @jit
@@ -101,7 +117,7 @@ def _publish_permutation(ranks, storage, tid, count):
     barrier()
 
 
-def _compact_merge(items, payload, valid, storage, tid, threads, descending, compare_op):
+def _compact_merge(items, payload, valid, storage, tid, threads, descending, compare_op, valid_items):
     count, total = len(items), threads * len(items)
     run = count
     indices = [tid * count + i for i in range(count)]
@@ -116,11 +132,12 @@ def _compact_merge(items, payload, valid, storage, tid, threads, descending, com
             mids = [(lo + hi) // 2 for lo, hi in zip(low, high)]
             addresses = [o + (mid < size).select(mid, size - 1) for o, mid, size in zip(other, mids, sizes)]
             addresses = [((a >= 0) & (a < total)).select(a, Int32(0)) for a in addresses]
-            candidates, _, candidate_valid = _gather_columns(items, None, valid, addresses, storage, tid)
+            candidates, _ = _gather_columns(items, None, addresses, storage, tid)
             for i in range(count):
-                before = _valid_before(candidates[i], items[i], candidate_valid[i], valid[i], descending, compare_op)
+                candidate_valid = _valid_at(addresses[i], valid_items)
+                before = _valid_before(candidates[i], items[i], candidate_valid, valid[i], descending, compare_op)
                 equal = ~before & ~_valid_before(
-                    items[i], candidates[i], valid[i], candidate_valid[i], descending, compare_op
+                    items[i], candidates[i], valid[i], candidate_valid, descending, compare_op
                 )
                 advance = (mids[i] < sizes[i]) & (before | (equal & right[i]))
                 low[i] = advance.select(mids[i] + 1, low[i])
@@ -129,33 +146,31 @@ def _compact_merge(items, payload, valid, storage, tid, threads, descending, com
         _publish_permutation(ranks, storage, tid, count)
         queries = [Int32(_shared_load(storage.permutation, index)) for index in indices]
         barrier()
-        items, payload, valid = _gather_columns(items, payload, valid, queries, storage, tid)
+        items, payload = _gather_columns(items, payload, queries, storage, tid)
         run *= 2
     return items, payload
 
 
 @jit
-def _stage_sort(keys, values, valid, storage, tid, count):
+def _stage(keys, values, storage, tid, count, scope):
     for i in range_constexpr(count):
         _shared_store(storage.slots, tid * count + i, keys[i])
-        storage.valid[tid * count + i] = valid[i]
         if const_expr(values is not None):
             _shared_store(storage.values, tid * count + i, values[i])
-    barrier()
+    barrier(scope=scope)
 
 
 @jit
-def _scatter_sort(keys, values, valid, ranks, storage, count):
+def _scatter(keys, values, ranks, storage, count, scope):
     for i in range_constexpr(count):
         _shared_store(storage.slots, ranks[i], keys[i])
-        storage.valid[ranks[i]] = valid[i]
         if const_expr(values is not None):
             _shared_store(storage.values, ranks[i], values[i])
-    barrier()
+    barrier(scope=scope)
 
 
 @jit
-def _merge_rank(key, valid, storage, index, run, total, descending, compare_op):
+def _merge_rank(key, valid, storage, index, run, total, descending, compare_op, valid_items):
     right = ((index // run) % 2) != 0
     base = (index // (2 * run)) * (2 * run)
     other = base + right.select(Int32(0), Int32(run))
@@ -167,13 +182,46 @@ def _merge_rank(key, valid, storage, index, run, total, descending, compare_op):
         address = other + (mid < size).select(mid, size - 1)
         address = ((address >= 0) & (address < total)).select(address, Int32(0))
         candidate = _record_cast(_shared_load(storage.slots, address), _item_dtype(key))
-        candidate_valid = storage.valid[address].to(Int32)
+        candidate_valid = _valid_at(address, valid_items)
         before = _valid_before(candidate, key, candidate_valid, valid, descending, compare_op)
         equivalent = ~before & ~_valid_before(key, candidate, valid, candidate_valid, descending, compare_op)
         advance = (mid < size) & (before | (equivalent & right))
         low = advance.select(mid + 1, low)
         high = advance.select(high, mid)
     return base + (index % run) + low
+
+
+def _merge_rounds(items, payload, storage, tid, run, threads, warp, valid_items, descending, compare_op):
+    """Merge sorted runs of *run* items, pass by pass, until the tile is one run.
+
+    The tile lives in shared memory in blocked order between passes. Every
+    pass ranks each item in the run it merges with, scatters it to that rank
+    and reads its blocked slots back, so a pass needs only two barriers: one
+    after its reads, before the scatter overwrites them, and one after the
+    scatter. A pass whose merged runs fit one logical warp's tile only
+    synchronizes that warp.
+    """
+    count = len(items)
+    total = threads * count
+    if run >= total:
+        return items, payload
+    key_dtype = _item_dtype(items[0])
+    value_dtype = _item_dtype(payload[0]) if payload is not None else None
+    indices = [tid * count + i for i in range(count)]
+    valid = [_valid_at(index, valid_items) for index in indices]
+    _stage(items, payload, storage, tid, count, _scope(run, warp, count))
+    while run < total:
+        ranks = [
+            _merge_rank(item, valid[i], storage, indices[i], run, total, descending, compare_op, valid_items)
+            for i, item in enumerate(items)
+        ]
+        barrier(scope=_scope(run, warp, count))
+        _scatter(items, payload, ranks, storage, count, _scope(2 * run if 2 * run < total else run, warp, count))
+        items = [_record_cast(_shared_load(storage.slots, index), key_dtype) for index in indices]
+        if payload is not None:
+            payload = [_record_cast(_shared_load(storage.values, index), value_dtype) for index in indices]
+        run *= 2
+    return items, payload
 
 
 class _BlockMergeSortMeta(BlockTileAlgorithmMeta):
@@ -202,40 +250,33 @@ class _BlockMergeSortMeta(BlockTileAlgorithmMeta):
             raise TypeError("specialize [(key_dtype, value_dtype), block_size, items_per_thread] for pairs")
         count = cls.items_per_thread
         _validate_valid_items(valid_items, cls.block_threads * count)
+        if isinstance(valid_items, int) and valid_items == cls.block_threads * count:
+            valid_items = None  # every slot is valid: let the validity checks fold away
         tid = _linear_thread_id(cls.block_size)
         items, payload, valid = _prepare(
             items, payload, [tid * count + i for i in range(count)], valid_items, oob_default
         )
-        items, payload, valid = _local_sort(items, payload, valid, descending, compare_op)
         if storage.permutation.size > 1:
+            items, payload, valid = _local_sort(items, payload, valid, descending, compare_op)
             items, payload = _compact_merge(
-                items, payload, valid, storage, tid, cls.block_threads, descending, compare_op
+                items, payload, valid, storage, tid, cls.block_threads, descending, compare_op, valid_items
             )
             return _pack(items, payload, vector, keys, values)
-        run = count
-        while run < cls.block_threads * count:
-            current = _from_items(items)
-            carried = _from_items(payload) if payload is not None else None
-            validity = Vector.from_elements(valid)
-            _stage_sort(current, carried, validity, storage, tid, count)
-            ranks = Vector.from_elements(
-                [
-                    _merge_rank(
-                        item, valid[i], storage, tid * count + i, run, cls.block_threads * count, descending, compare_op
-                    )
-                    for i, item in enumerate(items)
-                ]
-            )
-            barrier()
-            _scatter_sort(current, carried, validity, ranks, storage, count)
-            items = [_record_cast(_shared_load(storage.slots, tid * count + i), cls.dtype) for i in range(count)]
-            valid = [Int32(storage.valid[tid * count + i]) for i in range(count)]
-            if payload is not None:
-                payload = [
-                    _record_cast(_shared_load(storage.values, tid * count + i), cls.value_dtype) for i in range(count)
-                ]
-            barrier()
-            run *= 2
+        items, payload, run = cls._sort_runs(items, payload, valid, tid, storage, descending, compare_op, valid_items)
+        items, payload = _merge_rounds(
+            items,
+            payload,
+            storage,
+            tid,
+            run,
+            cls.block_threads,
+            cls.warp_threads,
+            valid_items,
+            descending,
+            compare_op,
+        )
+        if cls.block_threads > 1:
+            barrier()  # the storage is free again on return, as after every merge pass
         return _pack(items, payload, vector, keys, values)
 
 
@@ -314,6 +355,16 @@ class BlockMergeSort(BlockPrimitive, metaclass=_BlockMergeSortMeta):
         )
         # Named entry points return the same stable pairs.
     """
+
+    @classmethod
+    def _sort_runs(cls, items, payload, valid, tid, storage, descending, compare_op, valid_items):
+        """Sort the tile into runs the shared-memory passes merge; returns ``(items, payload, run)``.
+
+        Portably each thread sorts its own items, one run per thread. A target
+        may sort longer runs in registers, such as a whole warp's tile.
+        """
+        items, payload, valid = _local_sort(items, payload, valid, descending, compare_op)
+        return items, payload, cls.items_per_thread
 
     @classmethod
     def __call__(

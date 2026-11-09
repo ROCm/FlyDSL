@@ -7,22 +7,72 @@ import enum
 
 from ....compiler import jit
 from ....expr.gpu import barrier
-from ....expr.numeric import Int32, Integer, Numeric
-from ....expr.primitive import range_constexpr
-from ....expr.typing import ReductionOp, Vector
+from ....expr.numeric import Int32, Integer, Numeric, Uint32, Uint64
+from ....expr.primitive import inttoptr, ptrtoint, range_constexpr
+from ....expr.struct import Struct, is_struct_type
+from ....expr.typing import Array, Pointer, ReductionOp, Vector
 from .._common import _linear_thread_id
 from .._sorting import _pack, _unpack
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
-from .merge_sort import BlockMergeSort
+from .._values import _flatten_record, _item_dtype, _rebuild_record
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
 from .merge_sort import _storage as _merge_storage
-from .radix_sort import _exchange_words, _ordered_bits
-from .radix_sort import _storage as _radix_storage
+from .radix_sort import _UNSIGNED, _ordered_bits
 from .scan import BlockScan
 
 __all__ = [
     "BlockTopKAlgorithm",
     "BlockTopK",
 ]
+
+
+# AIR moves each tile word through the radix-sort scratch.
+
+
+@jit
+def _publish_words(words, ranks, storage, count):
+    for i in range_constexpr(count):
+        storage.words[ranks[i]] = words[i]
+    barrier()
+
+
+def _exchange_words(items, ranks, positions, storage):
+    """Move wide keys/payloads one 32-bit word at a time through one buffer."""
+    first = items[0]
+    if isinstance(first, Pointer):
+        addresses = _exchange_words([ptrtoint(item).to(Uint64) for item in items], ranks, positions, storage)
+        return [type(item)(inttoptr(item.type, address)) for item, address in zip(items, addresses)]
+    if isinstance(first, Vector):
+        columns = [_exchange_words([item[i] for item in items], ranks, positions, storage) for i in range(first.numel)]
+        return [
+            Vector(
+                Vector.from_elements([column[i] for column in columns], dtype=first.dtype),
+                shape=first.shape,
+                dtype=first.dtype,
+            )
+            for i in range(len(items))
+        ]
+    dtype = _item_dtype(items[0])
+    if is_struct_type(dtype):
+        fields = [_flatten_record(item) for item in items]
+        exchanged = [
+            _exchange_words([item[i] for item in fields], ranks, positions, storage) for i in range(len(fields[0]))
+        ]
+        return [_rebuild_record(dtype, [field[i] for field in exchanged], items[i]) for i in range(len(items))]
+    unsigned = _UNSIGNED[dtype.width]
+    result = [unsigned(0)] * len(items)
+    for bit in range(0, dtype.width, 32):
+        words = Vector.from_elements(
+            [
+                item.select(Uint32(1), Uint32(0)) if dtype.width == 1 else (item.bitcast(unsigned) >> bit).to(Uint32)
+                for item in items
+            ]
+        )
+        _publish_words(words, ranks, storage, len(items))
+        result = [
+            old | (Uint32(storage.words[position]).to(unsigned) << bit) for old, position in zip(result, positions)
+        ]
+        barrier()
+    return [item.to(dtype) if dtype.width == 1 else item.to(unsigned).bitcast(dtype) for item in result]
 
 
 class BlockTopKAlgorithm(enum.Enum):
@@ -46,6 +96,14 @@ class BlockTopKAlgorithm(enum.Enum):
 
 def _storage(dtype, threads, warp, count):
     return _merge_storage(dtype, threads, warp, count)
+
+
+def _air_storage(dtype, threads, warp, count):
+    """AIR scratch: one word per tile item, which the exchange moves a word at a time, and the scans."""
+    return Struct[
+        "words" : Array[Uint32, threads * count],
+        "scan" : BlockScan[Int32, threads].SharedStorage,
+    ]
 
 
 @jit
@@ -72,7 +130,7 @@ def _threshold(ordered, k, valid, scan, storage, count, width):
 class _BlockTopKMeta(BlockTileAlgorithmMeta):
     _supports_pairs = True
     _algorithms = BlockTopKAlgorithm
-    _shared_storage = {BlockTopKAlgorithm.MERGE: _storage, BlockTopKAlgorithm.AIR: _radix_storage}
+    _shared_storage = {BlockTopKAlgorithm.MERGE: _storage, BlockTopKAlgorithm.AIR: _air_storage}
 
     def _default_algorithm_for(cls, target):
         return BlockTopKAlgorithm.MERGE
@@ -106,7 +164,7 @@ class _BlockTopKMeta(BlockTileAlgorithmMeta):
         flags = [(tid * count + i < k) for i in range(count)]
         if cls.algorithm is BlockTopKAlgorithm.MERGE:
             dtype = (cls.dtype, cls.value_dtype) if cls.value_dtype is not None else cls.dtype
-            sort = BlockMergeSort[dtype, cls.block_size, count]
+            sort = cls.sort_type[dtype, cls.block_size, count]
             result = sort(
                 keys, values, storage=storage, descending=largest, compare_op=compare_op, valid_items=num_valid
             )
@@ -118,25 +176,7 @@ class _BlockTopKMeta(BlockTileAlgorithmMeta):
             raise TypeError("AIR requires numeric scalar keys; composite keys with a comparator require MERGE")
         ordered = Vector.from_elements([~_ordered_bits(key) if largest else _ordered_bits(key) for key in items])
         validity = Vector.from_elements([Int32(tid * count + i < num_valid) for i in range(count)])
-        scan = cls.scan_type[Int32, cls.block_size]
-        threshold, remaining = _threshold(ordered, Int32(k), validity, scan, storage, count, ordered.dtype.width)
-        equal = Vector.from_elements([Int32((ordered[i] == threshold) & (validity[i] != 0)) for i in range(count)])
-        duplicate_rank = scan.exclusive(equal, ReductionOp.ADD, storage=storage.scan)
-        barrier()
-        selected = Vector.from_elements(
-            [
-                Int32(
-                    (validity[i] != 0)
-                    & ((ordered[i] < threshold) | ((ordered[i] == threshold) & (duplicate_rank[i] < remaining)))
-                )
-                for i in range(count)
-            ]
-        )
-        prefix, selected_count = scan.exclusive_with_aggregate(selected, ReductionOp.ADD, storage=storage.scan)
-        barrier()
-        ranks = Vector.from_elements(
-            [(selected[i] != 0).select(prefix[i], selected_count + tid * count + i - prefix[i]) for i in range(count)]
-        )
+        ranks = cls._air_ranks(ordered, Int32(k), validity, tid, storage)
         positions = [tid * count + i for i in range(count)]
         items = _exchange_words(items, ranks, positions, storage)
         if payload is not None:
@@ -228,7 +268,32 @@ class BlockTopK(BlockPrimitive, metaclass=_BlockTopKMeta):
         # Key-only methods give the same key prefixes. Only the first three slots are valid.
     """
 
-    scan_type = BlockScan
+    scan_type = _Public("BlockScan")
+    sort_type = _Public("BlockMergeSort")
+
+    @classmethod
+    def _air_ranks(cls, ordered, k, validity, tid, storage):
+        """AIR: the blocked destination of every item -- selected ones first, both groups in input order."""
+        count = cls.items_per_thread
+        scan = cls.scan_type[Int32, cls.block_size]
+        threshold, remaining = _threshold(ordered, k, validity, scan, storage, count, ordered.dtype.width)
+        equal = Vector.from_elements([Int32((ordered[i] == threshold) & (validity[i] != 0)) for i in range(count)])
+        duplicate_rank = scan.exclusive(equal, ReductionOp.ADD, storage=storage.scan)
+        barrier()
+        selected = Vector.from_elements(
+            [
+                Int32(
+                    (validity[i] != 0)
+                    & ((ordered[i] < threshold) | ((ordered[i] == threshold) & (duplicate_rank[i] < remaining)))
+                )
+                for i in range(count)
+            ]
+        )
+        prefix, selected_count = scan.exclusive_with_aggregate(selected, ReductionOp.ADD, storage=storage.scan)
+        barrier()
+        return Vector.from_elements(
+            [(selected[i] != 0).select(prefix[i], selected_count + tid * count + i - prefix[i]) for i in range(count)]
+        )
 
     @classmethod
     def __call__(

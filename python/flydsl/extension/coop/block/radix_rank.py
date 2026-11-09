@@ -6,6 +6,7 @@
 import enum
 import functools
 
+from ...._mlir.dialects.gpu import BarrierScope
 from ....compiler import jit
 from ....expr.gpu import barrier, lane_id, shuffle_idx
 from ....expr.llvm import atomic_add, atomic_or
@@ -16,7 +17,7 @@ from ....expr.struct import Struct
 from ....expr.typing import Array, ReductionOp, Vector
 from .._common import _linear_thread_id
 from .._values import _as_items, _is_items, _shared_load
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _dispatch_target, _Public
 from .radix_sort import _bit_range, _digit
 from .scan import BlockScan
 
@@ -43,9 +44,11 @@ class BlockRadixRankAlgorithm(enum.Enum):
     layout's order among equal digits.
 
     Attributes:
-        BASIC: Consume blocked tiles and build each bin predicate on demand.
-            This is the default policy.
-        MEMOIZE: Consume blocked tiles and cache all bin predicates in registers.
+        BASIC: Consume blocked tiles, count digits in packed per-thread
+            shared counters and scan all of them at once. This is the
+            default policy.
+        MEMOIZE: Like BASIC, but keep each thread's raking segment of
+            counters in registers between the scan's two sweeps.
         MATCH: Consume warp-striped tiles, form match masks with shuffles,
             and publish counts after computing local ranks.
         MATCH_EARLY_COUNTS_ANY: Publish atomic histograms before local ranking,
@@ -70,27 +73,70 @@ class BlockRadixRankAlgorithm(enum.Enum):
     EarlyCounts = EARLY_COUNTS
 
 
+# BASIC/MEMOIZE count into one 16-bit counter per (digit, thread), packed two
+# to a 32-bit word, and scan all of them at once. At most this many counter
+# words per thread (16 digits, about 36 bytes of shared memory per thread);
+# wider digits rank in stable sub-passes.
+_COUNTER_ROWS = 8
+
+
+def _counter_bits(threads, count):
+    """The widest digit whose counters fit ``_COUNTER_ROWS`` words per thread."""
+    return (_COUNTER_ROWS * (2 if threads * count < 1 << 16 else 1)).bit_length() - 1
+
+
+def _counter_plan(threads, count, bins):
+    """Compile-time layout of the per-thread digit counters of BASIC/MEMOIZE.
+
+    Digit ``d`` lives in counter row ``d % rows`` and 16-bit field
+    ``d // rows`` of each thread's word, so one 32-bit scan in row-major
+    ``(row, thread)`` order scans every field at once. A tile of 65536 or more
+    items needs whole 32-bit counters. Each thread rakes ``segment``
+    consecutive words; an even row count gets a zero padding row so that
+    segment is odd and the raking reads hit distinct banks.
+
+    Returns ``(packing, rows, segment)``.
+    """
+    packing = min(2 if threads * count < 1 << 16 else 1, bins)
+    rows = bins // packing
+    return packing, rows, rows + 1 if rows % 2 == 0 else rows
+
+
 def _storage(dtype, threads, warp, count, match=False, masks=False, radix_bits=8):
     warps = (threads + warp - 1) // warp
     index_dtype = Uint16 if threads * count <= 65536 else Int32
     digit_dtype = Uint8 if radix_bits <= 8 else Uint16 if radix_bits <= 16 else Int32
-    offset_dtype = Uint16 if warp * count < 65536 else Int32
+    # Running offsets take LDS atomic adds; the atomic-OR policy, whose mask
+    # table dominates its storage, keeps 16-bit offsets updated by a write.
+    offset_dtype = Uint16 if masks and warp * count < 65536 else Int32
     bins = 1 << radix_bits
     digit_words = (threads * count * digit_dtype.width + 63) // 64
     index_words = (threads * count * index_dtype.width + 63) // 64
-    scratch_words = max(digit_words + index_words, warps * bins if masks else 1)
+    widest = 1 << min(radix_bits, _counter_bits(threads, count))
+    counter_words = 1 if match else (_counter_plan(threads, count, widest)[2] * threads + 1) // 2
+    scratch_words = max(digit_words + index_words, warps * bins if masks else 1, counter_words)
     Digits = Array[digit_dtype, threads * count]
     Indices = Array[index_dtype, threads * count]
     Masks = Array[Uint64, warps * bins if masks else 1]
+    Words = Array[Int32, 2 * scratch_words]
+    Halves = Array[Uint16, 4 * scratch_words]
 
     @Struct
     class Storage:
         scratch: Array[Uint64, scratch_words]
         histogram: Array[Int32, warps * bins if match else 1]
         offsets: Array[offset_dtype, warps * bins if match else 1]
-        counts: Array[Int32, bins if match else 1]
         prefix: Array[Int32, bins]
         scan: BlockScan[Int32, threads].SharedStorage
+
+        # BASIC/MEMOIZE digit counters, as words and as their 16-bit fields.
+        @property
+        def counters(self):
+            return Words.__peek_from_ptr__(self.scratch.ptr)
+
+        @property
+        def counter_fields(self):
+            return Halves.__peek_from_ptr__(self.scratch.ptr)
 
         # Typed views reuse scratch bytes at non-overlapping lifetimes.
         @property
@@ -117,93 +163,130 @@ def _atomic_match_storage(dtype, threads, warp, count, radix_bits=8):
     return _storage(dtype, threads, warp, count, match=True, masks=True, radix_bits=radix_bits)
 
 
-@jit
-def _initialize(storage, tid, threads, warps, bins):
-    for i in range_constexpr((warps * bins + threads - 1) // threads):
-        index = tid + i * threads
-        if index < warps * bins:
-            storage.histogram[index] = Int32(0)
-            storage.offsets[index] = storage.offsets.dtype(0)
-    barrier()
+# Every per-warp row below (histogram, offsets, masks) is read and written by
+# its own warp alone until _read_counts, so ordering inside a row needs only a
+# subgroup barrier, never the block's.
 
 
 @jit
-def _early_histogram(digits, storage, warp_id, bins, count):
-    for i in range_constexpr(count):
-        atomic_add(storage.histogram.ptr + warp_id * bins + digits[i], Int32(1))
-    barrier()
-
-
-@jit
-def _read_counts(storage, tid, threads, warps, bins, tracked):
-    result = []
-    for i in range_constexpr(tracked):
-        digit = tid * tracked + i
-        total = Int32(0)
-        if digit < bins:
-            for w in range_constexpr(warps):
-                total += storage.histogram[w * bins + digit]
-            storage.counts[digit] = total
-        result.append(total)
-    barrier()
-    return Vector.from_elements(result)
-
-
-@jit
-def _write_prefix(storage, prefix, tid, bins, tracked, descending, tile_items):
-    for i in range_constexpr(tracked):
-        digit = tid * tracked + i
-        if digit < bins:
-            count = Int32(storage.counts[digit])
-            storage.prefix[digit] = tile_items - prefix[i] - count if const_expr(descending) else prefix[i]
-    barrier()
-
-
-@jit
-def _match_rounds(digits, storage, tid, threads, width, bins, count, early, use_atomic_or):
+def _initialize(storage, tid, width, bins, early, masks):
     warp_id, lane = tid // width, tid % width
-    remaining = threads - warp_id * width
-    active = (remaining < width).select(remaining, Int32(width))
+    for i in range_constexpr((bins + width - 1) // width):
+        index = lane + i * width
+        if index < bins:
+            storage.offsets[warp_id * bins + index] = storage.offsets.dtype(0)
+            if const_expr(early):
+                storage.histogram[warp_id * bins + index] = Int32(0)
+            if const_expr(masks):
+                storage.masks[warp_id * bins + index] = Uint64(0)
+    barrier(scope=BarrierScope.Subgroup)
+
+
+@jit
+def _early_histogram(digits, storage, warp_id, bins, count, masks, lanes_below, lane):
+    for i in range_constexpr(count):
+        if const_expr(masks is None):
+            atomic_add(storage.histogram.ptr + warp_id * bins + digits[i], Int32(1))
+        else:
+            # One add per distinct digit: its first lane adds all of the
+            # digit's lanes, so skewed digits do not serialize on one address.
+            if lanes_below(masks[i], lane) == 0:
+                atomic_add(storage.histogram.ptr + warp_id * bins + digits[i], Int32(ctpop(masks[i])))
+    barrier()
+
+
+def _read_counts(source, tid, threads, warps, bins, tracked):
+    """Each tracked digit's total over the warps' *source* rows, and every warp's exclusive prefix in it.
+
+    Both stay in registers: only the thread that owns a digit uses them.
+    Padding digits past the last bin count zero.
+    """
+    totals, fronts = [], []
+    for i in range(tracked):
+        digit = tid * tracked + i
+        valid = None if threads * tracked == bins else digit < bins
+        safe = digit if valid is None else valid.select(digit, Int32(0))
+        total, front = Int32(0), []
+        for w in range(warps):
+            front.append(total)
+            total = total + Int32(_shared_load(source, w * bins + safe))
+        totals.append(total if valid is None else valid.select(total, Int32(0)))
+        fronts.append(front)
+    return Vector.from_elements(totals), fronts
+
+
+@jit
+def _write_prefix(storage, prefix, counts, fronts, tid, bins, tracked, descending, tile_items):
+    """Publish each owned digit's start and, per warp, where that warp's run of the digit starts."""
+    for i in range_constexpr(tracked):
+        digit = tid * tracked + i
+        if digit < bins:
+            start = tile_items - prefix[i] - counts[i] if const_expr(descending) else prefix[i]
+            storage.prefix[digit] = start
+            for w in range_constexpr(len(fronts[i])):
+                storage.histogram[w * bins + digit] = start + fronts[i][w]
+    barrier()
+
+
+def _shuffle_match(digit, width, bits):
+    """Mask of the logical warp's lanes holding *digit*: one shuffle per lane."""
+    mask = Uint64(0)
+    for source in range(width):
+        peer = shuffle_idx(digit, (lane_id() // width) * width + source, width)
+        mask = mask | (peer == digit).select(Uint64(1) << source, Uint64(0))
+    return mask
+
+
+def _mask_rank(mask, lane):
+    """Set bits of *mask* below logical *lane*."""
+    return Int32(ctpop(mask & ((Uint64(1) << lane) - Uint64(1))))
+
+
+@jit
+def _match_rounds(digits, storage, tid, width, bins, bits, count, use_atomic_or, masks, match_any, lanes_below):
+    """Warp-local ranks of each item in turn, from running per-warp digit offsets.
+
+    Offsets start at zero. The first lane of each digit adds the digit's match
+    count after every lane has read the running offset; an atomic add needs
+    no value from that read, so the items' offset reads stay independent.
+    The atomic-OR policy waits for its mask read anyway and writes instead.
+    """
+    warp_id, lane = tid // width, tid % width
     result = []
     for i in range_constexpr(count):
         digit = digits[i]
         if const_expr(use_atomic_or):
-            for b in range_constexpr((((threads + width - 1) // width) * bins + threads - 1) // threads):
-                index = tid + b * threads
-                if index < ((threads + width - 1) // width) * bins:
-                    storage.masks[index] = Uint64(0)
-            barrier()
             atomic_or(storage.masks.ptr + warp_id * bins + digit, Uint64(1) << lane)
-            barrier()
+            barrier(scope=BarrierScope.Subgroup)
             mask = Uint64(storage.masks[warp_id * bins + digit])
+        elif const_expr(masks is not None):
+            mask = masks[i]
         else:
-            mask = Uint64(0)
-            for source in range_constexpr(width):
-                peer = shuffle_idx(digit, (lane_id() // width) * width + source, width)
-                match = (peer == digit) & (source < active)
-                mask = mask | match.select(Uint64(1) << source, Uint64(0))
-        local_rank = Int32(ctpop(mask & ((Uint64(1) << lane) - Uint64(1))))
-        matches = Int32(ctpop(mask))
-        previous = Int32(_shared_load(storage.offsets, warp_id * bins + digit))
+            mask = match_any(digit, width, bits)
+        local_rank = lanes_below(mask, lane)
+        previous = Int32(0)
+        if const_expr(i > 0):
+            previous = Int32(_shared_load(storage.offsets, warp_id * bins + digit))
         result.append(previous + local_rank)
-        barrier()
+        barrier(scope=BarrierScope.Subgroup)
         if local_rank == 0:
-            storage.offsets[warp_id * bins + digit] = (previous + matches).to(storage.offsets.dtype)
-            if const_expr(not early):
-                storage.histogram[warp_id * bins + digit] = previous + matches
-        barrier()
+            if const_expr(i > 0 and not use_atomic_or):
+                atomic_add(storage.offsets.ptr + warp_id * bins + digit, Int32(ctpop(mask)))
+            else:
+                storage.offsets[warp_id * bins + digit] = (previous + Int32(ctpop(mask))).to(storage.offsets.dtype)
+            if const_expr(use_atomic_or):
+                # Each digit's first lane empties its mask for the next item.
+                storage.masks[warp_id * bins + digit] = Uint64(0)
+        barrier(scope=BarrierScope.Subgroup)
     return Vector.from_elements(result)
 
 
 @jit
-def _add_offsets(ranks, digits, storage, tid, width, bins, warps, count):
+def _add_offsets(ranks, digits, storage, tid, width, bins, count):
     result = []
     for i in range_constexpr(count):
         digit = digits[i]
-        offset = Int32(storage.prefix[digit])
-        for w in range_constexpr(warps):
-            if w < tid // width:
-                offset += storage.histogram[w * bins + digit]
+        offset = Int32(storage.histogram[(tid // width) * bins + digit])
         result.append(ranks[i] + offset)
     return Vector.from_elements(result)
 
@@ -221,6 +304,103 @@ def _inverse(indices, positions, storage, count):
     for i in range_constexpr(count):
         storage.indices[indices[i]] = positions[i].to(storage.indices.dtype)
     barrier()
+
+
+def _counter_slot(digit, column, plan, threads):
+    """Index of *digit*'s counter in *column*: a 16-bit field, or a word without packing."""
+    packing, rows, _ = plan
+    word = (digit & (rows - 1)) * threads + column
+    return word * 2 + ((digit >> (rows.bit_length() - 1)) & 1) if packing == 2 else word
+
+
+def _counter_ranks(digits, storage, scan, tid, threads, bins, descending, memoize, tracked, with_prefix):
+    """Rank blocked digits with one packed counter per (digit, thread) and one block scan.
+
+    A thread's own items are ranked in registers: ``local[i]`` counts its
+    earlier items with the same digit, and every item writes the thread's
+    total for its digit, so duplicates store the same value and no counter is
+    read back before the scan. Each thread zeroes only its own counter
+    column, which needs no barrier before its own writes. Thread ``t``
+    rakes ``segment`` consecutive words, so the exclusive scan in
+    ``(digit, thread)`` order leaves, at each thread's counter, the number of
+    items ranked before that thread's first item of the digit; thread 0's
+    column holds every digit's start.
+    """
+    count = len(digits)
+    plan = _counter_plan(threads, count, bins)
+    packing, _, segment = plan
+    words, fields = storage.counters, storage.counter_fields
+    ordered = [Int32(bins - 1) - d if descending else d for d in digits]
+    local, total = [Int32(0)] * count, [Int32(1)] * count
+    for i in range(count):
+        for j in range(i):
+            same = Int32(ordered[i] == ordered[j])
+            local[i], total[i], total[j] = local[i] + same, total[i] + same, total[j] + same
+
+    def load(digit, column):
+        index = _counter_slot(digit, column, plan, threads)
+        return _shared_load(fields, index).to(Int32) if packing == 2 else Int32(words[index])
+
+    for r in range(segment):
+        words[r * threads + tid] = Int32(0)
+    for i in range(count):
+        index = _counter_slot(ordered[i], tid, plan, threads)
+        if packing == 2:
+            fields[index] = total[i].to(Uint16)
+        else:
+            words[index] = total[i]
+    barrier()
+    raked = [Int32(words[tid * segment + k]) for k in range(segment)]
+    partial = raked[0]
+    for value in raked[1:]:
+        partial = partial + value
+    running, aggregate = scan.exclusive_with_aggregate(partial, ReductionOp.ADD, storage=storage.scan)
+    if packing == 2:
+        # Every high-field digit follows all low-field digits.
+        running = running + (aggregate << 16)
+    for k in range(segment):
+        value = raked[k] if memoize else Int32(words[tid * segment + k])
+        words[tid * segment + k] = running
+        running = running + value
+    barrier()
+    ranks = [load(ordered[i], tid) + local[i] for i in range(count)]
+    # Starts of the digits whose offsets this thread returns, in the requested order.
+    prefix = [
+        load(Int32(bins - 1 - (tid * tracked + i) % bins) if descending else Int32((tid * tracked + i) % bins), 0)
+        for i in range(tracked if with_prefix else 0)
+    ]
+    return Vector.from_elements(ranks), Vector.from_elements(prefix) if with_prefix else None
+
+
+@jit
+def _digit_offsets(digits, storage, scan, tid, threads, bins, descending, tile_items):
+    """Start of each digit this thread reports, from a block histogram and one scan.
+
+    BASIC/MEMOIZE return these when sub-passes rank a digit too wide for
+    their counters.
+    """
+    tracked = (bins + threads - 1) // threads
+    for i in range_constexpr(tracked):
+        if tid + i * threads < bins:
+            storage.prefix[tid + i * threads] = Int32(0)
+    barrier()
+    for i in range_constexpr(len(digits)):
+        atomic_add(storage.prefix.ptr + digits[i], Int32(1))
+    barrier()
+    counts = []
+    for i in range_constexpr(tracked):
+        digit = tid * tracked + i
+        valid = digit < bins
+        counts.append(valid.select(Int32(storage.prefix[valid.select(digit, Int32(0))]), Int32(0)))
+    counts = Vector.from_elements(counts)
+    starts = scan.exclusive(counts, ReductionOp.ADD, storage=storage.scan)
+    # The scan's barrier orders every histogram read before these writes.
+    for i in range_constexpr(tracked):
+        digit = tid * tracked + i
+        if digit < bins:
+            storage.prefix[digit] = tile_items - starts[i] - counts[i] if const_expr(descending) else starts[i]
+    barrier()
+    return Vector.from_elements([Int32(storage.prefix[(tid * tracked + i) % bins]) for i in range_constexpr(tracked)])
 
 
 class _BlockRadixRankMeta(BlockTileAlgorithmMeta):
@@ -293,8 +473,11 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
     ``BlockRadixRank.with_radix_bits(bits)`` before specialization to change it.
     The allocation must fit the target's shared-memory limit.
 
-    BASIC and MEMOIZE consume blocked tiles. BASIC forms a bin histogram on
-    demand; MEMOIZE caches all bin predicates in registers before scanning.
+    BASIC and MEMOIZE consume blocked tiles. They count each thread's digits
+    in packed 16-bit shared counters and rank every bin with one block scan;
+    MEMOIZE keeps its raking segment in registers instead of reading it twice.
+    Digits wider than four bits rank in stable sub-passes, and ``with_prefix``
+    then counts the whole digit in a block histogram.
     MATCH and both early-count policies consume warp-striped tiles: within each
     physical warp, item index precedes lane index. MATCH forms per-item masks using portable shuffles;
     early-count policies first publish atomic histograms, then use shuffles or
@@ -365,7 +548,7 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
         # The named rank entry point returns the same results in warp-striped ownership.
     """
 
-    scan_type = BlockScan
+    scan_type = _Public("BlockScan")
     configured_radix_bits = 8
 
     @classmethod
@@ -450,6 +633,25 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
         )
 
     @classmethod
+    def _match_any(cls, digit, width, bits):
+        """Mask of the logical warp's lanes whose *digit* equals this lane's; target overrides may replace it."""
+        return _shuffle_match(digit, width, bits)
+
+    @classmethod
+    def _early_masks(cls, digits, width, bits):
+        """Match masks of every item before the early counts, or None to count lane by lane.
+
+        Portable shuffle masks cost too many registers to hold through the
+        early phase; a target with cheap masks may return them for reuse.
+        """
+        return None
+
+    @classmethod
+    def _lanes_below(cls, mask, lane):
+        """Number of *mask* lanes below logical *lane*; target overrides may replace it."""
+        return _mask_rank(mask, lane)
+
+    @classmethod
     def with_radix_bits(cls, radix_bits: int) -> "type[BlockRadixRank]":
         """Configure histogram capacity before specializing dtype, block, and items.
 
@@ -466,6 +668,9 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
             capacity. Apply ``[dtype, block_size, items_per_thread, algorithm]``
             to it before invoking a rank collective.
         """
+        target = _dispatch_target(cls)
+        if target is not cls:
+            return target.with_radix_bits(radix_bits)
         if cls.block_threads is not None:
             raise TypeError("configure radix bits before specializing the block shape")
         if not isinstance(radix_bits, int) or radix_bits < 1:
@@ -579,29 +784,39 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
         original_ranks = positions
         scan = cls.scan_type[Int32, cls.block_size]
         output_prefix = None
-        # Four-bit passes cap the scan work of BASIC/MEMOIZE; MATCH supports
+        # Four-bit passes fit the counters of BASIC/MEMOIZE; MATCH supports
         # the complete eight-bit histogram in one pass.
         step = radix_bits or (
             max(1, end_bit - begin_bit)
             if count_callback is not None or with_prefix
             else min(cls.configured_radix_bits, 8 if match else 4)
         )
-        passes = list(range(begin_bit, end_bit, step)) or [begin_bit]
-        if with_prefix and len(passes) > 1:
+        # An extractor defines one digit; sub-passes below take bit fields of it.
+        extracted = (
+            None if digit_extractor is None else [_extract_digit(k, digit_extractor, radix_bits) for k in current]
+        )
+        single = len(range(begin_bit, end_bit, step)) <= 1
+        if with_prefix and not single:
             raise ValueError("with_prefix requires one digit pass: radix_bits must cover end_bit - begin_bit")
+        if not match and step > _counter_bits(threads, count):
+            # BASIC/MEMOIZE rank a digit wider than their counters in stable
+            # sub-passes; a histogram supplies the whole digit's offsets.
+            if with_prefix:
+                whole = extracted or [_digit(key, begin_bit, end_bit - begin_bit, False) for key in current]
+                output_prefix = _digit_offsets(
+                    whole, storage, scan, tid, threads, 1 << (end_bit - begin_bit), descending, threads * count
+                )
+            step = -(-step // -(-step // _counter_bits(threads, count)))
+        passes = list(range(begin_bit, end_bit, step)) or [begin_bit]
         for pass_index, bit in enumerate(passes):
             bits = min(step, end_bit - bit)
             bins = 1 << bits
-            digits = Vector.from_elements(
-                [
-                    (
-                        _extract_digit(key, digit_extractor, bits)
-                        if digit_extractor is not None
-                        else _digit(key, bit, bits, False)
-                    )
-                    for key in current
-                ]
-            )
+            if extracted is None:
+                digits = Vector.from_elements([_digit(key, bit, bits, False) for key in current])
+            elif len(passes) == 1:
+                digits = Vector.from_elements(extracted)
+            else:
+                digits = Vector.from_elements([(d >> (bit - begin_bit)) & (bins - 1) for d in extracted])
             if pass_index > 0:
                 _publish(digits, positions, original_ranks, storage, count)
                 digits = Vector.from_elements([Int32(_shared_load(storage.digits, p)) for p in positions])
@@ -609,61 +824,63 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
                 barrier()
             if match:
                 early = cls.algorithm is not BlockRadixRankAlgorithm.MATCH
-                _initialize(storage, tid, threads, cls.num_warps, bins)
+                atomic_masks = cls.algorithm is BlockRadixRankAlgorithm.MATCH_EARLY_COUNTS_ATOMIC_OR
+                tracked = (bins + threads - 1) // threads
+                # Masks a target can afford to hold through the early phase
+                # make the early counts one add per digit instead of per lane.
+                masks = cls._early_masks(digits, width, bits) if early and not atomic_masks else None
+                _initialize(storage, tid, width, bins, early, atomic_masks)
                 if early:
-                    _early_histogram(digits, storage, tid // width, bins, count)
-                    counts = _read_counts(storage, tid, threads, cls.num_warps, bins, (bins + threads - 1) // threads)
+                    _early_histogram(digits, storage, tid // width, bins, count, masks, cls._lanes_below, tid % width)
+                    counts, fronts = _read_counts(storage.histogram, tid, threads, cls.num_warps, bins, tracked)
                     if count_callback is not None:
                         count_callback(counts)
                 ranks = _match_rounds(
                     digits,
                     storage,
                     tid,
-                    threads,
                     width,
                     bins,
+                    bits,
                     count,
-                    early,
-                    cls.algorithm is BlockRadixRankAlgorithm.MATCH_EARLY_COUNTS_ATOMIC_OR,
+                    atomic_masks,
+                    masks,
+                    cls._match_any,
+                    cls._lanes_below,
                 )
-                tracked = (bins + threads - 1) // threads
                 if not early:
-                    counts = _read_counts(storage, tid, threads, cls.num_warps, bins, tracked)
+                    # Each warp's final running offsets are its digit counts.
+                    barrier()
+                    counts, fronts = _read_counts(storage.offsets, tid, threads, cls.num_warps, bins, tracked)
                     if count_callback is not None:
                         count_callback(counts)
                 prefix = scan.exclusive(counts, ReductionOp.ADD, storage=storage.scan)
-                _write_prefix(storage, prefix, tid, bins, tracked, descending, threads * count)
-                ranks = _add_offsets(ranks, digits, storage, tid, width, bins, cls.num_warps, count)
+                _write_prefix(storage, prefix, counts, fronts, tid, bins, tracked, descending, threads * count)
+                ranks = _add_offsets(ranks, digits, storage, tid, width, bins, count)
                 output_prefix = Vector.from_elements(
                     [Int32(storage.prefix[(tid * tracked + i) % bins]) for i in range(tracked)]
                 )
             else:
-                # MEMOIZE retains every bin predicate across the histogram
-                # scans; BASIC constructs only the current bin's predicates.
-                cached = (
-                    [[Int32(digit == b) for digit in digits] for b in range(bins)]
-                    if cls.algorithm is BlockRadixRankAlgorithm.MEMOIZE
-                    else None
-                )
-                result, offset = [Int32(0)] * count, Int32(0)
-                for b in range(bins):
-                    digit = bins - 1 - b if descending else b
-                    flags = cached[digit] if cached is not None else [Int32(key == digit) for key in digits]
-                    prefix, total = scan.exclusive_with_aggregate(
-                        sum(flags, Int32(0)), ReductionOp.ADD, storage=storage.scan
-                    )
-                    local = Int32(0)
-                    for i in range(count):
-                        result[i] = (flags[i] != 0).select(offset + prefix + local, result[i])
-                        local += flags[i]
-                    storage.prefix[digit] = offset
-                    offset += total
-                    barrier()
-                ranks = Vector.from_elements(result)
+                # MEMOIZE keeps each raking segment in registers between the
+                # upsweep and the downsweep; BASIC reads it again.
                 tracked = (bins + threads - 1) // threads
-                output_prefix = Vector.from_elements(
-                    [Int32(storage.prefix[(tid * tracked + i) % bins]) for i in range(tracked)]
+                ranks, pass_prefix = _counter_ranks(
+                    digits,
+                    storage,
+                    scan,
+                    tid,
+                    threads,
+                    bins,
+                    descending,
+                    cls.algorithm is BlockRadixRankAlgorithm.MEMOIZE,
+                    tracked,
+                    with_prefix and len(passes) == 1,
                 )
+                if len(passes) > 1:
+                    # _inverse reuses the counter bytes every thread just read.
+                    barrier()
+                else:
+                    output_prefix = pass_prefix
             if len(passes) == 1:
                 result = ranks if vector else ranks[0]
                 barrier()
@@ -671,6 +888,6 @@ class BlockRadixRank(BlockPrimitive, metaclass=_BlockRadixRankMeta):
             _inverse(indices, ranks, storage, count)
             original_ranks = Vector.from_elements([Int32(_shared_load(storage.indices, p)) for p in positions])
             barrier()
-        result = original_ranks
+        result = original_ranks if vector else original_ranks[0]
         barrier()
-        return result if vector else result[0]
+        return (result, output_prefix) if with_prefix else result

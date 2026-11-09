@@ -5,7 +5,6 @@
 
 import enum
 
-from ....compiler import jit
 from ....expr.gpu import barrier
 from ....expr.numeric import Integer
 from ....expr.struct import Struct
@@ -41,10 +40,12 @@ class BlockShuffleAlgorithm(enum.Enum):
     SharedMemory = SHARED_MEMORY
 
 
-@jit
 def _publish(first, last, tid, storage):
-    _shared_store(storage.first, tid, first)
-    _shared_store(storage.last, tid, last)
+    """Publish the boundary items a call reads (``None`` skips a side), then synchronize."""
+    if first is not None:
+        _shared_store(storage.first, tid, first)
+    if last is not None:
+        _shared_store(storage.last, tid, last)
     barrier()
 
 
@@ -113,13 +114,15 @@ class BlockShuffle(BlockPrimitive, metaclass=_BlockShuffleMeta):
     """
 
     @classmethod
-    def _neighbors(cls, value, storage):
+    def _neighbors(cls, value, storage, left=True, right=True):
+        """Return ``(items, tid, left, right)``; only the requested neighbors are published and read."""
         cls._check(value)
         items = list(_as_items(value, cls.dtype))
         tid = _linear_thread_id(cls.block_size)
-        _publish(items[0], items[-1], tid, storage)
-        left = _record_default(cls.dtype, _shared_load(storage.last, (tid + cls.block_threads - 1) % cls.block_threads))
-        right = _record_default(cls.dtype, _shared_load(storage.first, (tid + 1) % cls.block_threads))
+        _publish(items[0] if right else None, items[-1] if left else None, tid, storage)
+        threads = cls.block_threads
+        left = _record_default(cls.dtype, _shared_load(storage.last, (tid + threads - 1) % threads)) if left else None
+        right = _record_default(cls.dtype, _shared_load(storage.first, (tid + 1) % threads)) if right else None
         return items, tid, left, right
 
     @classmethod
@@ -140,7 +143,7 @@ class BlockShuffle(BlockPrimitive, metaclass=_BlockShuffleMeta):
         if _is_items(value, cls.dtype):
             raise TypeError("offset expects one complete element per thread; use up/down for item ranges")
         tid = _linear_thread_id(cls.block_size)
-        _publish(value, value, tid, storage)
+        _publish(value, None, tid, storage)
         source = tid + distance
         valid = (source >= 0) & (source < cls.block_threads)
         moved = _record_default(cls.dtype, _shared_load(storage.first, valid.select(source, tid)))
@@ -162,7 +165,7 @@ class BlockShuffle(BlockPrimitive, metaclass=_BlockShuffleMeta):
         if _is_items(value, cls.dtype):
             raise TypeError("rotate expects one complete element per thread")
         tid = _linear_thread_id(cls.block_size)
-        _publish(value, value, tid, storage)
+        _publish(value, None, tid, storage)
         # Reduce the distance before adding tid, so the sum cannot overflow.
         shift = (distance % cls.block_threads + cls.block_threads) % cls.block_threads
         source = (tid + shift) % cls.block_threads
@@ -191,7 +194,7 @@ class BlockShuffle(BlockPrimitive, metaclass=_BlockShuffleMeta):
             ``(shifted_items, block_suffix)``; the suffix is available to every
             thread.
         """
-        items, tid, left, _ = cls._neighbors(value, storage)
+        items, tid, left, _ = cls._neighbors(value, storage, right=False)
         boundary = items[0] if predecessor is None else _record_default(cls.dtype, predecessor)
         result = [_record_select(tid == 0, boundary, left), *items[:-1]]
         result = _from_items(result, like=value) if _is_items(value, cls.dtype) else result[0]
@@ -224,7 +227,7 @@ class BlockShuffle(BlockPrimitive, metaclass=_BlockShuffleMeta):
             ``(shifted_items, block_prefix)``; the prefix is available to every
             thread.
         """
-        items, tid, _, right = cls._neighbors(value, storage)
+        items, tid, _, right = cls._neighbors(value, storage, left=False)
         boundary = items[-1] if successor is None else _record_default(cls.dtype, successor)
         result = [*items[1:], _record_select(tid == cls.block_threads - 1, boundary, right)]
         result = _from_items(result, like=value) if _is_items(value, cls.dtype) else result[0]

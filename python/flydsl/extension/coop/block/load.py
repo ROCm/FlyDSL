@@ -10,8 +10,8 @@ from ....expr.struct import Struct
 from .._common import _linear_thread_id
 from .._io import _load_item, _load_vectorized
 from .._values import _from_items, _record_default, _shared_array
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
-from .exchange import BlockExchange, BlockExchangeAlgorithm, _storage, _timesliced_storage, _warp_layout
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
+from .exchange import BlockExchangeAlgorithm, _storage, _timesliced_storage, _warp_layout
 
 __all__ = [
     "BlockLoadAlgorithm",
@@ -176,7 +176,7 @@ class BlockLoad(BlockPrimitive, metaclass=_BlockLoadMeta):
         fx.barrier()
     """
 
-    exchange_type = BlockExchange
+    exchange_type = _Public("BlockExchange")
 
     @classmethod
     def __call__(

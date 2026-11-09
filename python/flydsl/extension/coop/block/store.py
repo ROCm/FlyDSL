@@ -9,8 +9,8 @@ from ....expr.numeric import Integer
 from .._common import _linear_thread_id
 from .._io import _store_item, _store_vectorized
 from .._values import _as_items
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
-from .exchange import BlockExchange, BlockExchangeAlgorithm, _storage, _timesliced_storage, _warp_layout
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
+from .exchange import BlockExchangeAlgorithm, _storage, _timesliced_storage, _warp_layout
 from .load import _direct_storage
 
 __all__ = [
@@ -167,7 +167,7 @@ class BlockStore(BlockPrimitive, metaclass=_BlockStoreMeta):
         fx.barrier()
     """
 
-    exchange_type = BlockExchange
+    exchange_type = _Public("BlockExchange")
 
     @classmethod
     def __call__(

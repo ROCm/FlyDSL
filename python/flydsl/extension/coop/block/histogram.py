@@ -14,7 +14,7 @@ from ....expr.struct import Struct
 from ....expr.typing import Array, Vector
 from .._common import _linear_thread_id
 from .._values import _as_items, _items_dtype
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
 from .merge_sort import BlockMergeSort
 
 __all__ = [
@@ -198,6 +198,8 @@ class BlockHistogram(BlockPrimitive, metaclass=_BlockHistogramMeta):
         # Explicit initialization followed by two accumulations gives [244,6,2,4].
     """
 
+    sort_type = _Public("BlockMergeSort")
+
     @classmethod
     def __call__(cls, value, *, storage):
         """Clear the histogram and accumulate one block's input items.
@@ -256,7 +258,7 @@ class BlockHistogram(BlockPrimitive, metaclass=_BlockHistogramMeta):
             _accumulate(items, storage, items.numel, cls.bins, counter)
         else:
             tid = _linear_thread_id(cls.block_size)
-            sort = BlockMergeSort[Int32, cls.block_size, 1]
+            sort = cls.sort_type[Int32, cls.block_size, 1]
             for item in items:
                 key = sort(_bin_index(item, cls.bins), storage=storage.sort)
                 _publish_sorted(key, storage, tid)

@@ -8,13 +8,13 @@ import enum
 from ....compiler import jit
 from ....expr.gpu import barrier
 from ....expr.numeric import Int32, Numeric, Uint8, Uint16, Uint32, Uint64, Uint128
-from ....expr.primitive import const_expr, inttoptr, ptrtoint, range_constexpr
+from ....expr.primitive import add_offset, const_expr, inttoptr, ptr_load, ptrtoint, range_constexpr
 from ....expr.struct import Struct, is_struct_type
 from ....expr.typing import Array, Pointer, ReductionOp, Vector
 from .._common import _linear_thread_id
 from .._sorting import _pack, _unpack
-from .._values import _flatten_record, _item_dtype, _normalize_value, _rebuild_record
-from ._spec import BlockPrimitive, BlockTileAlgorithmMeta
+from .._values import _flatten_record, _item_dtype, _leaf_fields, _normalize_value, _rebuild_record
+from ._spec import BlockPrimitive, BlockTileAlgorithmMeta, _Public
 from .scan import BlockScan
 
 __all__ = [
@@ -77,7 +77,10 @@ def _digit(key, begin, bits, transform=True, decomposer=None):
 class BlockRadixSortAlgorithm(enum.Enum):
     """Default digit-width policies for :class:`BlockRadixSort`.
 
-    An explicit ``radix_bits`` overrides the policy's default digit width.
+    An explicit ``radix_bits`` overrides the policy's default digit width. An
+    LSD radix sort's result does not depend on the digit width, so a backend may
+    rank with a different width where that is faster: gfx9 picks 1- to 3-bit
+    digits for both policies.
 
     Attributes:
         RADIX_SCAN: Perform one stable binary partition per bit by default.
@@ -93,56 +96,114 @@ class BlockRadixSortAlgorithm(enum.Enum):
     RadixDigit = RADIX_DIGIT
 
 
-@jit
-def _publish_words(words, ranks, storage, count):
-    for i in range_constexpr(count):
-        storage.words[ranks[i]] = words[i]
-    barrier()
-
-
-def _exchange_words(items, ranks, positions, storage):
-    """Move wide keys/payloads one 32-bit word at a time through one buffer."""
+def _columns(items):
+    """Split items into 32-bit word columns; return the columns and their inverse."""
     first = items[0]
     if isinstance(first, Pointer):
-        addresses = _exchange_words([ptrtoint(item).to(Uint64) for item in items], ranks, positions, storage)
-        return [type(item)(inttoptr(item.type, address)) for item, address in zip(items, addresses)]
-    if isinstance(first, Vector):
-        columns = [_exchange_words([item[i] for item in items], ranks, positions, storage) for i in range(first.numel)]
-        return [
-            Vector(
-                Vector.from_elements([column[i] for column in columns], dtype=first.dtype),
-                shape=first.shape,
-                dtype=first.dtype,
-            )
-            for i in range(len(items))
-        ]
-    dtype = _item_dtype(items[0])
-    if is_struct_type(dtype):
-        fields = [_flatten_record(item) for item in items]
-        exchanged = [
-            _exchange_words([item[i] for item in fields], ranks, positions, storage) for i in range(len(fields[0]))
-        ]
-        return [_rebuild_record(dtype, [field[i] for field in exchanged], items[i]) for i in range(len(items))]
-    unsigned = _UNSIGNED[dtype.width]
-    result = [unsigned(0)] * len(items)
-    for bit in range(0, dtype.width, 32):
-        words = Vector.from_elements(
-            [
-                item.select(Uint32(1), Uint32(0)) if dtype.width == 1 else (item.bitcast(unsigned) >> bit).to(Uint32)
-                for item in items
+        columns, rebuild = _columns([ptrtoint(item).to(Uint64) for item in items])
+        return columns, lambda c: [type(item)(inttoptr(item.type, a)) for item, a in zip(items, rebuild(c))]
+    if isinstance(first, (Vector,)) or is_struct_type(_item_dtype(first)):
+        if isinstance(first, Vector):
+            parts = [_columns([item[i] for item in items]) for i in range(first.numel)]
+        else:
+            fields = [_flatten_record(item) for item in items]
+            parts = [_columns([f[i] for f in fields]) for i in range(len(fields[0]))]
+
+        def rebuild_parts(c):
+            leaves, at = [], 0
+            for columns, rebuild in parts:
+                leaves.append(rebuild(c[at : at + len(columns)]))
+                at += len(columns)
+            if not isinstance(first, Vector):
+                dtype = _item_dtype(first)
+                return [_rebuild_record(dtype, [leaf[i] for leaf in leaves], items[i]) for i in range(len(items))]
+            return [
+                Vector(
+                    Vector.from_elements([leaf[i] for leaf in leaves], dtype=first.dtype),
+                    shape=first.shape,
+                    dtype=first.dtype,
+                )
+                for i in range(len(items))
             ]
-        )
-        _publish_words(words, ranks, storage, len(items))
-        result = [
-            old | (Uint32(storage.words[position]).to(unsigned) << bit) for old, position in zip(result, positions)
+
+        return [column for columns, _ in parts for column in columns], rebuild_parts
+    dtype = _item_dtype(first)
+    unsigned = _UNSIGNED[dtype.width]
+    if dtype.width == 1:
+        return [[item.select(Uint32(1), Uint32(0)) for item in items]], lambda c: [
+            w.to(unsigned).to(dtype) for w in c[0]
         ]
+    columns = [[(item.bitcast(unsigned) >> bit).to(Uint32) for item in items] for bit in range(0, dtype.width, 32)]
+
+    def rebuild_scalar(c):
+        out = []
+        for i in range(len(items)):
+            bits = c[0][i].to(unsigned)
+            for k in range(1, len(c)):
+                bits = bits | (c[k][i].to(unsigned) << (32 * k))
+            out.append(bits.bitcast(dtype))
+        return out
+
+    return columns, rebuild_scalar
+
+
+def _exchange(columns, ranks, tid, storage, threads, count, striped):
+    """Scatter every word column to *ranks* at once; read back blocked or striped positions.
+
+    Each column owns a plane of ``storage.words``, so keys and payloads share one
+    barrier. Columns beyond the planes take further rounds. No barrier trails the
+    read-back: the next pass synchronizes in its scan before it scatters, and the
+    sort synchronizes once after its last read-back.
+    """
+    tile = threads * count
+    planes = storage.words.size // tile
+    out = []
+    for first in range(0, len(columns), planes):
+        if first:
+            barrier()  # the previous round's reads precede this round's scatter
+        group = columns[first : first + planes]
+        # Item-major order keeps an item's plane stores adjacent, so a backend can
+        # pair them (gfx9: ds_write2st64_b32).
+        for i in range(count):
+            for c, column in enumerate(group):
+                storage.words[c * tile + ranks[i]] = column[i]
         barrier()
-    return [item.to(dtype) if dtype.width == 1 else item.to(unsigned).bitcast(dtype) for item in result]
+        for c in range(len(group)):
+            if striped:
+                out.append([Uint32(storage.words[c * tile + tid + i * threads]) for i in range(count)])
+            else:
+                row = ptr_load(add_offset(storage.words.ptr, c * tile + tid * count), Vector[Uint32, count])
+                out.append([Uint32(row[i]) for i in range(count)])
+    return out
+
+
+# Scatter planes beyond this many bytes go in further rounds.
+_PLANE_BUDGET = 32 * 1024
+
+
+def _words_per_item(dtype):
+    """32-bit word columns of one item (0 when unknown)."""
+    words = 0
+    try:
+        for _, leaf in _leaf_fields(dtype):
+            if issubclass(leaf, Pointer):
+                words += 2
+            elif issubclass(leaf, Vector):
+                return 0
+            else:
+                words += max(1, leaf.width // 32)
+    except TypeError:
+        return 0
+    return words
 
 
 def _storage(dtype, threads, warp, count):
+    keys, values = dtype if isinstance(dtype, tuple) else (dtype, None)
+    words = _words_per_item(keys) + (_words_per_item(values) if values is not None else 0)
+    tile = threads * count
+    planes = max(1, min(words or 1, _PLANE_BUDGET // (4 * tile)))
     return Struct[
-        "words" : Array[Uint32, threads * count],
+        "words" : Array[Uint32, planes * tile, 16],
         "scan" : BlockScan[Int32, threads].SharedStorage,
     ]
 
@@ -283,7 +344,7 @@ class BlockRadixSort(BlockPrimitive, metaclass=_BlockRadixSortMeta):
         # The named method returns the same striped pairs.
     """
 
-    scan_type = BlockScan
+    scan_type = _Public("BlockScan")
 
     @classmethod
     def __call__(
@@ -365,28 +426,39 @@ class BlockRadixSort(BlockPrimitive, metaclass=_BlockRadixSortMeta):
         count = cls.items_per_thread
         tid = _linear_thread_id(cls.block_size)
         scan = cls.scan_type[Int32, cls.block_size]
-        for bit in range(begin_bit, end_bit, radix_bits):
-            bits = min(radix_bits, end_bit - bit)
-            digits = Vector.from_elements([_digit(item, bit, bits, True, decomposer) for item in items])
-            if bits == 1:
-                flags = Vector.from_elements([Int32((digit != 0) if descending else (digit == 0)) for digit in digits])
-                prefix, total = scan.exclusive_with_aggregate(flags, ReductionOp.ADD, storage=storage.scan)
-                ranks = Vector.from_elements(
-                    [(flags[i] != 0).select(prefix[i], total + tid * count + i - prefix[i]) for i in range(count)]
-                )
-                barrier()
+        passes = list(range(begin_bit, end_bit, radix_bits))
+        if not passes and not striped:
+            return _pack(items, payload, vector, keys, values)
+        key_columns, rebuild_keys = _columns(items)
+        value_columns, rebuild_values = _columns(payload) if payload is not None else ([], None)
+        # An empty bit range still moves the tile once when striped output is requested.
+        for index, bit in enumerate(passes or [None]):
+            if bit is None:
+                ranks = [tid * count + i for i in range(count)]
             else:
-                ranks = _digit_ranks(digits, scan, storage, descending, 1 << bits)
-            positions = [tid * count + i for i in range(count)]
-            items = _exchange_words(items, ranks, positions, storage)
-            if payload is not None:
-                payload = _exchange_words(payload, ranks, positions, storage)
-        if striped:
-            ranks = Vector.from_elements([tid * count + i for i in range(count)])
-            positions = [tid + i * cls.block_threads for i in range(count)]
-            items = _exchange_words(items, ranks, positions, storage)
-            if payload is not None:
-                payload = _exchange_words(payload, ranks, positions, storage)
+                bits = min(radix_bits, end_bit - bit)
+                digits = Vector.from_elements([_digit(item, bit, bits, True, decomposer) for item in items])
+                if bits == 1:
+                    flags = Vector.from_elements(
+                        [Int32((digit != 0) if descending else (digit == 0)) for digit in digits]
+                    )
+                    prefix, total = scan.exclusive_with_aggregate(flags, ReductionOp.ADD, storage=storage.scan)
+                    ranks = Vector.from_elements(
+                        [(flags[i] != 0).select(prefix[i], total + tid * count + i - prefix[i]) for i in range(count)]
+                    )
+                else:
+                    ranks = _digit_ranks(digits, scan, storage, descending, 1 << bits)
+            # The last pass reads the requested layout straight out of its scatter.
+            last = index == max(len(passes), 1) - 1
+            columns = _exchange(
+                key_columns + value_columns, ranks, tid, storage, cls.block_threads, count, striped and last
+            )
+            key_columns, value_columns = columns[: len(key_columns)], columns[len(key_columns) :]
+            items = rebuild_keys(key_columns)
+        # Every thread has read the tile back before any thread returns.
+        barrier()
+        if payload is not None:
+            payload = rebuild_values(value_columns)
         return _pack(items, payload, vector, keys, values)
 
     @classmethod

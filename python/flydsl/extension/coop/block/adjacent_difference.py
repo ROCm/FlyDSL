@@ -139,7 +139,7 @@ class BlockAdjacentDifference(BlockShuffle):
             sequences return a tuple. An input SoV is retained only when its
             element type is unchanged. Invalid items do not invoke ``op``.
         """
-        items, tid, left, _ = cls._neighbors(value, storage)
+        items, tid, left, _ = cls._neighbors(value, storage, right=False)
         _validate_valid_items(valid_items, cls.block_threads * len(items))
         limit = cls.block_threads * len(items) if valid_items is None else valid_items
         if predecessor is not None:
@@ -197,7 +197,7 @@ class BlockAdjacentDifference(BlockShuffle):
             sequences return a tuple. An input SoV is retained only when its
             element type is unchanged. Invalid items do not invoke ``op``.
         """
-        items, tid, _, right = cls._neighbors(value, storage)
+        items, tid, _, right = cls._neighbors(value, storage, left=False)
         _validate_valid_items(valid_items, cls.block_threads * len(items))
         limit = cls.block_threads * len(items) if valid_items is None else valid_items
         out = []
