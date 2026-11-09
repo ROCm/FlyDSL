@@ -153,9 +153,7 @@ def test_backend_agnostic_collection_needs_no_gpu(tmp_path, module, expected_tes
         pytest.importorskip("torch")
         pytest.importorskip("flydsl._mlir.ir")
     probe_env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION")
+        key: value for key, value in os.environ.items() if key not in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION")
     }
     # Empty PATH: rocm_agent_enumerator and rocminfo are not resolvable.
     probe_env["PATH"] = ""
