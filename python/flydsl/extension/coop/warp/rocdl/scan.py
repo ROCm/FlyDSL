@@ -31,18 +31,11 @@ from ._common import (
     _dpp,
     _dpp_applies,
     _has_row_newbcast,
+    _replacing,
     _swizzle,
 )
 
-__all__ = [
-    "warp_inclusive_scan",
-    "warp_exclusive_scan",
-    "warp_inclusive_sum",
-    "warp_exclusive_sum",
-    "warp_scan",
-    "warp_scan_with_aggregate",
-    "warp_broadcast",
-]
+__all__ = ["WarpScan"]
 
 
 def _swizzle_broadcast(width):
@@ -468,3 +461,18 @@ def warp_broadcast(
 
 
 warp_broadcast.__doc__ = _universal_scan.warp_broadcast.__doc__
+
+
+class WarpScan(_universal_scan.WarpScan):
+    __doc__ = _universal_scan.WarpScan.__doc__
+
+    _implementations = _replacing(
+        _universal_scan,
+        warp_inclusive_scan,
+        warp_exclusive_scan,
+        warp_inclusive_sum,
+        warp_exclusive_sum,
+        warp_scan,
+        warp_scan_with_aggregate,
+        warp_broadcast,
+    )

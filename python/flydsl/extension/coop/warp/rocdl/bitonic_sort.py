@@ -40,10 +40,11 @@ from .....expr.numeric import Int32, Integer, Numeric
 from ..._common import _resolve_warp_width, _validate_valid_items
 from ..._sorting import _before, _pack, _prepare, _unpack
 from ..._values import _is_items
+from .. import bitonic_sort as _portable
 from ..bitonic_sort import warp_bitonic_sort as _portable_warp_bitonic_sort
-from ._common import _QUAD_REVERSE, _ROW_HALF_MIRROR, _SWIZZLE_XOR16, _XOR_DPP, _dpp, _is_gfx9, _swizzle
+from ._common import _QUAD_REVERSE, _ROW_HALF_MIRROR, _SWIZZLE_XOR16, _XOR_DPP, _dpp, _is_gfx9, _replacing, _swizzle
 
-__all__ = ["warp_bitonic_sort"]
+__all__ = ["WarpBitonicSort"]
 
 
 def _move(value, ctrl):
@@ -212,3 +213,9 @@ def warp_bitonic_sort(
 
 
 warp_bitonic_sort.__doc__ = _portable_warp_bitonic_sort.__doc__
+
+
+class WarpBitonicSort(_portable.WarpBitonicSort):
+    __doc__ = _portable.WarpBitonicSort.__doc__
+
+    _implementations = _replacing(_portable, warp_bitonic_sort)

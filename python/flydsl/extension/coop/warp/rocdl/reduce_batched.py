@@ -65,17 +65,11 @@ from ._common import (
     _XOR_DPP,
     _dpp,
     _dpp_applies,
+    _replacing,
     _swizzle,
 )
 
-__all__ = [
-    "warp_reduce_batched",
-    "warp_reduce_batched_to_blocked",
-    "warp_reduce_batched_to_striped",
-    "warp_sum_batched",
-    "warp_sum_batched_to_blocked",
-    "warp_sum_batched_to_striped",
-]
+__all__ = ["WarpReduceBatched"]
 
 
 def _zero(value):
@@ -234,3 +228,17 @@ def warp_sum_batched_to_striped(value, *, width: int | None = None, sync_physica
 for _name in ("warp_reduce_batched", "warp_reduce_batched_to_blocked", "warp_reduce_batched_to_striped"):
     globals()[_name].__doc__ = getattr(_portable, _name).__doc__
 del _name
+
+
+class WarpReduceBatched(_portable.WarpReduceBatched):
+    __doc__ = _portable.WarpReduceBatched.__doc__
+
+    _implementations = _replacing(
+        _portable,
+        warp_reduce_batched,
+        warp_reduce_batched_to_blocked,
+        warp_reduce_batched_to_striped,
+        warp_sum_batched,
+        warp_sum_batched_to_blocked,
+        warp_sum_batched_to_striped,
+    )

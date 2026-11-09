@@ -3,8 +3,9 @@
 
 """Compile-time specialization shared by warp operator classes."""
 
-from ....compiler.backends import compile_backend_name, current_target
+from ....compiler.backends import current_target
 from ....expr.struct import Empty
+from ..._dispatch import check_overrides, dispatch_target
 from .._common import _convert_value, _resolve_warp_width
 from .._values import _as_items, _leaf_fields
 
@@ -23,12 +24,10 @@ class WarpPrimitiveMeta(type):
     def __getitem__(cls, params):
         if cls.warp_threads is not None:
             raise TypeError(f"{cls.__name__} is already specialized")
-        if cls.__dict__.get("_dispatch_class", False):
-            # The target overrides the whole class, because its member
-            # functions are not dispatched names; specialize that one instead.
-            target = cls._dispatcher._resolve(compile_backend_name(), cls.__name__, cls)
-            if target is not cls:
-                return target[params]
+        target = dispatch_target(cls)
+        if target is not cls:
+            # A public class specializes into the backend's override of it.
+            return target[params]
         params = params if isinstance(params, tuple) else (params,)
         minimum = 3 if cls._tile else 1
         maximum = 4 if cls._algorithms is not None else (3 if cls._tile else 2)
@@ -106,9 +105,17 @@ class WarpPrimitive(metaclass=WarpPrimitiveMeta):
 
     dtype = key_dtype = value_dtype = None
     warp_threads = items_per_thread = algorithm = SharedStorage = None
-    _tile = _pairs = _dispatch_class = False
+    _tile = _pairs = False
     _minimum_items = 1
     _algorithms = _default_algorithm = _dispatcher = None
+    # A backend override maps the portable functions its methods call to its
+    # own; see ``_invoke``. The free ``fx.coop.warp_*`` functions take the same
+    # table, so a function and its member always run the same implementation.
+    _implementations = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        check_overrides(cls)
 
     @classmethod
     def _validate_specialization(cls):
@@ -142,8 +149,11 @@ class WarpPrimitive(metaclass=WarpPrimitiveMeta):
         return value
 
     @classmethod
+    def _implementation(cls, portable):
+        """This class's implementation of the portable function *portable*."""
+        return cls._implementations.get(portable, portable)
+
+    @classmethod
     def _invoke(cls, implementation, *args, storage=None, **kwargs):
         cls._check_storage(storage)
-        if cls._dispatcher is not None:
-            implementation = cls._dispatcher._resolve(compile_backend_name(), implementation.__name__, implementation)
-        return implementation(*args, width=cls.warp_threads, **kwargs)
+        return cls._implementation(implementation)(*args, width=cls.warp_threads, **kwargs)

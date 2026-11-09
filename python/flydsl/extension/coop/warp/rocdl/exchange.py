@@ -21,6 +21,7 @@ from .....expr.gpu import lane_id
 from .....expr.numeric import Index, Int32, Integer, Numeric, Uint8, Uint16, Uint32, Uint64, Uint128
 from .....expr.rocdl import ds_bpermute
 from .....expr.typing import Vector
+from ...._dispatch import override
 from ..._values import _as_items, _flatten_record, _from_items, _is_items, _item_dtype, _rebuild_record, _record_select
 from .. import exchange as _exchange
 from ..exchange import WarpExchangeAlgorithm
@@ -190,11 +191,13 @@ class WarpExchange(_exchange.WarpExchange):
             return None
         return _from_items(_transpose(items, cls.warp_threads), like=value)
 
+    @override
     @classmethod
     def blocked_to_striped(cls, value, *, storage=None):
         result = cls._shuffle_transpose(value, storage)
         return super().blocked_to_striped(value, storage=storage) if result is None else result
 
+    @override
     @classmethod
     def striped_to_blocked(cls, value, *, storage=None):
         result = cls._shuffle_transpose(value, storage)

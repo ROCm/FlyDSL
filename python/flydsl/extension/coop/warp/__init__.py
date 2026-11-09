@@ -1,22 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Warp-scope cooperative algorithms."""
+"""Warp-scope cooperative algorithms.
 
-from ..._dispatch import Dispatcher
+Every public class here specializes into the compile backend's override of
+it, when the backend has one (``rocdl`` for ROCm). A ``warp_*`` function
+belongs to the class defined next to it and runs the implementation that
+class's override gives it, so a function and the member it backs never
+diverge. ``fx.coop.universal`` keeps the portable classes and functions.
+"""
+
+from functools import wraps
+
+from ..._dispatch import Dispatcher, dispatch_target
+from . import bitonic_sort as _bitonic_sort
+from . import merge_sort as _merge_sort
+from . import reduce as _reduce
+from . import reduce_batched as _reduce_batched
+from . import scan as _scan
 from .bitonic_sort import *
-from .bitonic_sort import WarpBitonicSort as _WarpBitonicSort
 from .exchange import *
-from .exchange import WarpExchange as _WarpExchange
 from .load import *
 from .merge_sort import *
-from .merge_sort import WarpMergeSort as _WarpMergeSort
 from .reduce import *
-from .reduce import WarpReduce as _WarpReduce
 from .reduce_batched import *
-from .reduce_batched import WarpReduceBatched as _WarpReduceBatched
 from .scan import *
-from .scan import WarpScan as _WarpScan
 from .store import *
 
 __all__ = [
@@ -59,44 +67,34 @@ __all__ = [
 _dispatch = Dispatcher(__name__, targets={"rocm": "rocdl"})
 __getattr__ = _dispatch.load_target
 
-_dispatch.dispatch_all(
-    globals(),
-    [name for name in __all__ if name.startswith("warp_")],
-)
+WarpReduce = _dispatch.public_class(WarpReduce)
+WarpScan = _dispatch.public_class(WarpScan)
+WarpReduceBatched = _dispatch.public_class(WarpReduceBatched)
+WarpExchange = _dispatch.public_class(WarpExchange)
+WarpLoad = _dispatch.public_class(WarpLoad)
+WarpStore = _dispatch.public_class(WarpStore)
+WarpBitonicSort = _dispatch.public_class(WarpBitonicSort)
+WarpMergeSort = _dispatch.public_class(WarpMergeSort)
 
 
-class WarpReduce(_WarpReduce):
-    __doc__ = _WarpReduce.__doc__
+def _through(owner, portable):
+    """The public form of *portable*: it runs the implementation *owner*'s override gives it."""
 
-    _dispatcher = _dispatch
+    @wraps(portable)
+    def function(*args, **kwargs):
+        return dispatch_target(owner)._implementation(portable)(*args, **kwargs)
 
-
-class WarpScan(_WarpScan):
-    __doc__ = _WarpScan.__doc__
-
-    _dispatcher = _dispatch
+    return function
 
 
-class WarpReduceBatched(_WarpReduceBatched):
-    __doc__ = _WarpReduceBatched.__doc__
-
-    _dispatcher = _dispatch
-
-
-class WarpBitonicSort(_WarpBitonicSort):
-    __doc__ = _WarpBitonicSort.__doc__
-
-    _dispatcher = _dispatch
-
-
-class WarpMergeSort(_WarpMergeSort):
-    __doc__ = _WarpMergeSort.__doc__
-
-    _dispatcher = _dispatch
-
-
-class WarpExchange(_WarpExchange):
-    __doc__ = _WarpExchange.__doc__
-
-    _dispatcher = _dispatch
-    _dispatch_class = True
+for _owner, _module in (
+    (WarpReduce, _reduce),
+    (WarpScan, _scan),
+    (WarpReduceBatched, _reduce_batched),
+    (WarpBitonicSort, _bitonic_sort),
+    (WarpMergeSort, _merge_sort),
+):
+    for _name in _module.__all__:
+        if _name.startswith("warp_"):
+            globals()[_name] = _through(_owner, getattr(_module, _name))
+del _owner, _module, _name

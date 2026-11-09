@@ -11,11 +11,12 @@ from .....expr.numeric import Int32, Integer
 from ..._common import _resolve_warp_width, _validate_valid_items
 from ..._sorting import _pack, _unpack, _valid_before
 from ..._values import _is_items, _record_select
+from .. import merge_sort as _portable
 from ..merge_sort import warp_merge_sort as _portable_warp_merge_sort
-from ._common import _XOR_DPP, _dpp, _is_gfx9
+from ._common import _XOR_DPP, _dpp, _is_gfx9, _replacing
 from .exchange import _ds_bpermute, _ds_permute, _map_words, _movable
 
-__all__ = ["warp_merge_sort"]
+__all__ = ["WarpMergeSort"]
 
 
 def _valid_at(position, valid_items):
@@ -132,3 +133,9 @@ def warp_merge_sort(
 
 
 warp_merge_sort.__doc__ = _portable_warp_merge_sort.__doc__
+
+
+class WarpMergeSort(_portable.WarpMergeSort):
+    __doc__ = _portable.WarpMergeSort.__doc__
+
+    _implementations = _replacing(_portable, warp_merge_sort)

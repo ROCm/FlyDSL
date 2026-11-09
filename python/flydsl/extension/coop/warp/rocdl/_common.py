@@ -99,3 +99,12 @@ def _dpp_applies(value):
     if not _is_gfx9():
         return False
     return isinstance(value, Numeric) and value.dtype.width == 32
+
+
+def _replacing(portable, *implementations):
+    """An override's ``_implementations``: each function replaces the portable one of its name.
+
+    A name the portable module no longer defines fails here, when the override
+    is imported, rather than leaving its implementation silently unused.
+    """
+    return {getattr(portable, implementation.__name__): implementation for implementation in implementations}

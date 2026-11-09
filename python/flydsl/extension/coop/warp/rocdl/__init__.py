@@ -10,15 +10,20 @@ less to gain, since LLVM's own rewrite already reaches pure DPP there. A few
 sequences also need ``row_newbcast``, which gfx90a introduced; older gfx9 keeps
 the portable form for those.
 
-Each override covers the calls its sequence can take -- typically a
+Each module exports the override of the portable class of the same name, which
+the public ``fx.coop.Warp*`` class specializes into on ROCm. An override either
+replaces methods outright (marked ``override``) or, where the portable methods
+call a ``warp_*`` function, maps that function to its own in
+``_implementations`` -- the table the public ``fx.coop.warp_*`` function runs
+too. Each covers the calls its sequence can take -- typically a
 ``ReductionOp`` or the default comparator over 32-bit scalars -- and hands
 every other call to the portable implementation it displaces, which
-``fx.coop.universal`` keeps reachable. The modules mirror the portable ones:
+``fx.coop.universal`` keeps reachable:
 
-- ``reduce``: ``warp_reduce`` and the head/tail segmented reductions.
-- ``scan``: the scans and ``warp_broadcast``.
-- ``reduce_batched``, ``bitonic_sort``, ``merge_sort``: the functions of the
-  same names.
+- ``reduce``: ``WarpReduce`` -- ``warp_reduce`` and the head/tail segmented reductions.
+- ``scan``: ``WarpScan`` -- the scans and ``warp_broadcast``.
+- ``reduce_batched``, ``bitonic_sort``, ``merge_sort``: ``WarpReduceBatched``,
+  ``WarpBitonicSort``, ``WarpMergeSort`` and their functions.
 - ``exchange``: ``WarpExchange`` with the SHUFFLE algorithm.
 """
 

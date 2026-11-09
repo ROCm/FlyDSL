@@ -19,6 +19,7 @@ from ..._common import (
     _thread_partial,
 )
 from ..._values import _as_items
+from .. import reduce as _portable
 from ..reduce import warp_head_segmented_reduce as _portable_head_segmented_reduce
 from ..reduce import warp_reduce as _portable_warp_reduce
 from ..reduce import warp_tail_segmented_reduce as _portable_tail_segmented_reduce
@@ -36,19 +37,11 @@ from ._common import (
     _dpp,
     _dpp_applies,
     _has_row_newbcast,
+    _replacing,
     _swizzle,
 )
 
-__all__ = [
-    "warp_reduce",
-    "warp_sum",
-    "warp_max",
-    "warp_min",
-    "warp_head_segmented_reduce",
-    "warp_tail_segmented_reduce",
-    "warp_head_segmented_sum",
-    "warp_tail_segmented_sum",
-]
+__all__ = ["WarpReduce"]
 
 
 # What a butterfly step of each distance costs. Only the first two and the
@@ -436,9 +429,25 @@ def warp_tail_segmented_sum(value, tail_flag: int | Integer, *, width: int | Non
 
 
 # The contracts are the portable ones, and so is their documentation.
-for _name, _portable in (
+for _name, _doc in (
     ("warp_head_segmented_reduce", _portable_head_segmented_reduce),
     ("warp_tail_segmented_reduce", _portable_tail_segmented_reduce),
 ):
-    globals()[_name].__doc__ = _portable.__doc__
-del _name, _portable
+    globals()[_name].__doc__ = _doc.__doc__
+del _name, _doc
+
+
+class WarpReduce(_portable.WarpReduce):
+    __doc__ = _portable.WarpReduce.__doc__
+
+    _implementations = _replacing(
+        _portable,
+        warp_reduce,
+        warp_sum,
+        warp_max,
+        warp_min,
+        warp_head_segmented_reduce,
+        warp_tail_segmented_reduce,
+        warp_head_segmented_sum,
+        warp_tail_segmented_sum,
+    )

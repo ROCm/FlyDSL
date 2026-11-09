@@ -78,7 +78,7 @@ def _launch(kernel, *tensors, block):
 def test_rocm_specializes_the_override_classes():
     from flydsl.extension.coop.warp import rocdl
 
-    assert {"WarpExchange", "warp_merge_sort"} <= set(rocdl.__all__)
+    assert {"WarpExchange", "WarpMergeSort"} <= set(rocdl.__all__)
     fast = fx.coop.WarpExchange[fx.Int32, 8, 8, SHUFFLE]
     slow = portable.WarpExchange[fx.Int32, 8, 8, SHUFFLE]
     assert issubclass(fast, rocdl.WarpExchange)

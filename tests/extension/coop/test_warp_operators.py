@@ -132,22 +132,42 @@ def test_member_preconditions_and_pair_specialization(insert_point):
 
 
 def test_member_dispatch_and_portable_namespace(monkeypatch, insert_point):
+    """A public class specializes into the target's class; its members and functions run its table."""
     from flydsl.extension.coop import warp
+    from flydsl.extension.coop.warp import reduce as portable_reduce
+    from flydsl.extension.coop.warp import scan as portable_scan
 
+    def target_result(*args, **kwargs):
+        return "target-result"
+
+    overrides = {
+        "WarpReduce": type(
+            "WarpReduce",
+            (portable_reduce.WarpReduce,),
+            {"_implementations": {portable_reduce.warp_reduce: target_result}},
+        ),
+        "WarpScan": type(
+            "WarpScan",
+            (portable_scan.WarpScan,),
+            {"_implementations": {portable_scan.warp_inclusive_scan: target_result}},
+        ),
+    }
     seen = []
 
     def resolve(backend, name, portable):
         seen.append((backend, name))
-        return lambda *args, **kwargs: "target-result"
+        return overrides.get(name, portable)
 
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
     monkeypatch.setattr(warp._dispatch, "_resolve", resolve)
     value = fx.Int32(1)
     assert fx.coop.WarpReduce[fx.Int32, 8].reduce(value, fx.ReductionOp.ADD) == "target-result"
+    assert fx.coop.warp_reduce(value, fx.ReductionOp.ADD, width=8) == "target-result"
     assert fx.coop.WarpScan[fx.Int32, 8].inclusive_scan(value, fx.ReductionOp.ADD) == "target-result"
-    assert seen == [("rocm", "warp_reduce"), ("rocm", "warp_inclusive_scan")]
+    assert seen == [("rocm", "WarpReduce"), ("rocm", "WarpReduce"), ("rocm", "WarpScan")]
     assert fx.coop.universal.WarpReduce[fx.Int32, 8]._dispatcher is None
     assert fx.coop.universal.WarpScan[fx.Int32, 8]._dispatcher is None
+    assert fx.coop.universal.warp_reduce is portable_reduce.warp_reduce
 
 
 @pytest.mark.l2_device
