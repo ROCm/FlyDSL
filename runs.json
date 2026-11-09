@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T04:56:19Z",
+ "updated": "2026-11-09T06:10:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "pr/ci-kernels-labeler",
    "event": "pull_request",
    "title": "[CI] Label kernel-only pull requests automatically",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116",
    "created_at": "2026-11-09T03:31:43Z",
-   "updated_at": "2026-11-09T03:45:24Z",
+   "updated_at": "2026-11-09T06:09:12Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-09T03:45:24Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-09T05:40:01Z",
+     "completed_at": "2026-11-09T06:09:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116/job/128968283636"
     },
     {
@@ -56,20 +56,20 @@
    "branch": "pr/feat-core-layout-replacement",
    "event": "pull_request",
    "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320",
    "created_at": "2026-11-09T03:26:37Z",
-   "updated_at": "2026-11-09T03:40:10Z",
+   "updated_at": "2026-11-09T06:09:19Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-09T04:54:47Z",
-     "completed_at": null,
+     "completed_at": "2026-11-09T05:15:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880657"
     },
     {
