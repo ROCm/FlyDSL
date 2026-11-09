@@ -103,7 +103,7 @@ jobs:
             cat *.log || true
           fi
 
-      # aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
+      # aiter CSV MoE (kimik3 a8w4+a4w4/dsv4/glm5 from aiter main) + HGEMM.
       # Current: wheel under test (PyPI tag / nightly) + aiter at aiter_ref.
       # Baseline: flydsl== pinned in aiter main requirements.txt, same aiter + CSV.
       # Opt-in (caller passes aiter_ref) and restricted to gfx950 runners: the CSVs
@@ -170,7 +170,9 @@ jobs:
             MAIN_ROOT=/tmp/aiter-main
           fi
           CFG="${MAIN_ROOT}/aiter/configs/model_configs"
-          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+          # aiter's startup test_presorted_moe_hook needs the BM=16 kimik3_a4w4
+          # rows; without them fused_moe falls back to BM=64 and ignores the presort.
+          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/kimik3_a4w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
           PIN="$(awk -F== '/^flydsl==/{print $2; exit}' "${MAIN_ROOT}/requirements.txt" | awk -F';' '{print $1}' | tr -d '[:space:]')"
           if [ -z "${PIN}" ]; then
             echo "aiter main requirements.txt has no flydsl== pin" >&2
