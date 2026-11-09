@@ -23,6 +23,12 @@ class WarpPrimitiveMeta(type):
     def __getitem__(cls, params):
         if cls.warp_threads is not None:
             raise TypeError(f"{cls.__name__} is already specialized")
+        if cls.__dict__.get("_dispatch_class", False):
+            # The target overrides the whole class, because its member
+            # functions are not dispatched names; specialize that one instead.
+            target = cls._dispatcher._resolve(compile_backend_name(), cls.__name__, cls)
+            if target is not cls:
+                return target[params]
         params = params if isinstance(params, tuple) else (params,)
         minimum = 3 if cls._tile else 1
         maximum = 4 if cls._algorithms is not None else (3 if cls._tile else 2)
@@ -100,7 +106,7 @@ class WarpPrimitive(metaclass=WarpPrimitiveMeta):
 
     dtype = key_dtype = value_dtype = None
     warp_threads = items_per_thread = algorithm = SharedStorage = None
-    _tile = _pairs = False
+    _tile = _pairs = _dispatch_class = False
     _minimum_items = 1
     _algorithms = _default_algorithm = _dispatcher = None
 
