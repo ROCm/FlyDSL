@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-09T03:33:11Z",
+ "updated": "2026-11-09T04:03:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/ci-kernels-labeler",
    "event": "pull_request",
    "title": "[CI] Label kernel-only pull requests automatically",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116",
    "created_at": "2026-11-09T03:31:43Z",
-   "updated_at": "2026-11-09T03:32:10Z",
+   "updated_at": "2026-11-09T03:45:24Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:45:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116/job/128968283636"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:50:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116/job/128968283711"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:45:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556892116/job/128968283724"
+    }
+   ]
   },
   {
    "run_id": 42556429320,
@@ -25,13 +53,41 @@
    "branch": "pr/feat-core-layout-replacement",
    "event": "pull_request",
    "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320",
    "created_at": "2026-11-09T03:26:37Z",
-   "updated_at": "2026-11-09T03:28:20Z",
+   "updated_at": "2026-11-09T03:40:10Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:40:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880657"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:40:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880680"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-09T03:40:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880690"
+    }
+   ]
   },
   {
    "run_id": 42555911754,
@@ -147,21 +203,21 @@
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607",
    "created_at": "2026-11-09T00:37:40Z",
-   "updated_at": "2026-11-09T02:15:34Z",
+   "updated_at": "2026-11-09T04:01:50Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-09T01:10:52Z",
-     "completed_at": "2026-11-09T01:33:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404533"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-09T04:01:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972627133"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -170,7 +226,7 @@
      "conclusion": "success",
      "started_at": "2026-11-09T01:07:33Z",
      "completed_at": "2026-11-09T01:36:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404542"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972628416"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -179,7 +235,7 @@
      "conclusion": "success",
      "started_at": "2026-11-09T01:07:30Z",
      "completed_at": "2026-11-09T01:42:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128924404557",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972659402",
      "machine": "smci350-rck-g03-b20-03",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
@@ -255,32 +311,20 @@
    "event": "pull_request",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091",
    "created_at": "2026-11-08T11:14:15Z",
-   "updated_at": "2026-11-08T13:15:53Z",
+   "updated_at": "2026-11-09T04:01:50Z",
    "actor": "jli-melchior",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-08T12:35:58Z",
-     "completed_at": "2026-11-08T13:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128732610594",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-08T12:45:20Z",
-     "completed_at": "2026-11-08T13:15:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128732610679"
+     "conclusion": "cancelled",
+     "started_at": "2026-11-09T03:58:53Z",
+     "completed_at": "2026-11-09T04:01:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128971837273"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -289,7 +333,19 @@
      "conclusion": "success",
      "started_at": "2026-11-08T11:50:00Z",
      "completed_at": "2026-11-08T12:13:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128732611771"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128971838201"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-08T12:35:58Z",
+     "completed_at": "2026-11-08T13:07:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847091/job/128971874382",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
