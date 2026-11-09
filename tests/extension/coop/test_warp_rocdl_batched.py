@@ -141,6 +141,8 @@ def _items(tensor, row, batches):
 
 def run_case(width, batches, layout, names, *, sync=False):
     """One kernel: every op in *names* through the dispatched and the portable tree."""
+    if width > current_target().warp_size:
+        pytest.skip("the logical width exceeds the target wave")
     count = slots(width, batches, layout)
     ints = [n for n in names if OPS[n][1] == "int32"]
     flts = [n for n in names if OPS[n][1] == "float32"]

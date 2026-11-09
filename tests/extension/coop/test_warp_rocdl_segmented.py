@@ -59,6 +59,16 @@ def _is_gfx9():
     return current_target().arch.startswith("gfx9")
 
 
+def _has_row_newbcast():
+    # Mirrors ``warp/rocdl/_common._has_row_newbcast``: groups that span rows need it.
+    return current_target().arch.startswith(("gfx90a", "gfx94", "gfx95"))
+
+
+def _skip_wider_than_the_wave(width):
+    if width > current_target().warp_size:
+        pytest.skip("the logical width exceeds the target wave")
+
+
 needs_gpu = pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 requires_dpp = pytest.mark.skipif(
     torch is None or not torch.cuda.is_available() or not _is_gfx9(), reason="the DPP sequence is gfx9-only"
@@ -188,6 +198,7 @@ AGREEMENT_CASES = tuple(
 @pytest.mark.parametrize("width,form,op", AGREEMENT_CASES, ids=lambda v: "-".join(v) if isinstance(v, tuple) else None)
 @pytest.mark.usefixtures("warp_default_device")
 def test_reduction_ops_agree_with_the_portable_form(width, form, op):
+    _skip_wider_than_the_wave(width)
     opname, dtype = op
     reduction = getattr(fx.ReductionOp, opname)
     head = form == "head"
@@ -334,6 +345,8 @@ def _portable_lds(width, head):
 @pytest.mark.parametrize("width,form,dtype", matrix_cases(WIDTHS, FORMS, ("i32", "f32")))
 def test_a_reduction_op_stays_out_of_lds(width, form, dtype, tmp_path):
     """No cross-lane LDS at any width."""
+    if width >= 32 and not _has_row_newbcast():
+        pytest.skip("crossing rows needs row_newbcast (gfx90a+); older gfx9 keeps the portable form there")
     head = form == "head"
     op = fx.ReductionOp.ADD
     tdt = torch.int32 if dtype == "i32" else torch.float32
@@ -348,6 +361,7 @@ def test_a_reduction_op_stays_out_of_lds(width, form, dtype, tmp_path):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @requires_dpp
+@pytest.mark.skipif(not _has_row_newbcast(), reason="a 64-lane group crosses rows, which needs row_newbcast (gfx90a+)")
 @pytest.mark.parametrize("form", FORMS)
 def test_the_class_api_takes_the_sequence(form, tmp_path):
     """The class methods reach the override too, not just agree with it."""

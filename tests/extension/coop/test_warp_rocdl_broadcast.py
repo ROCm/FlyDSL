@@ -375,14 +375,14 @@ def test_a_constant_lane_is_dpp_or_one_swizzle(width, lane, tmp_path):
 
 @requires_newbcast
 def test_wide_and_narrow_values(tmp_path):
-    """64-bit values take one ``v_mov_b64_dpp``; 16-bit ones move unmasked (no ``0xffff``)."""
+    """64-bit values take one ``v_mov_b64_dpp``; a 16-bit one rides one zero-extended 32-bit move."""
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 3, width=16), torch.int64, tmp_path / "i64")
     assert _count(isa, "v_mov_b64_dpp") == 1 and _count(isa, *CROSS_LANE_LDS) == 0
     # ds_swizzle is 32-bit only, so the same value splits in two there.
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 20, width=32), torch.int64, tmp_path / "swizzle")
     assert _count(isa, "ds_swizzle_b32") == 2 and "ds_bpermute_b32" not in isa
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 3, width=16) + v, torch.float16, tmp_path / "f16")
-    assert "row_newbcast:3" in isa and "0xffff" not in isa
+    assert _count(isa, "row_newbcast:3") == 1 and _count(isa, *CROSS_LANE_LDS) == 0
 
 
 @requires_dpp

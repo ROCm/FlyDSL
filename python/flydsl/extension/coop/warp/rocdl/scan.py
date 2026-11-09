@@ -101,16 +101,13 @@ def _int(bits):
 def _words(raw, bits, size):
     """Split *raw* (*bits* wide) into *size*-bit words, padding the last one.
 
-    An 8- or 16-bit value rides in the low bits of a 32-bit word whose upper
-    bits are poison rather than zero, which spares the ``v_and`` a zero
-    extension costs and keeps a single move foldable into its consumer.
+    A value narrower than a word is zero-extended into one. Padding an 8- or
+    16-bit value with poison instead would save the ``v_and``, but bitcasting a
+    vector with a poison lane makes the whole word poison, and ``update.dpp``
+    takes neither a narrow integer nor a packed vector.
     """
     exact = _int(bits)
     as_int = raw if raw.type == exact else llvm.bitcast(exact, raw)
-    if bits in (8, 16):
-        packed = ir.VectorType.get([32 // bits], exact)
-        packed = llvm.insertelement(llvm.mlir_poison(packed), as_int, Int32(0).ir_value())
-        return [llvm.bitcast(_int(32), packed)]
     count = -(-bits // size)
     if bits != size * count:
         as_int = arith.extui(_int(size * count), as_int)
