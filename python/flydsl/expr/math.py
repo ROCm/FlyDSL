@@ -16,7 +16,7 @@ import inspect
 from functools import wraps
 
 from .._mlir import ir
-from .._mlir.dialects import math
+from .._mlir.dialects import arith, llvm, math, vector
 from .meta import dsl_loc_tracing
 from .numeric import Numeric
 from .typing import as_ir_value
@@ -140,6 +140,76 @@ def dsl_math_wrap_result(fn=None, *, exemplar=None, preserve_numeric_type=False)
     return wrapper
 
 
+def _float_splat(ty, value):
+    """A constant ``value`` of float type ``ty``, splatted when ``ty`` is a vector type."""
+    if isinstance(ty, ir.VectorType):
+        return arith.constant(ty, ir.DenseElementsAttr.get_splat(ty, ir.FloatAttr.get(ty.element_type, value)))
+    return arith.constant(ty, ir.FloatAttr.get(ty, value))
+
+
+def _lanewise(scalar_fn, x):
+    """``scalar_fn(x)`` for a scalar ``x``; lane by lane for a vector ``x``, reassembled into its shape."""
+    ty = x.type
+    if not isinstance(ty, ir.VectorType):
+        return scalar_fn(x)
+    n = 1
+    for extent in ty.shape:
+        n *= extent
+    flat_ty = ir.VectorType.get([n], ty.element_type)
+    flat = vector.shape_cast(flat_ty, x) if ty.rank != 1 else x
+    lanes = [scalar_fn(vector.extract(flat, [], [i])) for i in range(n)]
+    out = vector.from_elements(flat_ty, lanes)
+    return vector.shape_cast(ty, out) if ty.rank != 1 else out
+
+
+def _via_f32(scalar_fn, x):
+    """``scalar_fn`` computed in f32 for a float scalar of another type."""
+    return arith.truncf(x.type, scalar_fn(arith.extf(ir.F32Type.get(), x)))
+
+
+_OCML_SUFFIXES = ((ir.F16Type, "f16"), (ir.F32Type, "f32"), (ir.F64Type, "f64"))
+
+
+def _ocml_declared(symbol, fn_type):
+    """Declare ``symbol`` in the nearest enclosing ``gpu.module`` / ``builtin.module`` unless it is there."""
+    op = ir.InsertionPoint.current.block.owner
+    while op.operation.name not in ("gpu.module", "builtin.module"):
+        op = op.operation.parent
+    if symbol not in ir.SymbolTable(op.operation):
+        with ir.InsertionPoint.at_block_begin(op.operation.regions[0].blocks[0]):
+            llvm.LLVMFuncOp(symbol, ir.TypeAttr.get(fn_type), sym_visibility="private")
+    return ir.FlatSymbolRefAttr.get(symbol)
+
+
+def _ocml_scalar(name, x):
+    """``__ocml_<name>_<f16|f32|f64>(x)`` for a float scalar; other float types are computed in f32."""
+    ty = x.type
+    suffix = next((s for cls, s in _OCML_SUFFIXES if isinstance(ty, cls)), None)
+    if suffix is None:
+        return _via_f32(lambda v: _ocml_scalar(name, v), x)
+    callee = _ocml_declared(f"__ocml_{name}_{suffix}", ir.Type.parse(f"!llvm.func<{ty} ({ty})>"))
+    return llvm.CallOp(ty, [x], [], ir.DenseI32ArrayAttr.get([]), callee=callee).result
+
+
+_LN2 = 0.6931471805599453
+
+
+def _native_log_scalar(x):
+    """``log(x)`` as the hardware ``log2`` (``rocdl.log``, ``v_log_f32`` / ``v_log_f16``) times ln 2, for a float
+    scalar that is 0 or not denormal (the instruction flushes denormal inputs); f64 uses ``math.log``, other
+    float types f32. Without the ROCDL bindings, ``math.log``."""
+    try:
+        from .._mlir.dialects import rocdl
+    except ImportError:
+        return math.log(x)
+    ty = x.type
+    if isinstance(ty, ir.F64Type):
+        return math.log(x)
+    if not isinstance(ty, (ir.F32Type, ir.F16Type)):
+        return _via_f32(_native_log_scalar, x)
+    return arith.mulf(rocdl.log(ty, x), _float_splat(ty, _LN2))
+
+
 # ---------------------------------------------------------------------------
 # Unary float ops
 # ---------------------------------------------------------------------------
@@ -196,7 +266,12 @@ def exp2(x, *, fastmath=None, **kwargs):
 @dsl_loc_tracing
 @dsl_math_wrap_result
 def expm1(x, *, fastmath=None, **kwargs):
-    return math.expm1(as_ir_value(x), fastmath=fastmath, **kwargs)
+    """``exp(x) - 1``, accurate for small ``|x|``: a call to OCML's ``__ocml_expm1_*``.
+
+    ``math.expm1`` is not emitted: ``convert-gpu-to-rocdl`` lowers it to ``exp(x) - 1``, which is 0 for
+    ``|x|`` below half an ulp of 1 (6e-8 in f32). ``fastmath`` is accepted for API compatibility only.
+    """
+    return _lanewise(lambda v: _ocml_scalar("expm1", v), as_ir_value(x))
 
 
 @dsl_loc_tracing
@@ -220,7 +295,29 @@ def log10(x, *, fastmath=None, **kwargs):
 @dsl_loc_tracing
 @dsl_math_wrap_result
 def log1p(x, *, fastmath=None, **kwargs):
-    return math.log1p(as_ir_value(x), fastmath=fastmath, **kwargs)
+    """``log(1 + x)``, accurate for small ``|x|``: ``log(w) + c`` with ``w = 1 + x`` and ``c = x - (w - 1)``.
+
+    ``math.log1p`` is not emitted: ``convert-gpu-to-rocdl`` lowers it to ``log(1 + x)``, which is 0 for
+    ``|x|`` below half an ulp of 1 (6e-8 in f32).
+
+    For ``|x| <= 1``, ``c`` is the exact rounding error of ``w``, so ``log(1 + x) = log(w) + c / w`` to first
+    order. For ``w < 2``, ``c`` stands in for ``c / w`` at a cost of about an ulp: ``|c|`` is at most half an
+    ulp of 1, and ``|c - c / w|`` is at most ``|c| * |log w|`` for ``w >= 1`` and ``1.5 |c| * |log w|`` for
+    ``0.5 <= w < 1`` (below 0.5, ``w`` is exact and ``c == 0``). For ``w >= 2``, ``|c / w|`` is below an ulp
+    of ``log w`` and ``c`` is dropped. ``w == 1`` returns ``x`` exactly, except that ``-0`` gives ``+0``;
+    ``+inf``, ``-1``, ``x < -1`` and NaN give ``+inf``, ``-inf``, NaN and NaN.
+
+    ``log(w)`` is the hardware ``log2`` times ln 2, one transcendental instruction (``w`` is 0 or at least
+    2^-24, never denormal); the result is within about 4 ulps in f32. ``fastmath`` is not applied:
+    reassociating ``(w - 1)`` would undo the correction.
+    """
+    x = as_ir_value(x)
+    ty = x.type
+    one = _float_splat(ty, 1.0)
+    w = arith.addf(one, x)
+    c = arith.subf(x, arith.subf(w, one))
+    c = arith.select(arith.cmpf(arith.CmpFPredicate.OLT, w, _float_splat(ty, 2.0)), c, _float_splat(ty, 0.0))
+    return arith.addf(_lanewise(_native_log_scalar, w), c)
 
 
 @dsl_loc_tracing

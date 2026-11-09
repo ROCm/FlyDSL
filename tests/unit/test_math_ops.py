@@ -125,11 +125,9 @@ def test_wrapper_overrides_raw(name):
 _UNARY_FLOAT_OPS = [
     ("exp", "math.exp"),
     ("exp2", "math.exp2"),
-    ("expm1", "math.expm1"),
     ("log", "math.log"),
     ("log2", "math.log2"),
     ("log10", "math.log10"),
-    ("log1p", "math.log1p"),
     ("sqrt", "math.sqrt"),
     ("rsqrt", "math.rsqrt"),
     ("cbrt", "math.cbrt"),
@@ -166,6 +164,74 @@ def test_unary_float_op(fn_name, expected_op):
 
     ir_text = _build_module(build)
     assert expected_op in ir_text, f"{expected_op} not found in IR:\n{ir_text}"
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize(
+    "type_fn,log_op",
+    [
+        (ir.F32Type.get, "rocdl.log %"),
+        (ir.F16Type.get, "rocdl.log %"),
+        (ir.BF16Type.get, "rocdl.log %"),
+        (ir.F64Type.get, "math.log %"),
+    ],
+    ids=["f32", "f16", "bf16", "f64"],
+)
+def test_log1p_is_compensated(type_fn, log_op):
+    """log1p emits log(w) + (x - (w - 1)) with w = 1 + x, not math.log1p (lowered to log(1 + x), 0 for tiny x);
+    the log is the hardware log2 (rocdl.log) times ln 2, math.log for f64, and there is no division."""
+
+    ir_text = _build_module(lambda x: fly_math.log1p(x), arg_types=[type_fn])
+    assert "math.log1p" not in ir_text
+    assert "arith.divf" not in ir_text
+    for op in ("arith.addf", "arith.subf", "arith.cmpf olt", "arith.select", log_op):
+        assert op in ir_text, f"{op} not found in IR:\n{ir_text}"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_log1p_vector_logs_per_lane():
+    """A vector<2x2xf32> log1p is four rocdl.log calls, reassembled into vector<2x2xf32>."""
+
+    def build(x):
+        y = fly_math.log1p(x)
+        assert y.type == x.type
+
+    ir_text = _build_module(build, arg_types=[lambda: ir.VectorType.get([2, 2], ir.F32Type.get())])
+    assert ir_text.count("rocdl.log %") == 4
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize(
+    "type_fn,callee",
+    [
+        (ir.F32Type.get, "__ocml_expm1_f32"),
+        (ir.F64Type.get, "__ocml_expm1_f64"),
+        (ir.F16Type.get, "__ocml_expm1_f16"),
+        (ir.BF16Type.get, "__ocml_expm1_f32"),
+    ],
+    ids=["f32", "f64", "f16", "bf16"],
+)
+def test_expm1_calls_ocml(type_fn, callee):
+    """expm1 calls OCML's expm1, not math.expm1 (lowered to exp(x) - 1, 0 for tiny x); bf16 goes through f32."""
+
+    ir_text = _build_module(lambda x: fly_math.expm1(x), arg_types=[type_fn])
+    assert "math.expm1" not in ir_text
+    assert f"llvm.func @{callee}(" in ir_text
+    assert f"llvm.call @{callee}" in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+def test_expm1_vector_calls_ocml_per_lane():
+    """A vector<2x2xf32> expm1 is four calls to one declaration, reassembled into vector<2x2xf32>."""
+
+    def build(x):
+        y = fly_math.expm1(x)
+        assert y.type == x.type
+        fly_math.expm1(x)
+
+    ir_text = _build_module(build, arg_types=[lambda: ir.VectorType.get([2, 2], ir.F32Type.get())])
+    assert ir_text.count("llvm.func @__ocml_expm1_f32(") == 1
+    assert ir_text.count("llvm.call @__ocml_expm1_f32") == 8
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +763,58 @@ class TestMathOpsGPU:
         assert _torch.allclose(
             c_dev, c_ref, atol=1e-4, rtol=1e-3
         ), f"trig chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
+
+
+@_gpu_skip
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("name", ["log1p", "expm1"])
+def test_log1p_expm1_accurate_gpu(name):
+    """log1p and expm1 within a few f32 ulps of torch (float64) from 1e-30 to 10 in magnitude, and exact at the
+    edges. ``log(1 + x)`` / ``exp(x) - 1`` return 0 for |x| below 6e-8."""
+    import math
+
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+
+    VEC, BLOCK = 4, 64
+    fn = getattr(fly_math, name)
+
+    @flyc.kernel
+    def kernel(A: fx.Tensor, C: fx.Tensor):
+        tid = fx.thread_idx.x
+        tA = fx.logical_divide(A, fx.make_layout(VEC, 1))
+        tC = fx.logical_divide(C, fx.make_layout(VEC, 1))
+        atom = fx.make_copy_atom(fx.UniversalCopy(VEC * 32), fx.Float32)
+        rA = fx.make_rmem_tensor(VEC, fx.Float32)
+        rC = fx.make_rmem_tensor(VEC, fx.Float32)
+        fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
+        fx.memref_store_vec(fn(fx.memref_load_vec(rA)), rC)
+        fx.copy_atom_call(atom, rC, fx.slice(tC, (None, tid)))
+
+    @flyc.jit
+    def launch(A: fx.Tensor, C, stream: fx.Stream = fx.Stream(None)):
+        kernel(A, C).launch(grid=(1, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    n = VEC * BLOCK
+    edges = [math.inf, -math.inf, math.nan, 0.0, -0.0, -1.0, -2.0, 100.0, -100.0, 3e38]
+    tiny = n // 2 - len(edges)
+    x = _torch.cat(
+        [
+            _torch.logspace(-30, 1, tiny, dtype=_torch.float64),
+            -_torch.logspace(-30, -0.01, n // 2, dtype=_torch.float64),
+            _torch.tensor(edges, dtype=_torch.float64),
+        ]
+    ).float()
+    c = _torch.empty_like(x, device="cuda")
+    launch(x.cuda(), c)
+    _torch.cuda.synchronize()
+
+    got, want = c.cpu().double(), getattr(_torch, name)(x.double()).float().double()
+    finite = slice(0, n - len(edges))
+    rel = ((got[finite] - want[finite]) / want[finite]).abs()
+    assert rel.max().item() <= 1e-6, f"{name}: max rel err {rel.max().item():.3e} at x={x[finite][rel.argmax()].item()}"
+    _torch.testing.assert_close(got[finite.stop :], want[finite.stop :], rtol=1e-6, atol=0, equal_nan=True)
 
 
 # ---------------------------------------------------------------------------
