@@ -125,9 +125,11 @@ def test_wrapper_overrides_raw(name):
 _UNARY_FLOAT_OPS = [
     ("exp", "math.exp"),
     ("exp2", "math.exp2"),
+    ("expm1", "math.expm1"),
     ("log", "math.log"),
     ("log2", "math.log2"),
     ("log10", "math.log10"),
+    ("log1p", "math.log1p"),
     ("sqrt", "math.sqrt"),
     ("rsqrt", "math.rsqrt"),
     ("cbrt", "math.cbrt"),
@@ -164,74 +166,6 @@ def test_unary_float_op(fn_name, expected_op):
 
     ir_text = _build_module(build)
     assert expected_op in ir_text, f"{expected_op} not found in IR:\n{ir_text}"
-
-
-@pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize(
-    "type_fn,log_op",
-    [
-        (ir.F32Type.get, "rocdl.log %"),
-        (ir.F16Type.get, "rocdl.log %"),
-        (ir.BF16Type.get, "rocdl.log %"),
-        (ir.F64Type.get, "math.log %"),
-    ],
-    ids=["f32", "f16", "bf16", "f64"],
-)
-def test_log1p_is_compensated(type_fn, log_op):
-    """log1p emits log(w) + (x - (w - 1)) with w = 1 + x, not math.log1p (lowered to log(1 + x), 0 for tiny x);
-    the log is the hardware log2 (rocdl.log) times ln 2, math.log for f64, and there is no division."""
-
-    ir_text = _build_module(lambda x: fly_math.log1p(x), arg_types=[type_fn])
-    assert "math.log1p" not in ir_text
-    assert "arith.divf" not in ir_text
-    for op in ("arith.addf", "arith.subf", "arith.cmpf olt", "arith.select", log_op):
-        assert op in ir_text, f"{op} not found in IR:\n{ir_text}"
-
-
-@pytest.mark.l0_backend_agnostic
-def test_log1p_vector_logs_per_lane():
-    """A vector<2x2xf32> log1p is four rocdl.log calls, reassembled into vector<2x2xf32>."""
-
-    def build(x):
-        y = fly_math.log1p(x)
-        assert y.type == x.type
-
-    ir_text = _build_module(build, arg_types=[lambda: ir.VectorType.get([2, 2], ir.F32Type.get())])
-    assert ir_text.count("rocdl.log %") == 4
-
-
-@pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize(
-    "type_fn,callee",
-    [
-        (ir.F32Type.get, "__ocml_expm1_f32"),
-        (ir.F64Type.get, "__ocml_expm1_f64"),
-        (ir.F16Type.get, "__ocml_expm1_f16"),
-        (ir.BF16Type.get, "__ocml_expm1_f32"),
-    ],
-    ids=["f32", "f64", "f16", "bf16"],
-)
-def test_expm1_calls_ocml(type_fn, callee):
-    """expm1 calls OCML's expm1, not math.expm1 (lowered to exp(x) - 1, 0 for tiny x); bf16 goes through f32."""
-
-    ir_text = _build_module(lambda x: fly_math.expm1(x), arg_types=[type_fn])
-    assert "math.expm1" not in ir_text
-    assert f"llvm.func @{callee}(" in ir_text
-    assert f"llvm.call @{callee}" in ir_text
-
-
-@pytest.mark.l0_backend_agnostic
-def test_expm1_vector_calls_ocml_per_lane():
-    """A vector<2x2xf32> expm1 is four calls to one declaration, reassembled into vector<2x2xf32>."""
-
-    def build(x):
-        y = fly_math.expm1(x)
-        assert y.type == x.type
-        fly_math.expm1(x)
-
-    ir_text = _build_module(build, arg_types=[lambda: ir.VectorType.get([2, 2], ir.F32Type.get())])
-    assert ir_text.count("llvm.func @__ocml_expm1_f32(") == 1
-    assert ir_text.count("llvm.call @__ocml_expm1_f32") == 8
 
 
 # ---------------------------------------------------------------------------

@@ -235,7 +235,7 @@ definition for this checkout:
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
 | 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
-| 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
+| 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering (and the accurate `math.log1p` / `math.expm1` expansion), GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
 **Stage B — `binary_prep_fragments`** (LLVM lowering, host + kernel)
 
