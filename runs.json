@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-10T06:31:14Z",
+ "updated": "2026-11-10T07:42:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146",
    "created_at": "2026-11-10T05:22:25Z",
-   "updated_at": "2026-11-10T06:11:26Z",
+   "updated_at": "2026-11-10T07:41:05Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -41,10 +41,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-10T05:53:07Z",
-     "completed_at": null,
+     "completed_at": "2026-11-10T07:41:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146/job/129657634420"
     }
    ]
