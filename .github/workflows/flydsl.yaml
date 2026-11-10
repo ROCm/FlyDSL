@@ -157,6 +157,8 @@ jobs:
     # dispatch input is how to retarget when it is busy.
     runs-on: ${{ inputs.prepare_runner || 'build-only-flydsl' }}
     timeout-minutes: 150
+    outputs:
+      base_wheel: ${{ steps.wheels.outputs.base_wheel }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -434,6 +436,7 @@ jobs:
           echo "ready=true" >>"${GITHUB_OUTPUT}"
 
       - name: Build current and base FlyDSL wheels
+        id: wheels
         env:
           BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
           BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
@@ -467,8 +470,10 @@ jobs:
             if [ -n "${BASE_MLIR_PATH}" ] && [ -n "${BASELINE_LLVM_HASH}" ]; then
               printf '%s\n' "${BASELINE_LLVM_HASH}" >flydsl-ci-wheels/base/BASELINE_LLVM
             fi
+            echo "base_wheel=true" >>"${GITHUB_OUTPUT}"
           else
             echo "::warning title=Baseline wheel unavailable::Uploading PR wheel without an exact base benchmark."
+            echo "base_wheel=false" >>"${GITHUB_OUTPUT}"
           fi
           (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
 
@@ -496,7 +501,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: flydsl-ci-wheels-${{ github.run_id }}
-          path: flydsl-ci-wheels
+          path: |
+            flydsl-ci-wheels/pr
+            flydsl-ci-wheels/tools
+          if-no-files-found: error
+          retention-days: 1
+
+      # Only the benchmark and multi-GPU jobs use the base wheel, so the test
+      # job does not download it.
+      - name: Upload FlyDSL CI base wheel for this run
+        if: steps.wheels.outputs.base_wheel == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: flydsl-ci-wheels/base
           if-no-files-found: error
           retention-days: 1
 
@@ -654,6 +672,13 @@ jobs:
         with:
           name: flydsl-ci-wheels-${{ github.run_id }}
           path: ${{ env.CI_SOURCE_DIR }}-wheels
+
+      - name: Download FlyDSL CI base wheel
+        if: needs.prepare-mlir.outputs.base_wheel == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: ${{ env.CI_SOURCE_DIR }}-wheels/base
 
       - name: Prepare GPU environment
         run: bash "${CI_SOURCE_DIR}/scripts/setup_ci_gpu.sh"
@@ -880,6 +905,13 @@ jobs:
         with:
           name: flydsl-ci-wheels-${{ github.run_id }}
           path: flydsl-ci-wheels
+
+      - name: Download FlyDSL CI base wheel
+        if: needs.prepare-mlir.outputs.base_wheel == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: flydsl-ci-wheels/base
 
       - name: Verify FlyDSL CI wheels
         run: |
