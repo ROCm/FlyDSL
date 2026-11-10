@@ -50,6 +50,9 @@ BLOCK = 2 * WARP  # two waves, so a fold that overran one would show
 WIDTHS = (2, 4, 8, 16, 32, 64)
 LAYOUTS = ("scalar", "blocked", "striped")
 CROSS_LANE_LDS = ("ds_swizzle_b32", "ds_bpermute_b32", "ds_permute_b32")
+# A cross-row move of the portable shuffle: on gfx950 the full-wave xor-16/32
+# gpu.shuffle lowers to v_permlane16/32_swap (VALU) instead of an LDS-pipe move.
+CROSS_ROW_MOVES = (*CROSS_LANE_LDS, "v_permlane16_swap_b32", "v_permlane32_swap_b32")
 FN = {
     "scalar": "warp_reduce_batched",
     "blocked": "warp_reduce_batched_to_blocked",
@@ -291,8 +294,8 @@ def _count(isa, *needles):
     return sum(line.count(needle) for line in isa.splitlines() for needle in needles)
 
 
-# Cross-row LDS moves the override keeps for batches == width: one ds_swizzle per
-# stride-16 node and one ds_bpermute for the stride-32 node. Portable: width - 1.
+# Cross-row moves the override keeps for batches == width: one ds_swizzle per
+# stride-16 node and one shuffle for the stride-32 node. Portable: width - 1.
 KEPT_LDS = {2: 0, 4: 0, 8: 0, 16: 0, 32: 1, 64: 3}
 
 
@@ -315,9 +318,9 @@ def test_the_fold_keeps_lds_to_the_cross_row_strides(width, dtype, tmp_path):
     if dtype != "int32" and width == 64:
         # Commutative nodes stop at 32 lanes: across a full wave their VALU
         # moves cost more throughput than the shorter chain saves.
-        assert _count(fast, *CROSS_LANE_LDS) == width - 1, "a full-wave commutative tree should stay portable"
+        assert _count(fast, *CROSS_ROW_MOVES) == width - 1, "a full-wave commutative tree should stay portable"
         return
-    assert _count(fast, *CROSS_LANE_LDS) == KEPT_LDS[width], "the DPP tree did not take"
+    assert _count(fast, *CROSS_ROW_MOVES) == KEPT_LDS[width], "the DPP tree did not take"
     if dtype == "int32":
         # Directional nodes: row_shl/row_shr moves folded into v_add_u32_dpp.
         # (At 64 lanes, with 64 live columns, GCNDPPCombine leaves about a sixth
@@ -351,10 +354,12 @@ def test_the_class_reaches_the_override(tmp_path):
 @requires_gpu
 @requires_dpp
 def test_an_empty_right_half_folds_without_selects(tmp_path):
-    """One batch over 64 lanes: one move and one add per stride, two LDS moves."""
+    """One batch over 64 lanes: one move and one add per stride, two cross-row moves."""
     isa = _isa(_reduce_add(fx.coop, 64), torch.int32, 1, tmp_path=tmp_path)
-    assert _count(isa, *CROSS_LANE_LDS) == 2
-    assert _count(isa, "v_cndmask_b32") == 0
+    assert _count(isa, *CROSS_ROW_MOVES) == 2
+    # No select but the one each gfx950 permlane swap lowers with (it picks the
+    # swapped half by comparing it with the input).
+    assert _count(isa, "v_cndmask_b32") == _count(isa, "v_permlane16_swap_b32", "v_permlane32_swap_b32")
 
 
 @pytest.mark.l2_device

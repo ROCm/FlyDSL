@@ -55,6 +55,9 @@ except ImportError:
 portable = fx.coop.universal
 BLOCK = 128  # two waves; narrower widths also put several logical warps in each
 CROSS_LANE_LDS = ("ds_swizzle_b32", "ds_bpermute_b32", "ds_permute_b32")
+# A cross-row move of the portable shuffle: on gfx950 the full-wave xor-16/32
+# gpu.shuffle lowers to v_permlane16/32_swap (VALU) instead of an LDS-pipe move.
+CROSS_ROW_MOVES = (*CROSS_LANE_LDS, "v_permlane16_swap_b32", "v_permlane32_swap_b32")
 _INT32_MAX, _UINT32_MAX = 2**31 - 1, 2**32 - 1
 
 
@@ -390,7 +393,7 @@ def _isa(call, count, *, pairs=False, torch_dtype=None, tmp_path):
 
 
 def _lds(isa):
-    return sum(line.count(needle) for line in isa.splitlines() for needle in CROSS_LANE_LDS)
+    return sum(line.count(needle) for line in isa.splitlines() for needle in CROSS_ROW_MOVES)
 
 
 def _sorter(ns, width):
@@ -404,8 +407,9 @@ def _sorter(ns, width):
 @pytest.mark.parametrize(
     "width,count,pairs,expected",
     [
-        # Per moved value: xor 16 -> ds_swizzle, xor 32 -> ds_bpermute; the
-        # rest is DPP. Per item of a full wave: d16 at spans 32/64/128, d32 at 64/128.
+        # Per moved value: xor 16 -> ds_swizzle, xor 32 -> ds_bpermute (gfx950:
+        # v_permlane32_swap); the rest is DPP. Per item of a full wave: d16 at
+        # spans 32/64/128, d32 at 64/128.
         (64, 2, False, 10),
         # Inside a row, payloads move by DPP too.
         (16, 2, True, 0),
