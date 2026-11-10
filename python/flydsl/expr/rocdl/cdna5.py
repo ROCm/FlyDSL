@@ -162,20 +162,21 @@ def check_index_rows(index_bits, count, what):
 def check_index_tensor_shape(index_tensor):
     """A row list in memory is shaped like the data it indexes.
 
-    It carries one index per row and the same index for every column, so it is 2D with
-    the contiguous dimension broadcast. Tiling it with the data's tiler then yields one
-    row list per tile, which is what lets a single coordinate address a tile and its
-    rows together.
+    It carries one index per gathered row and the same index everywhere else, so
+    exactly one mode walks it and every other mode is broadcast. Rank is left to the
+    data, because the list is tiled with the data's tiler and the two have to agree; a
+    tiler deeper than the descriptor is fine, since the geometry merges memory-adjacent
+    modes afterwards. The 2D limit belongs to the descriptor and is checked there.
     """
     layout = getattr(index_tensor, "layout", None)
-    if layout is None or layout.rank != 2:
-        raise ValueError(f"index_tensor must be 2D, shaped like the tensor it indexes, got {layout}")
-    if layout.stride[1].unpack() != 0:
+    if layout is None or layout.rank < 2:
+        raise ValueError(f"index_tensor must be shaped like the tensor it indexes, got {layout}")
+    strides = [layout.stride[i].unpack() for i in range(layout.rank)]
+    if [i for i, v in enumerate(strides) if v != 0] != [0]:
         raise ValueError(
-            "index_tensor must be broadcast along the contiguous dimension (stride 0 there), " f"got {layout}"
+            "index_tensor must walk its outermost mode and broadcast every other one "
+            f"(one index per gathered row, the same index elsewhere), got {layout}"
         )
-    if layout.stride[0].unpack() == 0:
-        raise ValueError(f"index_tensor's row dimension must carry the indices, got {layout}")
 
 
 class TensorLoadGather(TensorLoad):
@@ -415,10 +416,11 @@ def make_tiled_tdm_atom(
     index_bits = 0
     if indexed:
         index_bits = index_bits_of(index_tensor, "index_tensor") or DEFAULT_INDEX_BITS
-        tile_rank = len(tdm_tile) if not isinstance(tdm_tile, ir.Value) else None
-        if tile_rank is not None and tile_rank != 2:
-            raise ValueError(f"indexed addressing is 2D only, got a rank-{tile_rank} tiler")
-        if tile_rank is not None:
+        # The 2D limit is on the *descriptor*, which the geometry derives after merging
+        # memory-adjacent modes, so a deeper tiler that compresses to 2D is fine and the
+        # derivation is what rejects one that does not. Only the row count is checkable
+        # here, and only when the tiler spells it out.
+        if not isinstance(tdm_tile, ir.Value) and len(tdm_tile) >= 1:
             rows = tdm_tile[0]
             check_index_rows(index_bits, rows if isinstance(rows, int) else None, "one indexed issue")
         if index_tensor is not None:
@@ -525,14 +527,12 @@ def _partition_index(index, n_warps, warp_id):
     if layout.rank < 1:
         raise ValueError("tdm_partition: the row list must be tiled before partitioning")
     tile = layout[0]
-    if tile.rank != 2:
-        raise ValueError(f"tdm_partition: the row list's tile must be 2D, like the data tile, got {tile}")
-    # The gathered dimension is the outer one; the other is broadcast across the tile.
-    if tile.stride[1].unpack() != 0:
+    strides = [tile.stride[i].unpack() for i in range(tile.rank)]
+    if [i for i, v in enumerate(strides) if v != 0] != [0]:
         raise ValueError(
-            "tdm_partition: the row list must be broadcast along the contiguous dimension "
-            f"(stride 0 there), got {tile}"
+            "tdm_partition: the row list's tile must walk its first mode and broadcast the " f"rest, got {tile}"
         )
     n_rest = layout.rank - 1
-    rows = index[((None, 0), *([None] * n_rest))]
+    inner = tuple([None] + [0] * (tile.rank - 1))
+    rows = index[(inner, *([None] * n_rest))]
     return rows if n_warps == 1 else rows[(warp_id, *([None] * n_rest))]

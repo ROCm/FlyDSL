@@ -229,14 +229,13 @@ def test_a_tuple_must_match_the_row_count():
 # -- descriptor shape -------------------------------------------------------------
 
 
-def test_rank_must_be_two():
-    """The row list occupies the groups dims 2..4 would use, so 2D is the only shape.
-
-    The tiler rank is refused while tracing; a tiler that is rank 2 but whose derived
-    descriptor is not reaches the same refusal from the geometry, which is the
-    authoritative one -- hence the regex spans both messages.
+def test_the_descriptor_not_the_tiler_must_be_two_dimensional():
+    """The 2D limit is on the descriptor, which the geometry derives after merging
+    memory-adjacent modes. So the tiler's own rank is not the thing checked: a tiler
+    that cannot be merged down to two dims is refused by the derivation, and one that
+    can is accepted even though it is deeper.
     """
-    with pytest.raises(Exception, match="2D only|must be 2D"):
+    with pytest.raises(Exception, match="must be 2D|tiler has 3 modes"):
         _build(tiler=(2, 4, WIDTH))
 
 
