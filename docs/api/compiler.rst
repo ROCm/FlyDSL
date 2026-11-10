@@ -193,6 +193,13 @@ The lowered IR is parsed and its export ABI validated on the first
 ``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
 
+``flyc.compile(launcher, *args, compile_only=True)`` compiles without executing
+the launcher for any arguments, including live device arguments, and always
+returns a ``CompiledFunction``, also under ``COMPILE_ONLY=1``. Call the returned
+function to execute it. ``compile_only`` is reserved by ``flyc.compile`` and is
+not forwarded to the launcher. Without it, ``flyc.compile`` behaves as described
+below.
+
 Passing live device arguments to ``flyc.compile`` preserves its normal initial
 launch, including when other pointer arguments are null to disable optional
 inputs. For an offline or CPU-only build host, use null pointer wrappers created
