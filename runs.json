@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-10T03:46:05Z",
+ "updated": "2026-11-10T04:15:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42754478224,
+   "pr": null,
+   "commit": "af47d9935bdc39a945f5dc4bea159bb1d10b95db",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Add compile_only to flyc.compile (#1392)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224",
+   "created_at": "2026-11-10T04:13:33Z",
+   "updated_at": "2026-11-10T04:13:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 42754062143,
+   "pr": null,
+   "commit": "4369be9adf8040574c2468fb00c11bf08acd0b26",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Shrink the wheel artifact the GPU jobs download (#1389)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754062143",
+   "created_at": "2026-11-10T04:09:46Z",
+   "updated_at": "2026-11-10T04:13:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42748333770,
    "pr": 1350,
@@ -10,11 +40,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770",
    "created_at": "2026-11-10T03:16:18Z",
-   "updated_at": "2026-11-10T03:36:04Z",
+   "updated_at": "2026-11-10T04:03:23Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -29,10 +59,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-10T03:36:19Z",
-     "completed_at": null,
+     "completed_at": "2026-11-10T04:03:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770/job/129612706776"
     },
     {
@@ -1608,36 +1638,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273814179",
    "created_at": "2026-11-06T18:47:05Z",
    "updated_at": "2026-11-06T18:48:05Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273803760,
-   "pr": 1137,
-   "commit": "50ab7fc7fba2fa75883fe1a054e173b2c0918b8b",
-   "branch": "fp8-attention-tune-20260915",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Fix and tune gfx950 dense FP8 attention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273803760",
-   "created_at": "2026-11-06T18:47:01Z",
-   "updated_at": "2026-11-06T18:47:38Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273791789,
-   "pr": 1125,
-   "commit": "a205f72077d5be6963c7dc378e13f36e4b9e70ab",
-   "branch": "perf/gemm-bf16-cross-tile-carry",
-   "event": "pull_request",
-   "title": "[Perf] gemm_bf16 gfx1250: cross-tile carry to hide K-tile prologue ds\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273791789",
-   "created_at": "2026-11-06T18:46:56Z",
-   "updated_at": "2026-11-06T18:47:38Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
