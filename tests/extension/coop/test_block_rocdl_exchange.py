@@ -400,6 +400,10 @@ def _ops(isa, prefix):
     return sum(line.split()[0].startswith(prefix) for line in isa)
 
 
+# The swizzle's XOR address terms; gfx950 folds each with its mask into one v_bitop3_b32.
+XOR_OPS = ("v_xor_b32", "v_bitop3_b32")
+
+
 def _exchange_body(namespace, method, count, block=256):
     def body(tid, a, out):
         E = namespace.BlockExchange[fx.Int32, block, count]
@@ -425,7 +429,7 @@ def test_isa_swizzle_keeps_wide_conflict_free_accesses(method, tmp_path):
     for isa in (dispatched, universal):
         assert _ops(isa, wide) == 2 and _ops(isa, striped) == 4
     # The swizzle's XOR address terms are the only difference.
-    assert _ops(dispatched, "v_xor_b32") >= 2 and _ops(universal, "v_xor_b32") == 0
+    assert _ops(dispatched, XOR_OPS) >= 2 and _ops(universal, XOR_OPS) == 0
 
 
 @requires_gfx9
@@ -498,7 +502,7 @@ def test_transpose_io_reaches_the_swizzle(io, tmp_path):
 
     dispatched = _isa(make(fx.coop), block, count, tmp_path / "d")
     universal = _isa(make(portable), block, count, tmp_path / "u")
-    assert _ops(dispatched, "v_xor_b32") >= 2 and _ops(universal, "v_xor_b32") == 0
+    assert _ops(dispatched, XOR_OPS) >= 2 and _ops(universal, XOR_OPS) == 0
 
     # And the same data comes out.
     size = block * count
