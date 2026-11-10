@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-emit-gpu-binary | FileCheck %s
-
-// fly-emit-gpu-binary wraps the upstream gpu-module-to-binary pass.  When
-// built with in-process LLD (FLYDSL_HAS_LLD_LIBRARY), it links HSA code
-// objects without spawning ld.lld; otherwise it falls back to the upstream
-// fatbin path which requires a reachable ROCm toolkit.
+//
+// When fly-opt was built with in-process LLD, prove the pass still emits a
+// fatbin even if every ROCm toolkit env var points at a missing path.  Builds
+// without FLYDSL_HAS_LLD_LIBRARY fall back to upstream format=fatbin and need a
+// reachable toolkit, so the env override is applied only when the binary
+// contains the in-process error string (compiled in only with LLD).
+// RUN: bash -c 'F="%fly-opt"; S="%s"; if grep -aql "in-process lld failed" "$F"; then env ROCM_PATH=/nonexistent-rocm ROCM_ROOT=/nonexistent-rocm ROCM_HOME=/nonexistent-rocm "$F" "$S" --fly-emit-gpu-binary; else "$F" "$S" --fly-emit-gpu-binary; fi' | %FileCheck %s
 
 // CHECK: gpu.binary @kernels
 // CHECK-SAME: #rocdl.target<chip = "gfx942">

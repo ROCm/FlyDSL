@@ -10,6 +10,7 @@
 
 #ifdef FLYDSL_HAS_LLD_LIBRARY
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -17,6 +18,8 @@
 
 #include "lld/Common/Driver.h"
 LLD_HAS_DRIVER(elf)
+
+#include <mutex>
 #endif // FLYDSL_HAS_LLD_LIBRARY
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
@@ -32,6 +35,10 @@ namespace {
 
 #ifdef FLYDSL_HAS_LLD_LIBRARY
 
+// lldMain mutates process-wide driver state; serialize concurrent JIT links
+// (autotune / multi-threaded host compilers in the same process).
+static std::mutex lldMutex;
+
 // Run the LLD ELF driver linked into this library.  Returns the linker
 // diagnostics on failure, std::nullopt on success.
 //
@@ -44,6 +51,8 @@ namespace {
 // links thousands of times per process, so a false here must abort rather than
 // let the next link run on corrupted state.
 std::optional<std::string> runLLD(StringRef objectPath, StringRef hsacoPath) {
+  std::lock_guard<std::mutex> lock(lldMutex);
+
   std::string objectPathStr = objectPath.str();
   std::string hsacoPathStr = hsacoPath.str();
   std::array<const char *, 6> args{"ld.lld", "--threads=1",       "-shared", objectPathStr.c_str(),
@@ -52,10 +61,16 @@ std::optional<std::string> runLLD(StringRef objectPath, StringRef hsacoPath) {
   std::string errString;
   llvm::raw_string_ostream errStream(errString);
   lld::Result result = lld::lldMain(args, llvm::outs(), errStream, {{lld::Gnu, &lld::elf::link}});
-  if (result.retCode != 0 || !result.canRunAgain) {
-    errStream.flush();
-    return errString.empty() ? std::string("unknown lld failure") : errString;
+  errStream.flush();
+  if (!result.canRunAgain) {
+    // Do not return: subsequent links would run on corrupted global state.
+    llvm::report_fatal_error(Twine("in-process lld left global state unusable (retCode=") +
+                                 Twine(result.retCode) +
+                                 "): " + (errString.empty() ? "unknown lld failure" : errString),
+                             /*gen_crash_diag=*/false);
   }
+  if (result.retCode != 0)
+    return errString.empty() ? std::string("unknown lld failure") : errString;
   return std::nullopt;
 }
 
@@ -92,10 +107,14 @@ FailureOr<SmallVector<char, 0>> linkObjectCode(ArrayRef<char> objectCode,
   return SmallVector<char, 0>(buffer.begin(), buffer.end());
 }
 
-// Replace every ROCDL assembly object of `binary` with the linked fatbin.  The
-// AMDGPU MC target is already registered here: `gpu-module-to-binary` ran
-// `SerializeGPUModuleBase::init()` while producing the ISA we consume.
+// Replace every ROCDL assembly object of `binary` with the linked fatbin.
+//
+// Called both after an in-process `gpu-module-to-binary{format=isa}` and after
+// an external mlir-opt that produced Assembly objects: the latter never ran
+// SerializeGPUModuleBase::init() in this process, so initialize AMDGPU MC here.
 LogicalResult compileAssemblyObjects(gpu::BinaryOp binary) {
+  ROCDL::SerializeGPUModuleBase::init();
+
   ArrayRef<Attribute> objects = binary.getObjectsAttr().getValue();
   SmallVector<Attribute> compiled;
   compiled.reserve(objects.size());

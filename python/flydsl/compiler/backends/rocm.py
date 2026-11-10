@@ -4,6 +4,7 @@
 import hashlib
 import os
 import sys
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -20,7 +21,15 @@ FLY_GPU_BINARY_PASS = "fly-emit-gpu-binary"
 #: ROCm toolkit root bundled with the package; holds ``amdgcn/bitcode/*.bc``
 #: copied in at build time.  Lives under ``_mlir`` because that subtree is the
 #: packaged build output.  Absent when CMake could not locate a ROCm install.
+#: Never contains ``llvm/bin/ld.lld``, so it is only safe for in-process linking.
 BUNDLED_ROCM_PATH = Path(__file__).resolve().parents[2] / "_mlir" / "_rocm"
+
+#: Device libraries ``appendStandardLibs()`` can pull out of a toolkit path.
+_DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
+
+
+def _mlir_capi_lib_name() -> str:
+    return "FlyPythonCAPI.dll" if os.name == "nt" else "libFlyPythonCAPI.so"
 
 
 @lru_cache(maxsize=1)
@@ -29,7 +38,7 @@ def _has_inprocess_lld() -> bool:
     try:
         import ctypes
 
-        lib = ctypes.CDLL(str(BUNDLED_ROCM_PATH.parent / "_mlir_libs" / "libFlyPythonCAPI.so"))
+        lib = ctypes.CDLL(str(BUNDLED_ROCM_PATH.parent / "_mlir_libs" / _mlir_capi_lib_name()))
         lib.flydsl_has_inprocess_lld.restype = ctypes.c_bool
         return lib.flydsl_has_inprocess_lld()
     except Exception:
@@ -46,57 +55,109 @@ def _has_device_bitcode(root: Path) -> bool:
     return (root / "amdgcn" / "bitcode" / "ocml.bc").is_file()
 
 
-@lru_cache(maxsize=1)
-def rocm_toolkit_path() -> str:
-    """Resolve the ROCm root that supplies AMDGCN device bitcode.
+def _has_toolkit_lld(root: Path) -> bool:
+    """True when *root* has the ``ld.lld`` layout upstream ``gpu-module-to-binary`` expects."""
+    lld_name = "ld.lld.exe" if os.name == "nt" else "ld.lld"
+    return (root / "llvm" / "bin" / lld_name).is_file()
 
-    Only ``<root>/amdgcn/bitcode`` is read: ``fly-emit-gpu-binary`` links the HSA
-    code object in process, so no ``ld.lld`` lookup is involved.  The bundled
-    tree is preferred over the environment so that a container that installs
-    ROCm somewhere unexpected still compiles kernels that call ``__ocml_*``.
 
-    When in-process LLD is **not** available (the C library was built without
-    ``FLYDSL_HAS_LLD_LIBRARY``), the bundled directory is skipped because it has
-    no ``llvm/bin/ld.lld`` and setting ``toolkit=`` to it would break upstream's
-    linker lookup.
+def _validate_toolkit_option_path(path: str) -> str:
+    """Reject characters that cannot appear inside a quoted MLIR pass option value."""
+    # Quoted ``toolkit="..."`` tolerates whitespace; commas/braces/quotes still break
+    # the pipeline parser, and we refuse embedded quotes that would end the value.
+    bad = sorted({ch for ch in path if ch in ",{}\"'"})
+    if bad:
+        raise ValueError(
+            f"ROCm toolkit path {path!r} contains unsupported character(s) {bad!r} and cannot be "
+            "passed to an MLIR pass option. Point FLYDSL_COMPILE_ROCM_PATH at a path without "
+            "commas, braces, or quotes."
+        )
+    return path
+
+
+def _windows_therock_toolkit_root() -> Path | None:
+    """TheRock / HIP SDK root staged into the layout ROCDL expects, or None."""
+    if os.name != "nt":
+        return None
+    try:
+        from ...runtime.device_runtime.rocm import _rocm_toolkit_root
+
+        return _rocm_toolkit_root()
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=2)
+def rocm_toolkit_path(*, for_external: bool = False) -> str:
+    """Resolve the ROCm root that supplies AMDGCN device bitcode (and maybe ``ld.lld``).
+
+    With in-process LLD, both the embedded ``fly-emit-gpu-binary`` path and the
+    external ``FLYDSL_COMPILE_LLVM_DIR`` path only need bitcode: external stops
+    at ``format=isa`` and FlyDSL finishes the link in process. The bundled tree
+    is preferred so a container that installs ROCm somewhere unexpected still
+    compiles kernels that call ``__ocml_*``.
+
+    Without in-process LLD, both paths fall back to upstream
+    ``gpu-module-to-binary{format=fatbin}`` and therefore need ``llvm/bin/ld.lld``;
+    the bitcode-only bundle is skipped.
+
+    ``for_external`` is retained for call-site clarity; with the current link
+    split it does not change toolkit requirements.
+
+    On Windows, a TheRock / HIP SDK install is staged through
+    ``_rocm_toolkit_root()`` so both layouts work.
 
     Returns an empty string when nothing is found, which leaves the upstream
     ``ROCM_PATH`` lookup in place rather than forcing a bad path on it.
     """
+    _ = for_external  # public keyword; requirements no longer diverge (see docstring).
+    require_lld = not HAS_INPROCESS_LLD
+
     candidates: List[Tuple[str, Path]] = []
-    if env.compile.rocm_path:
-        candidates.append(("FLYDSL_COMPILE_ROCM_PATH", Path(env.compile.rocm_path)))
-    if HAS_INPROCESS_LLD:
+    override = env.compile.rocm_path
+    if override:
+        override_root = Path(override)
+        override_ok = _has_device_bitcode(override_root) and (not require_lld or _has_toolkit_lld(override_root))
+        if override_ok:
+            candidates.append(("FLYDSL_COMPILE_ROCM_PATH", override_root))
+        else:
+            reason = "missing amdgcn/bitcode/ocml.bc"
+            if _has_device_bitcode(override_root) and require_lld and not _has_toolkit_lld(override_root):
+                reason = "missing llvm/bin/ld.lld (required without in-process LLD)"
+            warnings.warn(
+                f"FLYDSL_COMPILE_ROCM_PATH={override!r} is ignored ({reason}); "
+                "falling back to bundled bitcode or ROCM_PATH/ROCM_ROOT/ROCM_HOME.",
+                stacklevel=2,
+            )
+
+    if not require_lld:
         candidates.append(("bundled with flydsl", BUNDLED_ROCM_PATH))
+
     for var in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME"):
         value = os.environ.get(var)
         if value:
             candidates.append((var, Path(value)))
 
+    therock = _windows_therock_toolkit_root()
+    if therock is not None:
+        candidates.append(("Windows TheRock/HIP SDK", therock))
+
     for _, root in candidates:
         if not _has_device_bitcode(root):
             continue
-        path = str(root)
-        # MLIR's pass-pipeline parser treats whitespace, commas and braces as
-        # structural syntax, so such a path cannot be spelled as an option.
-        bad = sorted({ch for ch in path if ch.isspace() or ch in ",{}\"'"})
-        if bad:
-            raise ValueError(
-                f"ROCm toolkit path {path!r} contains unsupported character(s) {bad!r} and cannot be "
-                "passed to an MLIR pass option. Point FLYDSL_COMPILE_ROCM_PATH at a path without "
-                "whitespace, commas, braces, or quotes."
-            )
-        return path
+        if require_lld and not _has_toolkit_lld(root):
+            continue
+        return _validate_toolkit_option_path(str(root))
     return ""
-
-
-#: Device libraries ``appendStandardLibs()`` can pull out of a toolkit path.
-_DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
 
 
 @lru_cache(maxsize=4)
 def _device_bitcode_fingerprint(toolkit: str) -> str:
-    """Digest the device bitcode reachable from *toolkit*."""
+    """Digest the device bitcode reachable from *toolkit*.
+
+    Only the four libraries ``appendStandardLibs()`` may pull in are hashed:
+    linked-in ocml/ockl changes the ISA; ld.lld itself does not.
+    """
     if not toolkit:
         return "none"
     bitcode_dir = Path(toolkit) / "amdgcn" / "bitcode"
@@ -113,19 +174,6 @@ def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
     if "ktrace" in compile_hints:
         return bool(compile_hints["ktrace"])
     return bool(env.ktrace.enable)
-
-
-@lru_cache(maxsize=None)
-def _hash_device_bitcode(root: str) -> str:
-    """SHA-256 of the device bitcode under ``root``; read once per root and process.
-
-    ROCDL links ocml/ockl from here into kernels that call them, so it changes the ISA.
-    ld.lld is not hashed: it only links the assembled object into the code object.
-    """
-    h = hashlib.sha256()
-    for path in sorted(Path(root, "amdgcn", "bitcode").glob("*.bc")):
-        h.update(path.name.encode() + b"\0" + path.read_bytes())
-    return h.hexdigest()
 
 
 class RocmBackend(BaseBackend):
@@ -213,14 +261,18 @@ class RocmBackend(BaseBackend):
             ),
         ]
         opts = f'opts="{" ".join(bin_cli_opts)}"'
-        toolkit = rocm_toolkit_path()
+        toolkit = rocm_toolkit_path(for_external=external)
         if toolkit:
-            opts = f"toolkit={toolkit} {opts}"
-        # The external toolchain drives an upstream mlir-opt that does not know
-        # about FlyDSL passes, so that path keeps using gpu-module-to-binary.
-        binary_fragment = (
-            f"gpu-module-to-binary{{format=fatbin {opts}}}" if external else f"{FLY_GPU_BINARY_PASS}{{{opts}}}"
-        )
+            opts = f'toolkit="{toolkit}" {opts}'
+        if not external:
+            binary_fragment = f"{FLY_GPU_BINARY_PASS}{{{opts}}}"
+        elif HAS_INPROCESS_LLD:
+            # ROCDL's format=bin/fatbin always spawn ld.lld. Stop at isa so the
+            # external tree only does codegen; fly-emit-gpu-binary then
+            # assemble+links in process (see run_external_binary_codegen).
+            binary_fragment = f"gpu-module-to-binary{{format=isa {opts}}}"
+        else:
+            binary_fragment = f"gpu-module-to-binary{{format=fatbin {opts}}}"
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
@@ -291,16 +343,11 @@ class RocmBackend(BaseBackend):
     # -- cache / fingerprint ---------------------------------------------
 
     def toolkit_fingerprint(self) -> str:
-        if os.name == "nt":
-            from ...runtime.device_runtime.rocm import _rocm_toolkit_root
-
-            root = str(_rocm_toolkit_root())
-        else:
-            # gpu-module-to-binary leaves toolkit= empty here, so ROCDL picks the root.
-            from ..._mlir._mlir_libs import _mlirDialectsFlyROCDL
-
-            root = _mlirDialectsFlyROCDL.rocm_path()
-        return f"rocm-bitcode:{_hash_device_bitcode(root)}"
+        # Same resolver as the embedded pipeline / backend.hash(), so disk and
+        # in-memory cache keys track the bitcode that was actually linked.
+        # External codegen is keyed separately via FLYDSL_COMPILE_LLVM_DIR.
+        toolkit = rocm_toolkit_path()
+        return f"rocm-bitcode:{_device_bitcode_fingerprint(toolkit)}"
 
     def jit_runtime_lib_basenames(self) -> List[str]:
         if os.name == "nt":

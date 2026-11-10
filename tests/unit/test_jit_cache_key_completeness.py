@@ -340,26 +340,29 @@ def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
     ocml = toolkit / "amdgcn" / "bitcode" / "ocml.bc"
     ocml.parent.mkdir(parents=True)
     ocml.write_bytes(b"v1")
-    monkeypatch.setenv("ROCM_PATH", str(toolkit))
+    # Override wins over the bundled bitcode tree that rocm_toolkit_path prefers.
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(toolkit))
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     seen = []
     monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: seen.append(args[-1]) or "")
 
-    def key():
-        rocm._hash_device_bitcode.cache_clear()
+    def key(*, bust_bitcode_cache: bool):
+        rocm.rocm_toolkit_path.cache_clear()
+        if bust_bitcode_cache:
+            rocm._device_bitcode_fingerprint.cache_clear()
         jf._flydsl_key()
         return seen[-1]
 
-    first = key()
+    first = key(bust_bitcode_cache=True)
     ocml.write_bytes(b"v2")
-    changed = key()
+    changed = key(bust_bitcode_cache=True)
     assert changed != first
 
-    # Files are read once per toolkit root and process.
+    # Fingerprint is cached per toolkit path for the process.
     ocml.write_bytes(b"v3")
-    jf._flydsl_key()
-    assert seen[-1] == changed
-    rocm._hash_device_bitcode.cache_clear()
+    assert key(bust_bitcode_cache=False) == changed
+    rocm._device_bitcode_fingerprint.cache_clear()
+    rocm.rocm_toolkit_path.cache_clear()
 
 
 def test_waves_per_eu_hint_reaches_the_ir(frontend):

@@ -6,14 +6,23 @@
 ``fly-emit-gpu-binary`` links in process, so the only thing the toolkit path
 still supplies is ``<root>/amdgcn/bitcode``.  FlyDSL bundles that bitcode and
 points ``toolkit=`` at it, so kernels calling ``__ocml_*`` compile regardless of
-where a container installs ROCm.
+where a container installs ROCm.  External codegen with in-process LLD stops at
+``format=isa`` and finishes the link in process, so it can use the same
+bitcode-only toolkit.
 """
 
+import os
 from pathlib import Path
 
 import pytest
 
-from flydsl.compiler.backends.rocm import FLY_GPU_BINARY_PASS, RocmBackend, rocm_toolkit_path
+from flydsl.compiler.backends.rocm import (
+    BUNDLED_ROCM_PATH,
+    FLY_GPU_BINARY_PASS,
+    HAS_INPROCESS_LLD,
+    RocmBackend,
+    rocm_toolkit_path,
+)
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 
@@ -27,6 +36,25 @@ def _clear_resolution_cache():
     rocm_toolkit_path.cache_clear()
 
 
+def _make_bitcode_root(tmp_path: Path, *, with_lld: bool = False) -> Path:
+    bitcode_dir = tmp_path / "amdgcn" / "bitcode"
+    bitcode_dir.mkdir(parents=True)
+    (bitcode_dir / "ocml.bc").write_bytes(b"")
+    if with_lld:
+        lld_dir = tmp_path / "llvm" / "bin"
+        lld_dir.mkdir(parents=True)
+        lld_name = "ld.lld.exe" if os.name == "nt" else "ld.lld"
+        (lld_dir / lld_name).write_bytes(b"")
+    return tmp_path
+
+
+def _embedded_override_root(tmp_path: Path) -> Path:
+    """A toolkit that ``rocm_toolkit_path()`` accepts for the embedded pipeline."""
+    # Without in-process LLD the embedded path falls back to upstream fatbin and
+    # therefore also needs ld.lld.
+    return _make_bitcode_root(tmp_path, with_lld=not HAS_INPROCESS_LLD)
+
+
 def test_toolkit_resolves_without_rocm_environment(monkeypatch):
     for var in _ROCM_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
@@ -37,41 +65,93 @@ def test_toolkit_resolves_without_rocm_environment(monkeypatch):
         pytest.skip("build did not bundle AMDGCN device bitcode (FLYDSL_ROCM_BITCODE_DIR unset at configure time)")
 
     assert (Path(toolkit) / "amdgcn" / "bitcode" / "ocml.bc").is_file()
+    if HAS_INPROCESS_LLD:
+        assert Path(toolkit) == BUNDLED_ROCM_PATH
 
 
 def test_explicit_override_wins_over_bundled(monkeypatch, tmp_path):
-    bitcode_dir = tmp_path / "amdgcn" / "bitcode"
-    bitcode_dir.mkdir(parents=True)
-    (bitcode_dir / "ocml.bc").write_bytes(b"")
-    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(tmp_path))
+    root = _embedded_override_root(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(root))
 
-    assert rocm_toolkit_path() == str(tmp_path)
+    assert rocm_toolkit_path() == str(root)
 
 
-def test_override_without_bitcode_is_ignored(monkeypatch, tmp_path):
+def test_override_without_bitcode_warns_and_is_ignored(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(tmp_path / "missing"))
 
-    assert rocm_toolkit_path() != str(tmp_path / "missing")
+    with pytest.warns(UserWarning, match="FLYDSL_COMPILE_ROCM_PATH"):
+        assert rocm_toolkit_path() != str(tmp_path / "missing")
 
 
 def test_path_with_pipeline_metacharacters_is_rejected(monkeypatch, tmp_path):
-    root = tmp_path / "rocm dir"
-    (root / "amdgcn" / "bitcode").mkdir(parents=True)
-    (root / "amdgcn" / "bitcode" / "ocml.bc").write_bytes(b"")
+    root = _embedded_override_root(tmp_path / "rocm,dir")
     monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(root))
 
     with pytest.raises(ValueError, match="unsupported character"):
         rocm_toolkit_path()
 
 
+def test_path_with_whitespace_is_accepted_when_quoted(monkeypatch, tmp_path):
+    root = _embedded_override_root(tmp_path / "rocm dir")
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(root))
+
+    assert rocm_toolkit_path() == str(root)
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    binary_fragment = backend.pipeline_fragments(compile_hints={})[-1]
+    assert f'toolkit="{root}"' in binary_fragment
+
+
 def test_binary_fragment_carries_the_resolved_toolkit(monkeypatch, tmp_path):
-    bitcode_dir = tmp_path / "amdgcn" / "bitcode"
-    bitcode_dir.mkdir(parents=True)
-    (bitcode_dir / "ocml.bc").write_bytes(b"")
-    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(tmp_path))
+    root = _embedded_override_root(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(root))
 
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     binary_fragment = backend.pipeline_fragments(compile_hints={})[-1]
 
     assert binary_fragment.startswith(FLY_GPU_BINARY_PASS)
-    assert f"toolkit={tmp_path}" in binary_fragment
+    assert f'toolkit="{root}"' in binary_fragment
+
+
+def test_external_toolkit_matches_embedded_when_inprocess_lld(monkeypatch, tmp_path):
+    for var in _ROCM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("FLYDSL_COMPILE_ROCM_PATH", raising=False)
+
+    bitcode_only = _make_bitcode_root(tmp_path / "bitcode_only")
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(bitcode_only))
+
+    if HAS_INPROCESS_LLD:
+        # External stops at format=isa; bitcode-only toolkit is enough.
+        assert rocm_toolkit_path(for_external=True) == str(bitcode_only)
+        backend = RocmBackend(RocmBackend.make_target("gfx942"))
+        _, binary = backend.external_binary_pipeline_fragments(compile_hints={})
+        assert binary.startswith("gpu-module-to-binary")
+        assert "format=isa" in binary
+        assert f'toolkit="{bitcode_only}"' in binary
+        return
+
+    # Without in-process LLD, external still needs ld.lld for format=fatbin.
+    with pytest.warns(UserWarning, match="ld.lld"):
+        external = rocm_toolkit_path(for_external=True)
+    assert external != str(bitcode_only)
+
+    full = _make_bitcode_root(tmp_path / "full", with_lld=True)
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(full))
+    rocm_toolkit_path.cache_clear()
+    assert rocm_toolkit_path(for_external=True) == str(full)
+
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    _, binary = backend.external_binary_pipeline_fragments(compile_hints={})
+    assert "format=fatbin" in binary
+    assert f'toolkit="{full}"' in binary
+
+
+def test_toolkit_fingerprint_matches_hash_resolver(monkeypatch, tmp_path):
+    root = _embedded_override_root(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(root))
+
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    assert str(root) in backend.hash()
+    assert backend.toolkit_fingerprint().startswith("rocm-bitcode:")
+    # Both paths must hash the same resolved toolkit (not MLIR's bake-in ROCM_PATH).
+    assert backend.hash().rsplit(":", 1)[-1] == backend.toolkit_fingerprint().split(":", 1)[-1]

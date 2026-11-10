@@ -207,7 +207,10 @@ it for external LLVM codegen (`external_binary_pipeline_fragments()`). External
 mode runs Stages A and B with the bundled MLIR runtime, then invokes the
 external LLVM toolchain only for Stage C. That toolchain drives an upstream
 `mlir-opt` which does not know FlyDSL passes, so external mode substitutes
-`gpu-module-to-binary{format=fatbin}` for `fly-emit-gpu-binary`.
+`gpu-module-to-binary{format=isa}` (codegen only). FlyDSL then finishes
+assemble+link with the same in-process LLD path as `fly-emit-gpu-binary`, so
+external mode does not need `<toolkit>/llvm/bin/ld.lld`. Builds without
+in-process LLD fall back to `format=fatbin` and still require `ld.lld`.
 
 **Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
 
@@ -269,11 +272,19 @@ Device bitcode (`ocml`/`ockl`/`hip`/`opencl`) is loaded from
 example `fx.erfc`, which has no LLVM intrinsic. FlyDSL bundles that bitcode into
 the package at build time and points `toolkit=` at it, so this lookup does not
 depend on where the container installs ROCm either.
-`RocmBackend.rocm_toolkit_path()` resolves it in order:
+`rocm_toolkit_path()` (module-level in `rocm.py`) resolves it in order:
 
-1. `FLYDSL_COMPILE_ROCM_PATH`
-2. the bitcode bundled with the package
+1. `FLYDSL_COMPILE_ROCM_PATH` (ignored with a warning if the path lacks bitcode,
+   or lacks `llvm/bin/ld.lld` when the build has no in-process LLD)
+2. the bitcode bundled with the package (when in-process LLD is available)
 3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
+4. on Windows, a TheRock / HIP SDK root staged by `_rocm_toolkit_root()`
+
+External codegen (`FLYDSL_COMPILE_LLVM_DIR`) uses the same bitcode-only toolkit
+resolution when in-process LLD is available: external `mlir-opt` emits
+`format=isa`, then `run_external_binary_codegen` runs `fly-emit-gpu-binary` to
+assemble and link. Without in-process LLD, both paths need a toolkit that
+contains `llvm/bin/ld.lld`.
 
 If none of them contains `amdgcn/bitcode/ocml.bc`, no `toolkit=` is passed and
 upstream's own lookup applies. Configure the build with
