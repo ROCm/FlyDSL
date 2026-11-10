@@ -31,6 +31,7 @@
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
@@ -652,6 +653,17 @@ public:
       predMemTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
       if (!predMemTy)
         return rewriter.notifyMatchFailure(op, "pred is not a MemRef type");
+    }
+
+    if (Value indexVal = adaptor.getIndex()) {
+      if (pred)
+        return rewriter.notifyMatchFailure(op, "an indexed copy cannot also be predicated");
+      if (failed(fly_rocdl::emitTdmIndexedCall(rewriter, loc, copyAtomType, srcTy, dstTy,
+                                               op.getIndex().getType(), copyAtomVal, src, dst,
+                                               indexVal)))
+        return failure();
+      rewriter.eraseOp(op);
+      return success();
     }
 
     if (pred) {

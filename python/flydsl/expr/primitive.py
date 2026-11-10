@@ -1113,7 +1113,28 @@ def mma_make_fragment(operand_id, tiled_mma, input, *, stages=None):
 
 @dsl_loc_tracing
 def copy(copy_atom, src, dst, *, pred=None, **kwargs):
-    return fly.copy(copy_atom.set_value(kwargs) if kwargs else copy_atom, src, dst, pred=pred)
+    """Copy ``src`` into ``dst`` with one copy atom.
+
+    Either side may be given as ``[tensor, index]``. The index names the rows the
+    atom moves, for an atom whose type addresses its outer dimension by an index
+    list rather than by a coordinate; the data side still names the tile.
+    """
+    src, src_index = _split_indexed_operand(src, "src")
+    dst, dst_index = _split_indexed_operand(dst, "dst")
+    if src_index is not None and dst_index is not None:
+        raise ValueError("copy: only one side may carry an index")
+    index = src_index if src_index is not None else dst_index
+    atom = copy_atom.set_value(kwargs) if kwargs else copy_atom
+    return fly.copy(atom, src, dst, pred=pred, index=index)
+
+
+def _split_indexed_operand(operand, side):
+    """Split ``[tensor, index]`` into its two parts; pass a plain tensor through."""
+    if not isinstance(operand, (list, tuple)):
+        return operand, None
+    if len(operand) != 2:
+        raise ValueError(f"copy: {side} must be a tensor or [tensor, index], got {len(operand)} entries")
+    return operand[0], operand[1]
 
 
 @dsl_loc_tracing

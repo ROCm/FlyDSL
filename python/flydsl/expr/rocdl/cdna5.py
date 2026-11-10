@@ -6,12 +6,14 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAScaleType
 from ..._mlir.dialects import fly_rocdl
-from ..typing import Int32, Int64, Tensor
+from ..typing import Int16, Int32, Int64, Tensor, Uint16, Uint32
 
 __all__ = [
     "WMMAScale",
     "TensorLoad",
     "TensorStore",
+    "TensorLoadGather",
+    "TensorStoreScatter",
     "TDM",
     "make_tdm_atom",
     "make_tiled_tdm_atom",
@@ -103,6 +105,101 @@ class TensorStore:
 
     def __init__(self, cache_modifier=0):
         self.cache_modifier = cache_modifier
+
+
+# Indexed addressing is a *descriptor mode*, not a second opcode: both forms issue the
+# same TENSOR_LOAD_TO_LDS / TENSOR_STORE_FROM_LDS, and only the descriptor differs
+# (bit 31 of group 0 turns the mode on, bit 30 picks the index width, and groups 2/3
+# hold the row list instead of dims 2..4). That is why these subclass the linear ops
+# rather than standing beside them: the direction, the atom state and the lowering
+# path are all shared, and only the descriptor build forks.
+#
+# The index width is not a parameter of the op. It is read off the row list's element
+# type, so the list and the width it implies cannot disagree. Only the width reaches
+# the descriptor -- an index is a row number, never negative -- and signedness does not
+# survive into the memref type either, so the signed spellings are accepted beside the
+# unsigned ones rather than rejected for a distinction nothing downstream can see.
+INDEX_WIDTHS = {Uint16: 16, Int16: 16, Uint32: 32, Int32: 32}
+DEFAULT_INDEX_BITS = 16
+
+
+def index_rows_limit(index_bits):
+    """How many rows one issue carries: the row list has fixed descriptor storage."""
+    return 16 if index_bits == 16 else 8
+
+
+def is_index_tuple(index_list):
+    """Whether a row list is a tuple of indices rather than data in memory."""
+    from ..typing import IntTuple
+
+    return isinstance(index_list, IntTuple)
+
+
+def index_bits_of(index_list, what):
+    """Index width implied by a row list, or None when the list does not fix one.
+
+    A tuple holds the indices themselves, with no element type to read a width off,
+    so it leaves the width to the atom.
+    """
+    if index_list is None or is_index_tuple(index_list):
+        return None
+    elem = getattr(index_list, "element_type", None)
+    bits = INDEX_WIDTHS.get(elem)
+    if bits is None:
+        raise TypeError(f"{what} must hold 16- or 32-bit integer row indices, got {elem}")
+    return bits
+
+
+def check_index_rows(index_bits, count, what):
+    """Reject a row count the descriptor cannot hold. A dynamic count is left alone."""
+    if count is None:
+        return
+    limit = index_rows_limit(index_bits)
+    if not 1 <= count <= limit:
+        raise ValueError(f"{what} carries 1 to {limit} rows at {index_bits}-bit indices, got {count}")
+
+
+def check_index_tensor_shape(index_tensor):
+    """A row list in memory is shaped like the data it indexes.
+
+    It carries one index per gathered row and the same index everywhere else, so
+    exactly one mode walks it and every other mode is broadcast. Rank is left to the
+    data, because the list is tiled with the data's tiler and the two have to agree; a
+    tiler deeper than the descriptor is fine, since the geometry merges memory-adjacent
+    modes afterwards. The 2D limit belongs to the descriptor and is checked there.
+    """
+    layout = getattr(index_tensor, "layout", None)
+    if layout is None or layout.rank < 2:
+        raise ValueError(f"index_tensor must be shaped like the tensor it indexes, got {layout}")
+    strides = [layout.stride[i].unpack() for i in range(layout.rank)]
+    if [i for i, v in enumerate(strides) if v != 0] != [0]:
+        raise ValueError(
+            "index_tensor must walk its outermost mode and broadcast every other one "
+            f"(one index per gathered row, the same index elsewhere), got {layout}"
+        )
+
+
+class TensorLoadGather(TensorLoad):
+    """CDNA5 TDM Global -> LDS gather (``TENSOR_LOAD_TO_LDS``, indexed descriptor).
+
+    The outer dimension is not walked, it is listed: the atom is handed one row index
+    per row of the tile and collects exactly those rows. Pass the row list to
+    :func:`make_tiled_tdm_atom` as ``index_tensor``; a tensor's element type picks the
+    index width, and a call site may hand :func:`copy` a different list -- including an
+    int tuple, whose known entries become descriptor immediates.
+
+    Atom state is ``TensorLoad``'s. A row index at or past the tensor's row count
+    reads as zero, which is how a tile masks rows it does not want.
+    """
+
+
+class TensorStoreScatter(TensorStore):
+    """CDNA5 TDM LDS -> Global scatter (``TENSOR_STORE_FROM_LDS``, indexed descriptor).
+
+    The mirror of :class:`TensorLoadGather`: the row list names where each row of the
+    LDS tile lands. A row index at or past the tensor's row count is dropped, which is
+    how a tile masks rows it does not want to write.
+    """
 
 
 def TDM(
@@ -223,6 +320,7 @@ def make_tiled_tdm_atom(
     init_boundary_check=True,
     atomic_barrier=False,
     internal_type=None,
+    index_tensor=None,
 ):
     """Build a wave-scoped CDNA5 TDM copy atom and its coordinate tensor.
 
@@ -234,7 +332,9 @@ def make_tiled_tdm_atom(
     counted before coalescing (including extent-one modes). The innermost
     descriptor dimension of each warp's issue must span at least 16 bytes.
 
-    * ``op`` — a ``TensorLoad(...)`` or ``TensorStore(...)`` instance.
+    * ``op`` — the copy op: ``TensorLoad(...)`` / ``TensorStore(...)`` for a linear
+      tile, or ``TensorLoadGather(...)`` / ``TensorStoreScatter(...)`` for a row-indexed
+      one. The row list is ``index_tensor``.
     * ``tensor`` — the global tensor.
     * ``smem_layout`` — the LDS tile layout.
     * ``tdm_tile`` — the tiler: how many elements to take from each global mode.
@@ -244,6 +344,21 @@ def make_tiled_tdm_atom(
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
     * ``internal_type`` — reserved; currently must be ``None``.
+    * ``index_tensor`` — the row list an indexed ``op`` starts with: either a tensor
+      of 16- or 32-bit integers, whose element *width* picks the index width, or an
+      int tuple of the indices themselves, which leaves the width at the 16-bit
+      default. Leaving it out also keeps the default and leaves the list to the call
+      site. A linear op refuses it.
+
+    The atom sets the row list up; a :func:`copy` may hand over a different one. A
+    tensor there decides the width for that call; a tuple keeps the atom's, and every
+    index it already knows folds into the descriptor as an immediate rather than
+    costing a load.
+
+    Indexed addressing is 2D only, and the per-row span must be a whole multiple of
+    4 bytes. One issue carries any row count in ``[1, limit]``: 8 rows at 32-bit
+    indices, 16 at 16-bit. A row index at or past the tensor's row count reads zero on
+    a load and is dropped on a store, which is how a short tile masks its unused rows.
 
     Example:
         Loading a 128x64 tile of a row-major ``gA`` into LDS.
@@ -290,6 +405,27 @@ def make_tiled_tdm_atom(
     if internal_type is not None:
         raise ValueError("internal_type must be None for now")
 
+    # The op picks the addressing mode; the row list only supplies its data. The width
+    # follows the list's element type, so the two can never disagree.
+    indexed = isinstance(op, (TensorLoadGather, TensorStoreScatter))
+    if not indexed and index_tensor is not None:
+        raise ValueError(
+            f"index_tensor needs an indexed op (TensorLoadGather / TensorStoreScatter), got {type(op).__name__}"
+        )
+
+    index_bits = 0
+    if indexed:
+        index_bits = index_bits_of(index_tensor, "index_tensor") or DEFAULT_INDEX_BITS
+        # The 2D limit is on the *descriptor*, which the geometry derives after merging
+        # memory-adjacent modes, so a deeper tiler that compresses to 2D is fine and the
+        # derivation is what rejects one that does not. Only the row count is checkable
+        # here, and only when the tiler spells it out.
+        if not isinstance(tdm_tile, ir.Value) and len(tdm_tile) >= 1:
+            rows = tdm_tile[0]
+            check_index_rows(index_bits, rows if isinstance(rows, int) else None, "one indexed issue")
+        if index_tensor is not None:
+            check_index_tensor_shape(index_tensor)
+
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
     # value's type and the derivation reads it there.
@@ -300,6 +436,7 @@ def make_tiled_tdm_atom(
         num_warps=num_warps,
         cache_modifier=op.cache_modifier,
         atomic_barrier=bool(atomic_barrier),
+        index_bits=index_bits,
         internal_type=(
             None
             if internal_type is None
@@ -322,6 +459,12 @@ def tdm_partition(
 ):
     """Partition ``(TDM_Tile, rest...)`` tensors, returning ``(shared, global)``.
 
+    Pass ``gtensor`` as ``[coord_tensor, index_tensor]`` for an atom built with an
+    index tensor; the result then carries a third entry, that warp's slice of the row
+    list, and the pair goes back to :func:`copy` as ``[coord, index]``. With more than
+    one warp the index tensor's outermost mode selects the warp, so each warp reads
+    its own rows.
+
     Each result has shape ``((ATOM, ITER), rest...)``. ATOM contains exactly
     one warp's issue (the atom's NumVal). WARP selects consecutive chunks in the
     same compact LDS traversal used to build the descriptor; ITER advances by
@@ -342,6 +485,12 @@ def tdm_partition(
     )
     from ..typing import static
 
+    index = None
+    if isinstance(gtensor, (list, tuple)):
+        if len(gtensor) != 2:
+            raise ValueError(f"tdm_partition: gtensor must be a tensor or [coord, index], got {len(gtensor)} entries")
+        gtensor, index = gtensor
+
     n_warps = size(warp_layout).unpack()
     if n_warps < 1 or cosize(warp_layout).unpack() != n_warps or size(right_inverse(warp_layout)).unpack() != n_warps:
         raise ValueError("warp layout must bijectively map participants to consecutive IDs starting at zero")
@@ -360,4 +509,30 @@ def tdm_partition(
         tiled = group(tiled, 0, 2)
         return coalesce(tiled, make_int_tuple(((1, 1),)))
 
-    return apply(stensor), apply(gtensor)
+    if index is None:
+        return apply(stensor), apply(gtensor)
+    return apply(stensor), apply(gtensor), _partition_index(index, n_warps, warp_id)
+
+
+def _partition_index(index, n_warps, warp_id):
+    """Cut a tiled row list down to the rows of one issue, keeping its rest modes.
+
+    The list arrives tiled like the data -- same tiler, same slice -- so its tile mode
+    is ``(rows, width)`` with the width broadcast. Only the rows carry indices, so the
+    broadcast half is selected away and the rest modes survive. That is what lets one
+    coordinate address a tile and its row list together: ``tAg[None, k]`` and
+    ``tAi[None, k]`` step in lockstep.
+    """
+    layout = index.layout
+    if layout.rank < 1:
+        raise ValueError("tdm_partition: the row list must be tiled before partitioning")
+    tile = layout[0]
+    strides = [tile.stride[i].unpack() for i in range(tile.rank)]
+    if [i for i, v in enumerate(strides) if v != 0] != [0]:
+        raise ValueError(
+            "tdm_partition: the row list's tile must walk its first mode and broadcast the " f"rest, got {tile}"
+        )
+    n_rest = layout.rank - 1
+    inner = tuple([None] + [0] * (tile.rank - 1))
+    rows = index[(inner, *([None] * n_rest))]
+    return rows if n_warps == 1 else rows[(warp_id, *([None] * n_rest))]
