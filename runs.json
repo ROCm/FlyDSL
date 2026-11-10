@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-10T03:24:44Z",
+ "updated": "2026-11-10T03:46:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770",
    "created_at": "2026-11-10T03:16:18Z",
-   "updated_at": "2026-11-10T03:20:48Z",
+   "updated_at": "2026-11-10T03:36:04Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-10T03:36:35Z",
+     "completed_at": "2026-11-10T03:38:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770/job/129612706771"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T03:36:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770/job/129612706776"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T03:42:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770/job/129612706791"
+    }
+   ]
   },
   {
    "run_id": 42742602646,
@@ -25,20 +53,20 @@
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
    "title": "[Coop] Optimize warp-level prims on the rocdl",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646",
    "created_at": "2026-11-10T02:24:59Z",
-   "updated_at": "2026-11-10T03:16:06Z",
+   "updated_at": "2026-11-10T03:44:23Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-10T02:45:49Z",
-     "completed_at": null,
+     "completed_at": "2026-11-10T03:41:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646/job/129594464131"
     },
     {
