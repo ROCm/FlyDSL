@@ -16,6 +16,8 @@ import os
 
 import pytest
 
+import flydsl.compiler as flyc
+from kernels.norm.softmax_autotune import _RTOL
 from kernels.norm.softmax_kernel import build_softmax_module
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -76,9 +78,11 @@ def run_test(M, N, dtype_str):
         c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
 
     stream = torch.cuda.current_stream()
+    # Time a CompiledFunction: every direct @flyc.jit call retraces the launcher.
+    compiled = flyc.compile(launch_fn, a_dev, c_dev, M, stream)
 
     def kernel_launch():
-        launch_fn(a_dev, c_dev, M, stream=stream)
+        compiled(a_dev, c_dev, M, stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -100,21 +104,18 @@ def run_test(M, N, dtype_str):
     if flydsl_gpu_us is not None:
         print(f"[Perf] FlyDSL softmax gpu: {flydsl_gpu_us:.1f} us")
 
-    # Verify in pure torch style (keep tensors, compute max error in torch), similar to test_mfma_gemm_fp8_rocir.py
-    if dtype_str == "f32":
-        res = c_dev.to(DTYPE_FP32)
-        atol = 1e-5
-    elif dtype_str == "f16":
-        res = c_dev.to(DTYPE_FP32)
-        atol = 1e-2
-    elif dtype_str == "bf16":
-        res = c_dev.to(DTYPE_FP32)
-        atol = 2e-2
+    # Verify in pure torch style (keep tensors, compute max error in torch).
+    # The bound is relative to the row's own scale: softmax elements are O(1/N), so an
+    # absolute bound sized for O(1) values would accept an all-zero output. These are the
+    # same tolerances the autotune candidate gate applies, so the default and every
+    # candidate are held to one standard.
+    res = c_dev.to(DTYPE_FP32)
+    rtol = _RTOL[dtype_str]
+    scale = expected.abs() + expected.amax(dim=-1, keepdim=True)
+    max_err = ((res - expected).abs() / scale).max().item()
+    print(f"  Max Relative Error: {max_err:.2e} (rtol={rtol})")
 
-    max_err = (res - expected).abs().max().item()
-    print(f"  Max Absolute Error: {max_err:.2e} (atol={atol})")
-
-    if max_err < atol:
+    if max_err < rtol:
         print("  Passed")
         return True, flydsl_gpu_us
     else:

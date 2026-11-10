@@ -5,13 +5,16 @@
 # Fail-fast: exits immediately on first test failure.
 #
 # Local (default): skips large_shape tests for fast iteration.
-# CI:              RUN_TESTS_FULL=1 bash scripts/run_tests.sh
+# CI/full:         RUN_TESTS_FULL=1 bash scripts/run_tests.sh
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
+
+# Broad test runs must be deterministic; dedicated autotune tests opt in per test.
+export FLYDSL_AUTOTUNE=0
 
 # Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
 if [[ -z "${HIP_VISIBLE_DEVICES:-}" ]] && command -v python3 &>/dev/null; then
@@ -36,22 +39,29 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-pytest_args=(-v --no-header --tb=short)
+pytest_markers="not multi_gpu and not benchmark"
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
-    pytest_args+=(-m "not large_shape")
+    pytest_markers+=" and not large_shape"
 fi
+# pytest.ini already enables verbose mode; -q brings the broad suite back to
+# compact per-file progress instead of emitting thousands of node IDs to CI.
+pytest_args=(-q --no-header --tb=short --durations=20 -m "${pytest_markers}")
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + unit + system + examples)
+# 1. Single-GPU correctness tests (kernels + language + unit + system + extension + examples)
+# Multi-GPU and benchmark tests have dedicated CI jobs/steps and must not be
+# repeated here, especially on single-GPU jobs backed by an 8-GPU host.
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + unit + system + examples"
+echo "Pytest: kernels + language + unit + system + extension + examples"
 echo "========================================================================"
 
 python3 -m pytest \
     tests/kernels/ \
+    tests/language/ \
     tests/unit/ \
     tests/system/ \
+    tests/extension/ \
     tests/python/examples/ \
     "${pytest_args[@]}"
 
@@ -63,14 +73,23 @@ echo "========================================================================"
 echo "Examples (examples/)"
 echo "========================================================================"
 
-# Whitelist from tests/arch_compat.py (single source of truth for arch compat).
-_RDNA_EXAMPLE_WHITELIST=$(python3 -c "from tests.arch_compat import RDNA_COMPATIBLE_EXAMPLES; print(' '.join(RDNA_COMPATIBLE_EXAMPLES))" 2>/dev/null || echo "")
+# Architecture assignments from tests/arch_compat.py, checked before execution.
 _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
-for example in "${REPO_ROOT}"/examples/*.py; do
+for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py; do
     [ -f "${example}" ] || continue
-    name="$(basename "${example}")"
-    if [[ "${_gpu_arch}" != gfx9* ]] && ! echo "${_RDNA_EXAMPLE_WHITELIST}" | grep -qw "${name}"; then
-        echo "  SKIP  ${name}  (not in RDNA whitelist, arch: ${_gpu_arch})"
+    # Named by their path under examples/, so nested ones stay unambiguous.
+    name="${example#"${REPO_ROOT}"/examples/}"
+    allowed_arches=$(python3 -c 'import sys; from tests.arch_compat import EXAMPLE_ARCHITECTURES; print(" ".join(EXAMPLE_ARCHITECTURES[sys.argv[1]]))' "${name}")
+    read -r -a arch_patterns <<< "${allowed_arches}"
+    supported=false
+    for pattern in "${arch_patterns[@]}"; do
+        if [[ "${_gpu_arch}" == ${pattern} ]]; then
+            supported=true
+            break
+        fi
+    done
+    if [[ "${supported}" != true ]]; then
+        echo "  SKIP  ${name}  (requires: ${allowed_arches}; arch: ${_gpu_arch})"
         continue
     fi
     output=$(python3 "${example}" 2>&1) || {
@@ -99,25 +118,57 @@ fi
 [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ] && FILECHECK="$(which FileCheck 2>/dev/null || true)"
 
 if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
-    echo "  SKIP  FileCheck not found; skipping MLIR lit tests."
+    # Fail-open by default for local runs without a built FileCheck, but say so
+    # loudly: a green run_tests.sh does NOT mean the MLIR tests passed when this
+    # fires. Set FLYDSL_REQUIRE_FILECHECK=1 (CI should) to make it an error.
+    case "${FLYDSL_REQUIRE_FILECHECK:-0}" in
+        1 | [Tt]rue | [Yy]es | [Oo]n)
+            echo "  FAIL  FileCheck not found and FLYDSL_REQUIRE_FILECHECK is set; MLIR lit tests cannot run."
+            exit 1
+            ;;
+    esac
+    echo "  SKIP  FileCheck not found; MLIR lit tests DID NOT RUN (not a pass)."
+    MLIR_TESTS_SKIPPED=1
 else
 
 for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
-    run_line=$(grep '^// RUN:' "$f" | head -1 | sed 's|^// RUN: *||')
-    [ -z "$run_line" ] && continue
-    cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${f}|g; s|FileCheck|${FILECHECK}|g")
-    if eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
-        echo "  PASS  ${f#${REPO_ROOT}/tests/mlir/}"
-    else
-        echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
-        tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
-        exit 1
-    fi
+    # A file may carry several RUN lines, typically one per --check-prefix. Run
+    # every one of them: only checking the first silently skips the rest.
+    mapfile -t run_lines < <(grep '^// RUN:' "$f" | sed 's|^// RUN: *||')
+    [ ${#run_lines[@]} -eq 0 ] && continue
+    for run_line in "${run_lines[@]}"; do
+        # Map every substitution to a placeholder first, then expand. Expanding
+        # in place would let a later rule rewrite text an earlier one inserted:
+        # with `%FileCheck`, the bare-FileCheck rule would match inside the path
+        # just substituted and yield `/usr/bin//usr/bin/FileCheck`. `%FileCheck`
+        # must also be consumed before the bare form, or it degrades to `%<path>`.
+        cmd=$(echo "$run_line" | sed \
+            -e "s|%fly-opt|@FLY_OPT@|g" \
+            -e "s|%FileCheck|@FILECHECK@|g" \
+            -e "s|FileCheck|@FILECHECK@|g" \
+            -e "s|%s|@SRC@|g" \
+            -e "s|@FLY_OPT@|${FLY_OPT}|g" \
+            -e "s|@FILECHECK@|${FILECHECK}|g" \
+            -e "s|@SRC@|${f}|g")
+        if ! eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
+            echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
+            echo "        RUN: ${run_line}"
+            tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
+            exit 1
+        fi
+    done
+    echo "  PASS  ${f#${REPO_ROOT}/tests/mlir/}"
 done
 
 fi
 
 echo ""
 echo "========================================================================"
-echo "All tests passed."
+if [ "${MLIR_TESTS_SKIPPED:-0}" = "1" ]; then
+    # Never claim a clean run when a whole stage was skipped -- that is the
+    # exact confusion this guard exists to prevent.
+    echo "All tests passed EXCEPT the MLIR lit stage, which DID NOT RUN."
+else
+    echo "All tests passed."
+fi
 echo "========================================================================"

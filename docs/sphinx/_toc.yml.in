@@ -1,0 +1,79 @@
+# Variables of the form ${<variable>} are substituted, currently the following
+# list is supported:
+#   - ${branch} (or {branch}) the name of the current branch
+#   - ${url} (or {url}) github url of the current project
+#   - ${project:<project_name>} base url of the documentation of <project_name>
+#     based on intersphinx_mapping.
+# These comments will also be removed.
+root: index
+defaults:
+  numbered: False
+  maxdepth: 6
+subtrees:
+  - entries:
+      - file: installation
+        title: Install FlyDSL
+      - file: quickstart
+        title: Quick start
+      - file: api_stability
+        title: API stability
+  - caption: Language
+    entries:
+      - file: language/arithmetic_types
+        title: Arithmetic types
+      - file: language/composite_types
+        title: Composite types
+      - file: language/storage_and_allocator
+        title: Storage and allocator
+      - file: language/dsl_protocols
+        title: DSL protocols
+  - caption: Extension
+    entries:
+      - file: extension/rand
+        title: Random number generation
+  - caption: Guides
+    entries:
+      - file: architecture_guide
+        title: Architecture and compilation pipeline
+      - file: layout_system_guide
+        title: Layout algebra
+      - file: kernel_authoring_guide
+        title: Kernel authoring
+      - file: kernel_tuning_guide
+        title: Kernel tuning
+      - file: ktrace_guide
+        title: In-kernel wave tracing
+      - file: autotune_guide
+        title: Offline autotune configs
+      - file: prebuilt_kernels_guide
+        title: Prebuilt kernel library
+      - file: testing_benchmarking_guide
+        title: Testing and benchmarking
+      - file: cute_layout_algebra_guide
+        title: CuTe layout algebra
+      - file: extern_integration_guide
+        title: External bitcode integration
+  - caption: API reference
+    entries:
+      - file: api/index
+        title: API overview
+      - file: api/dsl
+        title: Expression language
+      - file: api/compiler
+        title: Compiler
+      - file: api/extensions
+        title: Extension libraries
+      - file: api/runtime
+        title: Stable runtime helpers
+      - file: api/kernels
+        title: Pre-built kernels
+  - caption: Tutorials
+    entries:
+      - file: tutorials/basic_usage
+        title: Basic usage
+      - file: tutorials/kernel_development
+        title: Kernel development techniques
+  - caption: About
+    entries:
+      - file: about/license
+        title: License

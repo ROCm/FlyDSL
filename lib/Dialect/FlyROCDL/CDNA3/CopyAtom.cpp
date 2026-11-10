@@ -89,7 +89,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
   };
 
   // raw buffer load/store cachepolicy (0=cached, 2=nt)
-  Value aux = arith::ConstantIntOp::create(builder, loc, getCacheModifier(), 32);
+  auto aux = builder.getI32IntegerAttr(getCacheModifier());
   ArrayAttr noAttrs;
 
   auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
@@ -204,8 +204,15 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
 
 LogicalResult CopyOpCDNA3BufferCopyLDSType::verify(function_ref<InFlightDiagnostic()> emitError,
                                                    int32_t bitSize) {
-  if (bitSize != 32 && bitSize != 64 && bitSize != 128)
-    return emitError() << "unsupported bitSize = " << bitSize << " for BufferCopyLDS";
+  // LDS DMA transfer widths are 1/2/4 bytes, plus 12/16 bytes on gfx950
+  // (hasLDSLoadB96_B128). There is no 8-byte form on any target, so 64 is
+  // rejected here rather than silently failing instruction selection. The
+  // 96/128-bit forms still require gfx950 at run time, which a static type
+  // verifier cannot check.
+  if (bitSize != 32 && bitSize != 128)
+    return emitError() << "unsupported bitSize = " << bitSize
+                       << " for BufferCopyLDS; expected 32 or 128 (there is no 8-byte LDS DMA "
+                          "instruction, and 128 requires gfx950)";
   return success();
 }
 
@@ -275,8 +282,11 @@ FailureOr<Value> CopyOpCDNA3BufferCopyLDSType::emitAtomCallSSA(OpBuilder &builde
 FailureOr<Value> CopyOpCDNA3BufferCopyLDSType::emitAtomCallSSA(
     OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
     Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
-  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, predTyArg, atomVal, src,
-                          dst, pred)))
+  // src/dst remain in memory; the SSA predicate controls instruction issue.
+  OpBuilder::InsertionGuard guard(builder);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst)))
     return failure();
   return Value{};
 }
@@ -321,8 +331,9 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
   Value srcOff = bp.swizzleByteOffset(builder, loc);
 
   ArrayAttr noAttrs;
+  auto auxAttr = builder.getI32IntegerAttr(0);
   ROCDL::RawPtrBufferLoadLdsOp::create(builder, loc, srcRsrc, dst, size, srcOff, soffset, immOffset,
-                                       zero, noAttrs, noAttrs, noAttrs);
+                                       auxAttr, noAttrs, noAttrs, noAttrs);
   return success();
 }
 
@@ -341,6 +352,12 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
 }
 
 // --- CopyOpCDNA3BufferAtomic ---
+
+static int32_t getAtomicValueBitWidth(Type valType) {
+  if (auto vectorType = dyn_cast<VectorType>(valType))
+    return vectorType.getNumElements() * vectorType.getElementType().getIntOrFloatBitWidth();
+  return valType.getIntOrFloatBitWidth();
+}
 
 std::optional<unsigned> CopyOpCDNA3BufferAtomicType::getFieldIndex(AtomStateField field) {
   switch (field) {
@@ -380,15 +397,15 @@ Value CopyOpCDNA3BufferAtomicType::setAtomState(OpBuilder &builder, Location loc
 Attribute CopyOpCDNA3BufferAtomicType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutSrc() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutDst() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutRef() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 
@@ -428,7 +445,7 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
     soffset = arith::DivUIOp::create(builder, loc, bits, eight);
   }
 
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  auto auxAttr = builder.getI32IntegerAttr(0);
   ArrayAttr noAttrs;
 
   AtomicOp op = getAtomicOp().getValue();
@@ -437,22 +454,22 @@ FailureOr<Value> CopyOpCDNA3BufferAtomicType::emitAtomCallSSA(OpBuilder &builder
   case AtomicOp::Add:
     if (!isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                            noAttrs, noAttrs, noAttrs);
+    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                            soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Max:
     if (isFloat)
-      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                              noAttrs, noAttrs, noAttrs);
+      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                              soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     else
-      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                              noAttrs, noAttrs, noAttrs);
+      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                              soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   case AtomicOp::Min:
     if (isFloat)
       return failure();
-    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
-                                            noAttrs, noAttrs, noAttrs);
+    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff,
+                                            soffset, auxAttr, noAttrs, noAttrs, noAttrs);
     break;
   default:
     return failure();

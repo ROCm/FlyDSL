@@ -42,10 +42,8 @@ def _noop_launch(stream: fx.Stream = fx.Stream(None)):
 
 
 def _reset_jit_caches(jit_fn):
-    jit_fn._call_state_cache.clear()
     jit_fn._mem_cache.clear()
     jit_fn._last_compiled = None
-    jit_fn.manager_key = None
     jit_fn.cache_manager = None
 
 
@@ -212,70 +210,6 @@ class TestCompileHintsPropagation:
         exe()  # should compile and run without error
 
 
-class TestCacheKeyIncludesTarget:
-    """Verify that _resolve_and_make_cache_key includes the GPU target so different
-    architectures produce different cache entries."""
-
-    def test_cache_key_contains_target(self):
-        """Cache key must carry an arch-only ('_target_', GPUTarget). The kernel
-        binary is device-independent, so the key has no device id and the same
-        artifact is shared across same-arch GPUs."""
-        from flydsl.compiler.backends import GPUTarget, get_backend
-
-        jf = _noop_launch
-        jf._ensure_sig()
-
-        sig = jf._sig
-        bound = sig.bind()
-        bound.apply_defaults()
-        key = jf._resolve_and_make_cache_key(bound.arguments)
-
-        assert isinstance(key, tuple)
-        target_entry = next((v for k, v in key if k == "_target_"), None)
-        assert isinstance(target_entry, GPUTarget)
-        assert target_entry == get_backend().target
-
-    def test_different_arch_gives_different_key(self, monkeypatch):
-        """Monkeypatch ARCH env var → different GPUTarget → different cache key.
-
-        _backend_target is resolved once in _ensure_sig(); we reset _sig to
-        force re-resolution after changing ARCH.
-        """
-        from flydsl.compiler.backends import _make_backend, get_backend
-
-        jf = _noop_launch
-        jf._ensure_sig()
-
-        sig = jf._sig
-        bound = sig.bind()
-        bound.apply_defaults()
-
-        key1 = jf._resolve_and_make_cache_key(bound.arguments)
-        saved_target = jf._backend_target
-
-        real_arch = get_backend().target.arch
-        fake_arch = "gfx950" if real_arch != "gfx950" else "gfx942"
-
-        monkeypatch.setenv("ARCH", fake_arch)
-        _make_backend.cache_clear()
-
-        try:
-            jf._sig = None
-            jf._backend_target = None
-            jf._ensure_sig()
-
-            key2 = jf._resolve_and_make_cache_key(bound.arguments)
-            assert key1 != key2
-            t1 = next(v for k, v in key1 if k == "_target_")
-            t2 = next(v for k, v in key2 if k == "_target_")
-            assert t1.arch != t2.arch
-        finally:
-            monkeypatch.delenv("ARCH", raising=False)
-            _make_backend.cache_clear()
-            jf._sig = sig
-            jf._backend_target = saved_target
-
-
 class TestCacheDisabledRegression:
     """Regression coverage for FLYDSL_RUNTIME_ENABLE_CACHE=0 launch path."""
 
@@ -289,7 +223,6 @@ class TestCacheDisabledRegression:
         torch.cuda.synchronize()
         assert _noop_launch.cache_manager is None
         assert len(_noop_launch._mem_cache) == 1
-        assert len(_noop_launch._call_state_cache) == 1
 
         artifact = next(iter(_noop_launch._mem_cache.values()))
         artifact_ref = weakref.ref(artifact)
@@ -308,7 +241,6 @@ class TestCacheDisabledRegression:
         _noop_launch(stream)
         torch.cuda.synchronize()
         assert next(iter(_noop_launch._mem_cache.values())) is kept_alive
-        assert len(_noop_launch._call_state_cache) == 1
 
     def test_cache_disabled_run_perftest_does_not_crash(self, monkeypatch):
         from tests.test_common import run_perftest
@@ -326,4 +258,3 @@ class TestCacheDisabledRegression:
         assert math.isfinite(avg_us)
         assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
-        assert len(_noop_launch._call_state_cache) == 1

@@ -5,6 +5,35 @@
 // Pointer operation lowering tests:
 //   - fly.add_offset -> llvm.getelementptr
 //   - fly.make_view -> identity/bitcast
+//   - fly.to_llvm_ptr -> converted-operand passthrough
+
+// -----
+
+// === ToLLVMPtr ===
+
+// fly.to_llvm_ptr exposes the already-converted !llvm.ptr; the address space
+// is explicit in Fly IR and verified against the ROCDL pointer conversion, so
+// a matching conversion lowers to a no-op passthrough with no integer cast.
+
+// CHECK-LABEL: @test_to_llvm_ptr_global
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<1>) -> !llvm.ptr<1>
+func.func @test_to_llvm_ptr_global(%ptr: !fly.ptr<f32, global>) -> !llvm.ptr<1> {
+  // CHECK-NOT: fly.to_llvm_ptr
+  // CHECK-NOT: llvm.ptrtoint
+  // CHECK-NOT: llvm.inttoptr
+  // CHECK: return %[[PTR]] : !llvm.ptr<1>
+  %r = fly.to_llvm_ptr(%ptr) {llvm_address_space = 1 : i32} : (!fly.ptr<f32, global>) -> !llvm.ptr<1>
+  return %r : !llvm.ptr<1>
+}
+
+// CHECK-LABEL: @test_to_llvm_ptr_shared
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<3>) -> !llvm.ptr<3>
+func.func @test_to_llvm_ptr_shared(%ptr: !fly.ptr<f32, shared>) -> !llvm.ptr<3> {
+  // CHECK-NOT: fly.to_llvm_ptr
+  // CHECK: return %[[PTR]] : !llvm.ptr<3>
+  %r = fly.to_llvm_ptr(%ptr) {llvm_address_space = 3 : i32} : (!fly.ptr<f32, shared>) -> !llvm.ptr<3>
+  return %r : !llvm.ptr<3>
+}
 
 // -----
 

@@ -7,14 +7,12 @@ Keep helper naming consistent with other kernel helpers (e.g. `mfma_preshuffle_p
 but this module is intentionally small and MLIR-dialect facing.
 """
 
-from contextlib import contextmanager
-
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import builtin
 from flydsl._mlir.dialects import gpu as _gpu
-from flydsl._mlir.dialects import scf as _scf
-from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import get_warp_size as get_warp_size
 
 # Memory/atomic primitives now live in mem_ops; re-exported here for back-compat.
 from kernels.common.mem_ops import _create_llvm_ptr
@@ -22,40 +20,18 @@ from kernels.common.mem_ops import atomic_add as atomic_add
 from kernels.common.mem_ops import get_llvm_ptr as get_llvm_ptr
 
 
-@contextmanager
-def _if_then(if_op, scf=None):
-    """Context manager for SCF IfOp then-region across old/new Python APIs.
+def format_kernel_name(name: str) -> str:
+    """Sanitize a kernel symbol name for the amdhsa assembler.
 
-    Ensures the then block always ends with a YieldOp.
-    The optional *scf* parameter is accepted for backward compatibility
-    but ignored — the module-level import is used.
+    Config values interpolated into a kernel name may be negative (e.g. the
+    grouped-contiguous sentinel ``topk=-1`` renders as ``tk-1``). A hyphen is
+    not a legal symbol character, so the assembler misparses the
+    ``.amdhsa_kernel`` directive and the whole module fails to link.
     """
-    with ir.InsertionPoint(if_op.then_block):
-        try:
-            yield if_op.then_block
-        finally:
-            blk = if_op.then_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
-                _scf.YieldOp([])
+    return name.replace("-", "_")
 
 
-@contextmanager
-def _if_else(if_op, scf=None):
-    """Context manager for SCF IfOp else-region across old/new Python APIs.
-
-    Ensures the else block always ends with a YieldOp. The optional *scf*
-    parameter is accepted for backward compatibility but ignored.
-    """
-    if getattr(if_op, "else_block", None) is None:
-        raise RuntimeError("IfOp has no else block")
-    with ir.InsertionPoint(if_op.else_block):
-        try:
-            yield if_op.else_block
-        finally:
-            blk = if_op.else_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
-                _scf.YieldOp([])
-
+LOG2E = 1.4426950408889634
 
 _VALID_A_DTYPES = frozenset(("fp8", "fp16", "int8", "fp4"))
 _VALID_B_DTYPES = frozenset(("fp8", "fp16", "int8", "int4", "fp4"))
@@ -85,14 +61,41 @@ def dtype_to_elem_type(dtype_str: str):
     raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', 'bf16', or 'fp8')")
 
 
-def get_warp_size(arch=None):
-    """Return the wavefront/warp size for the given GPU architecture.
+def cvt_sr_f32_to_bf16(x, rand):
+    """Stochastically convert f32 to bf16 using raw random bits.
 
-    CDNA (gfx9xx) uses wave64, RDNA (gfx10xx/gfx11xx/gfx12xx) uses wave32.
+    The add-then-truncate conversion matches AMD's non-saturating behavior.
     """
-    if arch is None:
-        arch = get_rocm_arch()
-    return 32 if is_rdna_arch(arch) else 64
+    bits = fx.Float32(x).bitcast(fx.Uint32) + (fx.Uint32(rand) & 0xFFFF)
+    return fx.Uint16(bits >> 16).bitcast(fx.BFloat16)
+
+
+def default_f8_type() -> ir.Type:
+    """Select E4M3 f8 type compatible with the current GPU arch.
+
+    - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx12*: FP8 E4M3FN (OCP)
+    - gfx94* (MI300): FP8 E4M3FNUZ
+
+    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
+    native FP8 instructions, so FP8 compute would surface as a late LLVM
+    "cannot select" error. Fail early with a clear message instead.
+    """
+    arch = ""
+    try:
+        arch = str(get_rocm_arch())
+    except Exception:
+        arch = ""
+    if "gfx95" in arch or "gfx12" in arch:
+        return fx.Float8E4M3FN.ir_type
+    if arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"default_f8_type(): no native FP8 support on {arch}; "
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
+            "Use bf16/f16 GEMM via "
+            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
+        )
+    return fx.Float8E4M3FNUZ.ir_type
 
 
 def stream_ptr_to_async_token(stream_ptr_value, loc=None, ip=None):

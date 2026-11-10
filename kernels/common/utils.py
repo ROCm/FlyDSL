@@ -3,8 +3,7 @@
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, rocdl
+from flydsl.expr import const_expr, rocdl
 from flydsl.expr.typing import T
 
 # Pointer/global-load helpers now live in mem_ops; re-exported here for back-compat.
@@ -15,37 +14,50 @@ from kernels.common.mem_ops import global_load_i64x2 as global_load_i64x2
 from kernels.common.mem_ops import global_ptr_from_addr as global_ptr_from_addr
 
 
+def global_pointer_from_addr(addr, dtype, *, alignment: int):
+    ptr_type = fx.PointerType.get(
+        elem_ty=dtype.ir_type,
+        address_space=fx.AddressSpace.Global,
+        alignment=alignment,
+    )
+    return fx.inttoptr(ptr_type, addr)
+
+
+def copy_load(source, offset, copy_atom, register):
+    fx.copy(copy_atom, fx.slice(source, (None, fx.Int32(offset))), register)
+    return fx.memref_load_vec(register)
+
+
+def copy_store(destination, offset, copy_atom, register, value):
+    fx.memref_store_vec(value, register)
+    fx.copy(copy_atom, register, fx.slice(destination, (None, fx.Int32(offset))))
+
+
+def load_global_16b(global_ptr, byte_offset, copy_atom, register):
+    source = fx.make_view(global_ptr + byte_offset, fx.make_layout(16, 1))
+    fx.copy(copy_atom, source, register)
+    return fx.memref_load_vec(register).bitcast(fx.Int64)
+
+
 def rcp_f32(value):
     return rocdl.rcp(T.f32, value)
 
 
-def exp2_amdgcn_scalar(scalar_value):
-    raw = (
-        arith.unwrap(scalar_value)
-        if hasattr(scalar_value, "ir_value") or hasattr(scalar_value, "type")
-        else scalar_value
-    )
-    f32_ty = ir.F32Type.get()
-    return llvm.call_intrinsic(f32_ty, "llvm.amdgcn.exp2.f32", [raw], [], [])
-
-
 def exp2_f32_fast(value):
-    from flydsl._mlir.dialects import vector as _vector_dialect
-
-    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    raw = fx.as_ir_value(value)
     ty = raw.type
     if isinstance(ty, ir.VectorType):
-        n = ty.shape[0]
-        elems = []
-        for i in range(n):
-            scalar = _vector_dialect.extract(raw, static_position=[i], dynamic_position=[])
-            elems.append(exp2_amdgcn_scalar(scalar))
-        return _vector_dialect.from_elements(ty, elems)
-    return exp2_amdgcn_scalar(raw)
+        vec = fx.Vector(raw)
+        elems = [rocdl.exp2(T.f32, vec[i].ir_value()) for i in range(ty.shape[0])]
+        return fx.Vector.from_elements(elems, vec.dtype)
+    return rocdl.exp2(T.f32, raw)
 
 
-def cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
+def cdiv(numer, denom):
+    """Ceiling division for host integers and typed DSL integer values."""
+    if isinstance(numer, (fx.Numeric, fx.Vector)) or isinstance(denom, (fx.Numeric, fx.Vector)):
+        return fx.ceildiv(numer, denom)
+    return -(-numer // denom)
 
 
 # Alias: several kernels historically spelled this ``ceildiv``.

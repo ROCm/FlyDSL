@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from itertools import chain
+from types import FunctionType
 from typing import Any, List
 
 from .._mlir import ir
 from ..compiler.protocol import (
     c_abi_spec,
     cache_signature,
+    construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
@@ -26,6 +29,7 @@ from .typing import Array, Constexpr, Pointer
 __all__ = [
     "struct",
     "Struct",
+    "Empty",
     "union",
     "Union",
     "Array",
@@ -78,6 +82,49 @@ _RESERVED_FIELD_NAMES = frozenset(
 )
 
 
+def _field_type_signature(dtype):
+    """Stable field/specialization keys, without inspecting Python object state."""
+    if is_composite_type(dtype):
+        return dtype.__cache_signature__()
+    if _is_constexpr_type(dtype) and dtype.is_specialized:
+        return ("constexpr", Constexpr.value_signature(dtype.value))
+    if issubclass(dtype, Array._Base):
+        return ("array", _field_type_signature(dtype.dtype), dtype.size, dtype.align)
+    if issubclass(dtype, Align):
+        return ("align", _field_type_signature(dtype.dtype), dtype.align)
+    if issubclass(dtype, Storage):
+        return ("storage", _field_type_signature(dtype._target_type))
+    return (dtype.__module__, dtype.__qualname__)
+
+
+def _make_cache_signature(definition, fields):
+    """Schema signature for the type; an instance adds its exact type and runtime fields."""
+    field_keys = tuple((name, _field_type_signature(dtype)) for name, dtype in fields)
+    signature = ("composite", hashlib.sha256(repr((definition, field_keys)).encode()).hexdigest())
+    runtime_fields = tuple(name for name, dtype in fields if not _is_constexpr_type(dtype))
+
+    def __cache_signature__(self=None):
+        if self is None:
+            return signature
+        return (type(self), *((name, cache_signature(getattr(self, name))) for name in runtime_fields))
+
+    return __cache_signature__
+
+
+def _normalize_members(klass):
+    """Collect the class body's methods and properties to install natively."""
+    members = {}
+    for name, member in vars(klass).items():
+        function = member.fget if isinstance(member, property) else getattr(member, "__func__", member)
+        # @flyc.jit / @flyc.kernel members wrap the function they rewrote in place.
+        function = getattr(function, "func", None) or getattr(function, "_func", None) or function
+        if isinstance(function, FunctionType):
+            members[name] = member
+    if "__eq__" in members and vars(klass).get("__hash__") is None:
+        members["__hash__"] = None
+    return members
+
+
 def _validate_field_name(name: str, context: str):
     if name.startswith("_"):
         raise ValueError(f"{context}: field name '{name}' must not start with underscore")
@@ -112,10 +159,13 @@ def _storage_layout(schema: type) -> tuple[int, int, dict[str, int]]:
 
     def _field_layout(field: FieldDef) -> tuple[int, int]:
         try:
-            return dsl_size_of(field.type_spec), dsl_align_of(field.type_spec)
+            size = dsl_size_of(field.type_spec)
+            align = dsl_align_of(field.type_spec)
+            # Empty fields, including nested containers, add neither bytes nor padding.
+            return size, align if size else 1
         except TypeError as exc:
             raise TypeError(
-                f"Cannot compute layout for schema {_display_name(schema)}: field '{field.name}' has type "
+                f"Cannot compute layout for type {_display_name(schema)}: field '{field.name}' has type "
                 f"{_type_name(field.type_spec)} which does not implement the Storable protocol."
             ) from exc
 
@@ -161,14 +211,14 @@ def _resolve_field(schema: type, key: int | str) -> FieldDef:
     fields = schema.__dsl_field_defs__
     if isinstance(key, int):
         if key < 0 or key >= len(fields):
-            raise IndexError(f"Index {key} out of range for schema {_display_name(schema)} with {len(fields)} fields.")
+            raise IndexError(f"Index {key} out of range for type {_display_name(schema)} with {len(fields)} fields.")
         return fields[key]
     if isinstance(key, str):
         for f in fields:
             if f.name == key:
                 return f
         available = [f.name for f in fields]
-        raise KeyError(f"Field '{key}' not found in schema {_display_name(schema)}. Available fields: {available}.")
+        raise KeyError(f"Field '{key}' not found in type {_display_name(schema)}. Available fields: {available}.")
 
 
 def _type_cache_key(type_spec: Any):
@@ -260,6 +310,7 @@ def _specialize_type(base_cls: type, fields: tuple[FieldDef, ...], values: dict[
         "__dsl_effective_field_defs__": tuple(effective),
         "__dsl_base_type__": base_cls,
         "__dsl_display_name__": _display_name(base_cls) + suffix,
+        "__cache_signature__": _make_cache_signature(base_cls.__cache_signature__(), effective),
     }
     specialized = type(base_cls.__name__ + suffix, (base_cls,), namespace)
     _specialization_cache[cache_key] = specialized
@@ -274,20 +325,31 @@ def _effective_field_defs(schema: type) -> tuple[tuple[str, Any], ...]:
     return tuple(getattr(base_cls, "__annotations__", {}).items())
 
 
+def _runtime_fields(obj: Any) -> list[tuple[str, Any]]:
+    """``(name, value)`` of a struct instance's non-constexpr fields, in C ABI packing order."""
+    return [
+        (name, getattr(obj, name))
+        for name, eff_type in _effective_field_defs(type(obj))
+        if not _is_constexpr_type(eff_type)
+    ]
+
+
 def _carrier_for_field(eff_type: Any, value: Any) -> Any:
     if isinstance(eff_type, type) and issubclass(eff_type, Constexpr):
         return eff_type
     return value
 
 
-def _construct_field_from_ir(type_spec: Any, values):
+def _construct_field_from_ir(type_spec: Any, values, exemplar=None):
     ctor = getattr(type_spec, "__construct_from_ir_values__", None)
     if ctor is None:
         raise TypeError(f"struct field type {_type_name(type_spec)} does not implement __construct_from_ir_values__")
-    return ctor(values)
+    return ctor(values, exemplar) if exemplar is not None else ctor(values)
 
 
 def _ir_value_count_from_type(type_spec: Any) -> int:
+    if getattr(type_spec, "__dsl_align_wrapper__", False):
+        return _ir_value_count_from_type(type_spec.dtype)
     if is_struct_type(type_spec):
         return sum(_ir_value_count_from_type(eff) for _, eff in _effective_field_defs(type_spec))
     types_fn = getattr(type_spec, "__get_ir_types__", None)
@@ -299,19 +361,19 @@ def _ir_value_count_from_type(type_spec: Any) -> int:
     return 1
 
 
-def _normalize_inline_fields(params) -> tuple[FieldDef, ...]:
+def _normalize_inline_fields(params, display: str) -> tuple[FieldDef, ...]:
     if not isinstance(params, tuple):
         params = (params,)
     if len(params) == 0:
-        raise ValueError("inline schema requires at least one field")
+        raise ValueError("inline type requires at least one field")
     fields = []
     seen: set[str] = set()
     for idx, item in enumerate(params):
         if isinstance(item, slice):
             if not isinstance(item.start, str) or item.stop is None:
-                raise TypeError("named inline fields must use Schema['name': Type] syntax")
+                raise TypeError(f"named inline fields must use {display}['name': Type] syntax")
             name = item.start
-            _validate_field_name(name, "inline schema")
+            _validate_field_name(name, "inline type")
             type_spec = item.stop
         else:
             name = f"_{idx}"
@@ -335,6 +397,8 @@ def _inline_display_name(display: str, params, fields: tuple[FieldDef, ...]) -> 
 
 def is_specializable_struct_type(tp: Any) -> bool:
     """True if *tp* is a struct type carrying a (possibly nested) Constexpr field."""
+    if getattr(tp, "__dsl_align_wrapper__", False):
+        return is_specializable_struct_type(tp.dtype)
     if not is_struct_type(tp):
         return False
     for _name, eff in _effective_field_defs(tp):
@@ -352,7 +416,14 @@ def _make_composite_class(
     fields: tuple[FieldDef, ...],
     policy: CompositeKind,
     display_name: str,
+    members=None,
+    qualname=None,
+    doc=None,
 ):
+    members = members or {}
+    conflicts = members.keys() & {field.name for field in fields}
+    if conflicts:
+        raise ValueError(f"{name}: members conflict with fields: {sorted(conflicts)}")
     identity = _make_type_identity(policy, fields)
 
     def __init__(self, *args, **kwargs):
@@ -415,8 +486,13 @@ def _make_composite_class(
         rebuilt = {}
         cursor = 0
         for name, eff_type in _effective_field_defs(cls):
-            nvalues = _ir_value_count_from_type(eff_type)
-            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues])
+            field_exemplar = getattr(exemplar, name) if exemplar is not None else None
+            nvalues = (
+                len(get_ir_types(_carrier_for_field(eff_type, field_exemplar)))
+                if field_exemplar is not None
+                else _ir_value_count_from_type(eff_type)
+            )
+            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues], field_exemplar)
             cursor += nvalues
         if cursor != len(values):
             raise ValueError(f"struct {_display_name(cls)} expected {cursor} ir.Values, got {len(values)}")
@@ -434,10 +510,8 @@ def _make_composite_class(
         # Recurse each non-constexpr field through the shared ABI dispatcher and
         # wrap every sub-slot fill so it reads the field off the struct instance.
         slots = []
-        for name, eff_type in _effective_field_defs(type(self)):
-            if _is_constexpr_type(eff_type):
-                continue
-            for ctype, subfill in c_abi_spec(getattr(self, name)):
+        for name, value in _runtime_fields(self):
+            for ctype, subfill in c_abi_spec(value):
 
                 def fill(struct_arg, s, _n=name, _f=subfill):
                     _f(getattr(struct_arg, _n), s)
@@ -465,7 +539,7 @@ def _make_composite_class(
                 continue
             if name not in offsets:
                 raise TypeError(
-                    f"Cannot peek field '{name}' in schema {_display_name(cls)} because it has no storage offset."
+                    f"Cannot peek field '{name}' in type {_display_name(cls)} because it has no storage offset."
                 )
             values[name] = peek_from_ptr(eff_type, add_offset(ptr, offsets[name]))
         return cls(**values)
@@ -488,22 +562,14 @@ def _make_composite_class(
                 continue
             if field.name not in offsets:
                 raise TypeError(
-                    f"Cannot poke field '{field.name}' in schema {_display_name(cls)} because it has no storage offset."
+                    f"Cannot poke field '{field.name}' in type {_display_name(cls)} because it has no storage offset."
                 )
             poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
-    def __cache_signature__(self):
-        parts = [type(self)]
-        for field in fields:
-            if _is_constexpr_type(field.type_spec):
-                # Constexpr fields are already folded into type(self) by _specialize_type,
-                # so only the non-constexpr field values need to be encoded here.
-                continue
-            parts.append((field.name, cache_signature(getattr(self, field.name))))
-        return tuple(parts)
-
     namespace = {
         "__module__": module,
+        "__qualname__": qualname or name,
+        "__doc__": doc,
         "__annotations__": {field.name: field.type_spec for field in fields},
         "__dsl_composite_kind__": policy,
         "__dsl_field_defs__": fields,
@@ -517,7 +583,9 @@ def _make_composite_class(
         "__hash__": __hash__,
         "__extract_to_ir_values__": __extract_to_ir_values__,
         "__construct_from_ir_values__": __construct_from_ir_values__,
-        "__cache_signature__": __cache_signature__,
+        "__cache_signature__": _make_cache_signature(
+            (module, qualname, policy.name), tuple((field.name, field.type_spec) for field in fields)
+        ),
         "__get_ir_types__": __get_ir_types__,
         "__c_abi_spec__": __c_abi_spec__,
         "__dsl_size_of__": __dsl_size_of__,
@@ -526,6 +594,7 @@ def _make_composite_class(
         "__poke_into_ptr__": __poke_into_ptr__,
         "replace": replace,
     }
+    namespace.update(members)
     schema = type(name, (), namespace)
     schema.__dsl_base_type__ = schema
     return schema
@@ -539,16 +608,21 @@ class CompositeMeta(type):
         return cls
 
     def __call__(cls, klass=None, /, **kwargs):
+        # Preserve the decorator API's acceptance of ignored keyword options.
         policy = cls._policy
 
         def wrap(wrapped):
             fields = _normalize_decorator_fields(wrapped)
+            members = _normalize_members(wrapped)
             return _make_composite_class(
                 name=wrapped.__name__,
                 module=wrapped.__module__,
                 fields=fields,
                 policy=policy,
                 display_name=wrapped.__name__,
+                members=members,
+                qualname=wrapped.__qualname__,
+                doc=wrapped.__doc__,
             )
 
         if klass is None:
@@ -556,7 +630,7 @@ class CompositeMeta(type):
         return wrap(klass)
 
     def __getitem__(cls, params):
-        fields = _normalize_inline_fields(params)
+        fields = _normalize_inline_fields(params, cls._display)
         display_name = _inline_display_name(cls._display, params, fields)
         return _make_composite_class(
             name=f"_Dsl{cls._display}_{abs(hash(_make_type_identity(cls._policy, fields)))}",
@@ -580,6 +654,65 @@ Struct = struct
 Union = union
 
 
+class Empty:
+    """Zero-size value with alignment 1 and no runtime IR values.
+
+    Use ``Empty`` for storage that requires no memory. Allocating it returns a
+    pointer-free ``Storage[Empty]``; ``peek()`` returns ``Empty()`` and
+    ``poke(Empty())`` is a no-op, with no allocation or alignment padding.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return f"{type(self).__name__}()"
+
+    def __eq__(self, other):
+        return True if type(self) is type(other) else NotImplemented
+
+    def __hash__(self):
+        return hash(type(self))
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if values:
+            raise ValueError(f"{cls.__name__} expected 0 ir.Values, got {len(values)}")
+        return cls()
+
+    def __extract_to_ir_values__(self):
+        return []
+
+    @classmethod
+    def __get_ir_types__(cls):
+        return []
+
+    @classmethod
+    def __cache_signature__(cls):
+        return (cls.__module__, cls.__qualname__)
+
+    def __c_abi_spec__(self):
+        return []
+
+    @classmethod
+    def __dsl_size_of__(cls):
+        return 0
+
+    @classmethod
+    def __dsl_align_of__(cls):
+        return 1
+
+    @classmethod
+    def __peek_from_ptr__(cls, ptr):
+        return cls()
+
+    @classmethod
+    def __poke_into_ptr__(cls, ptr, value):
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{cls.__name__}.__poke_into_ptr__ expects {cls.__name__} value, got {type(value).__name__}."
+            )
+
+
 class Align:
     __dsl_align_wrapper__: bool = False
     dtype: Any = None
@@ -595,7 +728,7 @@ class Align:
             raise TypeError(f"struct.Align alignment must be an int, got {requested_align!r}")
         if requested_align <= 0:
             raise ValueError(f"struct.Align alignment must be positive, got {requested_align}")
-        if not (requested_align > 0 and (requested_align & (requested_align - 1)) == 0):
+        if requested_align & (requested_align - 1):
             raise ValueError(f"struct.Align alignment must be a power of two, got {requested_align}")
         natural = dsl_align_of(dtype)
         if requested_align < natural:
@@ -603,6 +736,32 @@ class Align:
                 f"struct.Align[{_type_name(dtype)}, {requested_align}]: requested alignment {requested_align} "
                 f"is smaller than natural alignment {natural} of {_type_name(dtype)}; use a value >= {natural}."
             )
+
+        def _coerce(cls, value):
+            coerce = getattr(dtype, "__coerce__", None)
+            if coerce is not None:
+                return coerce(value)
+            if not isinstance(value, dtype):
+                raise TypeError(f"expects {_type_name(dtype)}, got {type(value).__name__}")
+            return value
+
+        specializations = {}
+
+        def _specialize_for_value(cls, value):
+            specializer = getattr(dtype, "__specialize_for_value__", None)
+            inner = (
+                specializer(value)
+                if specializer is not None
+                else type(value) if is_composite_type(type(value)) else dtype
+            )
+            if inner is dtype:
+                return cls
+            if inner not in specializations:
+                specializations[inner] = Align[inner, requested_align]
+            return specializations[inner]
+
+        def _construct(cls, values, exemplar=None):
+            return construct_from_ir_values(dtype, dtype if exemplar is None else exemplar, values)
 
         def _aligned_size_of(inner=dtype):
             return dsl_size_of(inner)
@@ -628,6 +787,9 @@ class Align:
                 "dtype": dtype,
                 "align": requested_align,
                 "__dsl_align_wrapper__": True,
+                "__coerce__": classmethod(_coerce),
+                "__specialize_for_value__": classmethod(_specialize_for_value),
+                "__construct_from_ir_values__": classmethod(_construct),
                 "__cache_signature__": classmethod(lambda cls, _f=_cache_sig: _f()),
                 "__dsl_size_of__": classmethod(lambda cls, _f=_aligned_size_of: _f()),
                 "__dsl_align_of__": classmethod(lambda cls, _f=_aligned_align_of: _f()),
@@ -660,12 +822,42 @@ class Storage:
         class _StorageImpl(Storage):
             _target_type = target_type
 
+            # The bytes are reached through exactly one of:
+            # - ``ptr``: a base pointer; composite fields live at their byte offsets from it.
+            # - ``prebuilt``: field name -> Storage, for a struct whose fields are separate
+            #   allocations without a common base (static SharedAllocator).
+            # Neither is set for storage without bytes (Empty, constexpr-only structs).
             def __init__(self, ptr, prebuilt=None):
+                if ptr is not None and prebuilt:
+                    raise ValueError(f"Storage[{target_name}] takes a base pointer or prebuilt fields, not both")
                 object.__setattr__(self, "_ptr", ptr)
                 object.__setattr__(self, "_prebuilt", prebuilt or {})
 
+            def __extract_to_ir_values__(self):
+                ptr = object.__getattribute__(self, "_ptr")
+                if ptr is not None:
+                    return extract_to_ir_values(ptr)
+                return extract_to_ir_values(object.__getattribute__(self, "_prebuilt"))
+
+            @classmethod
+            def __construct_from_ir_values__(cls, values, exemplar=None):
+                # The type alone does not tell a base pointer from prebuilt fields (static
+                # and dynamic placement share Storage[T]), so without an exemplar assume a
+                # base pointer. Control flow and struct fields always pass the exemplar.
+                if exemplar is None:
+                    if len(values) != 1:
+                        raise ValueError(f"Storage[{target_name}] expected 1 ir.Value, got {len(values)}")
+                    return cls(Pointer.__construct_from_ir_values__(values))
+                ptr = object.__getattribute__(exemplar, "_ptr")
+                if ptr is not None:
+                    return cls(construct_from_ir_values(type(ptr), ptr, values))
+                prebuilt = object.__getattribute__(exemplar, "_prebuilt")
+                return cls(None, prebuilt=construct_from_ir_values(dict, prebuilt, values))
+
             def peek(self):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return Empty()
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     values = {}
@@ -686,6 +878,8 @@ class Storage:
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return poke_into_ptr(Empty, None, value)
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     for name, eff_type in _effective_field_defs(dsl_type):
@@ -766,7 +960,9 @@ class Arena:
 
     def _bump(self, nbytes: int, align: int) -> int:
         offset = _align_up(self._offset, align)
-        self._offset = offset + nbytes
+        # A zero-size allocation must not consume alignment padding either.
+        if nbytes:
+            self._offset = offset + nbytes
         return offset
 
     @dsl_loc_tracing
@@ -791,5 +987,7 @@ class Arena:
             nbytes = dsl_size_of(storable)
             align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
             offset = self._bump(nbytes, align)
+            if storable is Empty:
+                return Storage[Empty](None)
             base = add_offset(self.base_ptr, offset)
             return Storage[storable](base)

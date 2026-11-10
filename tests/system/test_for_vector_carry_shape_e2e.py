@@ -22,7 +22,6 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -39,9 +38,8 @@ def _k_vec_carry(Out: fx.Tensor, n: fx.Int32):
     for _ in range(1, n):  # dynamic bound -> scf.for, so vec_sum is loop-carried
         vec_sum += fx.Vector.filled((4, 1), 1.0, fx.Float32)
     # After 1 init + (n-1) adds, every element == n; reduce over the 4 lanes -> 4*n.
-    s = vec_sum.reduce(fx.vector.ReductionOp.ADD)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(s, rsrc, tid)
+    s = vec_sum.reduce(fx.ReductionOp.ADD)
+    Out[tid] = s
 
 
 @flyc.jit

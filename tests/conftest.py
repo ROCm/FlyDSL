@@ -93,6 +93,17 @@ def insert_point(ctx):
         yield InsertionPoint.current
 
 
+@pytest.fixture
+def rocm_arch():
+    """Resolve the target only for tests that require ROCm hardware."""
+    from flydsl.runtime.device import get_rocm_arch
+
+    try:
+        return get_rocm_arch()
+    except RuntimeError as error:
+        pytest.skip(str(error))
+
+
 def pytest_addoption(parser):
     """Add FlyDSL test-session options that map to env variables."""
     group = parser.getgroup("flydsl")
@@ -129,3 +140,25 @@ def pytest_sessionfinish(session, exitstatus):
     """Prevent pytest from erroring on empty test files."""
     if exitstatus == 5:
         session.exitstatus = 0
+
+
+# Test files that check Linux-only behaviour, or that only hold on POSIX,
+# and therefore fail on Windows for reasons outside FlyDSL's Windows support.
+_WINDOWS_SKIPS = {
+    "test_llvm_extension_apply.py": "drives the Linux bash build scripts",
+    "test_python_interpreter_pinning.py": "drives the Linux bash build scripts",
+    "test_external_llvm_codegen.py": "fake tools are POSIX shebang scripts",
+    "test_inject_asm.py": "redirects HOME; Windows reads USERPROFILE",
+    "test_compile_error_locations.py": "compares unescaped Windows paths",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    if sys.platform != "win32":
+        return
+    for item in items:
+        reason = _WINDOWS_SKIPS.get(item.path.name)
+        if reason:
+            # A skipif placed first: pytest evaluates skipif before skip marks, so the
+            # tests' own skipif (no bash, no C compiler) would otherwise give the reason.
+            item.add_marker(pytest.mark.skipif(True, reason=f"Windows: {reason}"), append=False)

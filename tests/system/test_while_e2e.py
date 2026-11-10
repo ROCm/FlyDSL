@@ -19,7 +19,7 @@ if not torch.cuda.is_available():
 
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
-from flydsl.expr import buffer_ops, const_expr  # noqa: E402
+from flydsl.expr import const_expr  # noqa: E402
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -39,8 +39,7 @@ def _k_while_countdown(Out: fx.Tensor, n: fx.Int32):
     while offset > fx.Int32(0):
         acc = acc + offset
         offset = offset - fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -61,10 +60,9 @@ def test_while_simple_countdown():
 
 @flyc.kernel
 def _k_while_store_in_loop(Out: fx.Tensor, n: fx.Int32):
-    rsrc = buffer_ops.create_buffer_resource(Out)
     offset = n
     while offset > fx.Int32(0):
-        buffer_ops.buffer_store(offset, rsrc, fx.Int32(0))
+        Out[0] = offset
         offset = offset - fx.Int32(1)
 
 
@@ -94,8 +92,7 @@ def _k_while_with_if(Out: fx.Tensor, n: fx.Int32):
         else:
             acc = acc + fx.Int32(1)
         offset = offset - fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -122,8 +119,7 @@ def _k_while_with_for(Out: fx.Tensor, n: fx.Int32):
         for i in range(offset):
             acc = acc + fx.Int32(1)
         offset = offset - fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -150,8 +146,7 @@ def _k_for_with_while(Out: fx.Tensor, n: fx.Int32):
         while x > fx.Int32(0):
             acc = acc + fx.Int32(1)
             x = x - fx.Int32(1)
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit
@@ -177,8 +172,7 @@ def _k_while_constexpr(Out: fx.Tensor, iters: fx.Constexpr[int]):
     while const_expr(i < iters):
         acc = acc + fx.Int32(1)
         i += 1
-    rsrc = buffer_ops.create_buffer_resource(Out)
-    buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+    Out[0] = acc
 
 
 @flyc.jit

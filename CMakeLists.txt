@@ -5,12 +5,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-
 option(FLY_UNITTEST "Build Fly Unit Tests" OFF)
 
 find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
+  message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to ${CMAKE_BUILD_TYPE}")
+endif()
 
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
@@ -27,6 +31,15 @@ include(HandleLLVMOptions)
 string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
+
+# MLIR detects Python twice (Python3_ for the project, Python_ for nanobind).
+# Both passes must agree, or the extensions are built for one ABI and installed
+# under another. Included by path like the other project modules, since
+# CMAKE_MODULE_PATH only carries MLIR/LLVM's directories here.
+option(FLY_ALLOW_PYTHON_MISMATCH
+  "Warn instead of failing when MLIR's two Python detections disagree" OFF)
+include(cmake/FlyDSLPythonCheck.cmake)
+fly_check_python_consistency()
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
@@ -51,3 +64,8 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 
 add_subdirectory(python/mlir_flydsl)
+
+if(FLY_UNITTEST)
+  enable_testing()
+  add_subdirectory(tests/core)
+endif()

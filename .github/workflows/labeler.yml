@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FlyDSL Project Contributors
+#
+# Applies the path-based labels in .github/labeler.yml to pull requests.
+#
+# pull_request_target gives PRs from forks a token that can write labels. It runs this file as it
+# is on main, the job never checks out or runs PR code, and labeler reads its rules through the
+# API at the base commit, so a PR cannot change what runs or which rules apply.
+name: labeler
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  label:
+    if: github.event.action != 'edited' || github.event.changes.base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          sync-labels: true

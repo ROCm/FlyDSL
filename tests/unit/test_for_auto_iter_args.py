@@ -93,9 +93,8 @@ def _kernel_iv_liveout(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
     for i in range(n):
         acc = acc + fx.Int32(1)
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(i, rsrc, fx.Int32(0))
-    fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(1))
+    Out[0] = i
+    Out[1] = acc
 
 
 @flyc.jit
@@ -111,8 +110,7 @@ def _kernel_iv_assign(Out: fx.Tensor, start: fx.Int32, stop: fx.Int32):
     count = fx.Int32(0)
     for iv in range(start, stop):
         count = iv
-    rsrc = fx.buffer_ops.create_buffer_resource(Out)
-    fx.buffer_ops.buffer_store(count, rsrc, fx.Int32(0))
+    Out[0] = count
 
 
 @flyc.jit

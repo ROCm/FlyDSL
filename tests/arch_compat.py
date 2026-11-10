@@ -1,6 +1,6 @@
 """Architecture compatibility configuration for GPU tests and examples.
 
-Single source of truth for what runs on CDNA vs RDNA GPUs.
+Single source of truth for GPU architecture restrictions.
 Referenced by:
   - tests/kernels/conftest.py  (pytest collection filter)
   - scripts/run_tests.sh       (example script filter)
@@ -10,23 +10,31 @@ Referenced by:
 # Reasons: MFMA instructions, hardcoded wave64, or imports from CDNA-only kernels.
 CDNA_ONLY_TESTS = frozenset(
     {
+        "test_flash_attn_fwd.py",  # MFMA + hardcoded wave64 FMHA kernels
+        "test_gemm_a16w16_gfx950.py",  # gfx950-only A16W16 GEMM kernel
         "test_preshuffle_gemm.py",
-        "test_blockscale_preshuffle_gemm.py",
         "test_moe_gemm.py",
-        "test_moe_blockscale.py",
         "test_moe_reduce.py",
         "test_pa.py",
+        "test_swa_gfx950.py",
         "test_quant.py",
         "test_allreduce.py",  # custom_all_reduce requires CDNA (gfx9xx)
         "test_sage_attn.py",  # MI308X gfx942 SageAttention; also module-skip if not MI308
+        "test_mega_moe_v2.py",  # MegaMoEV2 A8W4/A4W4 requires CDNA4 (gfx95x)
     }
 )
 
-# Example scripts verified to work on RDNA (non-CDNA) GPUs.
-# On CDNA all examples run; on RDNA only whitelisted ones run.
-RDNA_COMPATIBLE_EXAMPLES = frozenset(
-    {
-        "01-vectorAdd.py",
-        "02-tiledCopy.py",
-    }
-)
+# Paths relative to examples/ -> supported architectures (shell glob patterns).
+# "*" allows any backend
+# Register each standalone example here so CI selects it before starting Python.
+EXAMPLE_ARCHITECTURES = {
+    "01-vectorAdd.py": ("*",),
+    "02-tiledCopy.py": ("gfx*",),
+    "03-tiledMma.py": ("gfx9*",),
+    "04-preshuffle_gemm.py": ("gfx9*",),
+    "05-gather_scatter.py": ("*",),
+    "06-cdna5_tensor_copy.py": ("gfx1250*",),
+    "07-ktrace_wave_timeline.py": ("gfx942", "gfx95*"),
+    "extension/coop/01-warp_collectives.py": ("*",),
+    "extension/coop/02-block_scan.py": ("*",),
+}

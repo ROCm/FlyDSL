@@ -131,7 +131,7 @@ def test_scf_if_dispatch_dynamic_type_mismatch_has_clear_error():
                 def else_fn(x):
                     return {"x": arith.ConstantOp(i64, 3).result}
 
-                with pytest.raises(TypeError, match="type mismatch|mismatched types"):
+                with pytest.raises(TypeError, match="does not match the region entry"):
                     ReplaceIfWithDispatch.scf_if_dispatch(
                         cond,
                         then_fn,

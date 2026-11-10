@@ -4,14 +4,15 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+
+#include <cassert>
+
+#include "WmmaLayout.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-
-#include "WmmaLayout.h"
 
 using namespace mlir;
 using namespace mlir::fly;
@@ -22,9 +23,42 @@ namespace mlir::fly_rocdl {
 // MmaOpGFX1250_WMMAScaleType — MX-scaled WMMA (E8M0 block scale)
 //
 // gfx1250 wave32 scaled WMMA for the unified f8/f6/f4 operand format. Per-operand
-// E8M0 scales are carried as atom state (ScaleA / ScaleB, i32), mirroring
-// MmaOpCDNA4_MFMAScaleType.
+// E8M0 scales are carried as atom state (ScaleA / ScaleB): i32 for block-32,
+// i64 for block-16. An extra scale operand in an atom-call group overrides the
+// corresponding state for that call. Omitted scale operands use atom state.
 //===----------------------------------------------------------------------===//
+
+// The shape constants come from WmmaLayout.h, shared with the plain WMMA
+// layouts on this target. The hand-over table below does not: the plain side is
+// also used by another target and disagrees about how wide a chunk of K is, so
+// each side keeps its own. Reusing one another's widths is exactly the bug this
+// layout once had.
+
+// How many consecutive K values a lane half takes before the other half takes
+// over, keyed by element width. The 8-bit formats hand over twice as often as
+// the narrower ones.
+struct KChunkRule {
+  int elemBits;
+  int chunkK;
+};
+
+constexpr int kNoKChunkRule = -1;
+
+template <size_t N> constexpr int lookupChunkK(const KChunkRule (&rules)[N], int elemBits) {
+  for (const KChunkRule &rule : rules)
+    if (rule.elemBits == elemBits)
+      return rule.chunkK;
+  return kNoKChunkRule;
+}
+
+constexpr KChunkRule kScaledKChunks[] = {
+    // fp8 / bf8.
+    {8, 16},
+    // fp6 / bf6.
+    {6, 32},
+    // fp4.
+    {4, 32},
+};
 
 std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField field) {
   switch (field) {
@@ -89,7 +123,9 @@ Value MmaOpGFX1250_WMMAScaleType::setAtomState(OpBuilder &builder, Location loc,
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, scaleVal, ArrayRef<int64_t>{*idx});
 }
 
-Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
+Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const {
+  return FxLayout(FxC(gfx1250::kWaveSize), FxC(1));
+}
 
 Attribute MmaOpGFX1250_WMMAScaleType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
@@ -100,37 +136,69 @@ Type MmaOpGFX1250_WMMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeD() const { return getElemTyAcc(); }
 
-// PROVISIONAL layouts for the 32x16x128 f4 form: the emit path is FileCheck-
-// validated, but these thr-val layouts are derived by analogy to the 16-row form
-// and NOT hardware-verified for make_tiled_mma. The shipping fp4 kernels feed
-// pre-arranged fragments through a direct mma_atom_call and never consult them.
-static Attribute scaled32RowLayoutA(MLIRContext *ctx, int32_t k) {
+// gfx1250 block-scaled WMMA A/B layout.
+// The scaled instruction has its own register layouts, separate from plain WMMA:
+// K is split into per-format chunks that alternate between the two lane halves.
+// V_WMMA_SCALE picks each value's block scale by its register slot, so A and B
+// must both match the hardware exactly (a shared K permutation is not enough).
+//   FP8:     16-wide chunks, k = (l/16)*16 + v%16 + (v/16)*32
+//   FP6/FP4: 32-wide chunks, k = (l/16)*32 + v%32 + (v/32)*64
+// A 32-row operand (the 32x16x128 f4 form) is two 16-row operands stacked in
+// consecutive VGPRs, rows 16..31 in the second half of the slots:
+//   m = l%16 + (v/64)*16, k = (l/16)*32 + v%32 + ((v/32)%2)*64
+// Reference (rows, K) space is column-major with stride (1, rows).
+static Attribute scaledLayoutAB(MLIRContext *ctx, int32_t rows, int32_t k, Type elemTy) {
   auto getContext = [&]() { return ctx; };
-  // 32 lanes over 32 M rows; each lane holds the full K. Reference (M,K) stride (1, 32).
-  return FxLayout(FxShape(FxThr(32), FxVal(k)), FxStride(FxThr(1), FxVal(32)));
+  const int chunk = lookupChunkK(kScaledKChunks, elemTy.getIntOrFloatBitWidth());
+  assert(chunk != kNoKChunkRule && "no scaled K hand-over rule for this element width");
+  const int kStride = rows;                                   // step K by one
+  const int chunkStride = chunk * kStride;                    // skip one chunk of K
+  const int roundStride = gfx1250::kLaneHalves * chunkStride; // skip both halves' chunks
+  const int chunksPerLane = k / (gfx1250::kLaneHalves * chunk);
+  const int rowBlocks = rows / gfx1250::kRowsPerBlock; // 1, or 2 for the 32-row A
+  if (rowBlocks == 1) {
+    return FxLayout(
+        FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves), FxVal(chunk, chunksPerLane)),
+        FxStride(FxThr(1, chunkStride), FxVal(kStride, roundStride)));
+  }
+  return FxLayout(
+      FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+              FxVal(chunk, chunksPerLane, rowBlocks)),
+      FxStride(FxThr(1, chunkStride), FxVal(kStride, roundStride, gfx1250::kRowsPerBlock)));
 }
 
-static Attribute scaled32x16LayoutC(MLIRContext *ctx) {
+// C/D accumulator for the block-scaled form; always f32 (see verify()).
+// Same chunking idea as A/B, but the hand-over runs along M rather than K: a
+// lane half takes kAccChunkM consecutive rows, the columns spread across the
+// 16 lanes within a half, and a 32-row C is two 16x16 halves in consecutive
+// VGPRs (M 16-31 in the second).
+//   n = l%16, m = (v/8)*16 + (l/16)*8 + v%8
+// Reference (M, N) space is column-major with stride (1, rows).
+static Attribute scaledLayoutC(MLIRContext *ctx, int32_t rows) {
   auto getContext = [&]() { return ctx; };
-  // C is 32x16 f32: N = lane%16, M = (lane/16)*16 + v, 16 VGPRs per lane.
-  return FxLayout(FxShape(FxThr(16, 2), FxVal(16)), FxStride(FxThr(16, 16), FxVal(1)));
+  const int nStride = rows; // step N by one
+  const int rowBlocks = rows / gfx1250::kRowsPerBlock;
+  if (rowBlocks == 1) {
+    return FxLayout(
+        FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves), FxVal(gfx1250::kAccChunkM)),
+        FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1)));
+  }
+  return FxLayout(FxShape(FxThr(gfx1250::kLaneHalfSize, gfx1250::kLaneHalves),
+                          FxVal(gfx1250::kAccChunkM, rowBlocks)),
+                  FxStride(FxThr(nStride, gfx1250::kAccChunkM), FxVal(1, gfx1250::kRowsPerBlock)));
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutA() const {
-  if (getM() == 32)
-    return scaled32RowLayoutA(getContext(), getK());
-  return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());
+  return scaledLayoutAB(getContext(), getM(), getK(), getElemTyA());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutB() const {
-  // B is always N=16 rows for both supported shapes.
-  return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyB());
+  // B is N rows, which is 16 for both supported shapes.
+  return scaledLayoutAB(getContext(), getN(), getK(), getElemTyB());
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getThrValLayoutC() const {
-  if (getM() == 32)
-    return scaled32x16LayoutC(getContext());
-  return gfx1250::getThrValLayoutCD(getContext(), getElemTyAcc());
+  return scaledLayoutC(getContext(), getM());
 }
 
 static bool isSupportedScaledElemTy(Type ty) {
@@ -168,10 +236,10 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic
                           "f6E3M2FN, f4E2M1FN, got "
                        << elemTyB;
   }
-  if (opselA < 0 || opselA > 3)
-    return emitError() << "opselA must be in [0, 3], got " << opselA;
-  if (opselB < 0 || opselB > 3)
-    return emitError() << "opselB must be in [0, 3], got " << opselB;
+  if (opselA < 0 || opselA > 1)
+    return emitError() << "opselA must be in [0, 1] (row0/row1), got " << opselA;
+  if (opselB < 0 || opselB > 1)
+    return emitError() << "opselB must be in [0, 1] (row0/row1), got " << opselB;
   if (modC < 0 || modC > 0xFFFF)
     return emitError() << "modC must fit the i16 intrinsic field [0, 65535], got " << modC;
   return success();
@@ -205,11 +273,18 @@ static Type getScaledWmmaABType(MLIRContext *ctx, int32_t rows, int32_t k, Type 
   return VectorType::get({i32count}, IntegerType::get(ctx, 32));
 }
 
-FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc,
-                                                             Type resultTy, Type mmaAtomTyArg,
-                                                             Type dTyArg, Type aTyArg, Type bTyArg,
-                                                             Type cTyArg, Value atomVal, Value d,
-                                                             Value a, Value b, Value c) const {
+FailureOr<Value>
+MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                            Type mmaAtomTyArg, Type dTyArg, TypeRange aTyArgs,
+                                            TypeRange bTyArgs, Type cTyArg, Value atomVal, Value d,
+                                            ValueRange aValues, ValueRange bValues, Value c) const {
+  if (aValues.empty() || aValues.size() > 2 || bValues.empty() || bValues.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -231,29 +306,38 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
-  Value scaleA = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
-  Value scaleB = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  Value scaleA = aValues.size() == 2
+                     ? aValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
+  Value scaleB = bValues.size() == 2
+                     ? bValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  if (scaleA.getType() != scaleType)
+    scaleA = LLVM::BitcastOp::create(builder, loc, scaleType, scaleA);
+  if (scaleB.getType() != scaleType)
+    scaleB = LLVM::BitcastOp::create(builder, loc, scaleType, scaleB);
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
   // (i64 scale operands); block-32 the V_WMMA_SCALE form (i32 scale operands).
   bool block16 = getBlockSize() == 16;
+  auto modC = static_cast<ROCDL::WMMACModifier>(getModC());
+  auto scaleAType = static_cast<ROCDL::WMMAMatrixScale>(getOpselA());
+  auto scaleBType = static_cast<ROCDL::WMMAMatrixScale>(getOpselB());
+  auto fmtScale0 = static_cast<ROCDL::WMMAMatrixScaleFormat>(0);
+
   if (m == 32 && n == 16 && k == 128) {
-    // fp4-only form; no fmtA/fmtB operands.
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-                 /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-                 /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-                 /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, scaleA, scaleBType,
+                 fmtScale0, scaleB, getReuseA(), getReuseB())
           .getResult();
-    return ROCDL::wmma_scale_f32_32x16x128_f4::create(
-               builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+    return ROCDL::wmma_scale_f32_32x16x128_f4::create(builder, loc, accTy, a, b, modC, c,
+                                                      scaleAType, fmtScale0, scaleA, scaleBType,
+                                                      fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   }
 
@@ -262,28 +346,33 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (!aFmt || !bFmt)
     return failure();
 
+  auto fmtA = static_cast<ROCDL::MatrixFormat>(*aFmt);
+  auto fmtB = static_cast<ROCDL::MatrixFormat>(*bFmt);
+
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-               /*modC=*/(uint16_t)getModC(), c,
-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+               scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
-             /*modC=*/(uint16_t)getModC(), c,
-             /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
-             /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-             /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+             scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
       .getResult();
 }
 
 LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                       Type mmaAtomTy, Type dMemTy, Type aMemTy,
-                                                       Type bMemTy, Type cMemTy, Value atomVal,
-                                                       Value dPtr, Value aPtr, Value bPtr,
+                                                       Type mmaAtomTy, Type dMemTy,
+                                                       TypeRange aMemTys, TypeRange bMemTys,
+                                                       Type cMemTy, Value atomVal, Value dPtr,
+                                                       ValueRange aPtrs, ValueRange bPtrs,
                                                        Value cPtr) const {
+  if (aPtrs.empty() || aPtrs.size() > 2 || bPtrs.empty() || bPtrs.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   MLIRContext *ctx = builder.getContext();
   Type abTyA = getScaledWmmaABType(ctx, getM(), getK(), getElemTyA());
   Type abTyB = getScaledWmmaABType(ctx, getN(), getK(), getElemTyB());
@@ -295,8 +384,15 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Locat
   Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
-                             Value{}, a, b, c);
+  SmallVector<Value> aValues{a}, bValues{b};
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  if (aPtrs.size() == 2)
+    aValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, aPtrs[1]));
+  if (bPtrs.size() == 2)
+    bValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, bPtrs[1]));
+  auto res =
+      emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, ValueRange(aValues).getTypes(),
+                      ValueRange(bValues).getTypes(), accTy, atomVal, Value{}, aValues, bValues, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);

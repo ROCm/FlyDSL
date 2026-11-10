@@ -7,8 +7,8 @@
 and the 2D TDM copy atom.
 
 These only build the FlyROCDL atom *types* via the Python factories in
-``flydsl.expr.rocdl.universal`` and check textual round-trip + verifier
-behavior; no GPU is required.
+``flydsl.expr.rocdl.cdna5`` (gfx1250 MX-scale WMMA + TDM) and check textual
+round-trip + verifier behavior; no GPU is required.
 """
 
 import pytest
@@ -26,7 +26,7 @@ def _ctx():
 def test_wmma_scale_type_roundtrip():
     with _ctx(), ir.Location.unknown():
         from flydsl._mlir.dialects import fly_rocdl  # noqa: F401  (register dialect)
-        from flydsl.expr.rocdl import universal as U
+        from flydsl.expr.rocdl import cdna5 as U
 
         f8 = ir.Float8E4M3FNType.get()
         f4 = ir.Float4E2M1FNType.get()
@@ -46,8 +46,8 @@ def test_wmma_scale_type_roundtrip():
         assert ir.Type.parse(str(t_b16)) == t_b16
         assert t_b16 != t_fp8
 
-        t_fp4 = U.WMMAScale(16, 16, 128, f4, f4, f32, opsel_a=1, opsel_b=2)
-        assert "opselA = 1, opselB = 2" in str(t_fp4)
+        t_fp4 = U.WMMAScale(16, 16, 128, f4, f4, f32, opsel_a=1, opsel_b=1)
+        assert "opselA = 1, opselB = 1" in str(t_fp4)
         assert ir.Type.parse(str(t_fp4)) == t_fp4
 
         # 32x16x128 fp4 (A/B-swap perf path)
@@ -61,10 +61,30 @@ def test_wmma_scale_type_roundtrip():
         assert ir.Type.parse(str(t_reuse)) == t_reuse
 
 
+def test_wmma_type_modc_roundtrip():
+    with _ctx(), ir.Location.unknown():
+        from flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
+        from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
+
+        bf16 = ir.BF16Type.get()
+        f32 = ir.F32Type.get()
+
+        t_default = MmaOpGFX1250_WMMAType.get(16, 16, 32, bf16, bf16, f32)
+        assert "gfx1250.wmma<" in str(t_default)
+        # Defaults (modC=0) are elided from the printed form.
+        assert "modC" not in str(t_default)
+        assert ir.Type.parse(str(t_default)) == t_default
+
+        t_modc = MmaOpGFX1250_WMMAType.get(16, 16, 32, bf16, bf16, f32, mod_c=1)
+        assert "modC = 1" in str(t_modc)
+        assert ir.Type.parse(str(t_modc)) == t_modc
+        assert t_modc != t_default
+
+
 def test_tdm2d_type_roundtrip():
     with _ctx(), ir.Location.unknown():
         from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
-        from flydsl.expr.rocdl import universal as U
+        from flydsl.expr.rocdl import cdna5 as U
 
         t = U.TDM(2, 1)
         assert "gfx1250.tdm<" in str(t)

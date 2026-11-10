@@ -38,11 +38,12 @@ from ..._mlir.dialects import (
 )
 from ..._mlir.dialects import (
     rocdl,
+    vector,
 )
-from .. import arith, vector
+from .. import arith
 from ..arith import _to_raw as _raw
 from ..meta import dsl_loc_tracing
-from ..typing import T
+from ..typing import T, as_ir_value
 from ..utils.arith import ArithValue as _ArithValue
 
 __all__ = [
@@ -67,6 +68,13 @@ __all__ = [
     "compute_warp_distribution",
     "l2_prefetch_tile",
 ]
+
+
+def _cache_policy_attr(val):
+    """Convert an int cache-policy to an IntegerAttr for TDM ops."""
+    if val is None or isinstance(val, ir.Attribute):
+        return val
+    return ir.IntegerAttr.get(ir.IntegerType.get_signless(32), int(val))
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +202,24 @@ def _i32_const(v: int) -> ir.Value:
     return _unwrap(std_arith.ConstantOp(i32, ir.IntegerAttr.get(i32, v)).result)
 
 
+def _extract_lds_base_index(value) -> ir.Value:
+    """Extract a builtin memref or Fly shared view as an LDS byte index."""
+    raw = _unwrap(as_ir_value(value))
+    try:
+        ir.MemRefType(raw.type)
+        return _unwrap(memref_dialect.extract_aligned_pointer_as_index(raw))
+    except ValueError:
+        pass
+
+    from ..._mlir.dialects import fly as _fly_d
+
+    ptr_type = ir.Type.parse("!llvm.ptr<3>")
+    ptr = _fly_d.extract_aligned_pointer_as_index(ptr_type, raw)
+    i64 = ir.IntegerType.get_signless(64)
+    ptr_i64 = llvm_dialect.ptrtoint(i64, ptr)
+    return _unwrap(std_arith.IndexCastOp(ir.IndexType.get(), ptr_i64).result)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -219,6 +245,7 @@ def make_tensor_descriptor_2d(
     atomic_barrier_enable: bool = False,
     early_timeout: bool = False,
     oob_outer_bound=None,
+    oob_inner_bound=None,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -283,6 +310,10 @@ def make_tensor_descriptor_2d(
                        Python int or an i32/index ir.Value. None (default) keeps
                        tensor_dim1 == tile_dim1 (OOB off) — byte-identical to the
                        original path.
+        oob_inner_bound: Optional tile-start-relative runtime inner extent.
+                       Rewrites tensor_dim0 while keeping tile_dim0 unchanged,
+                       so an M tail in a transposed scale tensor is zero-filled.
+                       Supported with one descriptor warp and inner offset zero.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -348,7 +379,7 @@ def make_tensor_descriptor_2d(
     glb_addr_i64 = glb_base_i64 + glb_byte_off_i64
 
     # -- LDS address (byte address within shared memory) --
-    lds_base_idx = _ArithValue(memref_dialect.extract_aligned_pointer_as_index(lds_memref))
+    lds_base_idx = _ArithValue(_extract_lds_base_index(lds_memref))
     # Compute padded LDS stride (elements) for the outer dim
     if pad_interval > 0 and pad_amount > 0:
         lds_inner_stride = inner_tile + pad_amount  # padded row width
@@ -372,7 +403,15 @@ def make_tensor_descriptor_2d(
     g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(
         1 << 31, type=T.i32
     )  # type field = 2 in [31:30]
-    dgroup0 = vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
+    dgroup0 = vector.from_elements(
+        T.vec(4, T.i32),
+        [
+            as_ir_value(g0_s0),
+            as_ir_value(g0_s1),
+            as_ir_value(g0_s2),
+            as_ir_value(g0_s3),
+        ],
+    )
 
     # ================================================================
     # GROUP1 (vector<8xi32>): config + tensor dims + strides + tile
@@ -475,6 +514,24 @@ def make_tensor_descriptor_2d(
             arith.constant(tile_d0 << 16, type=T.i32),
         )
 
+    if oob_inner_bound is not None:
+        assert num_warps == 1, "oob_inner_bound does not subtract a per-warp inner offset"
+        assert inner_off == 0, "oob_inner_bound is relative to the descriptor start"
+        if isinstance(oob_inner_bound, int):
+            inner_i32 = arith.constant(oob_inner_bound, type=T.i32)
+        else:
+            inner_i32 = as_ir_value(oob_inner_bound)
+            if isinstance(inner_i32.type, ir.IndexType):
+                inner_i32 = arith.index_cast(T.i32, inner_i32)
+        inner_rt = arith.maxsi(inner_i32, arith.constant(0, type=T.i32))
+        low16 = arith.constant(0xFFFF, type=T.i32)
+        shift16 = arith.constant(16, type=T.i32)
+        g1_s1 = arith.shli(arith.andi(inner_rt, low16), shift16)
+        g1_s2 = arith.ori(
+            arith.shli(arith.shrui(g1_s2, shift16), shift16),
+            arith.shrui(inner_rt, shift16),
+        )
+
     # sgpr4: tile_dim1[15:0] | tile_dim2[31:16]=0  (always the full per-warp tile)
     g1_s4 = arith.constant(tile_d1 & 0xFFFF, type=T.i32)
 
@@ -490,7 +547,7 @@ def make_tensor_descriptor_2d(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
@@ -521,7 +578,7 @@ def make_tensor_gather_descriptor(
 
     Args:
         global_ptr:    The global tensor pointer (fx.Tensor).
-        lds_memref:    The LDS memref base (SmemAllocator base).
+        lds_memref:    The LDS memref base (a ``fx.SharedAllocator`` sub-buffer).
         row_indices:   List of row index MLIR i32 Values.  Max 8 for 32-bit
                        mode, max 16 for 16-bit mode.
         row_width:     Width of each row in data_size elements (= tile_dim0).
@@ -651,7 +708,7 @@ def make_tensor_gather_descriptor(
 
     dgroup1 = vector.from_elements(
         T.vec(8, T.i32),
-        [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7],
+        [as_ir_value(v) for v in [g1_s0, g1_s1, g1_s2, g1_s3, g1_s4, g1_s5, g1_s6, g1_s7]],
     )
 
     # ================================================================
@@ -673,7 +730,10 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(
+                arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                arith.constant(16, type=T.i32),
+            )
             g2_vals.append(arith.ori(lo_masked, hi_shifted))
         # Group 3: indices [8..15] packed into 4 x i32
         g3_vals = []
@@ -683,11 +743,14 @@ def make_tensor_gather_descriptor(
             lo = row_indices[lo_idx] if lo_idx < num_indices else zero
             hi = row_indices[hi_idx] if hi_idx < num_indices else zero
             lo_masked = arith.andi(lo, arith.constant(0xFFFF, type=T.i32))
-            hi_shifted = arith.shli(arith.andi(hi, arith.constant(0xFFFF, type=T.i32)), arith.constant(16, type=T.i32))
+            hi_shifted = arith.shli(
+                arith.andi(hi, arith.constant(0xFFFF, type=T.i32)),
+                arith.constant(16, type=T.i32),
+            )
             g3_vals.append(arith.ori(lo_masked, hi_shifted))
 
-    dgroup2 = vector.from_elements(T.vec(4, T.i32), g2_vals)
-    dgroup3 = vector.from_elements(T.vec(4, T.i32), g3_vals)
+    dgroup2 = vector.from_elements(T.vec(4, T.i32), [as_ir_value(v) for v in g2_vals])
+    dgroup3 = vector.from_elements(T.vec(4, T.i32), [as_ir_value(v) for v in g3_vals])
 
     return TDMGatherDescriptor(
         dgroup0=dgroup0,
@@ -740,7 +803,15 @@ def make_tensor_gather_dgroup0(
     g0_s2 = _ArithValue(std_arith.TruncIOp(i32, _raw(glb_base_i64)).result)
     hi_raw = _ArithValue(_raw(glb_base_i64)).shrui(arith.constant(32, type=T.i64))
     g0_s3 = _ArithValue(std_arith.TruncIOp(i32, _raw(hi_raw)).result) | arith.constant(1 << 31, type=T.i32)
-    return vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
+    return vector.from_elements(
+        T.vec(4, T.i32),
+        [
+            as_ir_value(g0_s0),
+            as_ir_value(g0_s1),
+            as_ir_value(g0_s2),
+            as_ir_value(g0_s3),
+        ],
+    )
 
 
 @dsl_loc_tracing
@@ -764,7 +835,7 @@ def tensor_load_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -789,7 +860,7 @@ def tensor_store_gather(
         _raw(desc.dgroup2),
         _raw(desc.dgroup3),
         dg4,
-        cache_policy,
+        cache_policy=_cache_policy_attr(cache_policy),
     )
 
 
@@ -803,6 +874,25 @@ def tensor_store_gather(
 # the loop and patching only lane 2 inside the loop, we cut the per-iteration
 # work to a single vector.insert plus the addr_lo SGPR add.
 # ---------------------------------------------------------------------------
+
+
+@dsl_loc_tracing
+def update_tensor_descriptor_2d_lds_addr(
+    desc: TDMDescriptor2D,
+    new_lds_addr,
+) -> TDMDescriptor2D:
+    """Return a 2-D descriptor with its LDS address replaced."""
+    from ..._mlir.dialects import vector as _vector_dialect
+
+    return TDMDescriptor2D(
+        dgroup0=_vector_dialect.InsertOp(
+            _raw(new_lds_addr),
+            _raw(desc.dgroup0),
+            static_position=[1],
+            dynamic_position=[],
+        ).result,
+        dgroup1=desc.dgroup1,
+    )
 
 
 def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):
@@ -911,11 +1001,11 @@ def update_tensor_gather_descriptor_addr_lo(
 # Lane 3 layout (matching ``make_tensor_descriptor_2d`` /
 # ``make_tensor_gather_dgroup0``):
 #     [31:30]  type field (always set to 2 = ``0b10`` via ``| (1 << 31)``)
-#     [29:0]   addr_hi[29:0] (high 32 bits of the original 64-bit address;
-#              only [15:0] are meaningful for 48-bit AMDGPU virtual addresses)
+#     [29:25]  reserved (zero for a valid gfx1250 D#)
+#     [24:0]   global_addr[56:32] (gfx1250 uses a 57-bit GPU virtual address)
 # ---------------------------------------------------------------------------
 
-# Mask covering the address bits in lane 3 (everything except the type field).
+# Mask covering the non-type payload in lane 3, including reserved zero bits.
 _TDM_ADDR_HI_MASK = 0x3FFFFFFF  # bits [29:0]
 # Mask covering the type-field bits at the top of lane 3.
 _TDM_ADDR_HI_FLAG_MASK = 0xC0000000  # bits [31:30]
@@ -1073,12 +1163,14 @@ def update_tensor_gather_descriptor_addr64(
 def _zero_dgroup_v4i32():
     """Create a zero vector<4xi32> for unused descriptor groups."""
     z = arith.constant(0, type=T.i32)
+    z = as_ir_value(z)
     return vector.from_elements(T.vec(4, T.i32), [z, z, z, z])
 
 
 def _zero_dgroup_v8i32():
     """Create a zero vector<8xi32> for unused descriptor groups."""
     z = arith.constant(0, type=T.i32)
+    z = as_ir_value(z)
     return vector.from_elements(T.vec(8, T.i32), [z, z, z, z, z, z, z, z])
 
 
@@ -1103,7 +1195,14 @@ def tensor_load_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_load_to_lds(
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        dg2,
+        dg3,
+        dg4,
+        cache_policy=_cache_policy_attr(cache_policy),
+    )
 
 
 @dsl_loc_tracing
@@ -1123,7 +1222,14 @@ def tensor_store_2d(
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
     dg4 = _raw(_zero_dgroup_v8i32())
-    rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
+    rocdl.tensor_store_from_lds(
+        _raw(desc.dgroup0),
+        _raw(desc.dgroup1),
+        dg2,
+        dg3,
+        dg4,
+        cache_policy=_cache_policy_attr(cache_policy),
+    )
 
 
 @dsl_loc_tracing
@@ -1217,4 +1323,4 @@ def l2_prefetch_tile(
     # NOTE: rocdl.global_prefetch lowers to llvm.amdgcn.global.prefetch, which
     # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
     # build lacks this pattern, the instruction will be silently dropped.
-    rocdl.global_prefetch(ptr_val, scope)
+    rocdl.global_prefetch(ptr_val, cache_policy=_cache_policy_attr(scope))

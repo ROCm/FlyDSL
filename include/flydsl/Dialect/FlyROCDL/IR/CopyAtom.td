@@ -46,28 +46,57 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 }
 
 //===----------------------------------------------------------------------===//
+// CopyOp CDNA4 — async direct-to-LDS DMA (asyncmark-tracked).
+//
+// Same LDS DMA instructions as the non-async atoms, but the backend does not
+// insert the `vmcnt` wait before the staged LDS data is read. Completion must be
+// tracked explicitly with `rocdl.asyncmark` / `rocdl.wait.asyncmark`, which is
+// what lets a kernel keep several prefetch stages in flight and wait only on the
+// oldest one.
+//===----------------------------------------------------------------------===//
+
+// Buffer resource -> LDS.
+def FlyROCDL_CopyOpBufferLoadAsyncLDS
+    : FlyROCDL_StatefulCopyOp<"CopyOpCDNA4BufferLoadAsyncLDS", "cdna4.buffer_load_async_lds",[]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+  let genVerifyDecl = 1;
+}
+
+// Global pointer -> LDS.
+def FlyROCDL_CopyOpGlobalLoadAsyncLDS
+    : FlyROCDL_CopyOp<"CopyOpCDNA4GlobalLoadAsyncLDS", "cdna4.global_load_async_lds",[]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // CopyOp GFX1250 — N-D TDM (Tensor Data Mover) async Global<->LDS copy (1-5D).
 //
-// Whole-tile DMA. The atom carries the tile descriptor as runtime state. The
-// global operand of the copy_atom_call is a *shape/direction token only*: only
-// its layout (compile-time tile shape) and address space (load vs store) are
-// read — its pointer is unused; the base address comes from the `base` state.
-// `rank` (1-5) is the tensor/tile rank. Stateful fields (via fly.atom.set_value):
+// Whole-tile DMA. The global operand of the copy_atom_call supplies the base
+// pointer (its pointer, NOT atom state) and the compile-time tile shape (its
+// layout); its address space picks the direction (load vs store). `rank` (1-5) is
+// the tensor/tile rank. Stateful fields (via fly.atom.set_value):
 //   `workgroup_mask` (default 0): MCAST mask, ORed into GROUP1 config [15:0].
-//   `base`: global tile base pointer (advance it to move to the next tile).
 //   `extent_i` (default INT32_MAX = no clamp): per-dim tensor extent (tensor dim
 //     order, 0=outermost) for OOB handling; tensor_dim = max(0, extent - warp
 //     start) while the tile dims stay static, so a ragged tile is HW-guarded.
 //   `stride_i` (default = unset sentinel): per-dim tensor stride in elements for
-//     dims 0..rank-2 (innermost stride is assumed 1). Unset falls back to the
-//     tile memref's static layout stride.
+//     dims 0..rank-2 (innermost stride is assumed 1). Unset falls back to the tile
+//     memref's static layout stride; set it for a dynamic/true global stride that
+//     differs from the packed tile-internal stride.
 //   `imm_offset` (default 0): i64 byte offset added to base (K-loop tile bump).
 //===----------------------------------------------------------------------===//
 
-// TDM moves the whole N-D tile in one DMA, so it overrides `getCopyRank` (== rank)
+// TDM moves the whole N-D tile in one DMA, so it carries the WholeTileCopy trait
 // to keep the expand-copy lowering from decomposing the tiled memref per element.
 def FlyROCDL_CopyOpGFX1250TDM : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM", "gfx1250.tdm",
-    /*traits=*/[], /*copyOverrides=*/["getCopyRank"]> {
+    /*traits=*/[Fly_WholeTileCopyTrait]> {
   let parameters = (ins
     // Tensor/tile rank (1-5).
     "int32_t":$rank,
@@ -87,6 +116,60 @@ def FlyROCDL_CopyOpGFX1250TDM : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM", "gfx
     `,` `timeout` `=` $earlyTimeout `>`
   }];
   let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// CopyOp CDNA5 — N-D TDM (Tensor Data Mover) async Global <-> LDS copy (1-5D),
+// addressed by a tile coordinate.
+//===----------------------------------------------------------------------===//
+
+class FlyROCDL_CopyOpCDNA5TDM<string typeName, string typeMnemonic>
+    : FlyROCDL_StatefulCopyOp<typeName, typeMnemonic, [
+        DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface, ["getAtomState"]>
+      ]> {
+  dag tdmParams = (ins
+    ArrayRefParameter<"int32_t">:$tileShape,
+    // The unit the *descriptor* counts. Only its width reaches the hardware (`data_size`).
+    "Type":$dataType,
+    // Where each mode of the *global* tensor sends its *tdm* basis axis, congruent
+    // with that tensor's shape.
+    //
+    // Being an attribute is a real restriction, not just an encoding choice: a leaf is
+    // `scale E axis`, so the scale is a compile-time integer. Contiguous merging and
+    // rank-5 packing can map multiple global modes onto the same descriptor axis.
+    // TODO(rank>5, dynamic strides)
+    "::mlir::fly::IntTupleAttr":$tensor2tdm,
+    // Whether this atom arrives on the HW auto-barrier (descriptor config bit 18).
+    // Only the enable is a type property: *which* barrier is an LDS address, and that
+    // is atom state. With this off the atom has no `atomic_barrier_addr` field to set.
+    DefaultValuedParameter<"bool", "false">:$atomicBarrier,
+    DefaultValuedParameter<"int32_t", "0">:$cacheModifier,
+    DefaultValuedParameter<"int32_t", "1">:$iterCount
+  );
+  let genVerifyDecl = 1;
+}
+
+def FlyROCDL_CopyOpCDNA5TensorLoad : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5TensorLoad", "cdna5.tensor_load"> {
+  let parameters = !con(tdmParams, (ins
+    DefaultValuedParameter<"int32_t", "0">:$padInterval,
+    DefaultValuedParameter<"int32_t", "0">:$padAmount
+  ));
+
+  let assemblyFormat = [{
+    `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
+    `,` `tensor2tdm` `=` $tensor2tdm
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount, $padInterval, $padAmount)^)? `>`
+  }];
+}
+
+def FlyROCDL_CopyOpCDNA5TensorStore : FlyROCDL_CopyOpCDNA5TDM<"CopyOpCDNA5TensorStore", "cdna5.tensor_store"> {
+  let parameters = tdmParams;
+
+  let assemblyFormat = [{
+    `<` `shape` `=` `[` $tileShape `]` `,` `elem` `=` $dataType
+    `,` `tensor2tdm` `=` $tensor2tdm
+    (`,` struct($atomicBarrier, $cacheModifier, $iterCount)^)? `>`
+  }];
 }
 
 #endif // FLYROCDL_COPYATOM

@@ -32,6 +32,9 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+from kernels.common.tensor_shim import _run_compiled  # noqa: E402
 from kernels.moe.moe_gemm_2stage import compile_moe_reduction  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 
@@ -41,17 +44,28 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 
+def _ptr(t):
+    """torch tensor -> fx pointer arg for the fx.Pointer reduce launcher."""
+    return flyc.from_c_void_p(fx.Uint8, t.data_ptr())
+
+
 def run_reduce_test(
     tokens: int,
     topk: int,
     model_dim: int,
     dtype_str: str = "f16",
     use_mask: bool = False,
+    num_experts: int = 8,
     num_iters: int = 20,
     num_warmup: int = 5,
     compare_torch: bool = True,
 ):
-    """Run reduce kernel test: correctness + performance."""
+    """Run reduce kernel test: correctness + performance.
+
+    Masking uses the fused EP gather ``valid[t, k] = expert_mask[topk_ids[t, k]]
+    != 0``; the kernel takes ``expert_mask``/``topk_ids`` (not a precomputed
+    mask). The launcher takes ``fx.Pointer`` args, dispatched via ``_run_compiled``.
+    """
     dtype_map = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
     dtype = dtype_map[dtype_str]
     device = torch.device("cuda")
@@ -61,26 +75,31 @@ def run_reduce_test(
         f"use_mask={use_mask}, dtype={dtype_str} ==="
     )
 
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask)
+    reduce_exe = compile_moe_reduction(
+        topk=topk,
+        model_dim=model_dim,
+        dtype_str=dtype_str,
+        use_mask=use_mask,
+        num_experts=num_experts if use_mask else 0,
+    )
 
     X = torch.randn(tokens, topk, model_dim, device=device, dtype=dtype)
     Y = torch.empty(tokens, model_dim, device=device, dtype=dtype)
 
     if use_mask:
-        valid_mask = torch.randint(0, 2, (tokens, topk), device=device, dtype=torch.uint8)
+        topk_ids = torch.randint(0, num_experts, (tokens, topk), device=device, dtype=torch.int32)
+        expert_mask = torch.randint(0, 2, (num_experts,), device=device, dtype=torch.int32)
     else:
-        valid_mask = torch.empty((0, topk), device=device, dtype=torch.uint8)
+        topk_ids = torch.empty(0, device=device, dtype=torch.int32)
+        expert_mask = torch.empty(0, device=device, dtype=torch.int32)
 
     stream = torch.cuda.current_stream()
 
-    def launch(y, x, mask):
-        reduce_exe(x, y, mask, tokens, stream)
+    def launch():
+        _run_compiled(reduce_exe, _ptr(X), _ptr(Y), _ptr(expert_mask), _ptr(topk_ids), tokens, stream)
 
     _, us = run_perftest(
         launch,
-        Y,
-        X,
-        valid_mask,
         num_iters=num_iters,
         num_warmup=num_warmup,
     )
@@ -88,7 +107,8 @@ def run_reduce_test(
 
     # Correctness
     if use_mask:
-        X_ref = X * valid_mask.to(torch.bool).unsqueeze(-1)
+        valid = (expert_mask[topk_ids.long()] != 0).to(torch.bool)  # [tokens, topk]
+        X_ref = X * valid.unsqueeze(-1)
     else:
         X_ref = X
     Y_ref = torch.sum(X_ref, dim=1)

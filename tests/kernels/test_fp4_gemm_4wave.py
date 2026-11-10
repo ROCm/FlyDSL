@@ -51,9 +51,11 @@ def _as_u8(t: torch.Tensor) -> torch.Tensor:
     return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
 
 
-def _bench_fp4_gemm(M, N, K, tile_m=256, tile_n=256, num_warmups=10, num_iters=100):
+def _bench_fp4_gemm(M, N, K, num_warmups=10, num_iters=100):
     if ARCH != "gfx950":
         pytest.skip(f"FP4 4-wave GEMM requires gfx950, got {ARCH}")
+    # The kernel is hardcoded to a 256x256 block and an all-in-bounds epilogue.
+    assert M % 256 == 0 and N % 256 == 0, "kernel requires M/N aligned to 256"
 
     device = torch.device("cuda")
     M_a = (M + 31) // 32 * 32
@@ -80,10 +82,8 @@ def _bench_fp4_gemm(M, N, K, tile_m=256, tile_n=256, num_warmups=10, num_iters=1
 
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
 
-    launch_fn = compile_fp4_gemm_4w(
-        K=K, BLOCK_M=tile_m, BLOCK_N=tile_n, mn_aligned=(M % tile_m == 0 and N % tile_n == 0)
-    )
-    print(f"\n[fp4_gemm_4wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n}")
+    launch_fn = compile_fp4_gemm_4w(K=K, MN=(M, N))
+    print(f"\n[fp4_gemm_4wave] M={M} N={N} K={K}")
 
     def _args(c, a, b, sa, sb):
         # kernel signature: (A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
@@ -129,16 +129,123 @@ def _bench_fp4_gemm(M, N, K, tile_m=256, tile_n=256, num_warmups=10, num_iters=1
 
 
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n",
+    "M, N, K",
     [
-        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
-        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
+        pytest.param(8192, 8192, 8192, marks=pytest.mark.large_shape, id="8192x8192x8192"),
+        pytest.param(16384, 16384, 16384, marks=pytest.mark.large_shape, id="16384x16384x16384"),
     ],
 )
-def test_fp4_gemm_4wave(M, N, K, tile_m, tile_n):
-    _bench_fp4_gemm(M=M, N=N, K=K, tile_m=tile_m, tile_n=tile_n)
+def test_fp4_gemm_4wave(M, N, K):
+    _bench_fp4_gemm(M=M, N=N, K=K)
+
+
+# ---------------------------------------------------------------------------
+# Steady-state benchmark vs aiter
+# ---------------------------------------------------------------------------
+# The correctness harness above uses run_perftest, which is right for a smoke
+# check but reads a few percent low and drifts run to run. The one below is
+# built for A/B-ing a single optimization instead: it costs ~1500 launches per
+# shape (~30 s for the four shapes) and needs aiter installed, so it is
+# deliberately NOT a pytest test -- run it via
+#
+#     python3 tests/kernels/test_fp4_gemm_4wave.py --vs-aiter
+
+BENCH_PAIRS = 3
+BENCH_ITERS = 500
+BENCH_WARMUP = 500
+BENCH_SETS = 5  # rotated per iteration so the inputs do not stay MALL-resident
+
+
+def _steady_state_us(step, base):
+    st, en = torch.cuda.Event(True), torch.cuda.Event(True)
+    for n in range(BENCH_WARMUP):
+        step(base + n)
+    st.record()
+    for n in range(BENCH_ITERS):
+        step(base + n)
+    en.record()
+    torch.cuda.synchronize()
+    return st.elapsed_time(en) / BENCH_ITERS * 1e3
+
+
+def _make_bench_steps(aiter, M, N, K):
+    from aiter.ops.shuffle import shuffle_weight
+
+    device = torch.device("cuda")
+    quant = aiter.get_triton_quant(aiter.QuantType.per_1x32)
+    stream = torch.cuda.current_stream()
+    fly_args, ait_args = [], []
+    c = torch.zeros(M * N, dtype=OUT_DTYPE, device=device)
+
+    for s in range(BENCH_SETS):
+        torch.manual_seed(s)
+        a = torch.randn(M, K, device=device)
+        b = torch.randn(N, K, device=device)
+
+        a_q, scale_a, _ = gemm_common_utils.per_1x32_f4_quant(a)
+        b_q, scale_b, _ = gemm_common_utils.per_1x32_f4_quant(b)
+        flat = [
+            _as_u8(t).contiguous().view(-1)
+            for t in (
+                a_q,
+                gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False),
+                gemm_common_utils.shuffle_scale_w4(scale_a, 1, False),
+                gemm_common_utils.shuffle_scale_w4(scale_b, 1, False),
+            )
+        ]
+        fly_args.append((flat[0], flat[1], c, flat[2], flat[3], M, N, stream))
+
+        xq, xs = quant(a.to(OUT_DTYPE), shuffle=True)
+        wq, ws = quant(b.to(OUT_DTYPE), shuffle=True)
+        ait_args.append((xq, shuffle_weight(wq, layout=(16, 16)), xs, ws))
+        del a, b, a_q, b_q, wq
+
+    compiled = flyc.compile(compile_fp4_gemm_4w(K=K, MN=(M, N)), *fly_args[0])
+
+    def fly_step(i):
+        compiled(*fly_args[i % BENCH_SETS])
+
+    def aiter_step(i):
+        x, w, xs, ws = ait_args[i % BENCH_SETS]
+        aiter.gemm_a4w4(x, w, xs, ws, bpreshuffle=True)
+
+    return fly_step, aiter_step
+
+
+def bench_vs_aiter(M, N, K):
+    import aiter
+
+    assert ARCH == "gfx950", f"FP4 4-wave GEMM requires gfx950, got {ARCH}"
+
+    fly_step, aiter_step = _make_bench_steps(aiter, M, N, K)
+    fly_step(0)  # first-call costs: module load, aiter's kernel-config lookup
+    aiter_step(0)
+    torch.cuda.synchronize()
+
+    flops = 2 * M * N * K
+    print(
+        f"\n[fp4_gemm_4wave] {M}x{N}x{K}  ({BENCH_SETS} input sets, warmup {BENCH_WARMUP}, {BENCH_PAIRS}x{BENCH_ITERS} iters)"
+    )
+    fly_best = ait_best = float("inf")
+    for p in range(BENCH_PAIRS):
+        f = _steady_state_us(fly_step, p * BENCH_ITERS)
+        a = _steady_state_us(aiter_step, p * BENCH_ITERS)
+        fly_best, ait_best = min(fly_best, f), min(ait_best, a)
+        print(
+            f"  pair {p}:  fly {f:8.1f} us {flops / (f / 1e6) / 1e12:6.0f} TFLOPS"
+            f"   |  aiter {a:8.1f} us {flops / (a / 1e6) / 1e12:6.0f} TFLOPS"
+        )
+    print(
+        f"  BEST:    fly {flops / (fly_best / 1e6) / 1e12:6.0f} TFLOPS"
+        f"   |  aiter {flops / (ait_best / 1e6) / 1e12:6.0f} TFLOPS"
+        f"   |  fly is {(ait_best / fly_best - 1) * 100:+.2f}%"
+    )
 
 
 if __name__ == "__main__":
-    _bench_fp4_gemm(8192, 8192, 8192)
-    _bench_fp4_gemm(16384, 16384, 16384)
+    if "--vs-aiter" in sys.argv:
+        for shape in ((8192, 8192, 8192), (8192, 8192, 16384), (16384, 16384, 8192), (16384, 16384, 16384)):
+            bench_vs_aiter(*shape)
+    else:
+        _bench_fp4_gemm(8192, 8192, 8192)
+        _bench_fp4_gemm(16384, 16384, 16384)

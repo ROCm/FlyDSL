@@ -9,13 +9,10 @@ from collections.abc import Callable as AbcCallable
 from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
-from flydsl.runtime.device import get_rocm_arch
-
 from .._mlir import ir
-from .._mlir.dialects import gpu
-from .._mlir.dialects import vector as _vector
+from .._mlir.dialects import arith, gpu, vector
 from .meta import dsl_loc_tracing
-from .numeric import (
+from .numeric import (  # noqa: F401
     BFloat16,
     Boolean,
     Float,
@@ -46,6 +43,7 @@ from .numeric import (
     Uint64,
     Uint128,
     _common_numeric_type_for_op,
+    _resolve_numeric_type,
     _result_numeric_type_for_op,
     as_numeric,
 )
@@ -62,6 +60,136 @@ from .utils.arith import (
     resolve_fastmath,
 )
 
+__all__ = [
+    # MLIR type helpers
+    "Types",
+    "T",
+    # DSL utilities
+    "as_ir_value",
+    "as_dsl_value",
+    "is_generic_address_space",
+    "is_target_address_space",
+    # Composite DSL value types
+    "Constexpr",
+    "IntTuple",
+    "Layout",
+    "Swizzle",
+    "ComposedLayout",
+    "Pointer",
+    "Tensor",
+    "CopyAtom",
+    "Tile",
+    "TiledCopy",
+    "TiledMma",
+    "Stream",
+    "Tuple3D",
+    "Basis",
+    "E",
+    # Vector types
+    "Vector",
+    "ReductionOp",
+    "empty_like",
+    "full",
+    "full_like",
+    "ones_like",
+    "zeros_like",
+    # Vector aliases
+    "VectorAlias",
+    "BFloat16x1",
+    "BFloat16x2",
+    "BFloat16x4",
+    "BFloat16x8",
+    "BFloat16x16",
+    "Float4E2M1FNx2",
+    "Float4E2M1FNx4",
+    "Float4E2M1FNx8",
+    "Float4E2M1FNx16",
+    "Float4E2M1FNx32",
+    "Float8E4M3x1",
+    "Float8E4M3x2",
+    "Float8E4M3x4",
+    "Float8E4M3x8",
+    "Float8E4M3x16",
+    "Float8E4M3B11FNUZx1",
+    "Float8E4M3B11FNUZx2",
+    "Float8E4M3B11FNUZx4",
+    "Float8E4M3B11FNUZx8",
+    "Float8E4M3B11FNUZx16",
+    "Float8E4M3FNx1",
+    "Float8E4M3FNx2",
+    "Float8E4M3FNx4",
+    "Float8E4M3FNx8",
+    "Float8E4M3FNx16",
+    "Float8E4M3FNUZx1",
+    "Float8E4M3FNUZx2",
+    "Float8E4M3FNUZx4",
+    "Float8E4M3FNUZx8",
+    "Float8E4M3FNUZx16",
+    "Float8E5M2x1",
+    "Float8E5M2x2",
+    "Float8E5M2x4",
+    "Float8E5M2x8",
+    "Float8E5M2x16",
+    "Float8E8M0FNUx1",
+    "Float8E8M0FNUx2",
+    "Float8E8M0FNUx4",
+    "Float8E8M0FNUx8",
+    "Float8E8M0FNUx16",
+    "Float16x1",
+    "Float16x2",
+    "Float16x4",
+    "Float16x8",
+    "Float16x16",
+    "Float32x1",
+    "Float32x2",
+    "Float32x4",
+    "Float32x8",
+    "Float64x1",
+    "Float64x2",
+    "Float64x4",
+    "Int4x2",
+    "Int4x4",
+    "Int4x8",
+    "Int4x16",
+    "Int4x32",
+    "Int8x1",
+    "Int8x2",
+    "Int8x4",
+    "Int8x8",
+    "Int8x16",
+    "Int16x1",
+    "Int16x2",
+    "Int16x4",
+    "Int16x8",
+    "Int16x16",
+    "Int32x1",
+    "Int32x2",
+    "Int32x4",
+    "Int32x8",
+    "Int64x1",
+    "Int64x2",
+    "Int64x4",
+    "Int128x1",
+    "Uint8x1",
+    "Uint8x2",
+    "Uint8x4",
+    "Uint8x8",
+    "Uint8x16",
+    "Uint16x1",
+    "Uint16x2",
+    "Uint16x4",
+    "Uint16x8",
+    "Uint16x16",
+    "Uint32x1",
+    "Uint32x2",
+    "Uint32x4",
+    "Uint32x8",
+    "Uint64x1",
+    "Uint64x2",
+    "Uint64x4",
+    "Uint128x1",
+]
+
 
 def as_ir_value(value, *, keep_static=False):
     """Convert any DslType value into a raw ``ir.Value``
@@ -73,11 +201,13 @@ def as_ir_value(value, *, keep_static=False):
       - ``None``                                    -> ``None``
       - ``ir.Value``                                -> returned unchanged
       - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> its Python payload
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``bool`` / ``int`` / ``float``, when
         ``keep_static=True``                        -> returned unchanged
         ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
       - ``tuple`` / ``list``                        -> recursed, shape preserved
       - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
-      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
       - object with ``ir_value()``                  -> called as a fallback
       - anything else                               -> returned unchanged
     """
@@ -85,8 +215,10 @@ def as_ir_value(value, *, keep_static=False):
         return None
     if isinstance(value, ir.Value):
         return value
-    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+    if keep_static and isinstance(value, (bool, int, float)):
         return value
+    if keep_static and isinstance(value, Numeric) and value.is_static():
+        return value.value
     if isinstance(value, tuple):
         return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
     if isinstance(value, list):
@@ -154,44 +286,8 @@ def as_dsl_value(value, exemplar=None):
         raise TypeError(f"as_dsl_value cannot wrap ir.Value of type {value.type!s} into a DSL value") from e
 
 
-def _vec(n: int, elem: ir.Type) -> ir.Type:
-    return ir.VectorType.get([int(n)], elem)
-
-
-def default_f8_type() -> ir.Type:
-    """Select E4M3 f8 type compatible with the current GPU arch.
-
-    - gfx95* (MI350): FP8 E4M3FN (OCP)
-    - gfx12*: FP8 E4M3FN (OCP)
-    - gfx94* (MI300): FP8 E4M3FNUZ
-
-    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
-    native FP8 instructions, so FP8 compute would surface as a late LLVM
-    "cannot select" error. Fail early with a clear message instead.
-    """
-    arch = ""
-    try:
-        arch = str(get_rocm_arch())
-    except Exception:
-        arch = ""
-    if "gfx95" in arch or "gfx12" in arch:
-        return Float8E4M3FN.ir_type
-    if arch.startswith("gfx11"):
-        raise RuntimeError(
-            f"default_f8_type(): no native FP8 support on {arch}; "
-            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
-            "Use bf16/f16 GEMM via "
-            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
-        )
-    return Float8E4M3FNUZ.ir_type
-
-
 class Types:
     """Property-based MLIR type constructors backed by DSL numeric classes.
-
-    Scalar properties delegate to ``<DslClass>.ir_type`` (single source of
-    truth in ``numeric.py``).  Vector shortcuts and ``vec()`` use
-    ``ir.VectorType`` directly.
 
     Usage::
 
@@ -207,25 +303,28 @@ class Types:
         return ir.IndexType.get()
 
     # ---- Integer scalars & vectors ----
+    def vec(self, n: int, elem: ir.Type) -> ir.Type:
+        return ir.VectorType.get([int(n)], elem)
+
     @property
     def i8(self) -> ir.Type:
         return Int8.ir_type
 
     @property
     def i8x2(self) -> ir.Type:
-        return _vec(2, Int8.ir_type)
+        return self.vec(2, Int8.ir_type)
 
     @property
     def i8x4(self) -> ir.Type:
-        return _vec(4, Int8.ir_type)
+        return self.vec(4, Int8.ir_type)
 
     @property
     def i8x8(self) -> ir.Type:
-        return _vec(8, Int8.ir_type)
+        return self.vec(8, Int8.ir_type)
 
     @property
     def i8x16(self) -> ir.Type:
-        return _vec(16, Int8.ir_type)
+        return self.vec(16, Int8.ir_type)
 
     @property
     def i16(self) -> ir.Type:
@@ -233,15 +332,15 @@ class Types:
 
     @property
     def i16x2(self) -> ir.Type:
-        return _vec(2, Int16.ir_type)
+        return self.vec(2, Int16.ir_type)
 
     @property
     def i16x4(self) -> ir.Type:
-        return _vec(4, Int16.ir_type)
+        return self.vec(4, Int16.ir_type)
 
     @property
     def i16x8(self) -> ir.Type:
-        return _vec(8, Int16.ir_type)
+        return self.vec(8, Int16.ir_type)
 
     @property
     def i32(self) -> ir.Type:
@@ -249,11 +348,11 @@ class Types:
 
     @property
     def i32x2(self) -> ir.Type:
-        return _vec(2, Int32.ir_type)
+        return self.vec(2, Int32.ir_type)
 
     @property
     def i32x4(self) -> ir.Type:
-        return _vec(4, Int32.ir_type)
+        return self.vec(4, Int32.ir_type)
 
     @property
     def i64(self) -> ir.Type:
@@ -261,7 +360,7 @@ class Types:
 
     @property
     def i64x2(self) -> ir.Type:
-        return _vec(2, Int64.ir_type)
+        return self.vec(2, Int64.ir_type)
 
     @property
     def i128(self) -> ir.Type:
@@ -274,15 +373,15 @@ class Types:
 
     @property
     def f16x2(self) -> ir.Type:
-        return _vec(2, Float16.ir_type)
+        return self.vec(2, Float16.ir_type)
 
     @property
     def f16x4(self) -> ir.Type:
-        return _vec(4, Float16.ir_type)
+        return self.vec(4, Float16.ir_type)
 
     @property
     def f16x8(self) -> ir.Type:
-        return _vec(8, Float16.ir_type)
+        return self.vec(8, Float16.ir_type)
 
     @property
     def bf16(self) -> ir.Type:
@@ -290,15 +389,15 @@ class Types:
 
     @property
     def bf16x2(self) -> ir.Type:
-        return _vec(2, BFloat16.ir_type)
+        return self.vec(2, BFloat16.ir_type)
 
     @property
     def bf16x4(self) -> ir.Type:
-        return _vec(4, BFloat16.ir_type)
+        return self.vec(4, BFloat16.ir_type)
 
     @property
     def bf16x8(self) -> ir.Type:
-        return _vec(8, BFloat16.ir_type)
+        return self.vec(8, BFloat16.ir_type)
 
     @property
     def f32(self) -> ir.Type:
@@ -306,108 +405,18 @@ class Types:
 
     @property
     def f32x2(self) -> ir.Type:
-        return _vec(2, Float32.ir_type)
+        return self.vec(2, Float32.ir_type)
 
     @property
     def f32x4(self) -> ir.Type:
-        return _vec(4, Float32.ir_type)
+        return self.vec(4, Float32.ir_type)
 
     @property
     def f64(self) -> ir.Type:
         return Float64.ir_type
 
-    # ---- FP8 (arch-dependent shortcut) ----
-    @property
-    def f8(self) -> ir.Type:
-        return default_f8_type()
-
-    @property
-    def f8x2(self) -> ir.Type:
-        return _vec(2, default_f8_type())
-
-    @property
-    def f8x4(self) -> ir.Type:
-        return _vec(4, default_f8_type())
-
-    @property
-    def f8x8(self) -> ir.Type:
-        return _vec(8, default_f8_type())
-
-    @property
-    def f8x16(self) -> ir.Type:
-        return _vec(16, default_f8_type())
-
-    # ---- Dynamic vector constructor ----
-    def vec(self, n: int, elem: ir.Type) -> ir.Type:
-        return _vec(n, elem)
-
 
 T = Types()
-
-
-__all__ = [
-    # MLIR type helpers
-    "Types",
-    "T",
-    "default_f8_type",
-    # DSL utilities
-    "as_ir_value",
-    "as_dsl_value",
-    "is_generic_address_space",
-    "is_target_address_space",
-    # DSL value types
-    "Numeric",
-    "Boolean",
-    "Float",
-    "BFloat16",
-    "Float4E2M1FN",
-    "Float6E2M3FN",
-    "Float6E3M2FN",
-    "Float8E4M3",
-    "Float8E4M3B11FNUZ",
-    "Float8E4M3FN",
-    "Float8E4M3FNUZ",
-    "Float8E5M2",
-    "Float8E8M0FNU",
-    "Float16",
-    "Float32",
-    "Float64",
-    "Int4",
-    "Int8",
-    "Int16",
-    "Int32",
-    "Int64",
-    "Int128",
-    "Index",
-    "Uint8",
-    "Uint16",
-    "Uint32",
-    "Uint64",
-    "Uint128",
-    "Constexpr",
-    "IntTuple",
-    "Layout",
-    "Swizzle",
-    "ComposedLayout",
-    "Pointer",
-    "Tensor",
-    "CopyAtom",
-    "Tile",
-    "TiledCopy",
-    "TiledMma",
-    "Stream",
-    "Tuple3D",
-    "Basis",
-    "E",
-    # Vector types
-    "Vector",
-    "ReductionOp",
-    "empty_like",
-    "full",
-    "full_like",
-    "ones_like",
-    "zeros_like",
-]
 
 
 def address_space_from_attr(address_space):
@@ -589,7 +598,7 @@ class Constexpr:
         if not cls.is_specialized:
             raise TypeError(
                 f"{cls.__name__} must be value-specialized (e.g. Constexpr[42]) "
-                f"before reconstruction; the surrounding schema did not bind a value."
+                f"before reconstruction; the surrounding type did not bind a value."
             )
         return cls.value
 
@@ -936,6 +945,95 @@ class ComposedLayout(BuiltinDslType):
 
 @ir.register_value_caster(PointerType.static_typeid, replace=True)
 class Pointer(BuiltinDslType):
+    _alias_cache = {}
+
+    def __class_getitem__(cls, params):
+        """Specialize a storable pointer as ``Pointer[dtype, space, alignment]``.
+
+        ``space`` is Global or Shared; ``alignment`` describes the pointee address
+        in bytes and defaults to the element byte width rounded up. Swizzled
+        pointers are unsupported. Global/Shared addresses occupy 8/4 storage bytes.
+        """
+        if cls is not Pointer:
+            raise TypeError(f"{cls.__name__} is already specialized; use Pointer[dtype, space, alignment]")
+        if not isinstance(params, tuple) or len(params) not in (2, 3):
+            raise TypeError("Pointer expects Pointer[dtype, space] or Pointer[dtype, space, alignment]")
+        dtype, space = params[:2]
+        alignment = params[2] if len(params) == 3 else None
+        if (
+            not isinstance(dtype, type)
+            or not issubclass(dtype, Numeric)
+            or dtype._ir_type is None
+            or issubclass(dtype, Index)
+        ):
+            raise TypeError("Pointer dtype must be a concrete fixed-width Numeric type")
+
+        if isinstance(space, bool):
+            raise TypeError("Pointer address space must be Global or Shared")
+        space = address_space_from_attr(space)
+        if space not in (AddressSpace.Global, AddressSpace.Shared):
+            raise TypeError("Storable Pointer supports only Global and Shared address spaces")
+
+        elem_bytes = (dtype.width + 7) // 8
+        if alignment is None:
+            alignment = elem_bytes
+        if isinstance(alignment, bool) or not isinstance(alignment, int):
+            raise TypeError("Pointer alignment must be an integer byte count")
+        if alignment <= 0 or alignment > 0x7FFFFFFF or alignment % elem_bytes:
+            raise ValueError(f"Pointer alignment must be a positive int32 multiple of element byte size {elem_bytes}")
+
+        key = (dtype, space, alignment)
+        cached = Pointer._alias_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pointer_bytes = 8 if space == AddressSpace.Global else 4
+
+        def __init__(self, value):
+            if not isinstance(value, Pointer):
+                raise TypeError(f"{type(self).__name__} expects a Pointer, got {type(value).__name__}")
+            if value.type.element_type != dtype.ir_type or value.address_space != space:
+                raise TypeError(
+                    f"{type(self).__name__} expects matching element type and address space, got {value.type}"
+                )
+            if value.type.swizzle.mask != 0:
+                raise TypeError(f"{type(self).__name__} does not support swizzled pointers")
+            if value.alignment % alignment:
+                raise TypeError(f"{type(self).__name__} requires alignment {alignment}, got {value.alignment}")
+            target = type(self).ir_type
+            if value.type != target:
+                # Weaken the alignment promise in the IR type as well as in Python.
+                value = recast_iter(target, value)
+            Pointer.__init__(self, value)
+
+        def __coerce__(cls, value):
+            return value if isinstance(value, cls) else cls(value)
+
+        def __peek_from_ptr__(cls, ptr):
+            return ptr_load(ptr, cls)
+
+        def __poke_into_ptr__(cls, ptr, value):
+            ptr_store(cls.__coerce__(value), ptr)
+
+        suffix = f", {alignment}" if alignment != elem_bytes else ""
+        alias = type(
+            f"Pointer[{dtype.__name__}, {space}{suffix}]",
+            (Pointer,),
+            {
+                "__module__": Pointer.__module__,
+                "__init__": __init__,
+                "__coerce__": classmethod(__coerce__),
+                "ir_type": lazy_classattr(lambda: PointerType.get(dtype.ir_type, space, alignment)),
+                "element_type": property(lambda self: dtype),
+                "__dsl_size_of__": classmethod(lambda cls: pointer_bytes),
+                "__dsl_align_of__": classmethod(lambda cls: pointer_bytes),
+                "__peek_from_ptr__": classmethod(__peek_from_ptr__),
+                "__poke_into_ptr__": classmethod(__poke_into_ptr__),
+            },
+        )
+        Pointer._alias_cache[key] = alias
+        return alias
+
     @property
     def element_type(self):
         return Numeric.from_ir_type(self.type.element_type)
@@ -959,6 +1057,10 @@ class Pointer(BuiltinDslType):
     @property
     def alignment(self):
         return self.type.alignment
+
+    @property
+    def llvm_ptr(self):
+        return to_llvm_ptr(self)
 
     @dsl_loc_tracing
     def load(self, dtype=None):
@@ -1040,6 +1142,10 @@ class Tensor(BuiltinDslType):
     def stride(self) -> IntTuple:
         return self.layout.stride
 
+    @property
+    def iter(self):
+        return get_iter(self)
+
     @dsl_loc_tracing
     def __getitem__(self, coord):
         if not isinstance(coord, IntTuple):
@@ -1110,8 +1216,12 @@ class CopyAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
@@ -1151,13 +1261,35 @@ class MmaAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
 class TiledCopy(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
+
     @property
     def tile_mn(self):
         return static(self.type.tile_mn)
@@ -1185,6 +1317,24 @@ class TiledCopy(BuiltinDslType):
 
 @ir.register_value_caster(TiledMmaType.static_typeid, replace=True)
 class TiledMma(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
+
     @property
     def mma_atom(self):
         return self.type.mma_atom
@@ -1363,10 +1513,10 @@ class ReductionOp(enum.Enum):
 
 
 _REDUCE_KINDS = {
-    "add": (_vector.CombiningKind.ADD, _vector.CombiningKind.ADD, _vector.CombiningKind.ADD),
-    "mul": (_vector.CombiningKind.MUL, _vector.CombiningKind.MUL, _vector.CombiningKind.MUL),
-    "max": (_vector.CombiningKind.MAXNUMF, _vector.CombiningKind.MAXSI, _vector.CombiningKind.MAXUI),
-    "min": (_vector.CombiningKind.MINIMUMF, _vector.CombiningKind.MINSI, _vector.CombiningKind.MINUI),
+    "add": (vector.CombiningKind.ADD, vector.CombiningKind.ADD, vector.CombiningKind.ADD),
+    "mul": (vector.CombiningKind.MUL, vector.CombiningKind.MUL, vector.CombiningKind.MUL),
+    "max": (vector.CombiningKind.MAXNUMF, vector.CombiningKind.MAXSI, vector.CombiningKind.MAXUI),
+    "min": (vector.CombiningKind.MINIMUMF, vector.CombiningKind.MINSI, vector.CombiningKind.MINUI),
 }
 
 _VECTOR_OP_METHODS = {
@@ -1407,7 +1557,7 @@ _VECTOR_REVERSE_OP_METHODS = {
 
 
 def _resolve_combining_kind(op, is_float, signed):
-    if isinstance(op, _vector.CombiningKind):
+    if isinstance(op, vector.CombiningKind):
         return op
     if isinstance(op, ReductionOp):
         key = op.value
@@ -1429,6 +1579,16 @@ class Vector(ArithValue):
     Arithmetic operators are inherited from ArithValue; scalar operands
     are auto-broadcast via ``_coerce_other``.
     """
+
+    _alias_cache = {}
+
+    def __class_getitem__(cls, params):
+        """Return the cached fixed-dtype, fixed-shape ``VectorAlias`` type."""
+        if cls is not Vector:
+            raise TypeError(f"{cls.__name__} is already specialized; use Vector[dtype, lanes]")
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError("Vector expects Vector[dtype, lanes]")
+        return VectorAlias(*params)
 
     def __init__(self, value, shape=None, dtype=None):
         if not isinstance(value, ir.Value) and hasattr(value, "ir_value"):
@@ -1452,6 +1612,15 @@ class Vector(ArithValue):
         super().__init__(value, signed)
         self._shape = shape
         self._dtype = dtype
+
+    @classmethod
+    def __coerce__(cls, value):
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except Exception as exc:
+            raise TypeError(f"expects {cls.__name__}, got {type(value).__name__} ({exc})") from exc
 
     @property
     def dtype(self) -> Type[Numeric]:
@@ -1570,8 +1739,10 @@ class Vector(ArithValue):
             return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
-    def to(self, dtype: Type[Numeric]) -> "Vector":
+    def to(self, dtype: Type[Numeric], *, rounding_mode=None) -> "Vector":
         if dtype is ir.Value:
+            if rounding_mode is not None:
+                raise TypeError("rounding_mode is only supported for float-to-float casts")
             return self
         if not isclass(dtype) or not issubclass(dtype, Numeric):
             raise TypeError(f"dtype must be a Numeric type, got {type(dtype)}")
@@ -1580,8 +1751,17 @@ class Vector(ArithValue):
             return self
         src_float = getattr(src_dtype, "is_float", False)
         dst_float = getattr(dtype, "is_float", False)
+        if rounding_mode is not None:
+            if not isinstance(rounding_mode, arith.RoundingMode):
+                raise TypeError(f"rounding_mode must be an RoundingMode, got {type(rounding_mode).__name__}")
+            if not (src_float and dst_float):
+                raise TypeError(
+                    f"rounding_mode is only supported for float-to-float casts, "
+                    f"got {src_dtype.__name__} -> {dtype.__name__}"
+                )
+            rounding_mode = rounding_mode if dtype.width <= src_dtype.width else None
         if src_float and dst_float:
-            res = fp_to_fp(self, dtype.ir_type)
+            res = fp_to_fp(self, dtype.ir_type, rounding_mode=rounding_mode)
         elif src_float:
             res = fp_to_int(self, dtype.signed, dtype.ir_type)
         elif dst_float:
@@ -1704,6 +1884,36 @@ class Vector(ArithValue):
     def __rpow__(self, other):
         return self.apply_op(operator.pow, other, flip=True)
 
+    def __pos__(self):
+        return self
+
+    def __neg__(self):
+        result = ArithValue.__neg__(self.with_signedness(getattr(self._dtype, "signed", None)))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __invert__(self):
+        if getattr(self._dtype, "is_float", False):
+            raise TypeError(f"bitwise NOT requires an integer element type, got {self._dtype.__name__}")
+        result = ArithValue.__invert__(self.with_signedness(getattr(self._dtype, "signed", None)))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __abs__(self):
+        signed = getattr(self._dtype, "signed", None)
+        result = abs(self.with_signedness(signed))
+        return self._wrap_op_result(result, self._shape, self._dtype)
+
+    def __divmod__(self, other):
+        quotient = self.__floordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__mod__(other))
+
+    def __rdivmod__(self, other):
+        quotient = self.__rfloordiv__(other)
+        if quotient is NotImplemented:
+            return NotImplemented
+        return (quotient, self.__rmod__(other))
+
     def __lshift__(self, other):
         return self.apply_op(operator.lshift, other)
 
@@ -1753,6 +1963,30 @@ class Vector(ArithValue):
         return self.apply_op(operator.ne, other)
 
     @dsl_loc_tracing
+    def select(self, true_value, false_value) -> "Vector":
+        """Lane-wise ternary select driven by this vector condition."""
+        cond = self if self._dtype is Boolean else (self != 0)
+        dtypes = [
+            dtype
+            for dtype in (self._operand_element_dtype(true_value), self._operand_element_dtype(false_value))
+            if dtype is not None
+        ]
+        if not dtypes:
+            raise TypeError("Vector.select branches must be Vector, Numeric, or numeric literals")
+        common_dtype = dtypes[0]
+        for dtype in dtypes[1:]:
+            common_dtype = _resolve_numeric_type(common_dtype, dtype)
+
+        def _prepare(value):
+            if isinstance(value, Vector):
+                vec = value if value.shape == self.shape else value.broadcast_to(self.shape)
+                return vec if vec.dtype is common_dtype else vec.to(common_dtype)
+            return Vector.filled(self.shape, value, common_dtype)
+
+        result = ArithValue.select(cond, _prepare(true_value), _prepare(false_value))
+        return Vector(result, self.shape, common_dtype)
+
+    @dsl_loc_tracing
     def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None):
         is_fp = self._dtype.is_float
         signed = getattr(self._dtype, "signed", True)
@@ -1766,7 +2000,7 @@ class Vector(ArithValue):
             if isinstance(init_val, Numeric):
                 init_val = init_val.ir_value()
             kwargs["acc"] = _to_raw(init_val)
-        res = _vector.reduction(et, kind, self, **kwargs)
+        res = vector.reduction(et, kind, self, **kwargs)
         return self._dtype(res)
 
     @staticmethod
@@ -1787,11 +2021,16 @@ class Vector(ArithValue):
         if idx is None:
             return self
         if isinstance(idx, int):
-            res = _vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
+            orig_idx = idx
+            if idx < 0:
+                idx += self.numel
+            if not 0 <= idx < self.numel:
+                raise IndexError(f"vector index {orig_idx} out of range for numel {self.numel}")
+            res = vector.ExtractOp(self, static_position=[idx], dynamic_position=[]).result
             return self._dtype(res)
         if isinstance(idx, (Numeric, ArithValue, ir.Value)):
             dyn_idx = _to_raw(Index(idx))
-            res = _vector.ExtractOp(
+            res = vector.ExtractOp(
                 self,
                 static_position=[ir.ShapedType.get_dynamic_size()],
                 dynamic_position=[dyn_idx],
@@ -1811,9 +2050,9 @@ class Vector(ArithValue):
             offsets = [0 if c is None else int(c) for c in flat_coord]
             sizes = [int(s) if c is None else 1 for s, c in zip(flat_shape, flat_coord, strict=True)]
             tmp_ty = ir.VectorType.get(list(flat_shape), self._dtype.ir_type)
-            tmp = _vector.shape_cast(tmp_ty, self)
+            tmp = vector.shape_cast(tmp_ty, self)
             res_ty = ir.VectorType.get(sizes, self._dtype.ir_type)
-            res = _vector.extract_strided_slice(
+            res = vector.extract_strided_slice(
                 res_ty,
                 tmp,
                 offsets=offsets,
@@ -1824,10 +2063,20 @@ class Vector(ArithValue):
             return self._build_result(res, res_shape, row_major=True)
         raise TypeError(f"unsupported index type: {type(idx)}")
 
+    def __len__(self) -> int:
+        return self.numel
+
+    def __iter__(self):
+        # Without this, list()/unpacking falls back to the legacy sequence
+        # protocol (self[0], self[1], ...), which spins forever because the
+        # int branch of __getitem__ used to never raise IndexError (see #793).
+        for i in range(self.numel):
+            yield self[i]
+
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":
         shape = self._canonical_shape(shape)
         flat_ty = self.make_type(shape, self._dtype)
-        flat_value = _vector.shape_cast(flat_ty, value)
+        flat_value = vector.shape_cast(flat_ty, value)
         return Vector(flat_value, shape, self._dtype)
 
     def reshape(self, shape) -> "Vector":
@@ -1846,7 +2095,7 @@ class Vector(ArithValue):
         if self.numel == 1:
             scalar = self[0].ir_value()
             target_ty = self.make_type(target_shape, self._dtype)
-            res = _vector.broadcast(target_ty, scalar)
+            res = vector.broadcast(target_ty, scalar)
             return Vector(res, target_shape, self._dtype)
         if len(src_flat_shape) > len(target_flat_shape):
             raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
@@ -1855,9 +2104,9 @@ class Vector(ArithValue):
             if src_dim != dst_dim and src_dim != 1:
                 raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
         src_ty = ir.VectorType.get(padded_src, self._dtype.ir_type)
-        src = _vector.shape_cast(src_ty, self)
+        src = vector.shape_cast(src_ty, self)
         target_ty_nd = ir.VectorType.get(target_flat_shape, self._dtype.ir_type)
-        res = _vector.broadcast(target_ty_nd, src)
+        res = vector.broadcast(target_ty_nd, src)
         return self._build_result(res, target_shape, row_major=True)
 
     @dsl_loc_tracing
@@ -1865,13 +2114,13 @@ class Vector(ArithValue):
         src_bits = self.numel * self._dtype.width
         dst_count = src_bits // dtype.width
         dst_vec_ty = ir.VectorType.get([dst_count], dtype.ir_type)
-        res = _vector.BitCastOp(dst_vec_ty, self).result
+        res = vector.BitCastOp(dst_vec_ty, self).result
         return Vector(res, (dst_count,), dtype)
 
     @dsl_loc_tracing
     def shuffle(self, other, mask) -> "Vector":
         other_val = other if not isinstance(other, Vector) else ir.Value(other)
-        res = _vector.shuffle(self, other_val, mask)
+        res = vector.shuffle(self, other_val, mask)
         return Vector(res, (len(mask),), self._dtype)
 
     @classmethod
@@ -1892,8 +2141,8 @@ class Vector(ArithValue):
                 dtype = type(Numeric.from_python_value(first))
         vec_ty = cls.make_type(len(elements), dtype)
         raw_elements = [_to_raw(cls._coerce_element(element, dtype)) for element in elements]
-        res = _vector.from_elements(vec_ty, raw_elements)
-        return cls(res, (len(elements),), dtype)
+        res = vector.from_elements(vec_ty, raw_elements)
+        return cls(res, dtype=dtype)
 
     @classmethod
     @dsl_loc_tracing
@@ -1907,8 +2156,8 @@ class Vector(ArithValue):
             elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
                 index = Index(index)
             raw_indices.append(_to_raw(index))
-        res = _vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
-        return cls(res, tuple(vty.shape), dtype)
+        res = vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
+        return cls(res, dtype=dtype)
 
     @dsl_loc_tracing
     def store(self, memref, indices, *, alignment=None):
@@ -1922,7 +2171,7 @@ class Vector(ArithValue):
         kwargs = {}
         if alignment is not None:
             kwargs["alignment"] = alignment
-        return _vector.store(_to_raw(self), _to_raw(memref), raw_indices, **kwargs)
+        return vector.store(_to_raw(self), _to_raw(memref), raw_indices, **kwargs)
 
     @classmethod
     @dsl_loc_tracing
@@ -1936,7 +2185,7 @@ class Vector(ArithValue):
         else:
             raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
         vec_ty = cls.make_type(n, dtype)
-        val = _vector.broadcast(vec_ty, fill_value.ir_value())
+        val = vector.broadcast(vec_ty, fill_value.ir_value())
         return cls(val, shape, dtype)
 
     @classmethod
@@ -1981,12 +2230,14 @@ class Array:
         align = None
 
         def __init__(self, ptr_value):
-            self._ptr_value = ptr_value
+            # Non-numeric elements use byte strides. The caller may supply a
+            # pointer whose original element is wider.
+            self._ptr_value = ptr_value if self._is_numeric else recast_iter(Uint8, ptr_value)
 
         def __repr__(self):
             cls = type(self)
             name = getattr(cls.dtype, "__name__", repr(cls.dtype))
-            suffix = f", {cls.align}" if cls.align != max(1, cls.dtype.width // 8) else ""
+            suffix = f", {cls.align}" if cls.align != cls._element_align else ""
             return f"Array[{name}, {cls.size}{suffix}]({self._ptr_value})"
 
         @property
@@ -2004,8 +2255,7 @@ class Array:
 
         @classmethod
         def __dsl_size_of__(cls) -> int:
-            total_bytes = max(1, cls.dtype.width * cls.size // 8)
-            return total_bytes
+            return cls._nbytes
 
         @classmethod
         def __dsl_align_of__(cls) -> int:
@@ -2013,22 +2263,40 @@ class Array:
 
         @classmethod
         def __peek_from_ptr__(cls, ptr):
-            typed_ptr = recast_iter(cls.dtype, ptr)
-            return cls(typed_ptr)
+            return cls(recast_iter(cls.dtype, ptr) if cls._is_numeric else ptr)
 
         @classmethod
         def __poke_into_ptr__(cls, ptr, value):
             raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
 
+        def _element_ptr(self, offset):
+            # IntTuple multiplication retains the stride's divisibility, so a
+            # dynamic byte offset does not lose the element's known alignment.
+            byte_offset = (
+                offset * self._element_size if isinstance(offset, int) else int_tuple_mul(offset, self._element_size)
+            )
+            return add_offset(self.ptr, byte_offset)
+
         @dsl_loc_tracing
         def __getitem__(self, offset):
-            return self.ptr.__getitem__(offset)
+            if self._is_numeric:
+                return self.ptr.__getitem__(offset)
+            from ..compiler.protocol import peek_from_ptr
+
+            return peek_from_ptr(self.dtype, self._element_ptr(offset))
 
         @dsl_loc_tracing
         def __setitem__(self, offset, value):
-            self.ptr.__setitem__(offset, value)
+            if self._is_numeric:
+                self.ptr.__setitem__(offset, value)
+                return
+            from ..compiler.protocol import poke_into_ptr
+
+            poke_into_ptr(self.dtype, self._element_ptr(offset), value)
 
         def view(self, layout):
+            if not self._is_numeric:
+                raise TypeError("Array.view(layout) requires Numeric elements; index the array directly")
             return make_view(self._ptr_value, layout)
 
     def __class_getitem__(cls, params):
@@ -2042,17 +2310,27 @@ class Array:
         else:
             raise TypeError("Array expects Array[dtype, size] or Array[dtype, size, align]")
 
-        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
-            raise TypeError(f"Array dtype must be a Numeric subclass, got {dtype!r}")
+        from ..compiler.protocol import Storable, dsl_align_of, dsl_size_of
+
+        if not isinstance(dtype, type) or not issubclass(dtype, Storable):
+            raise TypeError(f"Array element type must implement the Storable protocol, got {dtype!r}")
         if not isinstance(size, int) or size <= 0:
             raise TypeError(f"Array size must be a positive integer, got {size!r}")
 
-        elem_byte_size = max(1, dtype.width // 8)
+        # Keep Numeric's packed layout and typed-pointer access unchanged.
+        # The protocol extends element support without redefining that path.
+        is_numeric = issubclass(dtype, Numeric)
+        elem_byte_size = max(1, dtype.width // 8) if is_numeric else dsl_size_of(dtype)
+        elem_align = elem_byte_size if is_numeric else dsl_align_of(dtype)
         if align is None:
-            align = elem_byte_size
+            align = elem_align
         else:
             if not isinstance(align, int) or align <= 0:
                 raise TypeError(f"Array align must be a positive integer, got {align!r}")
+            if not is_numeric and align % elem_align != 0:
+                raise ValueError(f"Array align must be a multiple of the element alignment {elem_align}, got {align}")
+        if not is_numeric and align & (align - 1):
+            raise ValueError(f"Array alignment must be a power of two, got {align}")
 
         cache_key = (dtype, size, align)
         cached = cls._cache.get(cache_key)
@@ -2060,11 +2338,19 @@ class Array:
             return cached
 
         name = getattr(dtype, "__name__", repr(dtype))
-        suffix = f", {align}" if align != elem_byte_size else ""
+        suffix = f", {align}" if align != elem_align else ""
         array_type = type(
             f"Array[{name}, {size}{suffix}]",
             (cls._Base,),
-            {"dtype": dtype, "size": size, "align": align},
+            {
+                "dtype": dtype,
+                "size": size,
+                "align": align,
+                "_is_numeric": is_numeric,
+                "_element_size": elem_byte_size,
+                "_element_align": elem_align,
+                "_nbytes": max(1, dtype.width * size // 8) if is_numeric else elem_byte_size * size,
+            },
         )
         cls._cache[cache_key] = array_type
         return array_type
@@ -2075,8 +2361,74 @@ class Array:
 # ===========================================================================
 
 
-def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
-    expected_shape = (lanes,)
+def VectorAlias(
+    alias_dtype: Type[Numeric],
+    lanes: int | tuple | list,
+) -> type[Vector]:
+    """Return the same specialized type as ``Vector[alias_dtype, lanes]``.
+
+    ``lanes`` accepts a count or a logical shape, including nested tuples/lists,
+    using Vector's shape normalization. Type identity and names retain the full
+    logical shape; only the MLIR representation is flattened.
+    """
+    if not isinstance(alias_dtype, type) or not issubclass(alias_dtype, Numeric) or alias_dtype._ir_type is None:
+        raise TypeError(f"Vector dtype must be a concrete Numeric type, got {alias_dtype!r}")
+    if not isinstance(lanes, (int, tuple, list)):
+        raise TypeError(f"Vector lanes must be a positive integer or a nested tuple/list shape, got {lanes!r}")
+    expected_shape = Vector._canonical_shape(lanes)
+
+    def _validate_shape(shape):
+        if not shape:
+            raise TypeError(f"Vector shape must be non-empty at every level, got {lanes!r}")
+        for dim in shape:
+            if isinstance(dim, tuple):
+                _validate_shape(dim)
+            elif isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                raise TypeError(f"Vector shape dimensions must be positive integers, got {lanes!r}")
+
+    _validate_shape(expected_shape)
+    cache_key = (alias_dtype, expected_shape)
+    cached = Vector._alias_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    numel = Vector._numel_from_shape(expected_shape)
+    # Keep the established one-dimensional names. Other shapes need their full
+    # tuple structure: equal element counts do not imply equal indexing semantics.
+    alias_name = (
+        f"{alias_dtype.__name__}x{numel}"
+        if expected_shape == (numel,)
+        else f"Vector[{alias_dtype.__name__}, {expected_shape}]"
+    )
+
+    def _payload_bytes():
+        if issubclass(alias_dtype, Index):
+            raise TypeError("Index vectors are not Storable; use a fixed-width integer element type")
+        bits = alias_dtype.width * numel
+        if bits % 8:
+            raise TypeError(f"{alias_name} is not Storable: total bit width must be a multiple of 8")
+        return bits // 8
+
+    def __dsl_align_of__(cls):
+        _payload_bytes()
+        return max(1, (alias_dtype.width + 7) // 8)
+
+    def __dsl_size_of__(cls):
+        return _payload_bytes()
+
+    def __peek_from_ptr__(cls, ptr):
+        payload_bytes = _payload_bytes()
+        if alias_dtype.is_float and alias_dtype.width < 16:
+            # Transport narrow float packed bits through bytes, then recover the dtype.
+            bits = ptr_load(ptr, Vector.make_type(payload_bytes, Uint8))
+            return cls(bits.bitcast(alias_dtype))
+        return ptr_load(ptr, cls)
+
+    def __poke_into_ptr__(cls, ptr, value):
+        _payload_bytes()
+        value = cls.__coerce__(value)
+        if alias_dtype.is_float and alias_dtype.width < 16:
+            value = value.bitcast(Uint8)
+        ptr_store(value, ptr)
 
     def __init__(self, value, shape=None, dtype=None):
         if shape is not None and Vector._canonical_shape(shape) != expected_shape:
@@ -2089,15 +2441,21 @@ def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
             value = Vector.from_elements(value, alias_dtype)
         Vector.__init__(self, value, expected_shape, alias_dtype)
 
-    return type(
-        f"{alias_dtype.__name__}x{lanes}",
+    alias_type = type(
+        alias_name,
         (Vector,),
         {
             "__module__": Vector.__module__,
             "__init__": __init__,
-            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, alias_dtype)),
+            "ir_type": lazy_classattr(lambda: Vector.make_type(expected_shape, alias_dtype)),
+            "__dsl_size_of__": classmethod(__dsl_size_of__),
+            "__dsl_align_of__": classmethod(__dsl_align_of__),
+            "__peek_from_ptr__": classmethod(__peek_from_ptr__),
+            "__poke_into_ptr__": classmethod(__poke_into_ptr__),
         },
     )
+    Vector._alias_cache[cache_key] = alias_type
+    return alias_type
 
 
 Float4E2M1FNx2 = VectorAlias(Float4E2M1FN, 2)
@@ -2205,100 +2563,3 @@ Uint64x1 = VectorAlias(Uint64, 1)
 Uint64x2 = VectorAlias(Uint64, 2)
 Uint64x4 = VectorAlias(Uint64, 4)
 Uint128x1 = VectorAlias(Uint128, 1)
-
-__all__ += [
-    "VectorAlias",
-    "BFloat16x1",
-    "BFloat16x2",
-    "BFloat16x4",
-    "BFloat16x8",
-    "BFloat16x16",
-    "Float4E2M1FNx2",
-    "Float4E2M1FNx4",
-    "Float4E2M1FNx8",
-    "Float4E2M1FNx16",
-    "Float4E2M1FNx32",
-    "Float8E4M3x1",
-    "Float8E4M3x2",
-    "Float8E4M3x4",
-    "Float8E4M3x8",
-    "Float8E4M3x16",
-    "Float8E4M3B11FNUZx1",
-    "Float8E4M3B11FNUZx2",
-    "Float8E4M3B11FNUZx4",
-    "Float8E4M3B11FNUZx8",
-    "Float8E4M3B11FNUZx16",
-    "Float8E4M3FNx1",
-    "Float8E4M3FNx2",
-    "Float8E4M3FNx4",
-    "Float8E4M3FNx8",
-    "Float8E4M3FNx16",
-    "Float8E4M3FNUZx1",
-    "Float8E4M3FNUZx2",
-    "Float8E4M3FNUZx4",
-    "Float8E4M3FNUZx8",
-    "Float8E4M3FNUZx16",
-    "Float8E5M2x1",
-    "Float8E5M2x2",
-    "Float8E5M2x4",
-    "Float8E5M2x8",
-    "Float8E5M2x16",
-    "Float8E8M0FNUx1",
-    "Float8E8M0FNUx2",
-    "Float8E8M0FNUx4",
-    "Float8E8M0FNUx8",
-    "Float8E8M0FNUx16",
-    "Float16x1",
-    "Float16x2",
-    "Float16x4",
-    "Float16x8",
-    "Float16x16",
-    "Float32x1",
-    "Float32x2",
-    "Float32x4",
-    "Float32x8",
-    "Float64x1",
-    "Float64x2",
-    "Float64x4",
-    "Int4x2",
-    "Int4x4",
-    "Int4x8",
-    "Int4x16",
-    "Int4x32",
-    "Int8x1",
-    "Int8x2",
-    "Int8x4",
-    "Int8x8",
-    "Int8x16",
-    "Int16x1",
-    "Int16x2",
-    "Int16x4",
-    "Int16x8",
-    "Int16x16",
-    "Int32x1",
-    "Int32x2",
-    "Int32x4",
-    "Int32x8",
-    "Int64x1",
-    "Int64x2",
-    "Int64x4",
-    "Int128x1",
-    "Uint8x1",
-    "Uint8x2",
-    "Uint8x4",
-    "Uint8x8",
-    "Uint8x16",
-    "Uint16x1",
-    "Uint16x2",
-    "Uint16x4",
-    "Uint16x8",
-    "Uint16x16",
-    "Uint32x1",
-    "Uint32x2",
-    "Uint32x4",
-    "Uint32x8",
-    "Uint64x1",
-    "Uint64x2",
-    "Uint64x4",
-    "Uint128x1",
-]

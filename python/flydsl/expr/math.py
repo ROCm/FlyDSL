@@ -72,7 +72,7 @@ __all__ = [
 ]
 
 
-def dsl_math_wrap_result(fn=None, *, exemplar=None):
+def dsl_math_wrap_result(fn=None, *, exemplar=None, preserve_numeric_type=False):
     """Wrap raw builder results back into DSL ``Numeric`` / ``Vector`` values.
 
     The DSL type of the result is shaped after an *exemplar* operand:
@@ -82,9 +82,16 @@ def dsl_math_wrap_result(fn=None, *, exemplar=None):
     - ``exemplar="<name>"``: the argument bound to that parameter name is the
       exemplar. Use this for builders whose first argument is not the operand,
       e.g. ``cmpi(predicate, lhs, rhs)`` -> ``exemplar="lhs"``.
+    - ``preserve_numeric_type=True``: preserve the exemplar's exact DSL scalar
+      type or vector dtype. Use this for same-type operations whose MLIR result
+      does not encode DSL metadata such as integer signedness.
     """
     if fn is None:
-        return lambda f: dsl_math_wrap_result(f, exemplar=exemplar)
+        return lambda f: dsl_math_wrap_result(
+            f,
+            exemplar=exemplar,
+            preserve_numeric_type=preserve_numeric_type,
+        )
 
     sig = inspect.signature(fn)
     accepts_fastmath = "fastmath" in sig.parameters
@@ -118,8 +125,12 @@ def dsl_math_wrap_result(fn=None, *, exemplar=None):
             if not isinstance(value, ir.Value):
                 return value
             if is_vector:
+                if preserve_numeric_type:
+                    return Vector(value, first.shape, first.dtype)
                 elem_dtype = Numeric.from_ir_type(ir.VectorType(value.type).element_type)
                 return Vector(value, first.shape, elem_dtype)
+            if preserve_numeric_type:
+                return type(first)(value)
             return Numeric.from_ir_type(value.type)(value)
 
         if isinstance(result, ir.Value):

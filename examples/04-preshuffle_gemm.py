@@ -67,9 +67,6 @@ def gemm_kernel(
     gA_k_stride = fx.get_scalar(gA_k.stride[2])
     gB_k_stride = fx.get_scalar(gB_k.stride[2])
 
-    gA_k_stride = fx.get_scalar(gA_k.stride[2])
-    gB_k_stride = fx.get_scalar(gB_k.stride[2])
-
     def run_pipeline_stage(read_stage, next_k, read_next=True):
         write_stage = read_stage ^ 1
 
@@ -148,9 +145,9 @@ def gemm_kernel(
     run_pipeline_stage(read_stage=0, next_k=K // BLOCK_K - 1)
     run_pipeline_stage(read_stage=1, next_k=None, read_next=False)
 
-    mma_frag_C_f16 = fx.make_fragment_like(mma_frag_C, fx.Float16.ir_type)
+    mma_frag_C_f16 = fx.make_fragment_like(mma_frag_C, fx.Float16)
     mma_frag_C_retile = thr_copy_r2g_C.retile(mma_frag_C_f16)
-    mma_frag_C_f16.store(fx.arith.trunc_f(fx.T.VectorType.get([64], fx.T.f16()), mma_frag_C.load()))
+    mma_frag_C_f16.store(mma_frag_C.load().to(fx.Float16))
     fx.copy(buffer_copy_16b, mma_frag_C_retile, thr_gC)
 
 

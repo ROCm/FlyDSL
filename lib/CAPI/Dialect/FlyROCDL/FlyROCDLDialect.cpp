@@ -5,19 +5,29 @@
 
 #include "flydsl/Conversion/Passes.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
+#include "flydsl/Dialect/FlyROCDL/Transforms/Passes.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
+#include "mlir/CAPI/Support.h"
+#include "mlir/Target/LLVM/ROCDL/Utils.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
 
+void mlirRegisterConvertROCDLFastMathOpsPass(void) { mlir::registerConvertROCDLFastMathOpsPass(); }
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
-void mlirRegisterFlyROCDLClusterAttrPass(void) { mlir::registerFlyROCDLClusterAttrPass(); }
+void mlirRegisterFlyKtraceToROCDLConversionPass(void) {
+  mlir::registerFlyKtraceToROCDLConversionPass();
+}
 
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
   unwrap(registry)->insert<mlir::fly_rocdl::FlyROCDLDialect>();
 }
 
 void flydsl_register_rocdl_passes(void) {
+  mlirRegisterConvertROCDLFastMathOpsPass();
   mlirRegisterFlyToROCDLConversionPass();
-  mlirRegisterFlyROCDLClusterAttrPass();
+  mlir::fly_rocdl::registerFlyROCDLPasses();
+  mlirRegisterFlyKtraceToROCDLConversionPass();
 }
+
+MlirStringRef mlirFlyROCDLGetROCMPath(void) { return wrap(mlir::ROCDL::getROCMPath()); }

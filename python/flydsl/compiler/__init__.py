@@ -8,16 +8,18 @@ from .kernel_function import kernel
 
 __all__ = [
     "BaseBackend",
-    "compile",
     "CompiledFunction",
     "compile_backend_name",
+    "get_backend",
+    "GPUTarget",
+    "register_backend",
+    # Jit arguments
+    "JitArgumentRegistry",
     "from_dlpack",
     "from_torch_tensor",
     "from_c_void_p",
-    "get_backend",
-    "GPUTarget",
+    # Compilation functions
     "jit",
-    "JitArgumentRegistry",
     "kernel",
-    "register_backend",
+    "compile",
 ]

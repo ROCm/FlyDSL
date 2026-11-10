@@ -5,16 +5,29 @@ description: >
   analyze the trace data using hotspot_analyzer.py to identify top-K stall hotspots
   (VMEM-load, VMEM-wait, LDS/SMEM-wait, barrier, MFMA stalls) mapped back to source
   lines, and produce an actionable optimization plan.
+  Also analyzes rocprofv3 PMC counter CSVs (L2 hit rate, partial reads, over-fetch).
   Usage: /kernel-trace-analysis <cmd>
   Can also analyze an existing dispatch dir directly: /kernel-trace-analysis --dir <path>
-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
-note: All analysis is done programmatically via hotspot_analyzer.py + code.json. Do NOT use GUI tools.
+allowed-tools: Read,Edit,Bash,Grep,Glob,Agent,Write
 ---
 
 # Kernel Trace Analysis
 
 Profile and analyze GPU kernel ATT traces to identify stall hotspots and produce
 an optimization plan.
+
+All analysis is done by running the bundled `hotspot_analyzer.py` (ATT) and
+`pmc_l2_analyzer.py` (PMC CSVs); never recompute their metrics yourself.
+Do **not** use GUI tools.
+
+> If the question is only "did my change increase register pressure, spills, or
+> LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
+> profiler run, and answers in seconds. Come here when you need to know *why* a
+> kernel is slow rather than *what resources it uses*.
+>
+> To pick an LLVM knob that changes what the compiler emits — a compile hint, a
+> function attribute, an `-mllvm` flag — and to prove it took effect, use
+> `/llvm`. That is also compile-only.
 
 ## Arguments
 
@@ -28,10 +41,10 @@ an optimization plan.
 
 ## Analyzer Scripts
 
-- `scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
+- `${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
   directory; reports top-K stall hotspots, stall-type breakdown, and occupancy
   (combined-VGPR-pool model, reads accum/LDS/SGPR from `out_kernel_trace.csv`).
-- `scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
+- `${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
   L2 hit rate, HBM 32B-partial fraction, and over-fetch ratio. Use when a
   kernel is memory-bound and you need to know *why* (ATT has no cache counters).
   See "L2 / HBM efficiency analysis" under Step 5.
@@ -45,12 +58,11 @@ an optimization plan.
 If the user provides `--dir <path>` or already has a `ui_output_agent_*_dispatch_*` directory:
 
 ```bash
-# Write hotspot_analyzer.py (see above), then:
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+# Both analyzers ship with this skill -- do not reimplement them.
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --kernel <kernel> --topk 15 --mode both --detail --context 4
 ```
 
-Skip to **Step 4: Interpret Results**.
+Skip to **Step 5: Interpret Results**.
 
 ---
 
@@ -83,11 +95,8 @@ GROUP BY ks.KernelName ORDER BY avg_us DESC LIMIT 20;"
 
 #### Step 2: Configure input.yaml
 
-```bash
-cp ~/Documents/input.yaml /tmp/trace_input.yaml
-```
-
-Edit `/tmp/trace_input.yaml`:
+Write `/tmp/trace_input.yaml` with the job below, setting
+`kernel_include_regex` to the kernel found in Step 1:
 
 ```yaml
 jobs:
@@ -118,11 +127,17 @@ FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 rocprofv3 -i /tmp/trace_input.yaml -- <CMD> 2>&
 find . -type d -name "ui_output_agent_*" -newer /tmp/trace_ts 2>/dev/null
 ```
 
-If `rocprof-trace-decoder` library is missing:
+If the `rocprof-trace-decoder` library is missing, install the release matching
+the ROCm version in `/opt/rocm/.info/version`. Set `RTD_VERSION` to that release
+before running the block below. **build-rocm-image** hardcodes its own
+`RTD_VERSION` for the image it builds and does not derive it either; if the two
+disagree, the ROCm version on the machine you are profiling wins:
 ```bash
-wget -q https://github.com/ROCm/rocprof-trace-decoder/releases/download/0.1.6/rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-chmod +x rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh
-./rocprof-trace-decoder-manylinux-2.28-0.1.6-Linux.sh --skip-license --prefix=/tmp/rtd-install
+RTD_VERSION=0.1.6   # <-- set to the release matching your ROCm version
+RTD_INSTALLER="rocprof-trace-decoder-manylinux-2.28-${RTD_VERSION}-Linux.sh"
+wget -q "https://github.com/ROCm/rocprof-trace-decoder/releases/download/${RTD_VERSION}/${RTD_INSTALLER}"
+chmod +x "${RTD_INSTALLER}"
+"./${RTD_INSTALLER}" --skip-license --prefix=/tmp/rtd-install
 find /tmp/rtd-install -name '*.so*' -exec cp -a {} /opt/rocm/lib/ \;
 ldconfig
 ```
@@ -142,17 +157,17 @@ ui_output_agent_<PID>_dispatch_<N>/
 
 ## Step 4: Run hotspot_analyzer.py
 
-Write the script (see above), then run:
+The analyzer ships with this skill — do not reimplement it. Run:
 
 ```bash
 # Full report
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 15 --mode both
 
 # Source-level with code context (best for optimization)
-python /tmp/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
 
 # ASM-only for instruction-level detail
-python /tmp/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
+python ${CLAUDE_SKILL_DIR}/scripts/hotspot_analyzer.py <dispatch_dir> --mode asm --topk 20
 ```
 
 ---
@@ -192,6 +207,11 @@ Flatten recursively: `/FlyDSL/kernels/pa_decode_sw_fp8_ps.py` → `source_0_pa_d
 | `LDS` | `ds_read_*`, `ds_write_*` | LDS access latency |
 
 ### Common hotspot patterns
+
+The snippets below are schematic — they illustrate *instruction scheduling*, so
+loads are written in the abbreviated raw-intrinsic form. On the current surface
+these are `fx.copy` from a `make_buffer_tensor` view; the scheduling advice is
+unchanged either way.
 
 #### Pattern 1: V/K loads inside MFMA loop → very high stall rate (80–95%)
 
@@ -318,8 +338,9 @@ Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512
 wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
 combined ≤ 256, e.g. freeing ~24 VGPRs.
 
-**Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
-arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
+**Note**: `maxnreg` has been removed (it never reached LLVM). Forcing
+`accum_vgpr=0` with it doubled occupancy but caused MFMA spills through
+arch_vgpr — measured 4.5x GPU slowdown. Use `waves_per_eu` instead.
 
 ### L2 / HBM efficiency analysis (PMC, not ATT)
 
@@ -327,10 +348,10 @@ When the ATT hotspots are dominated by `VMEM-load` at high stall rate (e.g.
 40-50% of stall, ~94% per-load), the kernel is memory-bound and the next
 question is **why** — and ATT cannot answer it (it has no cache counters).
 Capture PMC counters (see capture-kernel-trace "PMC Mode") and analyze with
-`scripts/pmc_l2_analyzer.py`:
+`${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py`:
 
 ```bash
-python scripts/pmc_l2_analyzer.py \
+python ${CLAUDE_SKILL_DIR}/scripts/pmc_l2_analyzer.py \
     /tmp/pmc_out/pass_1/pmc_l2_counter_collection.csv \
     /tmp/pmc_ea_out/pass_1/pmc_ea_counter_collection.csv \
     --kernel <kernel> --ideal-gb <bytes_per_dispatch_GB> --ea-channels 2
@@ -423,7 +444,7 @@ After running `hotspot_analyzer.py --detail`, produce a prioritized plan:
 ### #1 :LINE  stall=XK (N%)  VMEM-load  stall_rate=92%
 Root cause: buffer_load inside QK MFMA loop — only 1 MFMA of hiding time.
 Fix: Move all V loads before the QK MFMA loop.
-Estimated gain: ~20% kernel cycle reduction.
+Estimated gain: ~20% kernel cycle reduction (hypothesis; verify correctness and re-time).
 
 ### #2 :LINE  stall=XK (N%)  VMEM-load  stall_rate=80%
 Root cause: K loads sequential with no compute interleaved.

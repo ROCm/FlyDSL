@@ -176,45 +176,62 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     """
     import torch
 
-    import flydsl
+    import flydsl.compiler as flyc
 
     if not torch.cuda.is_available():
         return None
 
     torch_dtype, dt_norm = _dtype_torch(dtype)
     dtype = dt_norm
+    # Every op times a CompiledFunction: every direct @flyc.jit call retraces the launcher.
 
     if op == "softmax":
         from kernels.norm.softmax_kernel import build_softmax_module
 
         # M is runtime; module construction uses a dummy M.
-        # `flydsl.compile()` already has its own cache.
         m = build_softmax_module(1, N, dtype)
-        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
+        stream = torch.cuda.current_stream()
+        exe = flyc.compile(m, x, y, M, stream)
+        return bench_gpu_us_torch(lambda: exe(x, y, M, stream), warmup=warmup, iters=iters)
 
     if op == "layernorm":
+        import flydsl.expr as fx
         from kernels.norm.layernorm_kernel import build_layernorm_module
 
         m = build_layernorm_module(N, dtype)
-        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y, M), warmup=warmup, iters=iters)
+        elem_dtype = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}[dtype]
+        stream = torch.cuda.current_stream()
+        exe = flyc.compile(
+            m,
+            flyc.from_c_void_p(elem_dtype, x.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, gamma.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, beta.data_ptr()),
+            flyc.from_c_void_p(elem_dtype, y.data_ptr()),
+            M,
+            stream,
+        )
+        return bench_gpu_us_torch(
+            lambda: exe(x.data_ptr(), gamma.data_ptr(), beta.data_ptr(), y.data_ptr(), M, stream),
+            warmup=warmup,
+            iters=iters,
+        )
 
     if op == "rmsnorm":
         from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
 
         m = build_rmsnorm_module(N, dtype)
-        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, y, M), warmup=warmup, iters=iters)
+        stream = torch.cuda.current_stream()
+        exe = flyc.compile(m, x, gamma, y, M, stream)
+        return bench_gpu_us_torch(lambda: exe(x, gamma, y, M, stream), warmup=warmup, iters=iters)
 
     if op == "wmma_gemm":
         # gfx11 uses the legacy v16-operand WMMA ABI; gfx12 uses v8 — the
@@ -223,22 +240,33 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         # arch.
         from flydsl.runtime.device import get_rocm_arch as _get_arch
 
-        if str(_get_arch() or "").startswith("gfx11"):
-            from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module
-        else:
-            from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module
-
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
-        launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
         A = torch.randn(M, K, dtype=torch_dtype, device="cuda")
         B_T = torch.randn(N, K, dtype=torch_dtype, device="cuda")
         C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
-        return bench_gpu_us_torch(
-            lambda: launch(C, A, B_T, torch.cuda.current_stream()),
-            warmup=warmup,
-            iters=iters,
-        )
+
+        if str(_get_arch() or "").startswith("gfx11"):
+            # Through the autotune wrapper, so the number reflects the tile
+            # chosen for the shape rather than the kernel's 128x128x32 default.
+            # With nothing configured that resolution still benchmarks nothing,
+            # and warmup absorbs the one-off dispatch through the tuner.
+            from kernels.gemm.rdna3_f16_gemm_autotune import rdna3_gemm_autotuned
+
+            def run():
+                rdna3_gemm_autotuned(C, A, B_T, in_dtype=dtype, out_dtype="bf16")
+
+        else:
+            from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module
+
+            launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
+            stream = torch.cuda.current_stream()
+            compiled = flyc.compile(launch, C, A, B_T, stream, 0)
+
+            def run():
+                compiled(C, A, B_T, stream, 0)
+
+        return bench_gpu_us_torch(run, warmup=warmup, iters=iters)
 
     if op == "wmma_fp8_gemm":
         from kernels.gemm.rdna_fp8_preshuffle_gemm import (
@@ -259,9 +287,10 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
         sa_t = sa.to(device="cuda", dtype=torch.float32).contiguous()
         sb_t = sb.to(device="cuda", dtype=torch.float32).contiguous()
-        launch = compile_fp8_gemm(M=M, N=N, K=K)
+        stream = torch.cuda.current_stream()
+        compiled = flyc.compile(compile_fp8_gemm(M=M, N=N, K=K), C, A_view, B_shuf, sa_t, sb_t, stream)
         return bench_gpu_us_torch(
-            lambda: launch(C, A_view, B_shuf, sa_t, sb_t, torch.cuda.current_stream()),
+            lambda: compiled(C, A_view, B_shuf, sa_t, sb_t, stream),
             warmup=warmup,
             iters=iters,
         )

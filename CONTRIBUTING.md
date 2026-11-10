@@ -100,6 +100,130 @@ Contributions should align with FlyDSL's goal of providing a Python DSL and MLIR
 * For Fly dialect (C++/MLIR) changes, update headers in `include/flydsl/` and implementation in `lib/`.
 * Add MLIR lit tests and/or Python-level pytest tests covering the new functionality.
 
+### Add an LLVM Extension
+
+FlyDSL's codegen quality is bounded by what LLVM does with the IR it emits, so
+some end-to-end performance work lands in LLVM rather than in the DSL. This is
+where those changes live: FlyDSL builds a stock upstream LLVM at the commit
+pinned in `thirdparty/llvm-build-info.json` and applies a small series of local
+extensions on top. The LLVM source tree is never forked or vendored.
+
+**What belongs here.** Only two kinds of change:
+
+1. A change already submitted upstream, carried locally while it is in review.
+2. A change genuinely specific to FlyDSL that upstream would not accept.
+
+Anything else belongs upstream first. A local extension is a maintenance cost paid
+on every pin bump, by whoever bumps it — usually not its author — so the series
+is kept small on purpose. Record which of the two cases an extension is, and
+its upstream link, in its `upstream_status`; that is what tells the next person
+whether it can be dropped.
+
+Patches live in `thirdparty/llvm-extensions/`. The series is declared in
+`thirdparty/llvm-build-info.json`, next to the pin it applies to, and **applied
+in the order listed there** — a file that is not listed is not applied, and the
+build fails rather than ignoring it:
+
+```json
+"upstream": {
+  "llvm_hash": "<pin>",
+  "required_patches": [
+    {"file": "rocdl-lld-argv0.patch", "description": "...", "upstream_status": "..."}
+  ],
+  "extensions": [
+    {"file": "my-fix.patch", "description": "...", "upstream_status": "submitted: <link>"}
+  ]
+}
+```
+
+Every entry needs a `description` and an `upstream_status`. Keep `llvm_hash`
+first in the entry: the CI base-pin step reads it with `sed` on a runner with no
+Python.
+
+**Every extension must be switchable at run time.** An extension changes a
+compiler FlyDSL does not own, and when one turns out to regress a kernel,
+finding that out costs a full LLVM rebuild unless the behavior can be turned off
+in place. So introduce an `llvm::cl::opt` (default off) or a `getenv` guard, and
+branch on it — do not change behavior unconditionally:
+
+```cpp
+static cl::opt<bool> EnableFlyThing(
+    "fly-thing", cl::Hidden, cl::init(false),
+    cl::desc("FlyDSL: enable the thing"));
+
+if (EnableFlyThing) { /* new behavior */ }
+```
+
+`scripts/check_llvm_extensions.py` enforces this and runs in CI through
+`scripts/check_repo.py`. It checks that the diff adds a switch and branches on
+it; it cannot tell a real switch from one wired to a constant, so that part is
+on review. Only `required_patches` are exempt (see below) — a new extension
+needs a switch, not a place in that array.
+
+To add one:
+
+```bash
+# 1. Prepare llvm-project: reset to the pin, replay the existing patches
+bash scripts/llvm_extension.sh my-fix-slug
+
+# 2. Edit or add files under ../llvm-project/
+
+# 3. Capture the edits as thirdparty/llvm-extensions/my-fix-slug.patch
+bash scripts/llvm_extension.sh --finish
+
+# 4. Add it to upstream.extensions in thirdparty/llvm-build-info.json
+```
+
+Do not generate it with a bare `git diff`. Because the preceding extensions
+are left as uncommitted work-tree edits, a plain `git diff` produces a
+*cumulative* diff that re-applies their hunks; replaying such a series fails
+with `patch does not apply`, which looks like staleness but is not.
+`scripts/llvm_extension.sh` makes a throwaway commit first so the diff is
+incremental, and `--finish` captures new files as well as edits.
+
+Order matters: each extension is a diff against the tree with its predecessors
+applied. Append to the array rather than inserting, unless the new one genuinely
+has to precede an existing one.
+
+**Required patches are not extensions.** They make LLVM work at all for FlyDSL
+rather than making it faster, so every build carries them and the run-time
+switch rule does not apply. Keep `required_patches` closed: a new patch belongs
+in `extensions` unless the build is broken without it.
+
+**Building without the extensions.** To answer "is this regression ours?",
+build the same pin with the required patches only, so the extensions are the
+only variable:
+
+```bash
+FLYDSL_LLVM_NO_EXT=1 bash scripts/build_llvm.sh -j64
+
+# Build any commit, optionally from another remote, without editing the pin.
+FLYDSL_LLVM_REF=<sha> \
+FLYDSL_LLVM_REMOTE=https://github.com/ROCm/llvm-project.git \
+  bash scripts/build_llvm.sh -j64
+```
+
+`FLYDSL_LLVM_NO_EXT` drops the extensions but keeps the required patches — a
+build without those cannot find lld, which would make the control arm broken
+rather than clean. It is all-or-nothing by design; there is no per-extension
+skip. A stale extension is meant to be rebased rather than routed around, and
+two possible answers to "which extensions were in this build?" are easier to
+reason about than many. The knob feeds the CI cache key, so a control build
+never restores an install that has the extensions applied, and it does not
+suppress the checks on the tree itself: an unlisted `.patch` file still fails
+the build.
+
+**When a pin bump breaks a patch**, CI names the one that failed. Either rebase
+it with `bash scripts/llvm_extension.sh --rebase <name>` (required patches
+included), or, if the change landed upstream, delete the file and drop its
+entry.
+
+> **Note**: `scripts/build_llvm.sh` resets the tracked files in `../llvm-project`
+> on every run (`git checkout --force`) so the extensions always replay from a
+> pristine tree. Uncommitted edits you made there by hand are discarded without
+> a prompt, but it refuses to run while `llvm_extension.sh` has a patch in
+> progress. Build outputs (`build-flydsl/`, `mlir_install/`) are left untouched.
+
 ---
 
 ## Testing
@@ -138,27 +262,70 @@ If you don't have access to specific AMD GPU models, mention this in your PR. Ou
 
 ## Code Quality
 
+### Commit Hooks
+
+Install the style tools and enable the commit hook:
+
+```bash
+python3 -m pip install --upgrade "pip>=25.1"
+python3 -m pip install --group style
+pre-commit install
+```
+
+Before each commit, pre-commit formats and checks staged Python and C/C++ files.
+It installs the pinned hook tools in isolated environments, so no system
+`clang-format` installation is required. Third-party and build directories are
+excluded, matching the CI style checks.
+
+If a hook changes files, review the changes, stage them again, and retry the
+commit. Ruff errors that cannot be fixed automatically must be corrected manually.
+
+To run all hooks on selected files or across the repository:
+
+```bash
+pre-commit run --files path/to/file.py path/to/file.cpp
+pre-commit run --all-files
+```
+
 ### Python
 
-FlyDSL uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. The project configuration is defined in `pyproject.toml`:
+FlyDSL uses [Black](https://black.readthedocs.io/) for formatting and
+[Ruff](https://docs.astral.sh/ruff/) for linting and import sorting. Their
+versions and configuration are defined in `pyproject.toml`:
 
 * **Line length**: 120 characters
 * **Target version**: Python 3.10+
 * **Linting rules**: pycodestyle (E/W), pyflakes (F), isort (I)
 * **Import sorting**: `flydsl` is treated as first-party
 
-Before submitting, run:
+The hooks run Black 26.5.1, Ruff 0.16.6 with automatic fixes, and a final Black
+pass to normalize Ruff's edits. These versions match the `style` dependency group
+installed by GitHub Actions; keep `.pre-commit-config.yaml` in sync when updating it.
+
+To format and check all branch-local Python changes manually, run:
 
 ```bash
-ruff check python/ kernels/ tests/
-ruff format --check python/ kernels/ tests/
+bash scripts/check_python_style.sh --fix --include-local
 ```
 
 ### C++ (Fly Dialect)
 
 * Tabs should be expanded to spaces. Use 2 spaces indentation (consistent with MLIR/LLVM style).
 * Follow MLIR coding conventions for dialect implementation code.
-* Use `clang-format` where applicable.
+* Use the repository's `.clang-format`: LLVM style with a 100-character line limit.
+* The commit hook pins clang-format 18.1.8, matching the major version of
+  `clang-format-18` installed by GitHub Actions. Keep the hook and CI versions aligned.
+* The hook and CI cover `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`,
+  `.cu`, and `.cuh` files. TableGen (`.td`) files are outside this check.
+
+To format all tracked C/C++ files with the pinned tool:
+
+```bash
+pre-commit run clang-format --all-files
+```
+
+CI runs `clang-format-18 --dry-run --Werror` on changed files, reporting format
+violations without modifying them.
 
 ### General Style Guidelines
 
@@ -193,7 +360,7 @@ For kernel PRs, include in the PR description:
 
 Example:
 
-```
+```markdown
 ## Performance Results (MI300X)
 
 | Config | Baseline | Optimized | Improvement |
@@ -348,6 +515,7 @@ A: We strongly prefer to avoid new dependencies. If necessary, provide justifica
 **Q: How do I run only the tests related to my change?**
 
 A: Use pytest's `-k` flag:
+
 ```bash
 pytest tests/ -k "test_rmsnorm" -v
 ```
@@ -355,6 +523,7 @@ pytest tests/ -k "test_rmsnorm" -v
 **Q: My PR conflicts with the main branch. How do I resolve?**
 
 A:
+
 ```bash
 git fetch upstream
 git rebase upstream/main
@@ -372,6 +541,6 @@ We follow the [Contributor Covenant Code of Conduct](https://www.contributor-cov
 
 ---
 
-## Thank You!
+## Thank You
 
 Thank you for contributing to FlyDSL! Whether you're optimizing a single kernel, adding a new DSL feature, or improving documentation, we appreciate your effort and dedication to the project.

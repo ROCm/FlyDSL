@@ -13,6 +13,7 @@ extern "C" {
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl);
 
+MLIR_CAPI_EXPORTED void mlirRegisterConvertROCDLFastMathOpsPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 
@@ -20,6 +21,10 @@ MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 MLIR_CAPI_EXPORTED void flydsl_register_rocdl_dialects(MlirDialectRegistry registry);
 /// Backend plugin registration: register all ROCDL passes.
 MLIR_CAPI_EXPORTED void flydsl_register_rocdl_passes(void);
+
+/// The ROCm root gpu-module-to-binary uses when its toolkit option is empty
+/// (ROCM_PATH, ROCM_ROOT, ROCM_HOME, then the build's default).
+MLIR_CAPI_EXPORTED MlirStringRef mlirFlyROCDLGetROCMPath(void);
 
 #ifdef __cplusplus
 }

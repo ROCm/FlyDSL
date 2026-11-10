@@ -8,14 +8,19 @@ from typing import Optional
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl, vector
-from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
+from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl
+from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 # (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k).
 _TILE_PRELOAD_TABLE = {
+    # ── 2-wave tile_n = 32 ──
+    (16, 32, 512): (4, 4),
+    (16, 32, 1024): (4, 4),
+    (32, 32, 512): (4, 4),
+    (32, 32, 1024): (4, 4),
     # ── tile_m = 16 ──
     (16, 64, 256): (2, 2),
     (16, 64, 512): (4, 4),
@@ -119,6 +124,7 @@ def compile_preshuffle_gemm(
     use_async_copy: bool = False,
     xcd_swizzle: int = 0,
     lds_stage: int = 2,
+    preload: Optional[tuple[int, int]] = None,
 ):
     """Compile preshuffle GEMM (fp8/int8/fp16/bf16).
     Signature: fn(C, A, B, scale_a, scale_b, bias, M, N, stream). bias is the fused
@@ -126,12 +132,20 @@ def compile_preshuffle_gemm(
     """
     if in_dtype not in ("fp8", "int8", "fp16", "bf16"):
         raise ValueError(f"in_dtype must be fp8/int8/fp16/bf16, got {in_dtype!r}")
+    if tile_m <= 0 or tile_m % 16 != 0:
+        raise ValueError(f"tile_m must be a positive multiple of 16, got tile_m={tile_m}")
+    if tile_n <= 0:
+        raise ValueError(f"tile_n must be positive, got tile_n={tile_n}")
     if tile_k <= 0 or K % tile_k != 0:
         raise ValueError(f"tile_k must be a positive divisor of K; got tile_k={tile_k}, K={K}")
+    if N % tile_n != 0:
+        raise ValueError(f"N must be divisible by tile_n; got N={N}, tile_n={tile_n}")
     if epilogue not in ("none", "bias", "bias_relu", "bias_silu", "bias_gelu"):
         raise ValueError(f"epilogue must be none/bias/bias_relu/bias_silu/bias_gelu, got {epilogue!r}")
     if lds_stage not in (1, 2):
         raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage}")
+    if tile_n != 32 and tile_n % 64 != 0:
+        raise ValueError(f"tile_n must be 32 or a multiple of 64, got tile_n={tile_n}")
     _has_epilogue = epilogue != "none"
     _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
     _has_relu = epilogue == "bias_relu"
@@ -146,13 +160,16 @@ def compile_preshuffle_gemm(
     is_8bit = is_fp8 or is_int8
     elem_bytes = 1 if is_8bit else 2
 
-    # The async gmem->LDS DMA (buffer_load_lds 128b) only lowers for 8-bit inputs.
-    if use_async_copy and not is_8bit:
-        raise ValueError("use_async_copy is only supported for 8-bit inputs (fp8/int8)")
-
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
+    if tile_n == 32 and not is_gfx950:
+        raise ValueError(f"tile_n=32 two-wave path requires gfx950, got {gpu_arch}")
+    if use_async_copy and not is_gfx950:
+        # buffer_load_lds only lowers on gfx950; without this the failure surfaces much
+        # later as an unactionable legalization error.
+        raise ValueError(f"use_async_copy requires gfx950, got {gpu_arch}")
+
     use_mfma_scale_128 = is_fp8 and is_gfx950 and (tile_k % 128 == 0)
     use_mfma_k32 = is_f16_or_bf16 and is_gfx950
 
@@ -166,24 +183,53 @@ def compile_preshuffle_gemm(
 
     # Tile geometry (tile_K_perm = K-elements grouped per MMA k-step)
     tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_8bit else 32)
+    if tile_k % tile_K_perm != 0:
+        raise ValueError(f"tile_k must be divisible by the {tile_K_perm}-element MMA step; " f"got tile_k={tile_k}")
     k_iters = tile_k // tile_K_perm
     num_tiles = K // tile_k
     m_repeat = tile_m // 16
-    num_waves = 4
+    is_two_wave = tile_n == 32
+    num_waves = 2 if is_two_wave else 4
     n_per_wave = tile_n // num_waves
     num_acc_n = n_per_wave // 16
     acc_size = m_repeat * num_acc_n * 4
 
-    total_threads = 256
+    total_threads = num_waves * 64
     a_load_bytes = 16
     bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
     num_a_loads = bytes_per_thread_a // a_load_bytes
+    # The A tile is copied by total_threads threads in a_load_bytes chunks, and both
+    # divisions above truncate. Any remainder leaves the tail of the tile unfetched and
+    # the kernel then computes on stale LDS, so check the exact condition on the tile
+    # size itself rather than on either truncated intermediate.
+    a_tile_bytes = tile_m * tile_k * elem_bytes
+    a_copy_granularity = total_threads * a_load_bytes
+    if a_tile_bytes % a_copy_granularity != 0:
+        raise ValueError(
+            f"tile_m * tile_k * elem_bytes must be a multiple of {a_copy_granularity} "
+            f"(total_threads * a_load_bytes); got tile_m={tile_m}, tile_k={tile_k}, "
+            f"elem_bytes={elem_bytes} -> {a_tile_bytes} bytes, leaving "
+            f"{a_tile_bytes % a_copy_granularity} bytes of the A tile unloaded"
+        )
+    val_per_thr = a_load_bytes // elem_bytes
+    thrs_k = tile_k // val_per_thr
+    if thrs_k <= 0 or total_threads % thrs_k != 0:
+        raise ValueError(f"tile_k={tile_k} gives thrs_k={thrs_k}, which must divide " f"total_threads={total_threads}")
+    thrs_m = total_threads // thrs_k
+    if tile_m % thrs_m != 0:
+        raise ValueError(f"tile_m={tile_m} must be divisible by thrs_m={thrs_m}")
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
-    if is_8bit and is_gfx950:
+    if preload is not None:
+        if len(preload) != 2 or any(not isinstance(v, int) or v < 0 for v in preload):
+            raise ValueError(f"preload must be a pair of non-negative ints, got {preload!r}")
+        dsrd_preload, dvmem_preload = (int(v) for v in preload)
+    elif is_8bit and is_gfx950:
         dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
     else:
+        # _TILE_PRELOAD_TABLE only covers 8-bit tiles, so other dtypes emit no
+        # sched_vmem/sched_dsrd hints unless the caller supplies them via preload=.
         dsrd_preload, dvmem_preload = (0, 0)
 
     a_lds_elems = tile_m * tile_k
@@ -225,9 +271,13 @@ def compile_preshuffle_gemm(
 
         if const_expr(use_mfma_scale_128):
             _scale_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
+            if const_expr(is_two_wave):
+                wave_layout = fx.make_layout((1, 2, 1), (0, 1, 0))
+            else:
+                wave_layout = fx.make_layout((1, 4, 1), (0, 1, 0))
             tiled_mma = fx.make_tiled_mma(
                 _scale_atom,
-                fx.make_layout((1, 4, 1), (0, 1, 0)),
+                wave_layout,
                 fx.make_tile(None, None, fx.make_layout((32, 4), (1, 32))),
             )
         else:
@@ -241,9 +291,7 @@ def compile_preshuffle_gemm(
             arg_a, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes)
         )
         gB = fx.rocdl.make_buffer_tensor(arg_b)
-        gC = fx.rocdl.make_buffer_tensor(
-            arg_c, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(2)
-        )
+        gC = fx.rocdl.make_buffer_tensor(arg_c, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(N) * 2)
 
         tA = fx.flat_divide(gA, fx.make_tile(tile_m, tile_k))[None, None, bid_x, None]
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
@@ -259,15 +307,23 @@ def compile_preshuffle_gemm(
         thr_g2r_B = fx.make_tiled_copy_B(buf_copy, tiled_mma).get_slice(tid)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        if const_expr(is_8bit):
+        # dma_a_to_lds writes A with k_swz derived from k_blocks16, so whenever the DMA
+        # is used the LDS view must be swizzled the same way or the reader unswizzles at
+        # a different width. The sync path writes through this same view and is
+        # self-consistent under any swizzle, and measurably prefers the fixed one
+        # (bf16 tile_k=256: 1011 TF/s fixed vs 417 derived), so it keeps Swizzle<3,3,3>.
+        if const_expr(is_8bit or use_async_copy):
             k_blocks16 = (tile_k * elem_bytes) // 16
             if k_blocks16 <= 0 or (k_blocks16 & (k_blocks16 - 1)) != 0:
                 raise ValueError(
-                    f"Unsupported tile_k for 8-bit LDS swizzle: tile_k={tile_k}, elem_bytes={elem_bytes} (k_blocks16={k_blocks16}); "
-                    "expected tile_k*elem_bytes to be a positive multiple of 16 with (tile_k*elem_bytes/16) a power of two."
+                    f"Unsupported tile_k for LDS swizzle: tile_k={tile_k}, elem_bytes={elem_bytes} "
+                    f"(k_blocks16={k_blocks16}); expected tile_k*elem_bytes to be a positive multiple "
+                    "of 16 with (tile_k*elem_bytes/16) a power of two."
                 )
             swz_bits = k_blocks16.bit_length() - 1  # log2
-            swz = fx.SwizzleType.get(swz_bits, 4, swz_bits)
+            # base = log2(elements per 16B): 4 for 8-bit, 3 for f16/bf16
+            swz_base = (16 // elem_bytes).bit_length() - 1
+            swz = fx.SwizzleType.get(swz_bits, swz_base, swz_bits)
         else:
             swz = fx.SwizzleType.get(3, 3, 3)
 
@@ -311,7 +367,16 @@ def compile_preshuffle_gemm(
             # Bound to the real M extent (like the sync gA) so ragged-M blocks DMA-read
             # OOB rows as 0 instead of faulting past the allocation.
             gA_flat = fx.rocdl.make_buffer_tensor(
-                fx.Tensor(fx.make_view(fx.get_iter(arg_a), fx.make_layout(65536 * K, 1))),
+                # Byte-typed on both sides: the DMA is a raw 128b byte move and the
+                # index math below is already expressed in bytes. With an element-typed
+                # global view the copy only legalizes -- and only indexes correctly --
+                # when elem_bytes == 1, which is what restricted this path to 8-bit.
+                fx.Tensor(
+                    fx.make_view(
+                        fx.recast_iter(Int8, fx.get_iter(arg_a)),
+                        fx.make_layout(65536 * K * elem_bytes, 1),
+                    )
+                ),
                 max_size=False,
                 num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes),
             )
@@ -458,6 +523,10 @@ def compile_preshuffle_gemm(
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
         def mma_kloop(a_stage, cur_frag_B):
+            # Issue the A-fragment LDS reads per k-step. Semantically this is the same as
+            # one whole-tile copy, but the single copy leaves the scheduler no room to
+            # interleave the reads with the MFMAs that consume them, which costs 3.3x on
+            # bf16 tile_k=256 (see the commit message for the measurement).
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_copy, pA_s2r_stages[a_stage][None, None, ki], frag_A_retile[None, None, ki])
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
@@ -492,7 +561,7 @@ def compile_preshuffle_gemm(
                 gpu.barrier()
 
         # ── Prologue ──────────────────────────────────────────────
-        acc_zero = Vec.filled(acc_size, 0, Int32) if const_expr(is_int8) else Vec.filled(acc_size, 0.0, Float32)
+        acc_zero = fx.full(acc_size, 0, Int32) if const_expr(is_int8) else fx.full(acc_size, 0.0, Float32)
         if const_expr(use_async_copy):
             dma_a_to_lds(fx.Int32(0), 0)
             fx.copy(buf_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
@@ -561,44 +630,50 @@ def compile_preshuffle_gemm(
         lane_div_16 = lane_id // 16
         lane_mod_16 = lane_id % 16
 
+        # Epilogue scalar/vec4 gathers via buffer_copy atoms over a make_buffer_tensor
+        # (element-index addressing; same OOB-checked descriptor as the legacy buffer_load).
+        epi_copy_32b = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Float32)
+        epi_copy_128b = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), Float32)
+        epi_copy_16b = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+
         def load_epi_operands():
             s_a = s_b = bias = None
             if const_expr(is_8bit):
                 # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
-                scale_b_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
-                s_b = [
-                    fx.buffer_ops.buffer_load(
-                        scale_b_rsrc,
-                        fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
-                        vec_width=1,
-                        dtype=T.f32,
+                sb_buf = fx.logical_divide(
+                    fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True), fx.make_layout(1, 1)
+                )
+                s_b = []
+                for ni in range_constexpr(num_acc_n):
+                    f = fx.make_rmem_tensor(1, Float32)
+                    fx.copy(
+                        epi_copy_32b,
+                        sb_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
+                        f,
                     )
-                    for ni in range_constexpr(num_acc_n)
-                ]
-                scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
-                s_a = [
-                    Vec(
-                        fx.buffer_ops.buffer_load(
-                            scale_a_rsrc, fx.Int32(bx_m + mi * 16 + lane_div_16 * 4), vec_width=4, dtype=T.f32
-                        )
-                    ).bitcast(fx.Float32)
-                    for mi in range_constexpr(m_repeat)
-                ]
+                    s_b.append(fx.Float32(f.load()[0]))
+                # scale_a: vec4 f32 per m-block (BufferCopy128b).
+                sa_buf = fx.logical_divide(
+                    fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True), fx.make_layout(4, 1)
+                )
+                s_a = []
+                for mi in range_constexpr(m_repeat):
+                    f = fx.make_rmem_tensor(4, Float32)
+                    grp = (bx_m + mi * 16 + lane_div_16 * 4) // 4
+                    fx.copy(epi_copy_128b, sa_buf[None, fx.Int32(grp)], f)
+                    s_a.append(Vec(f.load()))
             if const_expr(_has_bias):
                 # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
-                bias_rsrc = fx.buffer_ops.create_buffer_resource(arg_bias, max_size=True)
-                bias_elem_ty = T.bf16 if out_dtype == "bf16" else T.f16
-                bias = [
-                    fx.Float32(
-                        fx.buffer_ops.buffer_load(
-                            bias_rsrc,
-                            fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
-                            vec_width=1,
-                            dtype=bias_elem_ty,
-                        )
+                bias_buf = fx.logical_divide(fx.rocdl.make_buffer_tensor(arg_bias, max_size=True), fx.make_layout(1, 1))
+                bias = []
+                for ni in range_constexpr(num_acc_n):
+                    f = fx.make_rmem_tensor(1, out_elem_cls)
+                    fx.copy(
+                        epi_copy_16b,
+                        bias_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
+                        f,
                     )
-                    for ni in range_constexpr(num_acc_n)
-                ]
+                    bias.append(fx.Float32(f.load()[0]))
             return s_a, s_b, bias
 
         overlap_epi_load = acc_size <= 64  # small enough accumulator to keep operands live over the MMA
@@ -660,7 +735,7 @@ def compile_preshuffle_gemm(
                 val_s = apply_activation(val_s)
                 out_elems.append(val_s.to(out_elem_cls))
 
-            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), out_elems)
+            out_vec = fx.Vector.from_elements(out_elems, out_elem_cls)
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
@@ -694,16 +769,13 @@ def compile_preshuffle_gemm(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
-        tiled_mma = fx.make_tiled_mma(
-            mma_atom,
-            fx.make_layout((1, 4, 1), (0, 1, 0)),
-            fx.make_tile(None, None, k_perm),
-        )
+        if const_expr(is_two_wave):
+            wave_layout = fx.make_layout((1, 2, 1), (0, 1, 0))
+        else:
+            wave_layout = fx.make_layout((1, 4, 1), (0, 1, 0))
+        tiled_mma = fx.make_tiled_mma(mma_atom, wave_layout, fx.make_tile(None, None, k_perm))
 
         # G2S tiled copy
-        val_per_thr = a_load_bytes // elem_bytes
-        thrs_k = tile_k // val_per_thr
-        thrs_m = total_threads // thrs_k
         tiled_copy_g2s = fx.make_tiled_copy(
             fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem),
             fx.make_layout(
@@ -752,7 +824,7 @@ def compile_preshuffle_gemm(
             value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         ).launch(
             grid=(gx, gy, 1),
-            block=(256, 1, 1),
+            block=(total_threads, 1, 1),
             stream=stream,
         )
 

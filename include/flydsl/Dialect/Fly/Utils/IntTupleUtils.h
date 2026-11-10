@@ -57,9 +57,11 @@ private:
                        int32_t dyncIdxEnd = -1)
       : value(value), attr(attr), dyncIdxStart(dyncIdxStart), dyncIdxEnd(dyncIdxEnd) {}
 
-  Value value = nullptr;
+  // ``value`` is materialized lazily for static int leaves
+  mutable Value value = nullptr;
   IntTupleAttr attr = nullptr;
   int32_t dyncIdxStart = 0, dyncIdxEnd = -1;
+  const IntTupleBuilder<IntTupleValueAdaptor> *lazyOwner = nullptr;
 
 public:
   IntTupleValueAdaptor() = default;
@@ -93,7 +95,7 @@ public:
   bool isStatic() const { return attr.isStatic(); }
   int32_t rank() const { return attr.rank(); }
 
-  Value getValue() const { return value; }
+  Value getValue() const; // lazily materializes static int leaves
   IntTupleAttr getAttr() const { return attr; }
 
   friend class IntTupleBuilder<IntTupleValueAdaptor>;
@@ -274,9 +276,21 @@ public:
   IntTupleValueAdaptor materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
     assert(value.isStatic() && "Value must be static");
     auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    // Construct a lazy static int leaf: no SSA op yet; getValue() materializes it.
+    if (modes.empty()) {
+      IntTupleValueAdaptor a(nullptr, attr);
+      a.lazyOwner = this;
+      return a;
+    }
     return IntTupleValueAdaptor(
         arith::ConstantIntOp::create(builder, loc, value.getValue(), value.getWidth()).getResult(),
         attr);
+  }
+
+  // Materialize the deferred constant for a static int leaf (used by getValue()).
+  Value materializeLeafValue(IntTupleAttr attr) const {
+    IntAttr ia = attr.getLeafAsInt();
+    return arith::ConstantIntOp::create(builder, loc, ia.getValue(), ia.getWidth()).getResult();
   }
   IntTupleValueAdaptor materializeConstantLeaf(BasisAttr value) const {
     assert(value.isStatic() && "Value must be static");
@@ -358,6 +372,12 @@ public:
     }
   }
 };
+
+inline Value IntTupleValueAdaptor::getValue() const {
+  if (!value && lazyOwner)
+    value = lazyOwner->materializeLeafValue(attr);
+  return value;
+}
 
 template <class BinaryOp, class IntTuple>
 IntTuple intTupleBinaryOp(const IntTupleBuilder<IntTuple> &builder, BinaryOp &&binaryOp,
@@ -846,51 +866,43 @@ IntTuple intTupleZip(const IntTupleBuilder<IntTuple> &builder, IntTuple t0, IntT
 
 namespace detail {
 
-template <class IntTuple>
-std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple> &builder,
-                                                 IntTuple t, IntTupleAttr guide) {
+inline IntTupleAttr zipGuideAt(IntTupleAttr guide, int32_t idx) { return guide.at(idx); }
+inline TileAttr zipGuideAt(TileAttr guide, int32_t idx) { return TileAttr::get(guide.at(idx)); }
+
+template <class IntTuple, class Guide>
+IntTuple intTupleZip2ByImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple t, Guide guide) {
   using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
   if (guide.isLeaf()) {
-    assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
-    return {builder.at(t, 0), builder.at(t, 1)};
+    assert(t.rank() == 2 && "Mismatched ranks");
+    return t;
   }
-  // Canonicalize singleton guide wrappers so 1D profiles behave as leaf guides.
-  // This keeps zip2By robust after singleton unwrapping in product/divide type canonicalization.
-  if (guide.rank() == 1) {
-    return intTupleZip2ByImpl(builder, t, guide.at(0));
-  }
+  assert(t.rank() >= guide.rank() && "Mismatched ranks");
+
+  // zip2By produces the modes like ((A,a),(B,b),...)
   Collector firsts;
   Collector seconds;
-
   int32_t guideRank = guide.rank();
-  int32_t tRank = t.rank();
-  assert(tRank >= guideRank && "Mismatched ranks in intTupleZip2By");
   for (int i = 0; i < guideRank; ++i) {
-    auto [first, second] = intTupleZip2ByImpl(builder, builder.at(t, i), guide.at(i));
-    firsts.push_back(first);
-    seconds.push_back(second);
+    auto res = intTupleZip2ByImpl(builder, builder.at(t, i), zipGuideAt(guide, i));
+    firsts.push_back(builder.at(res, 0));
+    seconds.push_back(builder.at(res, 1));
   }
-  for (int i = guideRank; i < tRank; ++i) {
+
+  // Rearrange and append missing modes from t to make ((A,B,...),(a,b,...,x,y))
+  for (int i = guideRank; i < t.rank(); ++i) {
     seconds.push_back(builder.at(t, i));
   }
-  return {builder.makeTuple(firsts), builder.makeTuple(seconds)};
+  Collector zipped;
+  zipped.push_back(builder.makeTuple(firsts));
+  zipped.push_back(builder.makeTuple(seconds));
+  return builder.makeTuple(zipped);
 }
 
-} // namespace detail
+} // end namespace detail
 
-template <class IntTuple>
-IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, IntTupleAttr guide) {
-  if (guide.isLeaf()) {
-    assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
-    return t;
-  } else {
-    using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
-    auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
-    Collector collector;
-    collector.push_back(first);
-    collector.push_back(second);
-    return builder.makeTuple(collector);
-  }
+template <class IntTuple, class Guide>
+IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, Guide guide) {
+  return detail::intTupleZip2ByImpl(builder, t, guide);
 }
 
 namespace detail {

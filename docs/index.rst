@@ -1,8 +1,16 @@
-FlyDSL Documentation
-=====================
+FlyDSL |FLYDSL_VERSION| documentation
+=====================================
 
 **FlyDSL** is a Python DSL and MLIR compiler stack for authoring high-performance
 GPU kernels with explicit layout algebra, targeting AMD ROCm/HIP GPUs.
+
+.. note::
+
+   This site is built from ``main`` and may describe APIs newer than the
+   published package. See :ref:`documentation-versions`
+   to choose documentation and dependencies for your installed release.
+
+   Source commit: |SOURCE_COMMIT|. Built: |BUILD_DATE|.
 
 FlyDSL is the Python front-end (*Flexible Layout Python DSL*) powered by the
 **Fly dialect**: an MLIR-native compiler stack with first-class layout IR
@@ -10,49 +18,66 @@ FlyDSL is the Python front-end (*Flexible Layout Python DSL*) powered by the
 explicit algebra and coordinate mapping, plus a composable lowering pipeline
 to GPU/ROCDL.
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Getting Started
+.. grid:: 1 1 2 2
+   :gutter: 3
 
-   installation
-   quickstart
+   .. grid-item-card:: Getting started
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Language Specification
+      * :doc:`Install FlyDSL <installation>`
 
-   arithmetic_types
+      * :doc:`Quick start <quickstart>`
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Guides
+      * :doc:`API stability <api_stability>`
 
-   architecture_guide
-   layout_system_guide
-   kernel_authoring_guide
-   kernel_tuning_guide
-   prebuilt_kernels_guide
-   testing_benchmarking_guide
-   cute_layout_algebra_guide
+   .. grid-item-card:: Language
 
-.. toctree::
-   :maxdepth: 2
-   :caption: API Reference
+      * :doc:`Arithmetic types <language/arithmetic_types>`
+      * :doc:`Composite types <language/composite_types>`
+      * :doc:`Storage and allocator <language/storage_and_allocator>`
+      * :doc:`DSL protocols <language/dsl_protocols>`
 
-   api/dsl
-   api/compiler
-   api/kernels
+   .. grid-item-card:: Extension
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Tutorials
+      * :doc:`Random number generation <extension/rand>`
 
-   tutorials/index
+   .. grid-item-card:: Guides
 
+      * :doc:`Architecture and compilation pipeline <architecture_guide>`
 
-Indices and tables
-==================
+      * :doc:`Layout algebra <layout_system_guide>`
 
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+      * :doc:`Kernel authoring <kernel_authoring_guide>`
+
+      * :doc:`Kernel tuning <kernel_tuning_guide>`
+
+      * :doc:`In-kernel wave tracing <ktrace_guide>`
+
+      * :doc:`Offline autotune configs <autotune_guide>`
+
+      * :doc:`Prebuilt kernel library <prebuilt_kernels_guide>`
+
+      * :doc:`Testing and benchmarking <testing_benchmarking_guide>`
+
+      * :doc:`CuTe layout algebra <cute_layout_algebra_guide>`
+
+      * :doc:`External bitcode integration <extern_integration_guide>`
+
+   .. grid-item-card:: API reference
+
+      * :doc:`API overview <api/index>`
+
+      * :doc:`Expression language <api/dsl>`
+
+      * :doc:`Compiler <api/compiler>`
+
+      * :doc:`Extension libraries <api/extensions>`
+
+      * :doc:`Stable runtime helpers <api/runtime>`
+
+      * :doc:`Pre-built kernels <api/kernels>`
+
+   .. grid-item-card:: Tutorials
+
+      * :doc:`Basic usage <tutorials/basic_usage>`
+
+      * :doc:`Kernel development <tutorials/kernel_development>`

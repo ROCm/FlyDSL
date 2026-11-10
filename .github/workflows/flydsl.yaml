@@ -9,6 +9,16 @@ on:
       - main
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      prepare_runner:
+        description: 'Runner for prepare-mlir (compile-only; no GPU needed)'
+        type: choice
+        default: build-only-flydsl
+        options:
+          - build-only-flydsl
+          - linux-flydsl-mi325-1
+          - linux-flydsl-mi355-1
+          - linux-flydsl-navi-2
 
 permissions:
   contents: read
@@ -20,7 +30,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKER_IMAGE: "rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
+  LLVM_BUILD_PROFILE: "amd-minimal"
+  # Bump when the container or LLVM build environment changes incompatibly.
+  MLIR_CACHE_VERSION: "manylinux228-rocm7.2-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
   # PRs compare against their exact base; main pushes compare against the previous commit.
@@ -30,11 +43,13 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Detect whether the change touches code. Docs-only / non-code changes (docs,
-  # markdown, root docs, images, non-workflow .github files) set code_changed to
-  # 'false', and the heavy test / multi-gpu jobs below are skipped at the job
-  # level (a skipped required check still counts as passing for branch
-  # protection), so no GPU runner is used. workflow_dispatch always forces a
-  # full run, and a detection failure fails safe to running the tests.
+  # markdown, images, license, git/style/agent metadata, and non-workflow
+  # .github files) set code_changed to 'false', and the heavy GPU
+  # jobs below are skipped at the job level (a skipped required check still
+  # counts as passing for branch protection), so no GPU runner is used.
+  # workflow_dispatch always forces a full run, and a detection failure fails
+  # safe to running the tests. Workflow YAML under .github/workflows is still
+  # treated as code so GPU job wiring itself is re-tested.
   # ---------------------------------------------------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -67,7 +82,16 @@ jobs:
               - '!**/*.gif'
               - '!**/*.svg'
               - '!**/*.webp'
+              - '!.gitignore'
+              - '!.clang-format'
+              - '!.pre-commit-config.yaml'
+              - '!.claude/**'
+              - '!.cursor/**'
+              - '!.codex/**'
               - '!.github/ISSUE_TEMPLATE/**'
+              - '!.github/dashboard/**'
+              - '!.github/runner-config.yml'
+              - '!.github/scripts/**'
 
   check-signal:
     if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
@@ -97,10 +121,11 @@ jobs:
           && needs.detect-changes.outputs.code_changed != 'true' }}
     name: test
     strategy:
+      # Must match the 'test' matrix below.
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
     runs-on: ubuntu-latest
@@ -116,20 +141,408 @@ jobs:
           echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.runners }})' as passed."
 
   # ---------------------------------------------------------------------------
-  # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
+  # Prepare one shared MLIR install, then build current/base FlyDSL wheels once.
+  # GPU jobs consume the compact wheels instead of transferring the full MLIR
+  # install. Main and trusted same-repository PRs persist rebuilt MLIR caches.
+  # ---------------------------------------------------------------------------
+  prepare-mlir:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ !cancelled()
+          && needs.check-signal.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
+    # Compile-only, so it runs on the CPU builder instead of holding a GPU
+    # runner. These are ARC scale sets: runs-on names exactly one, and the
+    # dispatch input is how to retarget when it is busy.
+    runs-on: ${{ inputs.prepare_runner || 'build-only-flydsl' }}
+    timeout-minutes: 150
+    outputs:
+      base_wheel: ${{ steps.wheels.outputs.base_wheel }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+
+      # A pin bump leaves the base source uncompilable against the PR's MLIR, so
+      # the baseline wheel needs the base commit's own install. Every step gated
+      # on pin_changed is skipped for a PR that leaves the LLVM inputs alone.
+      - name: Resolve base LLVM pin
+        id: base-pin
+        # `run:` blocks are `bash -e`, and nothing decided here is worth failing
+        # prepare-mlir over: with no outputs written, the gated steps skip.
+        continue-on-error: true
+        # Some self-hosted runners rewrite GitHub URLs to a git cache, and this
+        # is the only fetch here that runs on the host, not in the container.
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          set -uo pipefail
+          # Self-hosted workspaces are reused; drop what the last run left.
+          rm -rf base-pin
+          rm -f mlir_install_base.tgz
+          mkdir -p base-pin/thirdparty base-pin/scripts
+          if ! git -C flydsl-test fetch "https://github.com/${BASE_REPO_NAME}.git" \
+                 "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+            echo "Could not fetch base ${BASE_REPO_NAME}@${BASE_COMMIT_SHA}; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh scripts/ci_mlir_cache_key.sh; do
+            if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
+              echo "Base commit has no ${f}; treating LLVM pin as unchanged."
+              echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+          # A base without the directory has no patches: compare against an empty
+          # dir rather than bailing out, or a real change would read as unchanged.
+          mkdir -p base-pin/thirdparty/llvm-extensions
+          if git -C flydsl-test cat-file -e "FETCH_HEAD:thirdparty/llvm-extensions" 2>/dev/null; then
+            git -C flydsl-test archive FETCH_HEAD thirdparty/llvm-extensions \
+              | tar -x -C base-pin
+          fi
+          changed=false
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
+            if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
+              echo "LLVM input differs from base: ${f}"
+              changed=true
+            fi
+          done
+          if ! diff -qr "flydsl-test/thirdparty/llvm-extensions" "base-pin/thirdparty/llvm-extensions" >/dev/null; then
+            echo "LLVM input differs from base: thirdparty/llvm-extensions"
+            changed=true
+          fi
+          # sed, not python3: every other python call here runs in the container
+          # and the runners promise no host interpreter. Scoped to "upstream" so a
+          # second entry carrying its own llvm_hash cannot be picked up.
+          base_hash="$(sed -n '/"upstream"/,/}/ s/.*"llvm_hash"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+            base-pin/thirdparty/llvm-build-info.json)"
+          if [ -z "${base_hash}" ]; then
+            echo "Could not read the base LLVM hash; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "pin_changed=${changed}" >>"${GITHUB_OUTPUT}"
+          echo "base_llvm_hash=${base_hash}" >>"${GITHUB_OUTPUT}"
+          echo "Base LLVM pin: ${base_hash}"
+
+      # Content-derived keys, which is what makes the base commit's key
+      # computable from the extracted files.  The base key uses the base
+      # commit's own ci_mlir_cache_key.sh to match the formula that was
+      # active when the base's MLIR install was cached.
+      - name: Compute MLIR cache keys
+        id: keys
+        run: |
+          set -euo pipefail
+          self_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh flydsl-test)"
+          echo "self=${self_key}" >>"${GITHUB_OUTPUT}"
+          echo "Shared MLIR cache key: ${self_key}"
+          if [ "${{ steps.base-pin.outputs.pin_changed }}" = "true" ]; then
+            # Use the *base commit's own* key script so the key matches what
+            # was cached when that commit was built.  The PR's script may hash
+            # a different set of inputs (e.g. the patches-dir migration).
+            base_key_script=base-pin/scripts/ci_mlir_cache_key.sh
+            if [ ! -f "${base_key_script}" ]; then
+              base_key_script=flydsl-test/scripts/ci_mlir_cache_key.sh
+            fi
+            base_key="$(bash "${base_key_script}" base-pin)"
+            echo "base=${base_key}" >>"${GITHUB_OUTPUT}"
+            echo "Baseline MLIR cache key: ${base_key}"
+          fi
+
+      # Restored before the shared entry and under the same `path`, then moved
+      # aside: actions/cache derives its version from the path list, so an entry
+      # saved as `mlir_install.tgz` is only findable under that name. No
+      # restore-keys either - a prefix fallback would return an install built
+      # from another pin.
+      #
+      # This is the entry every PR that leaves LLVM alone restores on every run,
+      # so it stays warm. A PR that also changes MLIR_CACHE_VERSION or
+      # LLVM_BUILD_PROFILE misses, since both feed the key from the PR side.
+      - name: Restore baseline MLIR cache
+        id: base-mlir-cache
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      # This install is ~1.4 GB and these runners are spread across regions, so
+      # the transfer is slow enough (~1.6 MB/s observed) to be interrupted:
+      #
+      #   Received 1010827264 of 1396566653 (72.4%), 1.6 MBs/sec
+      #   ##[warning]Failed to restore: Server failed to authenticate the
+      #             request ... Authorization header ... signature.
+      #   Cache not found for input keys: mlir-install-...-4087a417...
+      #
+      # The entry was there and matched; the blob SAS auth failed mid-download,
+      # which actions/cache reports as a plain miss. One retry costs nothing on
+      # the normal path and is the difference between having a baseline and
+      # silently not having one.
+      - name: Retry baseline MLIR cache restore
+        id: base-mlir-cache-retry
+        if: >-
+          steps.base-pin.outputs.pin_changed == 'true' &&
+          steps.base-mlir-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.base }}
+
+      - name: Stash baseline MLIR tarball
+        if: >-
+          steps.base-mlir-cache.outputs.cache-hit == 'true' ||
+          steps.base-mlir-cache-retry.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s mlir_install.tgz ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR cache reported a hit but produced no tarball."
+            rm -f mlir_install.tgz
+            exit 0
+          fi
+          mv mlir_install.tgz mlir_install_base.tgz
+
+      - name: Restore shared MLIR cache
+        id: mlir-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.keys.outputs.self }}
+
+      # Prebuilt image on ghcr (includes cp310-cp314); the fallback rebuilds it
+      # from Docker Hub only if the pull fails. Same step as build-whl.yaml.
+      - name: Pull or build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-a3c082a2ac9c"
+          if ! docker pull "${IMAGE}"; then
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              - < flydsl-test/.github/workflows/Dockerfile.manylinux_2_28
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+      - name: Start MLIR build container
+        run: |
+          docker ps -aq -f name=flydsl_mlir_cache | xargs -r docker stop | xargs -r docker rm || true
+          docker run -dt --network=host --user root \
+            -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+            --ipc=host --shm-size 16g \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            -w /flydsl-test \
+            --name flydsl_mlir_cache \
+            ${MANYLINUX_IMAGE}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      # The image ships cmake, ninja, gcc, patchelf, git and ROCm at /opt/rocm.
+      - name: Install MLIR build dependencies
+        run: |
+          docker exec flydsl_mlir_cache bash -c '
+            for d in /opt/python/cp*; do
+              case "${d}" in *t) continue ;; esac
+              py="${d}/bin/python"
+              [ -x "${py}" ] || continue
+              ver=$("${py}" -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+              ln -sf "${py}" "/usr/local/bin/python${ver}"
+            done
+            ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
+          '
+          docker exec flydsl_mlir_cache bash -c "python3 -m pip install -q nanobind"
+          docker exec flydsl_mlir_cache bash -c "git config --global --add safe.directory '*'"
+          sdk_root="$(docker exec flydsl_mlir_cache bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
+          test -n "${sdk_root}"
+          docker exec flydsl_mlir_cache test -d "${sdk_root}"
+          printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
+
+      - name: Use cached MLIR install
+        if: steps.mlir-cache.outputs.cache-hit == 'true'
+        run: |
+          test -s ./mlir_install.tgz
+          docker cp ./mlir_install.tgz flydsl_mlir_cache:/tmp/mlir_install.tgz
+          docker exec flydsl_mlir_cache bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
+          docker exec flydsl_mlir_cache bash -c "test -d /llvm-project/mlir_install/lib/cmake/mlir"
+
+      - name: Build LLVM once
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        # A cold LLVM build measures ~10 min on these runners. Fail fast instead
+        # of letting a stalled fetch or build hold the GPU runner until the
+        # job-level timeout.
+        timeout-minutes: 45
+        run: |
+          set -ex
+          docker exec -e LLVM_BUILD_PROFILE -e ROCM_PATH flydsl_mlir_cache bash -c '
+            cd /flydsl-test
+            bash scripts/build_llvm.sh
+          '
+          docker exec flydsl_mlir_cache bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
+          test -s ./mlir_install.tgz
+
+      # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
+      # is worse than none, since it yields a plausible number nobody questions.
+      #
+      # Only a cache hit produces a baseline. Building the old pin here would
+      # cost a second llvm-project clone and full LLVM build on a GPU runner, per
+      # push, for an advisory number. Revisit if the logs show misses are common.
+      - name: Unpack and verify baseline MLIR
+        id: base-mlir
+        if: steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ ! -s ./mlir_install_base.tgz ]; then
+            echo "::notice title=Benchmark baseline skipped::No cached MLIR install for the base commit's LLVM (${{ steps.base-pin.outputs.base_llvm_hash }}), so the vs-main comparison is skipped; vs latest tag is unaffected. This resolves itself once main has run under that pin."
+            exit 0
+          fi
+          docker cp ./mlir_install_base.tgz flydsl_mlir_cache:/tmp/mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "
+            set -e
+            rm -rf /llvm-project/mlir_install_base
+            mkdir -p /tmp/mlir_base_extract
+            tar -xzf /tmp/mlir_install_base.tgz -C /tmp/mlir_base_extract
+            mv /tmp/mlir_base_extract/mlir_install /llvm-project/mlir_install_base
+            rmdir /tmp/mlir_base_extract
+            test -d /llvm-project/mlir_install_base/lib/cmake/mlir
+          " || { echo "::warning title=Benchmark baseline unavailable::Baseline MLIR install could not be unpacked."; exit 0; }
+          want="${{ steps.base-pin.outputs.base_llvm_hash }}"
+          got="$(docker exec flydsl_mlir_cache sed -n 's/.*LLVM_REVISION R"(\([0-9a-f]\{40\}\))".*/\1/p' \
+                   /llvm-project/mlir_install_base/include/llvm/Support/VCSRevision.h 2>/dev/null)"
+          if [ -z "${got}" ]; then
+            echo "Baseline MLIR carries no VC revision; relying on the content-derived cache key alone."
+          elif [ "${got}" != "${want}" ]; then
+            echo "::warning title=Benchmark baseline unavailable::Baseline MLIR is LLVM ${got}, expected ${want}; refusing to use it."
+            docker exec flydsl_mlir_cache rm -rf /llvm-project/mlir_install_base
+            exit 0
+          else
+            echo "Baseline MLIR verified at LLVM ${got}"
+          fi
+          echo "ready=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Build current and base FlyDSL wheels
+        id: wheels
+        env:
+          BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
+          BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
+        run: |
+          docker exec \
+            -e BASE_REPO_NAME \
+            -e BASE_COMMIT_SHA \
+            -e ROCM_PATH \
+            -e BASE_MLIR_PATH \
+            flydsl_mlir_cache bash -c '
+              export MLIR_PATH=/llvm-project/mlir_install
+              if command -v rocm-sdk >/dev/null 2>&1; then
+                rocm_bin="$(rocm-sdk path --bin)"
+                rocm_cmake="$(rocm-sdk path --cmake)"
+              else
+                rocm_bin="${ROCM_PATH}/bin"
+                rocm_cmake="${ROCM_PATH}/lib/cmake"
+              fi
+              export PATH="${rocm_bin}:$PATH"
+              export CMAKE_PREFIX_PATH="${rocm_cmake}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+              cd /flydsl-test
+              bash scripts/build_ci_wheels.sh
+            '
+          docker cp flydsl_mlir_cache:/tmp/flydsl-ci-wheels ./flydsl-ci-wheels
+          (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
+          if [ -d flydsl-ci-wheels/base ]; then
+            (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+            # Mark which LLVM the wheel was really built against. A bump needing
+            # no source adaptation still builds from the shared MLIR; labelling
+            # that "old LLVM" points at a codegen difference that is not there.
+            if [ -n "${BASE_MLIR_PATH}" ] && [ -n "${BASELINE_LLVM_HASH}" ]; then
+              printf '%s\n' "${BASELINE_LLVM_HASH}" >flydsl-ci-wheels/base/BASELINE_LLVM
+            fi
+            echo "base_wheel=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "::warning title=Baseline wheel unavailable::Uploading PR wheel without an exact base benchmark."
+            echo "base_wheel=false" >>"${GITHUB_OUTPUT}"
+          fi
+          (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
+
+      # The second install is the whole disk cost, and nothing below needs it.
+      - name: Drop baseline MLIR install
+        if: always() && steps.base-pin.outputs.pin_changed == 'true'
+        continue-on-error: true
+        run: |
+          rm -f ./mlir_install_base.tgz
+          docker exec flydsl_mlir_cache bash -c "rm -rf /llvm-project/mlir_install_base /tmp/mlir_install_base.tgz" || true
+
+      - name: Save shared MLIR cache
+        if: >-
+          steps.mlir-cache.outputs.cache-hit != 'true' &&
+          ((github.ref == 'refs/heads/main' &&
+            (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) ||
+           (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository))
+        uses: actions/cache/save@v4
+        with:
+          path: mlir_install.tgz
+          key: ${{ steps.mlir-cache.outputs.cache-primary-key }}
+
+      - name: Upload FlyDSL CI wheels for this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-ci-wheels-${{ github.run_id }}
+          path: |
+            flydsl-ci-wheels/pr
+            flydsl-ci-wheels/tools
+          if-no-files-found: error
+          retention-days: 1
+
+      # Only the benchmark and multi-GPU jobs use the base wheel, so the test
+      # job does not download it.
+      - name: Upload FlyDSL CI base wheel for this run
+        if: steps.wheels.outputs.base_wheel == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: flydsl-ci-wheels/base
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Clean up MLIR build container
+        if: always()
+        run: |
+          docker stop flydsl_mlir_cache || true
+          docker rm flydsl_mlir_cache || true
+
+  # ---------------------------------------------------------------------------
+  # Single-GPU correctness: kernels, unit, examples and MLIR FileCheck.
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
   test:
-    needs: [check-signal, detect-changes]
+    needs: [check-signal, detect-changes, prepare-mlir]
     # Run only when check-signal passed AND the change touched code. Docs-only
     # changes (code_changed == 'false') skip this job entirely, so no GPU runner
     # is used; a detect-changes failure falls back to running.
     if: >-
       ${{ !cancelled()
           && needs.check-signal.result == 'success'
+          && needs.prepare-mlir.result == 'success'
           && (needs.detect-changes.result != 'success'
               || needs.detect-changes.outputs.code_changed == 'true') }}
     env:
+      CI_SOURCE_DIR: flydsl-test
+      CI_CONTAINER: flydsl-test-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runners }}
+      CI_PREPARE_AITER: ${{ !contains(matrix.runners, 'navi') }}
       # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
       # If that cache is unavailable, checkout fails before the tests start.
       GIT_CONFIG_GLOBAL: /dev/null
@@ -137,10 +550,14 @@ jobs:
       # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
       CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
     strategy:
+      # Must match the 'test-skip' matrix above, and must keep emitting the
+      # checks required by the 'main' ruleset. linux-flydsl-mi35x-1 covers both
+      # MI350 and MI355 machines; the MI355-only linux-flydsl-mi355-1 label is
+      # absent on purpose since it is the same gfx950 target.
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
       fail-fast: false
@@ -156,136 +573,120 @@ jobs:
         with:
           repository: ${{ env.GITHUB_REPO_NAME }}
           ref: ${{ env.GITHUB_COMMIT_SHA }}
-          path: flydsl-test
-    
-      - name: Start CI container
-        run: |
-          echo "Clean up containers..."
-          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm || true
+          path: ${{ env.CI_SOURCE_DIR }}
 
-          echo "Start CI container..."
-          if [ -f "/etc/podinfo/gha-render-devices" ]; then
-            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
-          else
-            DEVICE_FLAG="--device /dev/dri"
-          fi
+      # Self-hosted workspaces persist; discard wheels from earlier runs.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/${CI_SOURCE_DIR:?}-wheels"
 
-          GPU_ENV_ARGS=()
-          if [ -n "${CI_HIP_VISIBLE_DEVICES}" ]; then
-            GPU_ENV_ARGS=(--env "HIP_VISIBLE_DEVICES=${CI_HIP_VISIBLE_DEVICES}")
-          fi
-
-          echo "Starting container: flydsl_test:ci"
-          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG "${GPU_ENV_ARGS[@]}" \
-          -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
-          --ipc=host --group-add video \
-          --shm-size 16g \
-          --cap-add=SYS_PTRACE \
-          --security-opt seccomp=unconfined \
-          -w /flydsl-test \
-          --name flydsl_test \
-          ${{ env.DOCKER_IMAGE }}
-        env:
-          GITHUB_WORKSPACE: ${{ github.workspace }}
-
-      - name: Install dependencies
-        run: |
-          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
-          docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
-          docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
-          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-    
-      # Cache MLIR install tarball across workflow runs.
-      - name: Restore cached MLIR install tarball (if available)
-        id: mlir-cache
-        uses: actions/cache@v4
+      - name: Download FlyDSL CI wheels
+        uses: actions/download-artifact@v4
         with:
-          path: mlir_install.tgz
-          # Key includes LLVM commit and hashes of build scripts/workflow.
-          # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          name: flydsl-ci-wheels-${{ github.run_id }}
+          path: ${{ env.CI_SOURCE_DIR }}-wheels
 
-      - name: Use cached MLIR install tarball (skip LLVM build)
-        if: steps.mlir-cache.outputs.cache-hit == 'true'
-        run: |
-          ls -lh mlir_install.tgz
-          docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
-          docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-
-      - name: Build LLVM
-        if: steps.mlir-cache.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
-          ls -lh ./mlir_install.tgz || true
-
-      - name: Build FlyDSL (uses MLIR install prefix)
-        run: |
-          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
-
-      - name: MLIR tarball artifact status
-        run: |
-          echo "cache-hit: ${{ steps.mlir-cache.outputs.cache-hit }}"
-          echo "event:     ${{ github.event_name }}"
-          echo "ref:       ${{ github.ref }}"
-          if [[ "${{ steps.mlir-cache.outputs.cache-hit }}" == "true" ]]; then
-            echo "artifact:  skipped (MLIR restored from cache; no rebuild)"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "artifact:  will upload (workflow_dispatch + rebuilt)"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "artifact:  will upload (push to main + rebuilt, e.g. PR merged)"
-          else
-            echo "artifact:  skipped (PR runs do not upload)"
-          fi
-
-      - name: Export MLIR install tarball (workflow_dispatch OR push-to-main)
-        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        run: |
-          ls -lh ./mlir_install.tgz || true
-
-      - name: Upload MLIR install tarball artifact (workflow_dispatch OR push-to-main)
-        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlir_install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt') }}
-          path: mlir_install.tgz
-          if-no-files-found: ignore
-          retention-days: 7
-        
-      - name: Prepare aiter
-        if: ${{ !contains(matrix.runners, 'navi') }}
-        run: |
-          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
-          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
-          docker exec flydsl_test bash -c "python3 -m pip uninstall -y triton pytorch-triton pytorch-triton-rocm triton-rocm amd-triton || true"
-          docker exec flydsl_test bash -c "python3 -m pip install --extra-index-url https://pypi.amd.com/triton/rocm-7.2.0/simple/ triton"
-          docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
+      - name: Prepare GPU environment
+        run: bash "${CI_SOURCE_DIR}/scripts/setup_ci_gpu.sh"
 
       - name: Run tests
-        timeout-minutes: 60
+        timeout-minutes: 70
         run: |
-          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
+          # FLYDSL_REQUIRE_FILECHECK=1: this job installs FileCheck above, so the
+          # MLIR lit stage must actually run. Without it, deleting that install
+          # step would silently drop the whole stage and still report green.
+          docker exec -e ROCM_PATH "${CI_CONTAINER}" bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 FLYDSL_REQUIRE_FILECHECK=1 bash scripts/run_tests.sh'
 
       - name: Show tests logs
         if: failure()
         run: |
-          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
+          docker exec "${CI_CONTAINER}" bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          if docker cp "${CI_CONTAINER}":/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi
 
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f "${CI_CONTAINER}" >/dev/null 2>&1 || true
+
+  # ---------------------------------------------------------------------------
+  # Single-GPU performance: current benchmark and exact-base/latest-tag
+  # comparisons. Depends on wheel preparation, so it can run alongside test.
+  # Separate checkout, wheels and container keep both jobs isolated.
+  # ---------------------------------------------------------------------------
+  benchmark:
+    needs: [check-signal, detect-changes, prepare-mlir]
+    # Run only when check-signal passed AND the change touched code. Docs-only
+    # changes (code_changed == 'false') skip this job entirely, so no GPU runner
+    # is used; a detect-changes failure falls back to running.
+    if: >-
+      ${{ !cancelled()
+          && needs.check-signal.result == 'success'
+          && needs.prepare-mlir.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
+    env:
+      CI_SOURCE_DIR: flydsl-benchmark
+      CI_CONTAINER: flydsl-benchmark-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runners }}
+      CI_PREPARE_AITER: ${{ !contains(matrix.runners, 'navi') }}
+      # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
+      # If that cache is unavailable, checkout fails before the tests start.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
+      # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
+      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
+    strategy:
+      # Match correctness coverage; each runner benchmarks current, exact base
+      # and latest tag on the same GPU, independently of the correctness job.
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi35x-1',
+          'linux-flydsl-navi-2',
+        ]
+      fail-fast: false
+    runs-on: ${{ matrix.runners }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
+          # If that cache is unavailable, checkout fails before the tests start.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: ${{ env.CI_SOURCE_DIR }}
+
+      # Self-hosted workspaces persist; discard wheels from earlier runs.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/${CI_SOURCE_DIR:?}-wheels"
+
+      - name: Download FlyDSL CI wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-wheels-${{ github.run_id }}
+          path: ${{ env.CI_SOURCE_DIR }}-wheels
+
+      - name: Download FlyDSL CI base wheel
+        if: needs.prepare-mlir.outputs.base_wheel == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: ${{ env.CI_SOURCE_DIR }}-wheels/base
+
+      - name: Prepare GPU environment
+        run: bash "${CI_SOURCE_DIR}/scripts/setup_ci_gpu.sh"
+
       - name: Run benchmarks
         id: benchmarks
         run: |
-          docker exec -i flydsl_test bash <<'BASH'
+          docker exec -i -e ROCM_PATH "${CI_CONTAINER}" bash <<'BASH'
           set -e -o pipefail
           export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
           export AITER_REPO=/tmp/aiter
@@ -302,7 +703,8 @@ jobs:
           docker exec -i \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
-            flydsl_test bash <<'BASH'
+            -e ROCM_PATH \
+            "${CI_CONTAINER}" bash <<'BASH'
           set -u
           cd /flydsl-test
           rm -rf /tmp/flydsl-bench-main /tmp/flydsl-bench-tag
@@ -310,9 +712,19 @@ jobs:
           git worktree prune || true
           base_repo_url="https://github.com/${BASE_REPO_NAME}.git"
 
-          if git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
+          if [ ! -d /flydsl-ci-wheels/base ]; then
+            echo "::warning title=Benchmark baseline unavailable::Base wheel was not produced; skipping exact main comparison."
+          elif git fetch "${base_repo_url}" "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
             commit="$(git rev-parse FETCH_HEAD)"
             label="main"
+            # From prepare-mlir's marker, not from the pinned hashes: this job
+            # cannot see which MLIR the baseline wheel was compiled with.
+            display_label="main@${commit:0:8}"
+            baseline_llvm="$(cat /flydsl-ci-wheels/base/BASELINE_LLVM 2>/dev/null || true)"
+            if [ -n "${baseline_llvm}" ]; then
+              display_label="${display_label} (llvm ${baseline_llvm:0:8})"
+              echo "::notice title=Benchmark baseline uses a different LLVM::Baseline was built against LLVM ${baseline_llvm:0:8}, the PR against its own pin; deltas include LLVM codegen changes."
+            fi
             worktree="/tmp/flydsl-bench-main"
             csv="/tmp/bench_main_candidate.csv"
             output="/tmp/bench_main.out"
@@ -325,8 +737,10 @@ jobs:
               (
                 set -e -o pipefail
                 cd "${worktree}"
-                export MLIR_PATH=/llvm-project/mlir_install
-                python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+                python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/base/*.whl 2>&1 | tail -5
+                mkdir -p build-fly/bin
+                cp /flydsl-ci-wheels/base/fly-opt build-fly/bin/fly-opt
+                chmod +x build-fly/bin/fly-opt
                 export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
                 export AITER_REPO=/tmp/aiter
                 BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
@@ -335,7 +749,7 @@ jobs:
               status=$?
               if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
                 cp "${csv}" /tmp/bench_main.csv
-                echo "${label}" >/tmp/bench_main_label
+                echo "${display_label}" >/tmp/bench_main_label
               else
                 echo "Exact main benchmark baseline failed; not retrying older commits."
               fi
@@ -390,7 +804,7 @@ jobs:
         if: steps.bench-baselines.outcome != 'skipped'
         timeout-minutes: 5
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec "${CI_CONTAINER}" bash -c "
             if [ ! -f /tmp/bench_main.csv ]; then
               echo '::warning title=Benchmark comparison skipped::No usable main benchmark baseline found.'
               exit 0
@@ -405,7 +819,7 @@ jobs:
         if: steps.bench-baselines.outcome != 'skipped'
         timeout-minutes: 5
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec "${CI_CONTAINER}" bash -c "
             if [ ! -f /tmp/bench_latest_tag.csv ]; then
               echo '::warning title=Benchmark comparison skipped::No usable latest-tag benchmark baseline found.'
               exit 0
@@ -419,12 +833,12 @@ jobs:
       - name: Show benchmarks logs
         if: failure()
         run: |
-          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz . || true
-          if [ -f flydsl_bench_logs.tgz ]; then
-            tar -xzf flydsl_bench_logs.tgz || true
-            cat flydsl_bench*/*.log || true
-            cat bench_*.csv || true
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-benchmark-logs.XXXXXX")"
+          docker exec "${CI_CONTAINER}" bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
+          if docker cp "${CI_CONTAINER}":/tmp/flydsl_bench_logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -type f -name '*.log' -print -exec cat {} \;
+            find "${log_dir}" -maxdepth 1 -type f -name 'bench_*.csv' -print -exec cat {} \;
           else
             echo "flydsl_bench_logs.tgz not found; skipping log extraction"
           fi
@@ -432,18 +846,18 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker stop flydsl_test
-          docker rm flydsl_test
+          docker rm -f "${CI_CONTAINER}" >/dev/null 2>&1 || true
 
   # ---------------------------------------------------------------------------
   # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
-  # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # Runs on linux-flydsl-mi325-8 and linux-flydsl-mi355-8 independently
+  # (linux-flydsl-mi35x-8 is omitted: same gfx950 target as mi355-8).
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
   # ---------------------------------------------------------------------------
   multi-gpu:
-    needs: [test, detect-changes]
+    needs: [test, detect-changes, prepare-mlir]
     name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
     timeout-minutes: 120
     env:
@@ -454,6 +868,7 @@ jobs:
     # detect-changes failure falls back to running).
     if: |
       !cancelled() &&
+      needs.prepare-mlir.result == 'success' &&
       (needs.detect-changes.result != 'success' ||
        needs.detect-changes.outputs.code_changed == 'true') && (
         (github.event_name == 'pull_request' &&
@@ -480,6 +895,47 @@ jobs:
           ref: ${{ env.GITHUB_COMMIT_SHA }}
           path: flydsl-test
 
+      # download-artifact overlays its destination. Self-hosted workspaces are
+      # persistent, so remove wheels left by an older package version first.
+      - name: Remove stale FlyDSL CI wheels
+        run: rm -rf "${GITHUB_WORKSPACE:?}/flydsl-ci-wheels"
+
+      - name: Download FlyDSL CI wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-wheels-${{ github.run_id }}
+          path: flydsl-ci-wheels
+
+      - name: Download FlyDSL CI base wheel
+        if: needs.prepare-mlir.outputs.base_wheel == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-base-wheel-${{ github.run_id }}
+          path: flydsl-ci-wheels/base
+
+      - name: Verify FlyDSL CI wheels
+        run: |
+          shopt -s nullglob
+          pr_wheels=(flydsl-ci-wheels/pr/*.whl)
+          if [ "${#pr_wheels[@]}" -ne 1 ]; then
+            printf 'Expected exactly one PR wheel, found %s:\n' "${#pr_wheels[@]}" >&2
+            printf '  %s\n' "${pr_wheels[@]}" >&2
+            exit 1
+          fi
+          (cd flydsl-ci-wheels/pr && sha256sum -c SHA256SUMS)
+          if [ -d flydsl-ci-wheels/base ]; then
+            base_wheels=(flydsl-ci-wheels/base/*.whl)
+            if [ "${#base_wheels[@]}" -ne 1 ]; then
+              printf 'Expected exactly one base wheel, found %s:\n' "${#base_wheels[@]}" >&2
+              printf '  %s\n' "${base_wheels[@]}" >&2
+              exit 1
+            fi
+            (cd flydsl-ci-wheels/base && sha256sum -c SHA256SUMS)
+          else
+            echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
+          fi
+          (cd flydsl-ci-wheels/tools && sha256sum -c SHA256SUMS)
+
       - name: Start CI container
         run: |
           echo "Clean up containers..."
@@ -494,6 +950,7 @@ jobs:
 
           docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
           -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+          -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-ci-wheels:/flydsl-ci-wheels:ro" \
           --ipc=host --group-add video \
           --shm-size 16g \
           --cap-add=SYS_PTRACE \
@@ -509,40 +966,26 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_test bash -c "if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk init; fi"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+          sdk_root="$(docker exec flydsl_test bash -c 'if command -v rocm-sdk >/dev/null 2>&1; then rocm-sdk path --root; elif [ -d /opt/rocm ]; then printf "/opt/rocm\n"; fi')"
+          test -n "${sdk_root}"
+          docker exec flydsl_test test -d "${sdk_root}"
+          printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
 
-      - name: Restore cached MLIR install tarball (if available)
-        id: mlir-cache
-        uses: actions/cache@v4
-        with:
-          path: mlir_install.tgz
-          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
-
-      - name: Use cached MLIR install tarball (skip LLVM build)
-        if: steps.mlir-cache.outputs.cache-hit == 'true'
+      - name: Install FlyDSL CI wheel
         run: |
-          ls -lh mlir_install.tgz
-          docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
-          docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-
-      - name: Build LLVM
-        if: steps.mlir-cache.outputs.cache-hit != 'true'
-        run: |
-          set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
-          docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
-
-      - name: Build FlyDSL (uses MLIR install prefix)
-        run: |
-          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+          docker exec flydsl_test bash -c "python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/pr/*.whl"
+          docker exec flydsl_test bash -c "mkdir -p /flydsl-test/build-fly/bin && cp /flydsl-ci-wheels/pr/fly-opt /flydsl-test/build-fly/bin/fly-opt && chmod +x /flydsl-test/build-fly/bin/fly-opt"
+          docker exec flydsl_test bash -c "cp /flydsl-ci-wheels/tools/FileCheck /usr/local/bin/FileCheck && chmod +x /usr/local/bin/FileCheck"
+          docker exec -e ROCM_PATH flydsl_test bash -c "/flydsl-test/build-fly/bin/fly-opt --version"
+          docker exec -e ROCM_PATH flydsl_test bash -c 'python3 -c "import flydsl; from flydsl._mlir.ir import Context; print(\"Installed FlyDSL CI wheel\")"'
 
       - name: Install mori (for shmem regression test)
         timeout-minutes: 15
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             apt-get install -y libpci-dev libibverbs-dev libgrpc++1.51 libgrpc29 &&
             python3 -m pip install amd_mori &&
             MORI_PRECOMPILE=1 python3 -c 'import mori'
@@ -551,7 +994,7 @@ jobs:
       - name: Run multi-GPU shmem regression test
         timeout-minutes: 10
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_flydsl_shmem.py \
               -m multi_gpu -v --no-header --tb=short
@@ -560,28 +1003,41 @@ jobs:
       - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test &&
-            python tests/kernels/test_profiler_dispatch_combine.py \
+            MORI_SOCKET_IFNAME=lo python tests/kernels/test_profiler_dispatch_combine.py \
               --ci-sweep \
+              --skip-verify-spawn \
               --world-size 8 \
               --port 29503 \
               --output-dir /tmp/flydsl_ci_sweep
           "
 
+      # MegaMoEV2 A8W4/A4W4 v4_pro accuracy against the torch f32 oracle. The test self-skips on gfx942.
+      - name: Run multi-GPU MegaMoEV2 v4_pro accuracy tests
+        timeout-minutes: 45
+        run: |
+          docker exec -e ROCM_PATH flydsl_test bash -c "
+            cd /flydsl-test &&
+            python3 -c 'import torch; n = torch.cuda.device_count(); assert n >= 8, f\"requires 8 GPUs, found {n}\"' &&
+            python3 -m pytest \
+              tests/kernels/test_mega_moe_v2.py::test_mega_moe_8gpu_accuracy \
+              -v --no-header --tb=short
+          "
+
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_allreduce.py \
-              -m multi_gpu -v --no-header --tb=short
+              -m 'multi_gpu and not benchmark' -v --no-header --tb=short
           "
 
       - name: Run allreduce benchmark (PR)
         timeout-minutes: 30
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 tests/kernels/test_allreduce.py \
               --world_size 8 --iters 51 --warmup 5 \
@@ -599,12 +1055,19 @@ jobs:
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
             flydsl_test bash -c "
+            set -e -o pipefail
+            if [ ! -d /flydsl-ci-wheels/base ]; then
+              echo '::warning title=Benchmark baseline unavailable::Base wheel was not produced.'
+              exit 1
+            fi
             cd /flydsl-test
             git fetch \"https://github.com/\${BASE_REPO_NAME}.git\" \"\${BASE_COMMIT_SHA}\" --no-tags --depth=1
             git worktree add --detach /tmp/flydsl-main FETCH_HEAD
             cd /tmp/flydsl-main
-            export MLIR_PATH=/llvm-project/mlir_install
-            python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+            python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/base/*.whl 2>&1 | tail -5
+            mkdir -p build-fly/bin
+            cp /flydsl-ci-wheels/base/fly-opt build-fly/bin/fly-opt
+            chmod +x build-fly/bin/fly-opt
           "
 
       - name: Run allreduce benchmark (main)
@@ -613,7 +1076,7 @@ jobs:
         timeout-minutes: 30
         continue-on-error: true
         run: |
-          docker exec flydsl_test bash -c "
+          docker exec -e ROCM_PATH flydsl_test bash -c "
             cp /flydsl-test/tests/kernels/test_allreduce.py \
                /tmp/flydsl-main/tests/kernels/test_allreduce.py
             cd /tmp/flydsl-main
@@ -637,11 +1100,11 @@ jobs:
       - name: Show test logs
         if: failure()
         run: |
+          log_dir="$(mktemp -d "${RUNNER_TEMP}/flydsl-test-logs.XXXXXX")"
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          if docker cp flydsl_test:/tmp/logs.tgz "${log_dir}/logs.tgz"; then
+            tar -xzf "${log_dir}/logs.tgz" -C "${log_dir}" || true
+            find "${log_dir}" -maxdepth 1 -type f -name '*.log' -print -exec cat {} \;
           else
             echo "logs.tgz not found; skipping log extraction"
           fi

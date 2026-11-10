@@ -5,6 +5,12 @@
 
 from ..._mlir.dialects.fly_rocdl import TargetAddressSpace
 
+__all__ = [
+    "AddressSpace",
+    "TargetAddressSpace",
+    "SyncScope",
+]
+
 AddressSpace = TargetAddressSpace
 
 

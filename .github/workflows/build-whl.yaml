@@ -39,10 +39,11 @@ jobs:
       - name: Pull or build manylinux Docker image
         run: |
           ROCM_VERSION=7.2
-          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-a3c082a2ac9c"
           if ! docker pull "${IMAGE}"; then
             # The Dockerfile is self-contained, so avoid sending the full repo as build context.
-            docker build \
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
               - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
@@ -103,7 +104,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
+          # The patches are part of the build, so they are part of the key.
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/thirdparty/llvm-extensions/**', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -163,9 +165,9 @@ jobs:
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
         run: |
-          SUMMARY_LLVM_COMMIT="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          SUMMARY_LLVM_COMMIT="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
           export SUMMARY_LLVM_COMMIT
-          python3 flydsl/scripts/generate_summary.py build
+          python3 flydsl/.github/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}

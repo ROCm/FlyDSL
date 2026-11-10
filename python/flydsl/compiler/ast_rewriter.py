@@ -7,8 +7,10 @@ import copy
 import difflib
 import functools
 import inspect
+import os
 import types
 import warnings
+import weakref
 from textwrap import dedent
 from typing import List
 
@@ -18,6 +20,7 @@ from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
+from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
 
 
 def _set_lineno(node, n=1):
@@ -56,6 +59,100 @@ def _unwrap_constexpr(node):
     if _is_constexpr(node):
         return node.args[0] if node.args else node
     return node
+
+
+# ---------------------------------------------------------------------------
+# Unpack / pack carried state for control flow.
+#
+# scf.if/for/while only carry a flat list of ir.Value, but a carried variable may
+# be a container (list/tuple/dict/SimpleNamespace, nested). We treat the whole
+# tuple of pre-region values as one pytree: unpack to a flat ir.Value list before
+# building the op, pack it back afterwards (the values are their own template).
+# Delegates to the DSL<->ir protocol; shared by all four dispatchers.
+# ---------------------------------------------------------------------------
+
+
+def _promote(v):
+    """Wrap a bare python scalar (``0``, ``0.0``) or a raw ``ir.Value`` (e.g. an
+    ``ArithValue`` a kernel carries directly) into a DSL numeric, at any depth. A
+    DSL value -- not a raw ir.Value -- keeps the exemplar reconstructable by
+    :func:`_pack_states` (a raw ir.Value has no __construct_from_ir_values__).
+    Containers are rebuilt with promoted leaves; DSL values pass through.
+    """
+    if isinstance(v, (bool, int, float)):
+        return as_dsl_value(as_ir_value(v))
+    if isinstance(v, ir.Value):
+        return as_dsl_value(v)
+    if isinstance(v, dict):
+        return {k: _promote(x) for k, x in v.items()}
+    if isinstance(v, types.SimpleNamespace):
+        return types.SimpleNamespace(**{k: _promote(x) for k, x in vars(v).items()})
+    if isinstance(v, (list, tuple)):
+        return type(v)(_promote(x) for x in v)
+    return v
+
+
+def _flatten_like(entry, out, path, ctx_label):
+    """Flatten a branch output ``out`` into ir.Values ordered to match the entry
+    template ``entry``: dict/namespace are aligned by key (order-insensitive, since
+    a mapping's key order is not semantic), list/tuple by position. Raises a clear
+    error if ``out`` does not match the entry (different keys, length, or dtype).
+    Reordering to the entry's order is what keeps yielded values in the same slots
+    on every branch, so the scf results pack back correctly.
+    """
+
+    def bad(detail):
+        return TypeError(f"{ctx_label}: carried variable '{path}' does not match the region entry: {detail}")
+
+    if isinstance(entry, dict):
+        if not isinstance(out, dict) or set(out) != set(entry):
+            got = sorted(out) if isinstance(out, dict) else type(out).__name__
+            raise bad(f"expected dict with keys {sorted(entry)}, got {got}")
+        return [v for k in entry for v in _flatten_like(entry[k], out[k], f"{path}[{k!r}]", ctx_label)]
+    if isinstance(entry, types.SimpleNamespace):
+        if not isinstance(out, types.SimpleNamespace) or set(vars(out)) != set(vars(entry)):
+            got = sorted(vars(out)) if isinstance(out, types.SimpleNamespace) else type(out).__name__
+            raise bad(f"expected SimpleNamespace with attrs {sorted(vars(entry))}, got {got}")
+        return [
+            v for k in vars(entry) for v in _flatten_like(getattr(entry, k), getattr(out, k), f"{path}.{k}", ctx_label)
+        ]
+    if isinstance(entry, (list, tuple)):
+        if not isinstance(out, (list, tuple)) or len(out) != len(entry):
+            got = f"{type(out).__name__} of length {len(out)}" if isinstance(out, (list, tuple)) else type(out).__name__
+            raise bad(f"expected {type(entry).__name__} of length {len(entry)}, got {got}")
+        return [v for i, (e, o) in enumerate(zip(entry, out)) for v in _flatten_like(e, o, f"{path}[{i}]", ctx_label)]
+    # leaf: promote a bare scalar, then require the same ir.Type(s) as on entry
+    out = as_dsl_value(as_ir_value(out)) if isinstance(out, (bool, int, float)) else out
+    in_types, out_types = get_ir_types(entry), get_ir_types(out)
+    if in_types != out_types:
+        raise bad(f"expected dtype {in_types}, produced {out_types}")
+    return extract_to_ir_values(out)
+
+
+def _unpack_states(values):
+    """Promote bare scalars, then flatten the carried-state pytree ``values`` to a
+    flat ir.Value list + its ir.Types. Returns ``(exemplar, state_raw, result_types)``;
+    ``exemplar`` (scalars promoted) is the template :func:`_pack_states` rebuilds from.
+    """
+    exemplar = [_promote(v) for v in values]
+    return exemplar, extract_to_ir_values(exemplar), get_ir_types(exemplar)
+
+
+def _unpack_branch_outputs(names, values, exemplar, ctx_label):
+    """Flatten a branch/body output for scf.yield, aligning each carried variable to
+    its entry structure (``names``/``exemplar`` are the entry side) so reordered
+    dict/namespace keys still land in the right slots, and mismatches error.
+    """
+    out_raw = []
+    for name, entry_v, out_v in zip(names, exemplar, values):
+        out_raw.extend(_flatten_like(entry_v, out_v, name, ctx_label))
+    return out_raw
+
+
+def _pack_states(slots, exemplar):
+    """Rebuild the carried-state pytree from flat ``slots`` using ``exemplar`` as
+    the template (inverse of :func:`_unpack_states`)."""
+    return construct_from_ir_values(type(exemplar), exemplar, list(slots))
 
 
 def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_expr=None):
@@ -152,13 +249,48 @@ def _state_value_expr(name):
     )
 
 
+def _rewrite_cache_key(f, code):
+    """The key *f*'s rewrite is cached under, or None when the rewrite depends on more than *f*'s code."""
+
+    # The rewrite parses the wrapped function's source; every wrapper from one decorator shares its code.
+    if inspect.unwrap(f) is not f:
+        return None
+
+    # The rewrite picks the function out by name, which a renamed function no longer shares with its code.
+    if f.__name__ != code.co_name:
+        return None
+
+    # The AST diff is logged during the rewrite.
+    if env.debug.ast_diff:
+        return None
+
+    # The rewrite and the JIT cache key read the source file, not the loaded code. Reusing a rewrite after the
+    # file changed would store the old kernel under the new source's key.
+    try:
+        stat = os.stat(code.co_filename)
+    except OSError:
+        return None
+
+    # By id: code objects from different files can compare equal.
+    return (
+        id(code),
+        stat.st_size,
+        stat.st_mtime_ns,
+        env.debug.enable_debug_info,
+    )
+
+
 class ASTRewriter:
     transformers: List = []
     rewrite_globals: dict = {}
+    # A kernel factory creates the same nested functions again on every call, so their rewritten code is reused.
+    # An entry is dropped when its code object is freed, before the code's id can be reused.
+    _rewrite_cache: dict = {}
 
     @classmethod
     def register(cls, transformer):
         cls.transformers.append(transformer)
+        cls._rewrite_cache.clear()
         if hasattr(transformer, "rewrite_globals"):
             cls.rewrite_globals.update(transformer.rewrite_globals())
         return transformer
@@ -167,6 +299,14 @@ class ASTRewriter:
     def transform(cls, f):
         if not cls.transformers:
             return f
+
+        # The key and the entry stored at the end must hold the same code object, and another transform of f can
+        # replace f.__code__ in place meanwhile, so read it once.
+        code = f.__code__
+        key = _rewrite_cache_key(f, code)
+        cached = cls._rewrite_cache.get(key)
+        if cached is not None:
+            return cls._install_code(f, cached)
 
         f_src = dedent(inspect.getsource(f))
         module = ast.parse(f_src)
@@ -221,6 +361,14 @@ class ASTRewriter:
             log().warning("could not find rewritten function %s in code object", f.__name__)
             return f
 
+        if key is not None:
+            cls._rewrite_cache[key] = new_f_code_o
+            weakref.finalize(code, cls._rewrite_cache.pop, key, None)
+        return cls._install_code(f, new_f_code_o)
+
+    @classmethod
+    def _install_code(cls, f, new_f_code_o):
+        """Give *f* the rewritten code, rebuilding it when the rewrite dropped free variables."""
         for name, val in cls.rewrite_globals.items():
             f.__globals__[name] = val
 
@@ -548,28 +696,6 @@ class ReplaceIfWithDispatch(Transformer):
         return values
 
     @staticmethod
-    def _unwrap_mlir_values(values, state_names, branch_label):
-        raw_values = []
-        for name, value in zip(state_names, values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"if/else variable '{name}' in {branch_label} is {type(raw).__name__}, "
-                    "not an MLIR Value. Only MLIR Values can be yielded from dynamic if/else branches."
-                )
-            raw_values.append(raw)
-        return raw_values
-
-    @staticmethod
-    def _pack_dispatch_results(results, state_values):
-        if not results:
-            return None
-        wrapped = [as_dsl_value(v, exemplar) for v, exemplar in zip(results, state_values)]
-        if len(wrapped) == 1:
-            return wrapped[0]
-        return tuple(wrapped)
-
-    @staticmethod
     def _collect_result_dict(result_names, local_vars):
         return {name: local_vars[name] for name in result_names}
 
@@ -659,54 +785,29 @@ class ReplaceIfWithDispatch(Transformer):
         if else_fn is None:
             else_fn = lambda *args: {}
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "stateful dynamic if requires MLIR-backed values."
-                )
-            state_raw.append(raw)
-
-        result_types = [v.type for v in state_raw]
+        # Unpack carried states to flat scf.if results; `exemplar` re-packs on exit.
+        exemplar, state_raw, result_types = _unpack_states(result_values)
         if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=capture_user_location())
 
-        with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-            then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
-            then_values = ReplaceIfWithDispatch._normalize_branch_result(
-                then_result, result_names, result_map, "then-branch"
-            )
-            then_raw = ReplaceIfWithDispatch._unwrap_mlir_values(then_values, result_names, "then-branch")
-            for name, expect_ty, got in zip(result_names, result_types, then_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in then-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(then_raw, loc=capture_user_location())
+        def _emit_branch(fn, block, label):
+            with ir.InsertionPoint(block):
+                branch_inputs = _pack_states(state_raw, exemplar)
+                branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, branch_inputs)
+                branch_map = dict(zip(result_names, branch_inputs))
+                branch_values = ReplaceIfWithDispatch._normalize_branch_result(
+                    branch_result, result_names, branch_map, label
+                )
+                scf.YieldOp(
+                    _unpack_branch_outputs(result_names, branch_values, exemplar, label),
+                    loc=capture_user_location(),
+                )
 
+        _emit_branch(then_fn, if_op.regions[0].blocks[0], "then-branch")
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
-        with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-            else_result = ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
-            else_values = ReplaceIfWithDispatch._normalize_branch_result(
-                else_result, result_names, result_map, "else-branch"
-            )
-            else_raw = ReplaceIfWithDispatch._unwrap_mlir_values(else_values, result_names, "else-branch")
-            for name, expect_ty, got in zip(result_names, result_types, else_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"if/else variable '{name}' type mismatch in else-branch: "
-                        f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(else_raw, loc=capture_user_location())
+        _emit_branch(else_fn, if_op.regions[1].blocks[0], "else-branch")
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        final_values = _pack_states(if_op.results, exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -886,44 +987,40 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
+        # A ternary may evaluate to a container; treat its value as a single-entry
+        # carried-state pytree. Probe both branches in a throwaway region to learn
+        # the flat types and the template before building the real op.
+        NAME = ("ternary result",)
         sandbox = scf.ExecuteRegionOp(result=[])
         sandbox.region.blocks.append()
         with ir.InsertionPoint(sandbox.region.blocks[0]):
-            probe_then = then_fn()
-            probe_then_raw = as_ir_value(probe_then)
-            probe_else = else_fn()
-            probe_else_raw = as_ir_value(probe_else)
-            if not isinstance(probe_then_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
-                )
-            if not isinstance(probe_else_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp else-branch must produce an MLIR Value, " f"got {type(probe_else_raw).__name__}"
-                )
-            if probe_then_raw.type != probe_else_raw.type:
-                raise TypeError(
-                    f"dynamic ifexp type mismatch: "
-                    f"then-branch produces {probe_then_raw.type}, "
-                    f"else-branch produces {probe_else_raw.type}"
-                )
-            yield_type = probe_then_raw.type
+            exemplar, _then_raw, yield_types = _unpack_states((then_fn(),))
+            _unpack_branch_outputs(NAME, (else_fn(),), exemplar, "dynamic ifexp else-branch")
+        sandbox.operation.erase()
 
-        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=capture_user_location())
+        op = scf.IfOp(cond_i1, yield_types, has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([as_ir_value(then_fn())], loc=capture_user_location())
+            then_raw = _unpack_branch_outputs(NAME, (then_fn(),), exemplar, "dynamic ifexp then-branch")
+            scf.YieldOp(then_raw, loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([as_ir_value(else_fn())], loc=capture_user_location())
+            else_raw = _unpack_branch_outputs(NAME, (else_fn(),), exemplar, "dynamic ifexp else-branch")
+            scf.YieldOp(else_raw, loc=capture_user_location())
 
-        sandbox.operation.erase()
-        return as_dsl_value(op.results[0], probe_then)
+        return _pack_states(op.results, exemplar)[0]
 
 
 @ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
     _counter = 0
+
+    # Loop directive keywords accepted on ``range(...)`` and forwarded verbatim
+    # to the loop builders (``scf_for_dispatch`` / ``scf_range``). These tune how
+    # a loop is emitted; they are NOT loop-carried state (``init``) nor the
+    # positional start/stop/step. To add a new directive, add its name here and a
+    # matching keyword-only parameter on the builders -- no other change needed.
+    _LOOP_DIRECTIVE_KWARGS = ("unroll", "unroll_full")
 
     @staticmethod
     def _to_index(val):
@@ -942,7 +1039,39 @@ class InsertEmptyYieldForSCFFor(Transformer):
         raise TypeError(f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}")
 
     @staticmethod
-    def scf_range(start, stop=None, step=None, *, init=None):
+    def _apply_loop_unroll(for_op, unroll, unroll_full):
+        """Attach an LLVM ``loop_annotation`` unroll hint to an ``scf.for``.
+
+        ``unroll``/``unroll_full`` are unrolling directives only and are kept
+        separate from the ``init`` loop-carried arguments. They must be pure
+        Python constants (evaluated at trace time), not traced IR values:
+
+        - ``unroll_full=True``     -> ``<full = true>``
+        - ``unroll=N`` (N >= 2)    -> ``<count = N : i32>``
+        - ``unroll=1``             -> ``<count = 1 : i32, disable = true>`` (no unrolling)
+        - default (``unroll=-1``)  -> no annotation attached
+
+        The attribute rides ``scf.for`` -> ``cf`` -> ``llvm.br`` and becomes
+        ``!llvm.loop`` metadata; the LLVM backend performs the actual unrolling.
+        """
+        if isinstance(unroll, bool) or not isinstance(unroll, int):
+            raise TypeError(f"for-loop `unroll` must be a Python int constant, got {type(unroll).__name__}")
+        if not isinstance(unroll_full, bool):
+            raise TypeError(f"for-loop `unroll_full` must be a Python bool constant, got {type(unroll_full).__name__}")
+        if unroll_full:
+            if unroll != -1:
+                raise ValueError("for-loop `unroll` and `unroll_full=True` are mutually exclusive")
+            body = "<full = true>"
+        elif unroll != -1:
+            if unroll < 1:
+                raise ValueError(f"for-loop `unroll` count must be >= 1, got {unroll}")
+            body = "<count = 1 : i32, disable = true>" if unroll == 1 else f"<count = {unroll} : i32>"
+        else:
+            return
+        for_op.attributes["loop_annotation"] = ir.Attribute.parse(f"#llvm.loop_annotation<unroll = {body}>")
+
+    @staticmethod
+    def scf_range(start, stop=None, step=None, *, init=None, unroll=-1, unroll_full=False):
         if stop is None:
             stop = start
             start = 0
@@ -955,18 +1084,22 @@ class InsertEmptyYieldForSCFFor(Transformer):
             init = [as_ir_value(v) for v in init]
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, init, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
     @staticmethod
-    def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
+    def scf_for_dispatch(
+        start, stop, step, body_fn, *, result_names=(), result_values=(), unroll=-1, unroll_full=False
+    ):
         start_val = as_ir_value(start)
         stop_val = as_ir_value(stop)
         step_val = as_ir_value(step)
@@ -1001,6 +1134,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         if not result_names:
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 iv = for_op.induction_variable
@@ -1008,43 +1142,32 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"for-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "only MLIR-backed values can be loop-carried in dynamic for loops."
-                )
-            state_raw.append(raw)
+        # Unpack carried states to flat iter_args; `exemplar` re-packs body +
+        # results. scf.for infers its result types from iter_args, so the flat
+        # types are unused here.
+        exemplar, state_raw, _ = _unpack_states(result_values)
 
         loc = capture_user_location()
         for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
+        InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
         _locate_block_args(for_op.body, loc)
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            inner_args = [as_dsl_value(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
+            # pack the flat inner_iter_args back into each name's container shape
+            inner_args = _pack_states(for_op.inner_iter_args, exemplar)
 
             body_result = body_fn(iv, result_names, *inner_args)
 
             body_values = ReplaceIfWithDispatch._normalize_branch_result(
                 body_result, result_names, result_map, "for-body"
             )
-            body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "for-body")
-            result_types = [v.type for v in state_raw]
-            for name, expect_ty, got in zip(result_names, result_types, body_raw):
-                if got.type != expect_ty:
-                    raise TypeError(
-                        f"for-loop variable '{name}' type mismatch: " f"expected {expect_ty}, got {got.type}"
-                    )
-            scf.YieldOp(body_raw, loc=capture_user_location())
+            scf.YieldOp(
+                _unpack_branch_outputs(result_names, body_values, exemplar, "for-body"),
+                loc=capture_user_location(),
+            )
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(for_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        final_values = _pack_states(for_op.results, exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -1081,6 +1204,21 @@ class InsertEmptyYieldForSCFFor(Transformer):
         if not isinstance(iter_node, ast.Call):
             return False
         return any(kw.arg == "init" for kw in iter_node.keywords)
+
+    @classmethod
+    def _extract_loop_directive_kwargs(cls, iter_node):
+        """Pull the loop directive keywords (see ``_LOOP_DIRECTIVE_KWARGS``) off a
+        ``range(...)`` call and forward them untouched to the loop builder.
+
+        Only allow-listed directives are forwarded; ``init`` (loop-carried args)
+        and the positional start/stop/step are left alone, so adding a directive
+        never disturbs loop-state routing.
+        """
+        if not isinstance(iter_node, ast.Call):
+            return []
+        return [
+            ast.keyword(arg=kw.arg, value=kw.value) for kw in iter_node.keywords if kw.arg in cls._LOOP_DIRECTIVE_KWARGS
+        ]
 
     @staticmethod
     def _extract_range_args(iter_node):
@@ -1172,7 +1310,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         body_func = ast.fix_missing_locations(body_func)
 
         dispatch_args = [start, stop, step, ast.Name(body_name, ctx=ast.Load())]
-        dispatch_keywords = []
+        dispatch_keywords = self._extract_loop_directive_kwargs(node.iter)
         if result_names:
             dispatch_keywords.extend(
                 [
@@ -1334,17 +1472,9 @@ class CanonicalizeWhile(Transformer):
                 f"const_expr() if it is a compile-time constant."
             )
 
-        state_raw = []
-        for name, value in zip(result_names, result_values):
-            raw = as_ir_value(value)
-            if not isinstance(raw, ir.Value):
-                raise TypeError(
-                    f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
-                    "only MLIR-backed values can be loop-carried in dynamic while loops."
-                )
-            state_raw.append(raw)
-
-        result_types = [v.type for v in state_raw]
+        # Unpack carried states to the flat state before/after blocks carry;
+        # `exemplar` re-packs per block.
+        exemplar, state_raw, result_types = _unpack_states(result_values)
         loc = capture_user_location()
         while_op = scf.WhileOp(result_types, state_raw, loc=loc)
         # Give the loop-carried block arguments the user location.
@@ -1354,7 +1484,7 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
-            wrapped_before = [as_dsl_value(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
+            wrapped_before = _pack_states(before_args, exemplar) if result_names else []
             before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
@@ -1363,30 +1493,23 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
-            wrapped_after = [as_dsl_value(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
+            wrapped_after = _pack_states(after_args, exemplar) if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(
                     body_result, result_names, result_map, "while-body"
                 )
-                body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "while-body")
-                for name, expect_ty, got in zip(result_names, result_types, body_raw):
-                    if got.type != expect_ty:
-                        raise TypeError(
-                            f"while-loop variable '{name}' type mismatch: expected {expect_ty}, got {got.type}"
-                        )
-                scf.YieldOp(body_raw, loc=capture_user_location())
+                scf.YieldOp(
+                    _unpack_branch_outputs(result_names, body_values, exemplar, "while-body"),
+                    loc=capture_user_location(),
+                )
             else:
                 scf.YieldOp([], loc=capture_user_location())
 
         if not result_names:
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
-        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(while_op.results), result_values)
-        if len(result_names) == 1:
-            final_values = [wrapped]
-        else:
-            final_values = list(wrapped)
+        final_values = _pack_states(while_op.results, exemplar)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod

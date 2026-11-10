@@ -19,20 +19,39 @@ Usage::
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
+from ..compiler.backends import current_target
 from ..compiler.protocol import dsl_align_of, dsl_size_of
-from .meta import dsl_loc_tracing
-from .numeric import Numeric, Uint8
+from .math import dsl_math_wrap_result
+from .meta import dsl_loc_tracing, tracing_option
+from .numeric import Int32, Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
     CompositeKind,
+    Empty,
     Storage,
     _effective_field_defs,
     _is_constexpr_type,
     is_composite_type,
     is_struct_type,
 )
-from .typing import Array, PointerType, Tuple3D
+from .typing import Array, PointerType, Tuple3D, as_ir_value
+
+__all__ = [
+    "thread_idx",
+    "lane_id",
+    "block_idx",
+    "block_dim",
+    "grid_dim",
+    "barrier",
+    "shuffle_xor",
+    "shuffle_up",
+    "shuffle_down",
+    "shuffle_idx",
+    "known_block_size",
+    "num_warp_threads",
+    "SharedAllocator",
+]
 
 
 @dsl_loc_tracing
@@ -46,8 +65,69 @@ def block_id(*args, **kwargs):
 
 
 @dsl_loc_tracing
+def lane_id():
+    """Index of the calling thread within its warp, in ``[0, num_warp_threads())``."""
+    return Int32(gpu.lane_id())
+
+
+@dsl_loc_tracing
 def barrier(*args, **kwargs):
     return gpu.barrier(*args, **kwargs)
+
+
+@dsl_loc_tracing
+@dsl_math_wrap_result(preserve_numeric_type=True)
+def shuffle(value, offset, width, mode="xor"):
+    """Move ``value`` across lanes of a subgroup (warp) via ``gpu.shuffle``.
+
+    ``width`` is the number of participating lanes and must be uniform across
+    the subgroup.
+    """
+    if mode not in ("xor", "up", "down", "idx"):
+        raise ValueError(f"invalid shuffle mode {mode!r}; expected one of (xor, up, down, idx)")
+
+    return gpu.ShuffleOp(
+        as_ir_value(value),
+        Int32(offset).ir_value(),
+        Int32(width).ir_value(),
+        mode=mode,
+    ).shuffleResult
+
+
+def shuffle_xor(value, offset, width):
+    """``shuffle`` in ``"xor"`` mode: lane ``k`` reads lane ``k ^ offset``."""
+    return shuffle(value, offset, width, mode="xor")
+
+
+def shuffle_up(value, offset, width):
+    """``shuffle`` in ``"up"`` mode: lane ``k`` reads lane ``k - offset``."""
+    return shuffle(value, offset, width, mode="up")
+
+
+def shuffle_down(value, offset, width):
+    """``shuffle`` in ``"down"`` mode: lane ``k`` reads lane ``k + offset``."""
+    return shuffle(value, offset, width, mode="down")
+
+
+def shuffle_idx(value, lane, width):
+    """``shuffle`` in ``"idx"`` mode: every lane reads lane ``lane``."""
+    return shuffle(value, lane, width, mode="idx")
+
+
+def known_block_size():
+    """Return the compile-time block dimensions as ``(x, y, z)`` Python ints.
+
+    Raises ``RuntimeError`` when no block size is in scope.
+    """
+    size = tracing_option("known_block_size")
+    if size is None:
+        raise RuntimeError("no compile-time block size is in scope.")
+    return size
+
+
+def num_warp_threads():
+    """Lanes per warp on the target being compiled for, as a Python int."""
+    return current_target().warp_size
 
 
 thread_idx = Tuple3D(gpu.thread_id)
@@ -147,21 +227,16 @@ class SharedAllocator(Arena):
         - struct  → recurse into each field; each field emits its own `make_ptr`
                     and therefore lowers to its own LDS global.
         - union   → ONE `make_ptr` shared by all variants (size=max, align=max).
-                    Each variant is wrapped as a re-typed view over the same
-                    ptr.
+                    Variants are reached from that base pointer at offset 0.
         - leaf    → single `make_ptr`.
         """
 
+        if type_spec is Empty:
+            return Storage[Empty](None)
         if is_composite_type(type_spec) and type_spec.__dsl_composite_kind__ == CompositeKind.Sum:
             nbytes = dsl_size_of(type_spec)
             align = dsl_align_of(type_spec)
-            shared_ptr = self._allocate_static_shared(nbytes, align)
-            prebuilt = {}
-            for name, variant_ty in _effective_field_defs(type_spec):
-                if _is_constexpr_type(variant_ty):
-                    continue
-                prebuilt[name] = Storage[variant_ty](shared_ptr)
-            return Storage[type_spec](shared_ptr, prebuilt=prebuilt)
+            return Storage[type_spec](self._allocate_static_shared(nbytes, align))
         elif is_struct_type(type_spec):
             prebuilt = {}
             for name, field_ty in _effective_field_defs(type_spec):
@@ -189,17 +264,3 @@ class SharedAllocator(Arena):
             }
         )
         return make_ptr(ptr_ty, [], dict_attrs=dict_attrs)
-
-
-__all__ = [
-    "thread_id",
-    "block_id",
-    "thread_idx",
-    "block_idx",
-    "block_dim",
-    "grid_dim",
-    "barrier",
-    "smem_space",
-    "lds_space",
-    "SharedAllocator",
-]

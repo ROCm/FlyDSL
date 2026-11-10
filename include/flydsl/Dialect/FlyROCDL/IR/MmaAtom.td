@@ -85,17 +85,42 @@ def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCDL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wm
     // false = unsigned, no clamp.
     "bool":$signA,
     "bool":$signB,
-    "bool":$clamp
+    "bool":$clamp,
+    // Intrinsic attributes forwarded to the ROCDL WMMA op: modC (I16
+    // C-operand modifier) and reuseA/reuseB (I1 operand-reuse scheduler
+    // hints). Default 0/false; elided from the assembly when at defaults.
+    DefaultValuedParameter<"int32_t", "0">:$modC,
+    DefaultValuedParameter<"bool", "false">:$reuseA,
+    DefaultValuedParameter<"bool", "false">:$reuseB
   );
-  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
+  let assemblyFormat = [{
+    `<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc
+    `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp
+    (`,` `modC` `=` $modC^)?
+    (`,` `reuseA` `=` $reuseA^)?
+    (`,` `reuseB` `=` $reuseB^)? `>`
+  }];
 
   let builders = [
-    // Back-compat: default sign/clamp to false (unsigned, no clamp).
+    // Back-compat: default sign/clamp/modC/reuse to false/0.
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
-      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, /*signA=*/false, /*signB=*/false, /*clamp=*/false);
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   /*signA=*/false, /*signB=*/false, /*clamp=*/false,
+                   /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false);
     }]>,
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
-      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   signA, signB, clamp,
+                   /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp, "int32_t":$modC), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   signA, signB, clamp, modC,
+                   /*reuseA=*/false, /*reuseB=*/false);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp, "int32_t":$modC, "bool":$reuseA, "bool":$reuseB), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   signA, signB, clamp, modC, reuseA, reuseB);
     }]>
   ];
   let genVerifyDecl = 1;
@@ -204,6 +229,44 @@ def FlyROCDL_MmaOpGFX11_WMMA : FlyROCDL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", [
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
     }]>,
     // Explicit 9-arg builder for integer-WMMA callers.
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// MmaOp GFX120X — WMMA wave32 (RDNA4: gfx1200, gfx1201)
+//===----------------------------------------------------------------------===//
+//
+// RDNA4 shares the v8-operand WMMA register ABI with gfx1250 (each lane holds
+// K/2 A/B elements, accumulator rows blocked 8-per-lane-half) but its supported
+// floating-point forms use 16x16x16 and the 3-operand ROCDL intrinsic form.
+// gfx1250 uses different floating-point shapes and the mods/reuse operand form,
+// so it keeps its own `gfx1250.wmma` atom. Hence `gfx120x` rather than `gfx12`
+// in the name — this atom covers gfx1200 / gfx1201 only.
+
+def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wmma", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc,
+    // Integer-WMMA controls, forwarded to the ROCDL iu8/iu4 intrinsic. Ignored
+    // (and required to be false) on the floating-point paths. Always printed.
+    "bool":$signA,
+    "bool":$signB,
+    "bool":$clamp
+  );
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
+    }]>,
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
     }]>

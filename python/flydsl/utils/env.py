@@ -216,6 +216,14 @@ class EnvManager(metaclass=EnvManagerMeta):
         return self.help()
 
 
+class AutotuneEnvManager(EnvManager):
+    """Autotuning options (``FLYDSL_AUTOTUNE_*`` environment variables)."""
+
+    env_prefix = "AUTOTUNE"
+
+    config_dir = OptStr("", description="Directory for offline config artifacts; empty disables artifacts")
+
+
 class CompileEnvManager(EnvManager):
     """Compile-time options (``FLYDSL_COMPILE_*`` environment variables)."""
 
@@ -237,7 +245,7 @@ class DebugEnvManager(EnvManager):
 
     env_prefix = "DEBUG"
 
-    dump_asm = OptBool(False, description="Dump ASM to file")
+    dump_asm = OptBool(False, description="Dump only the final ISA to file (FLYDSL_DUMP_IR without the IR stages)")
     dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
     dump_dir = OptStr(
         str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR"
@@ -292,12 +300,34 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+class KtraceEnvManager(EnvManager):
+
+    env_prefix = "KTRACE"
+
+    enable = OptBool(False, description="Emit in-kernel wave tracing instrumentation (gfx942/gfx950)")
+    buffer_bytes = OptInt(
+        64 << 20,
+        min_value=1 << 12,
+        max_value=1 << 31,
+        description="Device trace buffer size in bytes; a run that needs more is rejected, not truncated",
+    )
+    blocks = OptStr(
+        "",
+        description="Restrict recording to 'x,y,z' or 'xcc:N'; empty records every workgroup",
+    )
+    dump_dir = OptStr("", description="Directory for trace output; empty writes to the working directory")
+
+
+autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
+ktrace = KtraceEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
+    "autotune",
     "compile",
     "debug",
+    "ktrace",
     "runtime",
 ]

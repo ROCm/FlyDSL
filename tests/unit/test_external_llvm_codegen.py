@@ -4,13 +4,20 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from flydsl._mlir import ir
+from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
+from flydsl._mlir.passmanager import PassManager
 from flydsl.compiler.backends.rocm import RocmBackend
 from flydsl.compiler.external_llvm import (
     _format_llvm_cli_options,
     external_llvm_fingerprint,
     run_external_binary_codegen,
 )
+from flydsl.compiler.jit_function import _create_mlir_context
+
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 
 def _write_executable(path: Path, text: str) -> None:
@@ -55,17 +62,66 @@ output_path.write_text(
 
 def test_rocm_external_pipeline_split_matches_full_pipeline():
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
-    hints = {"waves_per_eu": 2, "maxnreg": 128}
+    hints = {"waves_per_eu": 2}
 
     full = backend.pipeline_fragments(compile_hints=hints)
     pre_binary, binary = backend.external_binary_pipeline_fragments(compile_hints=hints)
 
     assert full == [*pre_binary, binary]
     assert pre_binary[-1] == "reconcile-unrealized-casts"
-    assert any(fragment.startswith("gpu.module(") for fragment in pre_binary)
+    gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
+    assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     assert binary.startswith("gpu-module-to-binary")
-    assert "--amdgpu-waves-per-eu=2" in binary
-    assert "--amdgpu-num-vgpr=128" in binary
+    # ROCDL never reads opts=; waves_per_eu goes through the attribute instead.
+    assert 'opts=""' in binary
+
+
+def test_rocm_maxnreg_hint_is_rejected():
+    """maxnreg only ever reached the dead opts= lane, so it must not be accepted."""
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        module = ir.Module.create()
+        with pytest.raises(ValueError, match="maxnreg"):
+            backend.lower_compile_hints(module, compile_hints={"maxnreg": 128})
+
+
+def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            """module attributes {gpu.container_module} {
+              gpu.module @m {
+                gpu.func @k() kernel attributes {rocdl.waves_per_eu = 1 : i32} { gpu.return }
+              }
+            }""",
+            context=ctx,
+        )
+        backend.lower_compile_hints(module, compile_hints={"waves_per_eu": 2})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={})
+        PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
+
+    assert '"amdgpu-waves-per-eu"="2"' in llvm_ir
+    assert '"amdgpu-waves-per-eu"="1"' not in llvm_ir
+
+
+def test_rocm_wpe_tuple_reaches_native_llvm_as_min_max():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            """module attributes {gpu.container_module} {
+              gpu.module @m {
+                gpu.func @k() kernel { gpu.return }
+              }
+            }""",
+            context=ctx,
+        )
+        backend.lower_compile_hints(module, compile_hints={"waves_per_eu": (1, 1)})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={})
+        PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
+
+    assert '"amdgpu-waves-per-eu"="1,1"' in llvm_ir
 
 
 def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
@@ -82,6 +138,29 @@ def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
     # Fingerprint should contain a hex SHA-256 hash of the mlir-opt binary.
     hash_part = fingerprint.split(":")[-1]
     assert len(hash_part) == 64 and all(c in "0123456789abcdef" for c in hash_part)
+
+
+def test_external_llvm_fingerprint_covers_shared_llvm_libraries(tmp_path, monkeypatch):
+    llvm_dir = _make_fake_llvm(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(llvm_dir))
+    lib = llvm_dir / "lib" / "libLLVM.so.23"
+    lib.parent.mkdir()
+    (llvm_dir / "lib" / "libLLVM.so").symlink_to(lib.name)
+    (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"x")
+
+    def fingerprint():
+        external_llvm_fingerprint.cache_clear()
+        return external_llvm_fingerprint()
+
+    try:
+        lib.write_bytes(b"v1")
+        first = fingerprint()
+        (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"y")
+        assert fingerprint() == first
+        lib.write_bytes(b"v2")
+        assert fingerprint() != first
+    finally:
+        external_llvm_fingerprint.cache_clear()
 
 
 def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):
@@ -151,7 +230,7 @@ def test_llvm_options_forwarded_to_external_mlir_opt(tmp_path, monkeypatch):
         run_external_binary_codegen(
             module,
             'gpu-module-to-binary{format=fatbin opts=""}',
-            llvm_options={"enable-post-misched": False, "lsr-drop-solution": 4},
+            llvm_options={"enable-post-misched": False, "amdgpu-schedule-metric-bias": 25},
             work_dir=tmp_path / "work",
             stage_prefix="opts_test",
         )
@@ -160,7 +239,7 @@ def test_llvm_options_forwarded_to_external_mlir_opt(tmp_path, monkeypatch):
     assert sidecar.is_file(), "fake mlir-opt should write argv sidecar"
     argv = json.loads(sidecar.read_text(encoding="utf-8"))
     assert "--enable-post-misched=false" in argv
-    assert "--lsr-drop-solution=4" in argv
+    assert "--amdgpu-schedule-metric-bias=25" in argv
 
 
 def test_input_mlir_contains_only_gpu_module(tmp_path, monkeypatch):
@@ -187,5 +266,7 @@ def test_input_mlir_contains_only_gpu_module(tmp_path, monkeypatch):
 def test_format_llvm_cli_options():
     assert _format_llvm_cli_options({"enable-post-misched": False}) == ["--enable-post-misched=false"]
     assert _format_llvm_cli_options({"enable-post-misched": True}) == ["--enable-post-misched=true"]
-    assert _format_llvm_cli_options({"lsr-drop-solution": 4}) == ["--lsr-drop-solution=4"]
+    # Integer pass-through. Use a genuinely uint-valued option: lsr-drop-solution
+    # is cl::opt<cl::boolOrDefault>, so `=4` is rejected by LLVM itself.
+    assert _format_llvm_cli_options({"amdgpu-schedule-metric-bias": 25}) == ["--amdgpu-schedule-metric-bias=25"]
     assert _format_llvm_cli_options({}) == []

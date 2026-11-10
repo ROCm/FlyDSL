@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -190,9 +191,8 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
-      mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
-      llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
+      mlir::ValueRange operands, mlir::DictionaryAttr attributes, mlir::PropertyRef properties,    \
+      mlir::RegionRange regions, llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
 
 //===----------------------------------------------------------------------===//
 // Constructors
@@ -1479,6 +1479,16 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(GetCopyAtomOp) {
+  inferredReturnTypes.assign({cast<TiledCopyType>(operands[0].getType()).getCopyAtom()});
+  return success();
+}
+
+FLY_INFER_RETURN_TYPES(GetMmaAtomOp) {
+  inferredReturnTypes.assign({cast<TiledMmaType>(operands[0].getType()).getMmaAtom()});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
   Type srcTy = operands[1].getType();
@@ -1818,6 +1828,22 @@ FLY_INFER_RETURN_TYPES(PtrToIntOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(ToLLVMPtrOp) {
+  auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
+  if (!ptrTy)
+    return emitOptionalError(location, "ToLLVMPtrOp: expected PointerType, got ",
+                             operands[0].getType());
+  if (!properties)
+    return emitOptionalError(location, "ToLLVMPtrOp: missing llvm_address_space");
+  int64_t addressSpace = properties.as<Properties *>()->llvm_address_space.getInt();
+  if (addressSpace < 0)
+    return emitOptionalError(location, "ToLLVMPtrOp: llvm_address_space must be non-negative, got ",
+                             addressSpace);
+  inferredReturnTypes.assign(
+      {LLVM::LLVMPointerType::get(context, static_cast<unsigned>(addressSpace))});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(AddOffsetOp) {
   auto offsetTy = dyn_cast<IntTupleType>(operands[1].getType());
   if (!offsetTy)
@@ -1910,6 +1936,16 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   }
   return success();
 }
+
+static LogicalResult verifyMmaOperandGroups(Operation *op, ValueRange a, ValueRange b) {
+  if (a.empty() || b.empty())
+    return op->emitOpError("A and B operand groups must each contain at least one tensor");
+  return success();
+}
+
+LogicalResult MmaAtomCall::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
+LogicalResult MmaAtomCallSSA::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
 
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {

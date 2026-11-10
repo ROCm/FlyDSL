@@ -1,10 +1,12 @@
-# Layout Algebra Guide
+# Layout algebra guide
 
-> Core types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
+This guide covers the core layout types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
 
-> **Important:** All `fx.*` layout operations generate MLIR IR and **must** be called inside a `@flyc.kernel` or `@flyc.jit` function body. Code snippets below show API usage patterns within that context, not standalone scripts.
+:::{important}
+All `fx.*` layout operations generate MLIR IR and must be called inside a `@flyc.kernel` or `@flyc.jit` function body. The code snippets below show API usage patterns within that context, not standalone scripts.
+:::
 
-## Quick Reference
+## Quick reference
 
 | Operation | Python API | Fly Dialect Op | Description |
 |---|---|---|---|
@@ -20,7 +22,7 @@
 | | `fx.cosize(layout)` | `fly.cosize` | Codomain size (max index + 1) |
 | | `fx.get_shape(layout)` | `fly.get_shape` | Extract shape from layout |
 | | `fx.get_stride(layout)` | `fly.get_stride` | Extract stride from layout |
-| | `fx.get(int_tuple, idx)` | `fly.select` + `fly.get_scalar` | Extract element at index |
+| | `fx.get_(int_tuple, idx).unpack()` | `fly.select` + `fly.get_scalar` | Extract a scalar element at index |
 | **Algebra** | `fx.composition(A, B)` | `fly.composition` | Compose: A ∘ B |
 | | `fx.complement(tiler, size)` | `fly.complement` | Complement of tiler |
 | | `fx.coalesce(layout)` | `fly.coalesce` | Simplify layout |
@@ -43,7 +45,7 @@
 
 ---
 
-## 1. Core Types
+## 1. Core types
 
 The Fly dialect defines several custom MLIR types for layout algebra:
 
@@ -57,7 +59,7 @@ The Fly dialect defines several custom MLIR types for layout algebra:
 | `!fly.copy_atom` | `!fly.copy_atom_universal_copy<...>` | Copy atom type |
 | `!fly.mma_atom` | `!fly.mma_atom_universal_fma<...>` | MMA atom type |
 
-### IntTuple Patterns
+### IntTuple patterns
 
 IntTuples encode structure at the type level:
 
@@ -104,19 +106,19 @@ identity = fx.make_identity_layout((M, N))
 
 ---
 
-## 3. Coordinate Mapping
+## 3. Coordinate mapping
 
-The fundamental operation: mapping between logical coordinates and physical memory indices.
+The fundamental operation maps between logical coordinates and physical memory indices.
 
 **Formula**: `Index = sum(coord_i * stride_i)`
 
-### `crd2idx` — Coordinate to Index
+### `crd2idx` — Coordinate to index
 
 ```python
 idx = fx.crd2idx(coord, layout)
 ```
 
-### `idx2crd` — Index to Coordinate (inverse)
+### `idx2crd` — Index to coordinate (inverse)
 
 ```python
 coord = fx.idx2crd(idx, layout)
@@ -125,12 +127,13 @@ coord = fx.idx2crd(idx, layout)
 ### Example
 
 For layout `((8, 16), (1, 8))` (8x16, column-major):
+
 - `crd2idx((3, 5), layout)` = `3*1 + 5*8` = `43`
 - `idx2crd(43, layout)` = `(43 % 8, 43 / 8)` = `(3, 5)`
 
 ---
 
-## 4. Query Operations
+## 4. Query operations
 
 | Operation | Description | Example |
 |---|---|---|
@@ -148,17 +151,17 @@ s = fx.size(layout)           # total elements (returns Int32 for static)
 cs = fx.cosize(layout)        # codomain size (max index + 1)
 shape = fx.get_shape(layout)
 stride = fx.get_stride(layout)
-v = fx.get(shape, 0)          # first dimension
+v = fx.get_(shape, 0).unpack()  # first dimension
 r = fx.rank(shape)            # number of modes
 ```
 
 ---
 
-## 5. Layout Algebra
+## 5. Layout algebra
 
 ### 5.1 Composition: `composition(A, B)`
 
-Composes two layouts: result maps through B first, then A.
+Composes two layouts: the result maps through B first, then A.
 
 **Semantics**: `result(x) = A(B(x))`
 
@@ -183,6 +186,7 @@ rest = fx.complement(tiler, target_size)
 Simplifies a layout by flattening nested modes and combining adjacent modes when possible.
 
 **Post-conditions**:
+
 - `size(result) == size(layout)` (preserves total size)
 - For all valid indices: `layout(i) == result(i)` (preserves mapping)
 
@@ -190,7 +194,7 @@ Simplifies a layout by flattening nested modes and combining adjacent modes when
 simplified = fx.coalesce(layout)
 ```
 
-### 5.4 Right Inverse: `right_inverse(layout)`
+### 5.4 Right inverse: `right_inverse(layout)`
 
 Computes the right inverse of a layout mapping.
 
@@ -198,9 +202,9 @@ Computes the right inverse of a layout mapping.
 inv = fx.right_inverse(layout)
 ```
 
-### 5.5 Recast Layout: `recast_layout(layout, old_bits, new_bits)`
+### 5.5 Recast layout: `recast_layout(layout, old_bits, new_bits)`
 
-Adjusts a layout for a type width change (e.g., FP16 → FP8):
+Adjusts a layout for a type width change (for example, FP16 → FP8):
 
 ```python
 # Convert layout from 16-bit to 8-bit elements
@@ -209,7 +213,7 @@ recasted = fx.recast_layout(layout, old_type_bits=16, new_type_bits=8)
 
 ---
 
-## 6. Product Operations
+## 6. Product operations
 
 Products combine two layouts to create a larger layout. All products take `(layout, tiler)`.
 
@@ -230,7 +234,7 @@ result = fx.raked_product(layout, tiler)
 
 ---
 
-## 7. Divide Operations
+## 7. Divide operations
 
 Divides partition a layout by a divisor, creating a view that separates "tile" and "rest" dimensions.
 
@@ -248,7 +252,7 @@ result = fx.zipped_divide(layout, divisor)
 
 ---
 
-## 8. Structural Operations
+## 8. Structural operations
 
 ### `select(int_tuple, indices)`
 
@@ -285,9 +289,9 @@ sliced = fx.slice(layout, coord)
 
 ---
 
-## 9. MemRef / View / Copy Operations
+## 9. MemRef / view / copy operations
 
-### MemRef Operations
+### MemRef operations
 
 ```python
 # Allocate on-chip memory with layout
@@ -308,7 +312,7 @@ ly = fx.get_layout(memref)
 it = fx.get_iter(memref)
 ```
 
-### View and Offset
+### View and offset
 
 ```python
 # Create a view from iterator + layout
@@ -318,9 +322,9 @@ view = fx.make_view(iterator, layout)
 ptr = fx.add_offset(ptr, offset)
 ```
 
-### Copy Atoms and Tiled Copies
+### Copy atoms and tiled copies
 
-#### Copy Atom Types
+#### Copy atom types
 
 | Type Factory | Description |
 |---|---|
@@ -331,7 +335,8 @@ ptr = fx.add_offset(ptr, offset)
 | `fx.rocdl.BufferCopy128b()` | AMD buffer-descriptor 128-bit copy |
 | `fx.rocdl.BufferCopy64b()` | AMD buffer-descriptor 64-bit copy |
 | `fx.rocdl.BufferCopy32b()` | AMD buffer-descriptor 32-bit copy |
-| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | gfx1250 TDM async Global↔LDS whole-tile copy (1–5D); descriptor carried as atom state |
+| `fx.rocdl.cdna5.make_tiled_tdm_atom(op, tensor, smem_layout, tiler, ...)` + `fx.rocdl.cdna5.tdm_partition(...)` | gfx1250 TDM async Global↔LDS tile copy (1–5D), preferred for new kernels; built over the whole tensor, cut per warp |
+| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | older gfx1250 TDM form with explicit per-dim extent/stride as atom state; kept for copies the tiled atom cannot express |
 
 #### Construction
 
@@ -362,7 +367,7 @@ tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout)
 tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout, permutation)
 ```
 
-#### Thread Slicing and Partitioning
+#### Thread slicing and partitioning
 
 ```python
 # Get a per-thread view of a tiled copy
@@ -414,7 +419,7 @@ fx.gemm(mma_atom, d, a, b, c)
 
 ---
 
-## 10. Nested / Hierarchical Layouts
+## 10. Nested / hierarchical layouts
 
 The Fly dialect supports nested layouts for representing multi-level tiling hierarchies:
 
@@ -427,7 +432,7 @@ Nested layouts are used in GEMM kernels for multi-level tiling (block → warp �
 
 ---
 
-## 11. IntTuple Arithmetic
+## 11. IntTuple arithmetic
 
 ```python
 # Element-wise operations on IntTuples
@@ -445,7 +450,7 @@ products = fx.int_tuple_product_each(int_tuple)
 
 ---
 
-## 12. Printf Debugging
+## 12. Printf debugging
 
 The Fly dialect provides a `printf` op for kernel debugging:
 
@@ -454,6 +459,7 @@ fx.printf("tid={} bid={} val={}", tid, bid, value)
 ```
 
 Supports:
+
 - `ir.Value` — dynamic values
 - `int`, `float`, `bool` — auto-converted to constants
 - `str`, `type` — embedded as static text
@@ -461,9 +467,9 @@ Supports:
 
 ---
 
-## 13. Decision Tree
+## 13. Decision tree
 
-```
+```text
 Which layout operation do I need?
 
 ├── Creating a layout?
@@ -502,7 +508,7 @@ Which layout operation do I need?
 
 ---
 
-## 14. Source Files
+## 14. Source files
 
 | File | Description |
 |---|---|

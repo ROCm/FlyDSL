@@ -93,7 +93,6 @@ def test_constexpr_annotation_survives_freevar_rebuild():
       - BLOCK_SIZE is treated as a regular kernel parameter
       - TypeError: Cannot derive IR types from 64
     """
-    from flydsl.expr import buffer_ops
     from flydsl.expr.typing import Constexpr
 
     def make_kernel():
@@ -104,8 +103,7 @@ def test_constexpr_annotation_survives_freevar_rebuild():
             val = n
             if const_expr(True):
                 val = val + fx.Int32(1)
-            rsrc = buffer_ops.create_buffer_resource(Out)
-            buffer_ops.buffer_store(val, rsrc, fx.Int32(0))
+            Out[0] = val
 
         @flyc.jit
         def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):

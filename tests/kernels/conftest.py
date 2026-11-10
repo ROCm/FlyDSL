@@ -1,7 +1,7 @@
 """Architecture-aware test filtering for GPU kernel tests.
 
 Automatically skips tests that are incompatible with the current GPU:
-  - MFMA-based kernels (preshuffle GEMM, MoE, blockscale, PA) require CDNA (gfx9xx)
+  - MFMA-based kernels (preshuffle GEMM, MoE, PA) require CDNA (gfx9xx)
   - WMMA-based kernels require RDNA4 (gfx12xx) — handled by per-test _requires_rdna4()
   - Generic kernels (softmax, layernorm, vec_add, quant, etc.) run on all architectures
 

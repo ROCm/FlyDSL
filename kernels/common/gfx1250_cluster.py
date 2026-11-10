@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+"""gfx1250 cluster GEMM policy helpers.
+
+These are kernel-pipeline policy helpers (index math over cluster tiling), not
+target primitives, so they live under ``kernels.common`` rather than
+``flydsl.expr.rocdl``. They emit only target-neutral ``arith`` ops and carry no
+ROCDL dependency. The cluster *primitives* (``cluster_barrier``,
+``compute_cluster_position``, cluster-ID wrappers) remain in
+``flydsl.expr.rocdl.cluster``.
+"""
+
+import flydsl.expr as fx
+from flydsl.expr.meta import dsl_loc_tracing
+
+
+@dsl_loc_tracing
+def compute_mcast_masks(local_x, local_y, cluster_m: int, cluster_n: int):
+    """Compute MCAST workgroup_mask values for A and B matrices.
+
+    Hardware flat WG index within a cluster uses X-inner ordering
+    (gfx1250 Shader Programming, TTMP6 layout, section 3.5.5.1):
+
+        flat_wg_id = wg_x + wg_y * nwg_x = local_x + local_y * cluster_m
+
+    where cluster_dims = (cluster_m, cluster_n, 1), so nwg_x = cluster_m.
+
+    A mask: WGs sharing the same M-tile row (same local_x, varying local_y).
+        Bits: {local_x + ly * cluster_m : ly in 0..cluster_n-1}
+    B mask: WGs sharing the same N-tile column (same local_y, varying local_x).
+        Bits: {lx + local_y * cluster_m : lx in 0..cluster_m-1}
+
+    Args:
+        local_x: WG row within cluster (MLIR index, 0..cluster_m-1).
+        local_y: WG column within cluster (MLIR index, 0..cluster_n-1).
+        cluster_m: Cluster rows (Python int).
+        cluster_n: Cluster columns (Python int).
+
+    Returns:
+        (a_mask, b_mask) as MLIR i32 values for TDM workgroup_mask.
+    """
+    # A mask: pattern has bits at strides of cluster_m, shifted by local_x.
+    a_pattern = sum(1 << (ly * cluster_m) for ly in range(cluster_n))
+    a_mask = fx.Int32(a_pattern) << fx.Int32(local_x)
+
+    # B mask: cluster_m contiguous low bits, shifted by local_y * cluster_m.
+    b_mask = fx.Int32((1 << cluster_m) - 1) << (fx.Int32(local_y) * cluster_m)
+
+    return a_mask.ir_value(), b_mask.ir_value()
+
+
+__all__ = ["compute_mcast_masks"]

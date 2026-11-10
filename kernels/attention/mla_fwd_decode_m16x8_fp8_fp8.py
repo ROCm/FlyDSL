@@ -18,16 +18,15 @@ NOTE: Do NOT use ``from __future__ import annotations`` here -- it breaks
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, memref
+from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr import math as fmath
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator
+from kernels.common import buffer_ops
+from kernels.common.kernels_common import LOG2E
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -57,7 +56,6 @@ TILE_M: int = BLOCK_M // NUM_WARPS  # 16
 OCCUPANCY: int = 1
 
 SIZE_MLA_WORK_INFO_IN_DW: int = 8
-LOG2E: float = 1.4426950408889634
 
 # ---------------------------------------------------------------------------
 # KvManagerV2 LDS layout constants
@@ -172,6 +170,11 @@ assert max(SZ_LDS_O16, SZ_LDS_O32) <= V3_SZ_LDS_KV, "Output LDS must fit in one 
 TOTAL_LDS_BYTES: int = V3_TOTAL_LDS_BYTES if IS_GFX950 else V2_TOTAL_LDS_BYTES
 
 
+@fx.struct
+class SharedStorage:
+    storage: fx.Array[fx.Int8, TOTAL_LDS_BYTES, 16]
+
+
 # ---------------------------------------------------------------------------
 # Utility helpers (ported from FlyDSL/kernels/mla_decode_fp8.py)
 # ---------------------------------------------------------------------------
@@ -204,66 +207,19 @@ def _inline_asm_void(operands, asm_string, constraints):
     llvm.inline_asm(None, operands, asm_string, constraints, has_side_effects=True)
 
 
-_LDS_PTR_TYPE = None
+def _lds_ptr_from_i32(addr_i32, byte_offset=0, *, alignment=8):
+    ptr_type = fx.PointerType.get(fx.Int8.ir_type, fx.AddressSpace.Shared, alignment)
+    return fx.inttoptr(ptr_type, fx.Uint64(fx.Uint32(addr_i32)) + byte_offset)
 
 
-def _inttoptr_lds(byte_addr):
-    """Convert an integer byte address to !llvm.ptr<3> (LDS pointer)."""
-    global _LDS_PTR_TYPE
-    if _LDS_PTR_TYPE is None:
-        _LDS_PTR_TYPE = ir.Type.parse("!llvm.ptr<3>")
-    return llvm.inttoptr(_LDS_PTR_TYPE, _raw(fx.Int64(byte_addr)))
-
-
-_gep = buffer_ops.get_element_ptr
-
-
-def _lds_load(byte_addr_index, vec_type, static_byte_offset=0):
-    """LDS load via raw llvm.LoadOp on an LDS pointer (addr space 3)."""
-    lds_ptr = _inttoptr_lds(byte_addr_index)
-    if static_byte_offset != 0:
-        lds_ptr = _gep(lds_ptr, static_byte_offset=static_byte_offset)
-    return _ptr_load(vec_type, lds_ptr, alignment=16, nontemporal=True)
-
-
-def _lds_load_volatile(base_i32, vec_type, byte_offset=0):
-    """Volatile LDS load forcing ds_read_b64/b32 with immediate offset.
-
-    Unlike _lds_load, uses volatile to prevent LLVM from merging adjacent
-    loads into ds_read2 variants (which have limited 8-bit offsets).
-    LLVM still tracks these as LDS loads for lgkmcnt.
-    Input: base_i32 must be an i32 ir.Value (LDS byte address).
-    """
-    lds_ptr = _inttoptr_lds(ArithValue(base_i32).extui(T.i64))
-    if byte_offset != 0:
-        lds_ptr = _gep(lds_ptr, static_byte_offset=byte_offset)
-    return _ptr_load(vec_type, lds_ptr, alignment=8, volatile_=True)
-
-
-def _lds_ptr_from_i32(addr_i32, byte_offset=0):
-    """Build an LDS pointer (ptr<3>) from an i32 byte address + optional static offset."""
-    ptr = _inttoptr_lds(ArithValue(addr_i32).extui(T.i64))
-    if byte_offset != 0:
-        ptr = _gep(ptr, static_byte_offset=byte_offset)
-    return ptr
-
-
-def _ptr_load(result_type, ptr, *, alignment=None, volatile_=False, nontemporal=False):
-    return llvm.LoadOp(
-        result_type,
-        ptr,
-        alignment=alignment,
-        volatile_=volatile_,
-        nontemporal=nontemporal,
-    ).result
-
-
-def _ptr_store(value, ptr, *, alignment=None, volatile_=False):
-    return llvm.StoreOp(_raw(value), ptr, alignment=alignment, volatile_=volatile_)
+def _lds_load_volatile(base_i32, dtype, byte_offset=0):
+    # Volatile prevents ds_read2 merging, whose immediate offsets are too small.
+    ptr = _lds_ptr_from_i32(base_i32, byte_offset)
+    return fx.generic_load(ptr, dtype=dtype, volatile=True).ir_value()
 
 
 def _i32(value):
-    """Cast index/ArithValue to i32.  No-op if already i32."""
+    """Cast index/typed numeric to raw i32. No-op if already i32."""
     raw = _raw(value) if not isinstance(value, ir.Value) else value
     if raw.type == T.i32:
         return raw
@@ -300,7 +256,7 @@ def _idx(val):
 
 def _pack_i32x2(lo, hi):
     """Pack two i32 values into a single i64: lo | (hi << 32)."""
-    return _raw(ArithValue(lo).extui(T.i64) | (ArithValue(hi).extui(T.i64) << 32))
+    return _raw(fx.Uint64(fx.Uint32(lo)) | (fx.Uint64(fx.Uint32(hi)) << 32))
 
 
 # ---------------------------------------------------------------------------
@@ -333,43 +289,21 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     # ---- Types ----
     fm_fast = arith.FastMathFlags.fast
-    # fastmath without ninf: safe for operations that may encounter -inf
-    # (boundary masking sets OOB attention scores to -inf)
-    fm_no_inf = (
-        arith.FastMathFlags.nnan
-        | arith.FastMathFlags.nsz
-        | arith.FastMathFlags.arcp
-        | arith.FastMathFlags.contract
-        | arith.FastMathFlags.afn
-        | arith.FastMathFlags.reassoc
-    )
 
     def _mfma_fp8(result_type, operands, **kw):
         return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
 
-    def _fadd(a, b, fastmath=fm_no_inf):
-        return arith.addf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fsub(a, b, fastmath=fm_no_inf):
-        return arith.subf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fmul(a, b, fastmath=fm_no_inf):
-        return arith.mulf(_raw(a), _raw(b), fastmath=fastmath)
-
-    def _fmax(a, b, fastmath=fm_no_inf):
-        return arith.maximumf(_raw(a), _raw(b), fastmath=fastmath)
-
     # ---- LDS setup ----
-    arch = get_rocm_arch()
-    lds_allocator = SmemAllocator(None, arch=arch)
-    lds_allocator.ptr = TOTAL_LDS_BYTES  # reserve LDS bytes
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_base_idx = fx.Index(fx.ptrtoint(lds.storage.ptr))
 
-    ctx = CompilationContext.get_current()
-    with ir.InsertionPoint(ctx.gpu_module_body):
-        lds_allocator.finalize()
+    _lds_storage_ptr = fx.recast_iter(fx.Uint8, lds.storage.ptr)
+    _lds_base_i32 = _i32(lds_base_idx)
 
-    lds_buffer = lds_allocator.get_base()
-    lds_base_idx = memref.extract_aligned_pointer_as_index(lds_buffer)
+    def _lds_ptr(abs_addr, extra_bytes=0):
+        """u8 LDS pointer at absolute byte address `abs_addr` (+ `extra_bytes`)."""
+        rel = fx.Int32(_i32(abs_addr)) - fx.Int32(_lds_base_i32) + fx.Int32(extra_bytes)
+        return _lds_storage_ptr + rel
 
     # ---- V^T transpose perm constants ----
     c_perm0 = fx.Int32(0x05010400)
@@ -385,13 +319,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     c_zero_f32 = fx.Float32(0.0)
     c_one_f32 = fx.Float32(1.0)
     c_zero_i32 = fx.Int32(0)
-    c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+    c_zero_v4f32 = fx.full(4, 0.0, fx.Float32)
     c_log2e = fx.Float32(LOG2E)
     c_inv_log2e = fx.Float32(1.0 / LOG2E)
 
     # ---- Buffer resources ----
     query_rsrc = buffer_ops.create_buffer_resource(query)
-    kv_rsrc = buffer_ops.create_buffer_resource(kv_buffer)
+    kv_rsrc = fx.rocdl.get_buffer_rsrc(buffer_ops.create_buffer_resource(kv_buffer))
     kv_page_indices_rsrc = buffer_ops.create_buffer_resource(kv_page_indices)
     work_indptr_rsrc = buffer_ops.create_buffer_resource(work_indptr)
     work_info_set_rsrc = buffer_ops.create_buffer_resource(work_info_set)
@@ -467,24 +401,22 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             # p_lds_kv_warp points to warp's sub-block start.
             # Actual LDS target: p_lds_kv_warp + block*KV_BLOCK_BYTES - block*64
             lds_adjust = lds_warp_offset - block_idx_const * KV_NUM_COLS
-        lds_base_i32 = _i32(ArithValue(p_lds_kv_warp) + lds_adjust)
+        lds_base_i32 = _i32(fx.Int32(p_lds_kv_warp) + lds_adjust)
 
         def _emit_vram_to_lds():
-            voff = _i32(ArithValue(row_i32) * QK_HEAD_DIM + col_base_i32)
+            voff = _i32(fx.Int32(row_i32) * QK_HEAD_DIM + col_base_i32)
             rocdl.buffer_load_to_lds(
                 kv_rsrc,
-                _lds_ptr_from_i32(lds_base_i32),
+                _lds_ptr_from_i32(lds_base_i32).llvm_ptr,
                 voff,
                 offset=block_idx_const * KV_NUM_COLS,
             )
 
         if const_expr(check_boundary):
-            is_oob = ArithValue(row_i32) == -1
+            is_oob = fx.Int32(row_i32) == -1
             if is_oob:
-                # Write zero via ds_write_b32 at lane's position
-                lds_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
-                lds_ptr = _lds_ptr_from_i32(lds_addr)
-                _ptr_store(c_zero_i32, lds_ptr, alignment=4)
+                lds_addr = _i32(fx.Int32(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
+                fx.ptr_store(fx.full(1, c_zero_i32, fx.Int32).bitcast(fx.Uint8), _lds_ptr(lds_addr))
             else:
                 _emit_vram_to_lds()
         else:
@@ -551,10 +483,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
         else:
             lds_adjust = block_idx_const * KV_BLOCK_BYTES - block_idx_const * KV_NUM_COLS
-        lds_base_i32 = _i32(ArithValue(p_lds_kv_warp) + lds_adjust)
+        lds_base_i32 = _i32(fx.Int32(p_lds_kv_warp) + lds_adjust)
 
         def _emit_normal_load():
-            voff = _i32(ArithValue(row_i32) * QK_HEAD_DIM + col_base_i32)
+            voff = _i32(fx.Int32(row_i32) * QK_HEAD_DIM + col_base_i32)
             col_off_imm = block_idx_const * KV_NUM_COLS
             lds_base_sgpr = _uniform_i32(lds_base_i32)
             asm_str = "s_mov_b32 m0, $0\n" "s_nop 0\n" f"buffer_load_dword $1, $2, 0 offen offset:{col_off_imm} lds"
@@ -564,14 +496,14 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             _emit_normal_load()
         else:
             # Build OOB condition: row == -1
-            is_oob = ArithValue(row_i32) == -1
+            is_oob = fx.Int32(row_i32) == -1
             # If check_boundary is a runtime i1, AND it in
             if const_expr(check_boundary is not True):
-                is_oob = _raw(ArithValue(check_boundary) & is_oob)
+                is_oob = fx.Boolean(check_boundary) & is_oob
 
             if is_oob:
                 # OOB: write zero to LDS via inline asm ds_write_b32
-                lds_zero_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
+                lds_zero_addr = _i32(fx.Int32(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
                 _inline_asm_void([lds_zero_addr, _raw(c_zero_i32)], "ds_write_b32 $0, $1", "v,v")
             else:
                 _emit_normal_load()
@@ -634,7 +566,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
 
         # ds_read_b64 with immediate offset (volatile prevents ds_read2 merge)
-        data = _lds_load_volatile(k_base_i32, T.i64, byte_offset=fixed_offset)
+        data = _lds_load_volatile(k_base_i32, fx.Int64, byte_offset=fixed_offset)
         return data
 
     # ---- Helper: load V from KV LDS (un-transposed) ----
@@ -672,12 +604,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 off = KV_SUB_BYTES
             else:
                 off = KV_SUB_BYTES + KV_BYTES_PER_ROW
-            data = _lds_load(
-                lds_addr,
-                T.i32x2,
-                static_byte_offset=off,
-            )
-            data_vec = Vec(data)
+            data_vec = fx.ptr_load(
+                _lds_ptr(lds_addr, extra_bytes=off), result_type=fx.Vector.make_type(8, fx.Uint8)
+            ).bitcast(fx.Int32)
             v_vals.append(data_vec[0])
             v_vals.append(data_vec[1])
         return v_vals  # 8 i32 values
@@ -728,14 +657,11 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         block_offset = (row_blk * VT_BLKS_PER_ROW_PAD + col_blk) * VT_ELEMS_PER_BLK
         lds_vt_addr = vt_lds_base_idx + block_offset
 
-        # ds_write_b128 x 2 (4 dwords each = 32 fp8)
         lo_packed = Vec.from_elements(vt8[0:4], fx.Int32)
-        lo_i8 = Vec(lo_packed).bitcast(fx.Int8)
-        lo_i8.store(lds_buffer, [lds_vt_addr])
+        fx.ptr_store(lo_packed.bitcast(fx.Uint8), _lds_ptr(_i32(lds_vt_addr)))
 
         hi_packed = Vec.from_elements(vt8[4:8], fx.Int32)
-        hi_i8 = Vec(hi_packed).bitcast(fx.Int8)
-        hi_i8.store(lds_buffer, [lds_vt_addr + 16])
+        fx.ptr_store(hi_packed.bitcast(fx.Uint8), _lds_ptr(_i32(fx.Int32(lds_vt_addr) + 16)))
 
     # ---- Helper: load transposed V from Vt LDS ----
     def _load_vt_from_lds(vt_base_i32, col_offset):
@@ -754,22 +680,24 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         offset_tl_bl = 4 * VT_BLKS_PER_ROW_PAD * VT_ELEMS_PER_BLK  # 8448
 
         # ds_read_b32 x 2 with immediate offsets (volatile prevents ds_read2 merge)
-        v0 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset)
-        v1 = _lds_load_volatile(vt_base_i32, T.i32, byte_offset=fixed_block_offset + offset_tl_bl)
+        v0 = _lds_load_volatile(vt_base_i32, fx.Int32, byte_offset=fixed_block_offset)
+        v1 = _lds_load_volatile(vt_base_i32, fx.Int32, byte_offset=fixed_block_offset + offset_tl_bl)
         return v0, v1
 
     # ---- Helper: warp reduce (butterfly XOR) ----
     def _shfl_xor_f32(val_f32, offset, width=WARP_SIZE):
         """XOR shuffle for f32 via bitcast to i32 and back."""
-        val_i32 = _raw(ArithValue(val_f32).bitcast(T.i32))
-        peer_i32 = ArithValue(val_i32).shuffle_xor(offset, width)
-        return fx.Float32(ArithValue(peer_i32).bitcast(T.f32))
+        val_i32 = fx.Float32(val_f32).bitcast(fx.Int32)
+        peer_i32 = val_i32.shuffle_xor(offset, width)
+        return peer_i32.bitcast(fx.Float32)
 
     def _warp_reduce_max_16(val):
         """Butterfly max reduce across MFMA column groups (strides 32, 16)."""
         w = _f32(val)
         for sh in [32, 16]:
-            w = _fmax(w, _shfl_xor_f32(w, sh), fm_no_inf)
+            # Pinned: fx.maxnumf now inherits this launcher's fast_fp_math, and
+            # test_mla_decode.py aborts here so that widening is unverified.
+            w = fx.maxnumf(w, _shfl_xor_f32(w, sh), fastmath=arith.FastMathFlags.contract)
         return w
 
     def _warp_reduce_add_16(val):
@@ -825,9 +753,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # (i32 = 4), so divide by 4.  s_offset is also in bytes.
         voff_dw = (v_offset + s_offset) // 4
 
-        # Pre-compute LDS pointers (constant across passes)
         lds_st_addr = p_lds_q_warp + lds_st_offset
-        lds_st_ptr = _inttoptr_lds(lds_st_addr)
         lds_rd_addr = p_lds_q_warp + lds_ld_offset
 
         def _q_buf_load(pass_idx):
@@ -840,12 +766,18 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
 
         def _shuffle_q_through_lds(q_vram_data):
-            """LDS write (ds_write_b128) + barrier + LDS read (2x ds_read_b64)."""
+            """LDS write + barrier + LDS read via the high-level LDS view."""
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            _ptr_store(q_vram_data, lds_st_ptr, alignment=16)
+            fx.ptr_store(Vec(q_vram_data).bitcast(fx.Uint8), _lds_ptr(lds_st_addr))
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            q0 = _lds_load(lds_rd_addr, T.i64, static_byte_offset=0)
-            q1 = _lds_load(lds_rd_addr, T.i64, static_byte_offset=MFMA_K)
+            q0 = _raw(
+                fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(8, fx.Uint8)).bitcast(fx.Int64)[0]
+            )
+            q1 = _raw(
+                fx.ptr_load(
+                    _lds_ptr(lds_rd_addr, extra_bytes=MFMA_K), result_type=fx.Vector.make_type(8, fx.Uint8)
+                ).bitcast(fx.Int64)[0]
+            )
             return (q0, q1)
 
         # 3-deep pipeline: keep 2 buffer_loads in flight while shuffling
@@ -897,8 +829,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 pos = col_0_start + sub_offset
                 is_oob = pos >= kv_end
                 if const_expr(check_boundary is not True):
-                    is_oob = _raw(ArithValue(check_boundary) & is_oob)
-                result[i] = ArithValue(is_oob).select(_raw(c_neg_inf), result[i])
+                    is_oob = fx.Boolean(check_boundary) & fx.Boolean(is_oob)
+                result[i] = fx.Boolean(is_oob).select(_raw(c_neg_inf), result[i])
         return result
 
     # ---- Helper: online softmax ----
@@ -925,7 +857,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Local max
         local_max = scaled[0]
         for i in range_constexpr(1, P_VALS_PER_THR):
-            local_max = _fmax(local_max, scaled[i], fm_no_inf)
+            local_max = fx.maxnumf(local_max, scaled[i], fastmath=arith.FastMathFlags.contract)
 
         # Warp reduce max (within 16-lane groups)
         local_max = _warp_reduce_max_16(local_max)
@@ -935,18 +867,18 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             new_row_max = local_max
             rescale = c_one_f32
         else:
-            new_row_max = _fmax(local_max, row_max_old, fm_no_inf)
+            new_row_max = fx.maxnumf(local_max, row_max_old, fastmath=arith.FastMathFlags.contract)
             # rescale = exp2((old_max - new_max) * log2e)
-            diff = _fsub(row_max_old, new_row_max, fm_no_inf)
-            rescale = _fast_exp2(_fmul(diff, c_log2e, fm_no_inf))
+            diff = row_max_old - new_row_max
+            rescale = _fast_exp2(diff * c_log2e)
 
         # exp(p - max) for each value, and sum
         p_exp_vals = [None] * P_VALS_PER_THR
         local_sum = c_zero_f32
         for i in range_constexpr(P_VALS_PER_THR):
-            exp_arg = _fmul(_fsub(scaled[i], new_row_max, fm_no_inf), c_log2e, fm_no_inf)
+            exp_arg = (scaled[i] - new_row_max) * c_log2e
             p_exp_vals[i] = _fast_exp2(exp_arg)
-            local_sum = _fadd(local_sum, p_exp_vals[i], fm_no_inf)
+            local_sum = local_sum + p_exp_vals[i]
 
         # Warp reduce sum
         local_sum = _warp_reduce_add_16(local_sum)
@@ -955,7 +887,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(is_first_iter):
             row_sum_e_new = local_sum
         else:
-            row_sum_e_new = _fadd(_f32(rescale) * row_sum_e_old, local_sum, fm_no_inf)
+            row_sum_e_new = _f32(rescale) * row_sum_e_old + local_sum
 
         return p_exp_vals, new_row_max, row_sum_e_new, rescale
 
@@ -978,7 +910,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     def _rescale_oaccu(oaccu, rescale):
         """Multiply all oaccu accumulators by rescale factor.
         Descending s_setprio 3->0 across 4 groups of 8 muls."""
-        rv = _raw(Vec.filled(4, rescale, fx.Float32))
+        rv = _raw(fx.full(4, rescale, fx.Float32))
         result = [None] * len(oaccu)
         for group in range_constexpr(4):
             rocdl.s_setprio(3 - group)
@@ -1017,7 +949,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         Returns (row_max, row_sum_e, p_pack, rescale).
         """
         # ---- K base VGPR (baked-in lane offset) ----
-        k_base_i32 = _i32(ArithValue(p_lds_kv_base) + k_lds_lane_offset)
+        k_base_i32 = _i32(fx.Int32(p_lds_kv_base) + k_lds_lane_offset)
 
         do_prefetch = p_lds_kv_next_warp is not None
 
@@ -1274,8 +1206,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         """Convert f32x4 accumulator to 2 packed bf16 dwords."""
         i16s = Vec(acc_val).to(fx.BFloat16).bitcast(fx.Int16)
         i16_0, i16_1, i16_2, i16_3 = (_raw(i16s[j]) for j in range(4))
-        dw0 = _raw(ArithValue(i16_0).extui(T.i32) | (ArithValue(i16_1).extui(T.i32) << 16))
-        dw1 = _raw(ArithValue(i16_2).extui(T.i32) | (ArithValue(i16_3).extui(T.i32) << 16))
+        dw0 = _raw(fx.Uint32(fx.Uint16(i16_0)) | (fx.Uint32(fx.Uint16(i16_1)) << 16))
+        dw1 = _raw(fx.Uint32(fx.Uint16(i16_2)) | (fx.Uint32(fx.Uint16(i16_3)) << 16))
         return dw0, dw1
 
     def _store_oaccu_pair_bf16(oaccu_a, oaccu_b, tile_idx, p_lds_o, row_base_i32):
@@ -1299,30 +1231,28 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         )
 
         # Per-warp LDS base
-        lds_warp = ArithValue(p_lds_o) + warp_idx * O16_LDS_PER_WARP
-        lds_st_addr = _i32(ArithValue(lds_warp) + o16_st_offset)
+        lds_warp = fx.Int32(p_lds_o) + warp_idx * O16_LDS_PER_WARP
+        lds_st_addr = _i32(lds_warp + o16_st_offset)
 
         # LDS write: 2 sub-blocks -> 2x ds_write_b64
         for sub, acc_val in enumerate([oaccu_a, oaccu_b]):
             dw0, dw1 = _pack_f32x4_to_bf16_2dw(acc_val)
             vec_2dw = Vec.from_elements([dw0, dw1], fx.Int32)
             sub_offset = sub * O16_NUM_COLS
-            st_addr_sub = _i32(ArithValue(lds_st_addr) + sub_offset)
+            st_addr_sub = _i32(fx.Int32(lds_st_addr) + sub_offset)
             st_ptr = _lds_ptr_from_i32(st_addr_sub)
-            _ptr_store(vec_2dw, st_ptr, alignment=8, volatile_=True)
+            fx.generic_store(st_ptr, vec_2dw, volatile=True)
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-        # LDS read: ds_read_b128 (4 dwords = 8 bf16 in coalesced layout)
-        lds_rd_addr = _i32(ArithValue(lds_warp) + o16_rd_offset)
-        rd_ptr = _lds_ptr_from_i32(lds_rd_addr)
-        data = _ptr_load(T.i32x4, rd_ptr, alignment=16)
+        lds_rd_addr = _i32(lds_warp + o16_rd_offset)
+        data = _raw(fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(16, fx.Uint8)).bitcast(fx.Int32))
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
         # Coalesced VRAM store: buffer_store_dwordx4
-        row_vram = ArithValue(row_base_i32) + o16_row_ld
-        col_vram = ArithValue(o16_col_ld) + tile_idx * MFMA_N * 2
+        row_vram = fx.Int32(row_base_i32) + o16_row_ld
+        col_vram = fx.Int32(o16_col_ld) + tile_idx * MFMA_N * 2
         vram_offset = _raw((row_vram * V_HEAD_DIM + col_vram) * 2)
         buffer_ops.buffer_store(data, final_output_rsrc, vram_offset, offset_is_bytes=True)
 
@@ -1344,33 +1274,35 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         o32_rd_offset = (o32_row_ld * O32_ELEM_PER_PAD_ROW + o32_col_ld) * 4
 
         # Per-warp LDS base
-        lds_warp = ArithValue(p_lds_o) + warp_idx * O32_LDS_PER_WARP
-        lds_st_addr = _i32(ArithValue(lds_warp) + o32_st_offset)
+        lds_warp = fx.Int32(p_lds_o) + warp_idx * O32_LDS_PER_WARP
+        lds_st_addr = _i32(lds_warp + o32_st_offset)
 
         col_offset_i32 = tile_idx * MFMA_N * 2
         O32_LD_DELTA = 8 * O32_ELEM_PER_PAD_ROW * 4  # 1152 bytes between round 0/1
 
-        # LDS write: 2 sub-blocks -> 2x ds_write_b128
         rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
         for sub, acc_val in enumerate([oaccu_a, oaccu_b]):
             sub_offset = sub * O32_NUM_COLS // 2 * 4
-            st_addr_sub = _i32(ArithValue(lds_st_addr) + sub_offset)
-            st_ptr = _lds_ptr_from_i32(st_addr_sub)
-            _ptr_store(acc_val, st_ptr, alignment=16)
+            st_addr_sub = _i32(fx.Int32(lds_st_addr) + sub_offset)
+            fx.ptr_store(Vec(acc_val).bitcast(fx.Uint8), _lds_ptr(st_addr_sub))
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-        # LDS read: 2x ds_read_b128 (round 0 = rows 0-7, round 1 = rows 8-15)
-        lds_rd_addr = _i32(ArithValue(lds_warp) + o32_rd_offset)
-        rd_ptr = _lds_ptr_from_i32(lds_rd_addr)
-        data_0 = _ptr_load(T.f32x4, rd_ptr, alignment=16)
-        data_1 = _ptr_load(T.f32x4, _gep(rd_ptr, static_byte_offset=O32_LD_DELTA), alignment=16)
+        lds_rd_addr = _i32(lds_warp + o32_rd_offset)
+        data_0 = _raw(
+            fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(16, fx.Uint8)).bitcast(fx.Int32)
+        )
+        data_1 = _raw(
+            fx.ptr_load(
+                _lds_ptr(lds_rd_addr, extra_bytes=O32_LD_DELTA), result_type=fx.Vector.make_type(16, fx.Uint8)
+            ).bitcast(fx.Int32)
+        )
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
         # 2x coalesced VRAM store
-        row_vram_0 = ArithValue(row_base_i32) + o32_row_ld
-        col_vram = ArithValue(o32_col_ld) + col_offset_i32
+        row_vram_0 = fx.Int32(row_base_i32) + o32_row_ld
+        col_vram = fx.Int32(o32_col_ld) + col_offset_i32
         vram_off_0 = _raw((row_vram_0 * V_HEAD_DIM + col_vram) * 4)
         buffer_ops.buffer_store(
             _raw(Vec(data_0).bitcast(fx.Int32)), split_output_rsrc, vram_off_0, offset_is_bytes=True
@@ -1395,8 +1327,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     ):
         """Last-tile GEMM2: interleave rescale + MFMA + normalize + store."""
         K_HALVES = BLOCK_N // 32
-        rescale_vec = _raw(Vec.filled(4, fx.Float32(rescale), fx.Float32))
-        reci_vec = _raw(Vec.filled(4, fx.Float32(reci_sum), fx.Float32))
+        rescale_vec = _raw(fx.full(4, fx.Float32(rescale), fx.Float32))
+        reci_vec = _raw(fx.full(4, fx.Float32(reci_sum), fx.Float32))
 
         _barrier(lgkmcnt=0)
         rocdl.sched_barrier(0)
@@ -1513,8 +1445,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     def _kv_warp_lds_base(p_lds_kv_base):
         """Return this warp's KV LDS base as a uniform i32 address."""
-        warp_offset = _raw(ArithValue(_uniform_i32(warp_idx)) * kv_warp_stride)
-        return _raw(ArithValue(_i32(p_lds_kv_base)) + warp_offset)
+        warp_offset = fx.Int32(_uniform_i32(warp_idx)) * kv_warp_stride
+        return _raw(fx.Int32(_i32(p_lds_kv_base)) + warp_offset)
 
     p_lds_kv_0_warp = _kv_warp_lds_base(p_lds_kv_0_base)
     p_lds_kv_1_warp = _kv_warp_lds_base(p_lds_kv_1_base)
@@ -1527,7 +1459,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         vt_block_offset = (vt_row_blk * VT_BLKS_PER_ROW_PAD + vt_col_blk) * VT_ELEMS_PER_BLK
         vt_inblock_offset = vt_row_inblk * VT_COLS_PER_THR + vt_col_inblk
         vt_lds_lane_offset = vt_block_offset + vt_inblock_offset
-        return _i32(ArithValue(lds_base_idx + P_LDS_VT) + vt_lds_lane_offset)
+        return _i32((lds_base_idx + P_LDS_VT) + vt_lds_lane_offset)
 
     if const_expr(IS_GFX950):
         # ---- V LDS lane base pointer (V3: HW transpose-during-load) ----
@@ -1569,7 +1501,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 * V3_KV_BYTES_PER_2SUB_PADDED
             )
             ptr = _lds_ptr_from_i32(v_base_i32, byte_offset=fixed_offset)
-            return rocdl.ds_read_tr8_b64(V_TR8_RES_TYPE, ptr).result
+            return rocdl.ds_read_tr8_b64(V_TR8_RES_TYPE, ptr.llvm_ptr).result
 
         # ---- Helper: process one KV tile (GEMM1 + softmax + V + GEMM2) ----
         # Interleaves async prefetch of the NEXT tile's KV data
@@ -1608,7 +1540,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             """V3: V is read transposed-during-load directly from the KV LDS region
             of the current double buffer. Per-lane base = kv_base + v_lds_lane_offset.
             """
-            return _i32(ArithValue(p_lds_kv_base) + v_lds_lane_offset)
+            return _i32(fx.Int32(p_lds_kv_base) + v_lds_lane_offset)
 
     # ==================================================================
     # Main kernel body: persistent-thread work loop (arch-unified)
@@ -1641,8 +1573,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         row_sum_e = c_zero_f32
 
         # Compute number of tiles
-        kv_len_v = ArithValue(kv_len)
-        num_tiles = (kv_len_v + BLOCK_N - 1).with_signedness(False) // BLOCK_N
+        kv_len_v = fx.Int32(kv_len)
+        num_tiles = fx.Uint32(kv_len_v + BLOCK_N - 1) // fx.Uint32(BLOCK_N)
 
         # --- Pre-compute boundary flags ---
         first_tile_needs_boundary = kv_len_v < BLOCK_N
@@ -1662,7 +1594,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             if const_expr(IS_GFX950):
                 row_kv_ld_first_p1 = _get_kv_ld_row(kv_start, kv_end, True, pass_idx=1)
         else:
-            kv_first_end = _raw(ArithValue(kv_start) + BLOCK_N)
+            kv_first_end = _raw(fx.Int32(kv_start) + BLOCK_N)
             row_kv_ld_first_p0 = _get_kv_ld_row(kv_start, kv_first_end, False, pass_idx=0)
             if const_expr(IS_GFX950):
                 row_kv_ld_first_p1 = _get_kv_ld_row(kv_start, kv_first_end, False, pass_idx=1)
@@ -1695,10 +1627,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # (the gfx950-only pass-1 prefetch is dead-code-eliminated).
         # Pre-initialize before the runtime `if` so the FlyDSL AST rewriter
         # treats these as branch-merged values (CLAUDE.md kernel rule).
-        kv_start_v = ArithValue(kv_start)
+        kv_start_v = fx.Int32(kv_start)
         kv_start_plus_bn = _raw(kv_start_v + BLOCK_N)
         kv_start_plus_2bn = _raw(kv_start_v + 2 * BLOCK_N)
-        tile1_is_full = ArithValue(kv_start_plus_2bn) <= kv_end
+        tile1_is_full = fx.Int32(kv_start_plus_2bn) <= fx.Int32(kv_end)
         row_kv_ld_tile1_p0 = fx.Int32(-1)
         row_kv_ld_tile1_p1 = fx.Int32(-1)
         if tile1_is_full:
@@ -1723,8 +1655,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # cbn=True when !tile1_is_full. This is correct regardless of last_tile_partial because
         # when num_tiles==2 and !tile1_is_full, the next tile IS the last and IS partial.
         # !tile1_is_full: kv_start + 2*BN > kv_end (num_tiles == 2, next tile partial)
-        first_tile_cbn = ArithValue(kv_start_plus_2bn) > kv_end
-        do_resolve_nn_first = ArithValue(kv_start_plus_2bn) < kv_end
+        first_tile_cbn = fx.Int32(kv_start_plus_2bn) > fx.Int32(kv_end)
+        do_resolve_nn_first = fx.Int32(kv_start_plus_2bn) < fx.Int32(kv_end)
 
         # Branch on has_multi_tiles: multi-tile gets prefetch, single doesn't.
         # State variables across the runtime if/else are kept as flat scalars
@@ -1831,10 +1763,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         def _write_lse(pqo_loc_i32, rm, rse):
             """Write LSE for split output (first 16 lanes per warp)."""
-            if ArithValue(lane_idx) < 16:
-                log2_sum = fmath.log2(rse, fastmath=fm_fast)
-                lse = fmath.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
-                row_idx = _raw(ArithValue(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
+            if fx.Index(lane_idx) < 16:
+                log2_sum = fx.log2(rse, fastmath=fm_fast)
+                lse = fx.fma(log2_sum, c_inv_log2e, rm, fastmath=fm_fast)
+                row_idx = _raw(fx.Index(lane_idx) + warp_idx * 16 + _idx(pqo_loc_i32) * NUM_QO_HEADS)
                 buffer_ops.buffer_store(lse, split_lse_rsrc, row_idx)
 
         # LDS base for output reshape (reuse KV buffer 0 region)
@@ -1894,7 +1826,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 oaccu_mt = _gemm2_first_iter(p_pack_first, _vt_base_i32())
 
             # --- Middle tiles [1, num_tiles-1) via loop-carried range ---
-            num_tiles_v = ArithValue(num_tiles)
+            num_tiles_v = num_tiles
             num_tiles_m1 = _raw(num_tiles_v - 1)
             num_tiles_m2 = _raw(num_tiles_v - 2)
 
@@ -1910,7 +1842,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             )
 
             for tile_iv, state in range(_idx(1), _idx(num_tiles_m1), _idx(1), init=init_args):
-                tile_iv_i32 = ArithValue(fx.Int32(tile_iv))
+                tile_iv_i32 = fx.Int32(tile_iv)
                 kv_tile_start_i32 = _raw(kv_start_v + tile_iv_i32 * BLOCK_N)
 
                 # Unpack carried state
@@ -1924,16 +1856,16 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
                 # Buffer parity
                 is_odd = (tile_iv_i32 & 1) != 0
-                curr_base_idx = ArithValue(is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
-                next_warp = ArithValue(is_odd).select(p_lds_kv_0_warp, p_lds_kv_1_warp)
+                curr_base_idx = is_odd.select(p_lds_kv_1_base, p_lds_kv_0_base)
+                next_warp = is_odd.select(p_lds_kv_0_warp, p_lds_kv_1_warp)
 
                 # check_boundary_next: True when tile_idx == num_tiles-2 AND last_tile_partial
-                is_second_to_last = tile_iv_i32 == ArithValue(num_tiles_m2)
-                mid_cbn = _raw(ArithValue(is_second_to_last) & last_tile_partial)
+                is_second_to_last = tile_iv_i32 == fx.Int32(num_tiles_m2)
+                mid_cbn = _raw(is_second_to_last & fx.Boolean(last_tile_partial))
 
                 # 2-ahead resolve params
-                nn_start_mid = _raw(ArithValue(kv_tile_start_i32) + 2 * BLOCK_N)
-                do_resolve_nn_mid = ArithValue(nn_start_mid) < kv_end
+                nn_start_mid = _raw(fx.Int32(kv_tile_start_i32) + 2 * BLOCK_N)
+                do_resolve_nn_mid = fx.Int32(nn_start_mid) < fx.Int32(kv_end)
 
                 # Pre-init mid-tile state vars as flat scalars (carried across
                 # the runtime mid_cbn if/else by the AST rewriter).
@@ -2002,13 +1934,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             oaccu_mt = [results[2 + i] for i in range(NUM_PV_ITERS * 2)]
 
             # --- Last tile: GEMM1 + interleaved GEMM2 store ---
-            last_tile_iv = ArithValue(num_tiles_m1)
+            last_tile_iv = fx.Int32(num_tiles_m1)
             kv_last_start = _raw(kv_start_v + last_tile_iv * BLOCK_N)
             last_is_odd = (last_tile_iv & 1) != 0
-            last_curr_base = ArithValue(last_is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
+            last_curr_base = last_is_odd.select(p_lds_kv_1_base, p_lds_kv_0_base)
             # gfx950: bounce output through the OPPOSITE KV buffer so output
             # stores do not corrupt the V reads happening on `last_curr_base`.
-            last_o_base = ArithValue(last_is_odd).select(p_lds_kv_0_base, p_lds_kv_1_base)
+            last_o_base = last_is_odd.select(p_lds_kv_0_base, p_lds_kv_1_base)
 
             _barrier(vmcnt=0, lgkmcnt=0)
             rocdl.sched_barrier(0)
@@ -2086,19 +2018,22 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
 ):
     """JIT host function: configures grid/block and launches the kernel."""
     assert TOTAL_LDS_BYTES <= lds_size, f"Kernel requires {TOTAL_LDS_BYTES} bytes LDS but CU budget is {lds_size}"
-    kn_mla_fwd_decode_m16x8_fp8_fp8(
-        query,
-        kv_buffer,
-        kv_page_indices,
-        work_indptr,
-        work_info_set,
-        final_output,
-        split_output,
-        split_lse,
-        softmax_scale,
-    ).launch(
-        grid=(num_cus, 1, 1),
-        block=(NUM_THREADS, 1, 1),
-        smem=0,  # LDS is statically allocated via SmemAllocator
-        stream=stream,
-    )
+    # DSL arithmetic (+ - * .maximumf) picks up fastmath from the ambient hint;
+    # enable it for the whole traced body so ops emit fastmath<fast>.
+    with CompilationContext.compile_hints({"fast_fp_math": True}):
+        kn_mla_fwd_decode_m16x8_fp8_fp8(
+            query,
+            kv_buffer,
+            kv_page_indices,
+            work_indptr,
+            work_info_set,
+            final_output,
+            split_output,
+            split_lse,
+            softmax_scale,
+        ).launch(
+            grid=(num_cus, 1, 1),
+            block=(NUM_THREADS, 1, 1),
+            smem=0,
+            stream=stream,
+        )

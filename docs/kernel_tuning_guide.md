@@ -1,4 +1,4 @@
-# Kernel Tuning Guide
+# Kernel tuning guide
 
 Practical techniques for optimizing FlyDSL GPU kernels on AMD CDNA GPUs
 (MI300X `gfx942`, MI350/MI355X `gfx950`). The running example is the production
@@ -22,9 +22,9 @@ at optimizations without a trace usually moves the bottleneck instead of removin
 
 ---
 
-## 0. Background: The GPU Performance Model
+## 0. Background: the GPU performance model
 
-Before the specific levers, it helps to have a mental model of *where a kernel's
+Before the specific levers, build a mental model of *where a kernel's
 time goes*. A GPU does not make individual instructions fast — it hides their
 latency with parallelism. Each SIMD holds several wavefronts; when one wave
 stalls waiting on memory, the scheduler issues from another ready wave. So tuning
@@ -128,12 +128,12 @@ thumb: **M ≤ 512 → likely memory/latency-bound; M > 512 → likely compute-b
 
 ---
 
-## 1. Tiling Strategy
+## 1. Tiling strategy
 
 GEMM tiles the output `C[M, N]` and the reduction `K` into blocks. With a 256-thread
 block (4 waves × 64 lanes) the typical mapping is:
 
-```
+```text
 block_x → M tiles (tile_m rows)      wave_id  = tid // 64  → N partitioning
 block_y → N tiles (tile_n cols)      lane_id  = tid % 64   → M + N within wave
 ```
@@ -166,7 +166,7 @@ num_acc_n  = n_per_wave // 16        # N-direction accumulators per wave
 
 A quick MFMA count sanity check (FP8, K64 micro-step = 2× K32 MFMA):
 
-```
+```text
 MFMA_per_tile = k_unroll × m_repeat × num_acc_n × 2      # k_unroll = tile_k_bytes // pack // 64
 # tile 64×256×128, FP8: (128/64) × (64/16) × (256/4/16) × 2 = 2×4×4×2 = 64
 ```
@@ -175,13 +175,13 @@ See `/gemm-optimization` §1 for the full derivation and the worked 5120×5120×
 
 ---
 
-## 2. LDS Double-Buffering (Ping-Pong)
+## 2. LDS double-buffering (ping-pong)
 
 With `lds_stage=2`, allocate **two** LDS buffers for the A tile. While one buffer
 feeds the MFMAs, the next K-tile's A is loaded into the other, hiding the
 global→LDS latency:
 
-```
+```text
 Buffer PONG: [compute k=0] [  load k=2  ] [compute k=2] ...
 Buffer PING: [  load k=1  ] [compute k=1] [  load k=3  ] ...
 ```
@@ -210,7 +210,7 @@ regresses non-spilling tiles, so measure before switching. See `/gemm-optimizati
 
 ---
 
-## 3. LDS Bank-Conflict Swizzle
+## 3. LDS bank-conflict swizzle
 
 LDS is banked: **32 banks** (4 B each) on gfx942, **64 banks** on gfx950;
 `bank = (byte_addr / 4) % num_banks`. When lanes in a wave access different
@@ -226,7 +226,7 @@ def swizzle_xor16(row, col_bytes, k_blocks16):
     return col_bytes ^ ((row % k_blocks16) * 16)   # k_blocks16 = tile_k_bytes // pack // 16
 ```
 
-**The swizzle must be applied identically on the write (global→LDS) and read
+**Apply the swizzle identically on the write (global→LDS) and read
 (LDS→VGPR) paths** — if only one side swizzles, the data is read from the wrong
 place. The physical write can stay linear as long as the read reverses the same
 mapping.
@@ -247,13 +247,13 @@ gfx950 `DS_READ_*_TR_*` transpose-load instructions.
 
 ---
 
-## 4. Data Prefetch Pipeline
+## 4. Data prefetch pipeline
 
 Global loads (`buffer_load`) are **asynchronous**: the instruction returns
 immediately and data arrives later. Issue the *next* iteration's loads before
 consuming the *current* iteration's data, so load latency overlaps compute:
 
-```
+```text
 without: |load|stall|compute|load|stall|compute|
 with:    |load0|compute0+load1|compute1+load2|compute2|
 ```
@@ -266,6 +266,8 @@ load as loop-invariant). Use FlyDSL's **runtime** loop with loop-carried values
 to create genuine SSA phi nodes:
 
 ```python
+from flydsl.expr.typing import T
+
 # Prologue: load iteration 0 before the loop
 next_a = buffer_ops.buffer_load(rsrc_a, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_a, acc]]
@@ -274,12 +276,12 @@ init_state = [_unwrap(v) for v in [next_a, acc]]
 for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     a, acc = state[0], state[1]
     next_a = buffer_ops.buffer_load(rsrc_a, compute_offsets(iv + 1), vec_width=4)  # async
-    acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)   # overlaps next load
+    acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])  # overlaps next load
     results = yield [_unwrap(v) for v in [next_a, acc]]
 
 # Epilogue: process the last iteration from `results`
 a, acc = results[0], results[1]
-acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)
+acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])
 ```
 
 Three pitfalls (all covered in `/prefetch-data-load`):
@@ -289,8 +291,8 @@ Three pitfalls (all covered in `/prefetch-data-load`):
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
-3. **Clear `SmemPtr._view_cache = None` before the epilogue** when a shared view
-   was created inside the loop, or the epilogue use hits an SSA dominance error.
+3. **Build shared-memory views at the top of the kernel**, not inside the loop
+   body, or the epilogue use hits an SSA dominance error.
 
 ### Async copy (global → LDS DMA)
 
@@ -304,7 +306,7 @@ already 1 wave and adding buffers would spill — profile both ways.
 
 ---
 
-## 5. MFMA Instruction Scheduling
+## 5. MFMA instruction scheduling
 
 `hot_loop_scheduler()` emits `rocdl.sched_*` hints that tell the compiler how to
 interleave instruction classes inside the hot loop:
@@ -339,7 +341,7 @@ enabling it wins +8–10%. Measure per tile. See `/gemm-optimization` §5.
 
 ---
 
-## 6. Epilogue Strategies
+## 6. Epilogue strategies
 
 **Direct store (default).** Each thread writes its MFMA accumulators straight to
 global memory. No extra LDS, simplest — but stores can be non-coalesced for some
@@ -362,18 +364,18 @@ preshuffle GEMM also exposes fused epilogues via the `epilogue=` argument of
 
 ---
 
-## 7. Register Budget & Occupancy
+## 7. Register budget and occupancy
 
 **Occupancy** is how many wavefronts are resident per SIMD at once — the pool the
 scheduler draws from to hide latency (§0). It is the **minimum across three
 resource limiters**, capped by a hardware maximum:
 
-```
+```text
 occupancy (waves/SIMD) = min(vgpr_limit, lds_limit, sgpr_limit, HW_MAX)
 ```
 
-Whichever resource you exhaust *first* caps occupancy — so all three must be
-watched, and the arch you target changes each limit.
+Whichever resource you exhaust *first* caps occupancy — so watch all three, and
+note that the target arch changes each limit.
 
 ### The three resources
 
@@ -424,7 +426,7 @@ back from the profiler rather than estimating.
 
 Rough VGPR estimate for a wave64 FP8 tile:
 
-```
+```text
 accumulators = m_repeat × num_acc_n × 4     # → accum_vgpr
 B tile       = k_unroll × 2 × num_acc_n × 2 # → arch_vgpr
 A prefetch   ≈ 4 ; A tile regs = num_a_loads × 4 ; addressing ≈ 10–20
@@ -445,12 +447,13 @@ WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
 reduce SGPR pressure.
 
-**Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
-arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).
+The `maxnreg` hint has been removed — it never reached LLVM, and forcing
+`accum_vgpr=0` with it spilled MFMA results through arch_vgpr via
+`v_accvgpr_read` (measured ~4.5× regression). Use `waves_per_eu` instead.
 
 ---
 
-## 8. Performance Metrics & Roofline
+## 8. Performance metrics and roofline
 
 ```python
 flops   = 2 * M * N * K
@@ -472,7 +475,7 @@ bandwidth), **M > 512 → compute-bound** (chase MFMA utilization).
 
 ---
 
-## 9. Profiling: ATT Traces & PMC Counters
+## 9. Profiling: ATT traces and PMC counters
 
 Instruction-level stall data comes from a rocprofv3 ATT trace. Collect and
 analyze with the `/kernel-trace-analysis` skill, which bundles the
@@ -509,12 +512,12 @@ inspection alone routinely mis-diagnoses memory bottlenecks.**
 
 ---
 
-## 10. Bisecting a Performance Regression
+## 10. Bisecting a performance regression
 
 When a kernel got slower and you don't know which commit did it, binary-search
 with `/bisect-perf-regression`:
 
-```
+```text
 /bisect-perf-regression <good_commit> [bad_commit] -- <bench_cmd>
 ```
 
@@ -525,7 +528,7 @@ range and print a stable metric; the working tree is auto-stashed and restored.
 
 ---
 
-## 11. Optimization Checklist
+## 11. Optimization checklist
 
 | Stage | Check | If failing |
 |---|---|---|
@@ -542,7 +545,7 @@ range and print a stable metric; the working tree is auto-stashed and restored.
 
 ---
 
-## See Also
+## See also
 
 - [Kernel Authoring Guide](kernel_authoring_guide.md) — `@flyc.kernel`/`@flyc.jit`, LDS, tiled copy/MMA
 - [Pre-built Kernels](prebuilt_kernels_guide.md) — GEMM/MoE/attention configs and dtypes

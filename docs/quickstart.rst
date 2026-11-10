@@ -1,15 +1,23 @@
-Quick Start
+Quick start
 ===========
 
 This guide walks through writing, compiling, and running a simple GPU kernel
-with FlyDSL.
+with FlyDSL. See :doc:`Install FlyDSL <installation>` for installation
+instructions.
 
-A Minimal Vector Add Kernel
+A minimal vector add kernel
 ----------------------------
 
 The following example demonstrates the core FlyDSL workflow: define a kernel
 with ``@flyc.kernel``, use layout algebra to partition data, then launch with
 ``@flyc.jit``.
+
+This teaching example requires a positive length divisible by 64 and contiguous
+one-dimensional float32 tensors of equal length. Its loads and stores are
+unmasked: rounding up the grid does **not** make a partial last block safe.
+Keep the assertion below when changing ``n``. Supporting arbitrary lengths
+requires predicated loads and stores or padding all three tensors to a full
+block before launching.
 
 .. code-block:: python
 
@@ -69,6 +77,7 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
 
    # Usage
    n = 128
+   assert n > 0 and n % 64 == 0, "This unmasked example requires full 64-element blocks"
    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
    C = torch.zeros(n, dtype=torch.float32).cuda()
@@ -76,10 +85,11 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
    torch.cuda.synchronize()
    print("Result correct:", torch.allclose(C, A + B))
 
-See ``examples/01-vectorAdd.py`` for the complete implementation with
+See `examples/01-vectorAdd.py <https://github.com/ROCm/FlyDSL/blob/main/examples/01-vectorAdd.py>`_
+for the complete implementation with
 CUDA Graph capture support.
 
-Key Concepts
+Key concepts
 ------------
 
 1. **@flyc.kernel**: Decorator that compiles a Python function into GPU IR.
@@ -92,11 +102,11 @@ Key Concepts
 6. **Automatic caching**: Compiled kernels are cached to disk
    (``~/.flydsl/cache/``) and reused on subsequent calls.
 
-Compilation Pipeline
+Compilation pipeline
 --------------------
 
-On first call, ``@flyc.jit`` traces the Python function into an MLIR module,
-then compiles it through the Fly MLIR pipeline. The pass list is built by
+On first call, ``@flyc.jit`` traces the Python function into an MLIR module
+and compiles it through the Fly MLIR pipeline. The pass list is built by
 ``RocmBackend._pipeline_parts()`` in three stages; see
 :doc:`architecture_guide` §3 for the per-pass table.
 
@@ -116,6 +126,7 @@ then compiles it through the Fly MLIR pipeline. The pass list is built by
       │    fly-promote-regmem-to-vectorssa →                     │
       │    convert-fly-to-rocdl → canonicalize →                 │
       │    gpu.module(convert-scf-to-cf, cse,                    │
+      │       convert-rocdl-fastmath-ops,                       │
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │
@@ -131,28 +142,60 @@ then compiles it through the Fly MLIR pipeline. The pass list is built by
            ▼
       Cached Compiled Artifact (ExecutionEngine)
 
-AOT Pre-compilation
---------------------
+JIT cache pre-warming
+---------------------
 
-FlyDSL supports ahead-of-time (AOT) compilation of kernels for deployment
-without JIT overhead. The ``tests/python/examples/aot_example.py`` script
-demonstrates pre-compiling preshuffle GEMM kernels into a cache directory:
+FlyDSL can populate its normal JIT cache before a workload runs. This is cache
+pre-warming through the existing JIT path; it does not create standalone
+linkable artifacts. The historically named
+``tests/python/examples/aot_example.py`` script shows how to compile
+preshuffle GEMM specializations into a cache directory:
 
 .. code-block:: bash
 
-   # Pre-compile with default configurations (auto-detect GPU arch)
+   # Pre-warm default configurations (auto-detect GPU arch)
    python tests/python/examples/aot_example.py
 
-   # Pre-compile and verify by running kernels on GPU
+   # Compile and verify by running kernels on GPU
    python tests/python/examples/aot_example.py --run_kernel
 
    # Custom cache directory
    FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
 
-At runtime, compiled kernels are loaded from the cache automatically when
-``FLYDSL_RUNTIME_CACHE_DIR`` is set.
+At runtime, FlyDSL loads matching compiled kernels from the cache automatically
+when ``FLYDSL_RUNTIME_CACHE_DIR`` points to the same cache directory.
 
-Next Steps
+The on-disk cache stores only the compressed compiled IR required to recreate
+the runtime module. Pre-lowering source IR remains available in the compiling
+process for inspection, but is intentionally omitted from cache files.
+
+Standalone C export
+-------------------
+
+FlyDSL can also turn one ``@flyc.jit`` specialization into a linkable host
+object. This is separate from JIT cache pre-warming:
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   output = Path("build/aot")
+   output.mkdir(parents=True, exist_ok=True)
+
+   compiled = flyc.compile(launch, *specialization_args)
+   compiled.export_to_c(output, "my_kernel")
+
+The output directory receives ``my_kernel.o`` (``my_kernel.obj`` on Windows,
+where an empty ``.flydsl_export.lock`` also stays to serialize exports) and
+``my_kernel.h``. The object embeds its FlyDSL backend adapter; the generated header lists the backend
+system libraries needed when linking the final binary, along with typed inline
+call helpers and module lifecycle entry points. On a build host
+without a visible GPU, select the architecture explicitly (for example,
+``ARCH=gfx950``) and compile with null pointer or non-device tensor
+placeholders. See :doc:`api/compiler` for the API contract and supported
+argument categories.
+
+Next steps
 ----------
 
 - :doc:`kernel_authoring_guide` -- detailed guide to writing GPU kernels

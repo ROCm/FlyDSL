@@ -1,0 +1,14 @@
+diff --git a/mlir/lib/Target/LLVM/ROCDL/Target.cpp b/mlir/lib/Target/LLVM/ROCDL/Target.cpp
+--- a/mlir/lib/Target/LLVM/ROCDL/Target.cpp
++++ b/mlir/lib/Target/LLVM/ROCDL/Target.cpp
+@@ -361,9 +361,9 @@ mlir::ROCDL::linkObjectCode(ArrayRef<char> objectCode, StringRef lldPath,
+ 
+   llvm::FileRemover cleanupHsaco(tempHsacoFilename);
+ 
+   int lldResult = llvm::sys::ExecuteAndWait(
+       lldPath,
+-      {"ld.lld", "-shared", tempIsaBinaryFilename, "-o", tempHsacoFilename});
++      {lldPath, "-shared", tempIsaBinaryFilename, "-o", tempHsacoFilename});
+   if (lldResult != 0)
+     return emitError() << "lld invocation failed";
+ 

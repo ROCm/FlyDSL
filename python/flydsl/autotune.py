@@ -3,11 +3,19 @@
 
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
+import hashlib
 import inspect
 import json
 import os
+import re
+import statistics
+import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
+
+from .utils import env, log
+from .utils.file import atomic_write
 
 try:
     import torch
@@ -15,12 +23,27 @@ except ImportError:
     torch = None
 
 
+_ARTIFACT_VERSION = 1
+_BENCH_MAX_BATCHES = 5
+_BENCH_BACKLOG_CYCLES = 20_000_000
+
+
+def _tuning_enabled() -> bool:
+    """Whether to bypass cached/default configs and run a fresh search."""
+    return os.environ.get("FLYDSL_AUTOTUNE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _env_fingerprint() -> tuple:
     """Sorted cache-invalidating env vars (reuses the JIT's canonical list)."""
     try:
         from .compiler.jit_function import _cache_invalidating_env_values
 
-        return tuple(sorted(_cache_invalidating_env_values()))
+        return tuple(sorted(_cache_invalidating_env_values(_device_fingerprint())))
     except Exception:
         return ()
 
@@ -51,6 +74,38 @@ def _device_fingerprint() -> str:
         return ""
 
 
+def _device_descriptor(device=None):
+    """Portable identity for the device that will run the call."""
+    if torch is None:
+        return None
+    try:
+        if not torch.cuda.is_available():
+            return None
+        device = torch.cuda.current_device() if device is None else device
+        properties = torch.cuda.get_device_properties(device)
+        name = str(properties.name)
+        compute_units = getattr(properties, "multi_processor_count", None)
+        with torch.cuda.device(device):
+            arch = _device_fingerprint()
+    except Exception:
+        return None
+    if not name or not arch or type(compute_units) is not int or compute_units <= 0:
+        return None
+    return {"name": name, "arch": arch, "compute_units": compute_units}
+
+
+def _artifacts_enabled() -> bool:
+    return bool(env.autotune.config_dir)
+
+
+def _artifact_config_dir() -> Path:
+    return Path(env.autotune.config_dir).expanduser().resolve()
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def _normalize_strides(t) -> tuple:
     """Bucket strides to {0, 1, other}: the layout *pattern* (broadcast /
     contiguous / strided) affects the best config, the exact numbers don't."""
@@ -75,11 +130,23 @@ def _normalize_strides(t) -> tuple:
 class Config:
     """A single tuning configuration."""
 
-    def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
+    def __init__(
+        self,
+        *,
+        num_warps=None,
+        waves_per_eu=None,
+        pre_hook=None,
+        **kwargs,
+    ):
+        # Explicit, or **kwargs would silently accept it as a Constexpr arg.
+        if "maxnreg" in kwargs:
+            raise TypeError(
+                "Config(maxnreg=...) is no longer supported: it never reached LLVM. "
+                "Use waves_per_eu to target occupancy instead."
+            )
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.waves_per_eu = waves_per_eu
-        self.maxnreg = maxnreg
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -91,14 +158,7 @@ class Config:
 
     def compiler_opts(self):
         """Compiler-level options (not user kwargs)."""
-        return {
-            k: v
-            for k, v in [
-                ("waves_per_eu", self.waves_per_eu),
-                ("maxnreg", self.maxnreg),
-            ]
-            if v is not None
-        }
+        return {k: v for k, v in [("waves_per_eu", self.waves_per_eu)] if v is not None}
 
     def __repr__(self):
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
@@ -106,13 +166,11 @@ class Config:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
             parts.append(f"waves_per_eu={self.waves_per_eu}")
-        if self.maxnreg is not None:
-            parts.append(f"maxnreg={self.maxnreg}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
         d = dict(self.kwargs)
-        for k in ("num_warps", "waves_per_eu", "maxnreg"):
+        for k in ("num_warps", "waves_per_eu"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -121,32 +179,73 @@ class Config:
     @classmethod
     def from_dict(cls, d):
         d = dict(d)
+        # Tolerate maxnreg in caches written before its removal.
+        d.pop("maxnreg", None)
         return cls(
             num_warps=d.pop("num_warps", None),
             waves_per_eu=d.pop("waves_per_eu", None),
-            maxnreg=d.pop("maxnreg", None),
             **d,
         )
 
 
+def _bench_batch_sizes(rep: int) -> List[int]:
+    """Split ``rep`` calls into a few non-empty timing windows.
+
+    Each window is long enough to amortize event granularity, while multiple
+    windows retain a median that rejects an occasional clock or system outlier.
+    """
+    if type(rep) is not int or rep <= 0:
+        raise ValueError(f"rep must be a positive integer, got {rep!r}")
+    batches = min(_BENCH_MAX_BATCHES, rep)
+    base, extra = divmod(rep, batches)
+    return [base + (index < extra) for index in range(batches)]
+
+
 def do_bench(fn, warmup=5, rep=25, quantiles=None):
-    """Benchmark a GPU kernel using CUDA/HIP events. Returns median ms."""
+    """Benchmark GPU work without timing a host-starved launch.
+
+    A fresh event pair around every launch on an empty stream over-reads short
+    kernels: the GPU can execute the start event before the host has submitted
+    the kernel. Queue a same-stream GPU sleep first, then submit a batch of
+    launches between one event pair while that backlog is executing. The sleep
+    is outside the timed interval, but gives the host time to enqueue the whole
+    interval. Several batch averages are summarized by their median.
+
+    ``fn`` must only enqueue asynchronous work on the current stream; a callable
+    that synchronizes internally cannot be measured as device-only work.
+
+    """
+    if torch is None or not torch.cuda.is_available():
+        raise RuntimeError("GPU benchmarking requires torch with CUDA/ROCm support")
+    if type(warmup) is not int or warmup < 0:
+        raise ValueError(f"warmup must be a non-negative integer, got {warmup!r}")
+    sleep = getattr(torch.cuda, "_sleep", None)
+    if not callable(sleep):
+        raise RuntimeError("accurate short-kernel benchmarking requires torch.cuda._sleep for a GPU-side backlog")
+
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
+
     times = []
-    for _ in range(rep):
+    for calls in _bench_batch_sizes(rep):
+        # The sleep is ordered on the current stream. Events and calls are
+        # submitted while it runs, so the GPU cannot catch the host between the
+        # start event and the first (or any later) launch in this batch.
+        sleep(_BENCH_BACKLOG_CYCLES)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        fn()
+        for _ in range(calls):
+            fn()
         end.record()
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end))
+        end.synchronize()
+        times.append(start.elapsed_time(end) / calls)
+
     times.sort()
     if quantiles:
         return [times[min(int(q * len(times)), len(times) - 1)] for q in quantiles]
-    return times[len(times) // 2]
+    return statistics.median(times)
 
 
 class Autotuner:
@@ -165,6 +264,10 @@ class Autotuner:
         pre_hook=None,
         post_hook=None,
         do_bench_fn=None,
+        default=None,
+        artifact_name=None,
+        validate_hook=None,
+        select_config=None,
     ):
         self.fn = fn  # JitFunction instance
         self.configs = configs
@@ -176,24 +279,51 @@ class Autotuner:
         self.restore_value = restore_value or []
         self.pre_hook = pre_hook
         self.post_hook = post_hook
+        self.validate_hook = validate_hook
+        self.select_config = select_config
         self._do_bench = do_bench_fn or do_bench
         self.cache: Dict[tuple, Config] = {}
+        self.default = default
 
-        # Infer arg names from the underlying function
-        if hasattr(fn, "func"):
-            self.arg_names = list(inspect.signature(fn.func).parameters.keys())
-        else:
-            self.arg_names = list(inspect.signature(fn).parameters.keys())
+        # Infer arg names from the underlying function.
+        source = fn.func if hasattr(fn, "func") else fn
+        self._signature = inspect.signature(source)
+        self.arg_names = list(self._signature.parameters.keys())
+
+        if artifact_name is not None:
+            if not isinstance(artifact_name, str):
+                raise TypeError("artifact_name must be a string")
+            artifact_name = artifact_name.strip()
+            safe_name = artifact_name.replace("-", "").replace("_", "").replace(".", "")
+            if not artifact_name.isascii() or not safe_name.isalnum() or len(artifact_name) > 64:
+                raise ValueError("artifact_name must use 1-64 letters, digits, '.', '_' or '-'")
+            if len(set(self.key)) != len(self.key) or any(name not in self._signature.parameters for name in self.key):
+                raise ValueError("artifact keys must be unique kernel parameter names")
+        self.artifact_name = artifact_name
+        self._artifact_cache = {}
 
         # Disk cache
         fn_name = getattr(fn, "__name__", None) or getattr(fn, "func", None)
         if fn_name is not None and not isinstance(fn_name, str):
             fn_name = getattr(fn_name, "__name__", "unknown")
         fn_name = fn_name or "unknown"
+        if sys.platform == "win32":
+            # Windows forbids these characters in file names, and a lambda is "<lambda>".
+            fn_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", fn_name)
         cache_dir = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", os.path.expanduser("~/.flydsl/autotune")))
         self._cache_file = cache_dir / f"{fn_name}.json"
 
         self._load_disk_cache()
+
+    def _sig_args(self, args, kwargs):
+        """Call arguments as a {parameter name: value} mapping."""
+        bound = self._signature.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        sig_args = dict(bound.arguments)
+        for name, parameter in self._signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                sig_args.update(sig_args.pop(name, {}))
+        return sig_args
 
     def _make_key(self, args, kwargs):
         """Cache key over shape/dtype/stride + arch + toolchain + env. A config
@@ -231,6 +361,19 @@ class Autotuner:
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint()))
         key_vals.append(("_device_", _device_fingerprint()))
+        if self.artifact_name is not None and _artifacts_enabled():
+            device = _device_descriptor(self._call_device(args, kwargs))
+            descriptor = tuple(sorted(device.items())) if device is not None else None
+            key_vals.append(("_artifact_", _ARTIFACT_VERSION, self.artifact_name, descriptor))
+        effective_hints = getattr(self.fn, "_effective_compile_hints", None)
+        if callable(effective_hints):
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints().items()
+                )
+            )
+            key_vals.append(("_compile_hints_", hint_key))
 
         return tuple(str(v) for v in key_vals)
 
@@ -275,35 +418,99 @@ class Autotuner:
             return self.prune_configs_by(configs, sig_args)
         return configs
 
+    def _stream_context(self, args, kwargs):
+        """Use an explicit torch/raw stream for benchmark events and setup ops."""
+        if torch is None:
+            return nullcontext()
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        stream = sig_args.get("stream")
+        if isinstance(stream, torch.cuda.Stream):
+            return torch.cuda.stream(stream)
+        if isinstance(stream, int):
+            device = next(
+                (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+                None,
+            )
+            stream = (
+                torch.cuda.default_stream(device) if stream == 0 else torch.cuda.ExternalStream(stream, device=device)
+            )
+            return torch.cuda.stream(stream)
+        return nullcontext()
+
     def _bench_one(self, config, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
+        run = self._candidate(compiler_opts, args, merged_kwargs)
 
-        # Snapshot once before any rep runs, so restores are from pristine input.
-        snapshot = self._snapshot_tensors(args, merged_kwargs)
+        with self._stream_context(args, merged_kwargs):
+            # Snapshot once before any rep runs, so restores are from pristine input.
+            snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-        def kernel_call():
-            # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
-            # hook that sets up state (incl. mutating a tensor) isn't clobbered
-            # by the restore. Each benchmark rep starts from clean inputs.
-            self._restore_tensors(snapshot)
-            self._reset_tensors(args, merged_kwargs)
-            if config.pre_hook:
-                config.pre_hook(merged_kwargs)
-            if self.pre_hook:
-                self.pre_hook(merged_kwargs)
-            self._run_with_hints(compiler_opts, args, merged_kwargs)
-            if self.post_hook:
-                self.post_hook(merged_kwargs)
-
-        try:
-            return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
-        finally:
-            # Leave the caller's tensors as a single clean run would.
-            if snapshot:
+            def kernel_call(validation=False):
+                # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
+                # hook that sets up state (incl. mutating a tensor) isn't clobbered
+                # by the restore. Each benchmark rep starts from clean inputs.
                 self._restore_tensors(snapshot)
+                self._reset_tensors(args, merged_kwargs)
+                if config.pre_hook:
+                    config.pre_hook(merged_kwargs)
+                if self.pre_hook:
+                    self.pre_hook(merged_kwargs)
+                if validation:
+                    with self.validate_hook(self._sig_args(args, merged_kwargs)):
+                        run()
+                        if self.post_hook:
+                            self.post_hook(merged_kwargs)
+                    return
+                run()
+                if self.post_hook:
+                    self.post_hook(merged_kwargs)
+
+            try:
+                # Untimed preflight: one extra run under this config's stream, compile
+                # hints and reset/restore policy, validated outside the timed reps so a
+                # numerically wrong candidate cannot win by launching successfully. A
+                # raising hook propagates as an ordinary candidate failure.
+                if self.validate_hook is not None:
+                    kernel_call(validation=True)
+                return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            finally:
+                # Leave the caller's tensors as a single clean run would.
+                if snapshot:
+                    self._restore_tensors(snapshot)
+
+    def _candidate(self, compiler_opts, args, kwargs):
+        """One launch of a candidate config.
+
+        Every ordinary ``@jit`` call retraces, so a ``@jit`` function is compiled
+        on its first launch and timed through that ``CompiledFunction``. Any
+        other callable owns its dispatch and must reuse compiled handles itself.
+        """
+        # A JitFunction implies its module is loaded; never import bindings for other callables.
+        jit_function = sys.modules.get(f"{__package__}.compiler.jit_function")
+        if jit_function is None or not isinstance(self.fn, jit_function.JitFunction):
+            return lambda: self._run_with_hints(compiler_opts, args, kwargs)
+
+        from .compiler.kernel_function import CompilationContext
+
+        compiled = None
+
+        def run():
+            nonlocal compiled
+            if compiled is not None:
+                # Bind per launch: a pre_hook may have replaced a keyword argument.
+                bound = self._signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                compiled(*bound.arguments.values())
+                return
+            with CompilationContext.compile_hints(compiler_opts):
+                # Not flyc.compile, which returns an argument-free function uncompiled.
+                compiled = jit_function._compile_impl(self.fn, *args, **kwargs)  # Compiles and launches once.
+
+        return run
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
         """Run the kernel with optional compiler hints. Import is deferred so
@@ -312,9 +519,9 @@ class Autotuner:
             from .compiler.kernel_function import CompilationContext
 
             with CompilationContext.compile_hints(compiler_opts):
-                self.fn(*args, **kwargs)
+                return self.fn(*args, **kwargs)
         else:
-            self.fn(*args, **kwargs)
+            return self.fn(*args, **kwargs)
 
     def _run_config(self, config, args, kwargs):
         """Run the chosen config as a real (non-benchmark) call. Re-applies
@@ -322,36 +529,222 @@ class Autotuner:
         clean run (restore_value tensors are already restored by _bench_one)."""
         merged = dict(kwargs)
         merged.update(config.all_kwargs())
-        self._reset_tensors(args, merged)
-        return self._run_with_hints(config.compiler_opts(), args, merged)
+        with self._stream_context(args, merged):
+            self._reset_tensors(args, merged)
+            return self._run_with_hints(config.compiler_opts(), args, merged)
 
-    def __call__(self, *args, **kwargs):
+    def _call_device(self, args, kwargs):
+        if torch is None:
+            return None
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        return next(
+            (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+            None,
+        )
+
+    def _artifact_ref(self, args, kwargs, *, required):
+        if self.artifact_name is None or not _artifacts_enabled():
+            return None
+        try:
+            bound = self._signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+            key = {}
+            for name in self.key:
+                if name not in bound.arguments:
+                    raise ValueError(f"artifact key {name!r} is missing from the call")
+                value = bound.arguments[name]
+                if hasattr(value, "shape"):
+                    value = tuple(value.shape)
+                elif hasattr(value, "dtype"):
+                    value = str(value.dtype)
+                key[name] = value
+            device = _device_descriptor(self._call_device(args, kwargs))
+            if device is None:
+                raise ValueError("call device identity is unavailable")
+            identity = {"name": self.artifact_name, "key": key, "device": device}
+            digest = hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
+            return (
+                _artifact_config_dir() / f"{self.artifact_name}-{digest}.json",
+                identity,
+            )
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            RecursionError,
+        ) as error:
+            if required:
+                raise ValueError(f"cannot generate offline config identity: {error}") from error
+            log().warning(f"Offline config identity is unavailable: {error}")
+            return None
+
+    def _validate_artifact_config_types(self, injected):
+        for name, value in injected.items():
+            parameter = self._signature.parameters.get(name)
+            if parameter is None or parameter.annotation is inspect.Parameter.empty:
+                continue
+            annotation = parameter.annotation
+            coerce = getattr(annotation, "__coerce__", None)
+            try:
+                if callable(coerce):
+                    coerce(value)
+                elif annotation in (bool, int, float, str) and type(value) is not annotation:
+                    raise TypeError(f"expects {annotation.__name__}, got {type(value).__name__}")
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"config value for {name!r} does not match its annotation: {error}") from error
+
+    def _decode_artifact_config(self, body, args, kwargs):
+        if not isinstance(body, dict):
+            raise ValueError("config must be an object")
+        if "pre_hook" in body:
+            raise ValueError("offline configs cannot contain Config.pre_hook")
+        config = Config.from_dict(body)
+        try:
+            call_bound = self._signature.bind_partial(*args, **kwargs)
+        except TypeError as error:
+            raise ValueError(f"call does not match the kernel signature: {error}") from error
+
+        call_names = set(call_bound.arguments)
+        for name, parameter in self._signature.parameters.items():
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD and name in call_bound.arguments:
+                call_names.update(call_bound.arguments[name])
+
+        injected = config.all_kwargs()
+        overlap = set(injected).intersection(call_names) | set(body).intersection(self.key)
+        if overlap:
+            raise ValueError(f"config would override call arguments: {sorted(overlap)}")
+        if any(type(value) is not int for value in config.compiler_opts().values()):
+            raise ValueError("compiler options must be integers")
+        self._validate_artifact_config_types(injected)
+        bound_kwargs = dict(kwargs)
+        bound_kwargs.update(injected)
+        try:
+            self._signature.bind(*args, **bound_kwargs)
+        except TypeError as error:
+            raise ValueError(f"config does not complete the kernel signature: {error}") from error
+        return config
+
+    def _load_artifact(self, ref, args, kwargs):
+        if ref is None:
+            return None
+        path, identity = ref
+        cache_key = str(path)
+        if cache_key not in self._artifact_cache:
+            try:
+                if not path.is_file():
+                    self._artifact_cache[cache_key] = None
+                    return None
+                data = json.loads(path.read_text(encoding="utf-8"))
+                _canonical_json(data)
+                if not isinstance(data, dict):
+                    raise ValueError("artifact must be an object")
+                if type(data.get("version")) is not int or data["version"] != _ARTIFACT_VERSION:
+                    raise ValueError("unsupported artifact version")
+                if _canonical_json(data.get("identity")) != _canonical_json(identity):
+                    raise ValueError("artifact identity does not match")
+                body = data["config"]
+                if not isinstance(body, dict):
+                    raise ValueError("config must be an object")
+                self._artifact_cache[cache_key] = body
+            except (
+                KeyError,
+                OSError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+                RecursionError,
+            ) as error:
+                log().warning(f"Ignoring offline config {path.name}: {error}")
+                self._artifact_cache[cache_key] = None
+                return None
+
+        body = self._artifact_cache[cache_key]
+        if body is None:
+            return None
+        try:
+            return self._decode_artifact_config(body, args, kwargs)
+        except (TypeError, ValueError, OverflowError, RecursionError) as error:
+            log().warning(f"Ignoring offline config {path.name}: {error}")
+            return None
+
+    def _emit_artifact(self, config, ref, args, kwargs):
+        if config.pre_hook is not None:
+            raise ValueError("offline configs cannot serialize Config.pre_hook")
+        path, identity = ref
+        body = config.to_dict()
+        if json.loads(_canonical_json(body)) != body:
+            raise ValueError("offline config values must preserve their types in JSON")
+        self._decode_artifact_config(body, args, kwargs)
+        payload = {"version": _ARTIFACT_VERSION, "identity": identity, "config": body}
+        with atomic_write(path, mode="w", encoding="utf-8") as output:
+            json.dump(payload, output, indent=2, sort_keys=True, allow_nan=False)
+            output.write("\n")
+        self._artifact_cache[str(path)] = body
+        log().info(f"Wrote offline config {path}")
+
+    def resolve_config(self, *args, **kwargs):
+        """Resolve or tune a config without launching the selected kernel.
+
+        Adapters that cache a :class:`CompiledFunction` can use this to avoid
+        paying the generic JIT/key path on every production call. The ordinary
+        ``__call__`` path below preserves its existing one-launch behavior.
+        """
         key = self._make_key(args, kwargs)
-        if key in self.cache:
-            return self._run_config(self.cache[key], args, kwargs)
+        force = _tuning_enabled()
 
-        # Benchmark all configs
-        configs = self._prune(self.configs, args, kwargs)
+        if not force and key in self.cache:
+            return self.cache[key]
+
+        artifact = self._artifact_ref(args, kwargs, required=force)
+        if not force:
+            artifact_config = self._load_artifact(artifact, args, kwargs)
+            if artifact_config is not None:
+                return artifact_config
+
+        if not force and self.default is not None:
+            return self.default(*args, **kwargs)
+
+        configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
+        configs = self._prune(configs, args, kwargs)
         print(f"[autotune] tuning {len(configs)} configs...")
         results = []
+        last_error = None
         for i, config in enumerate(configs):
             try:
                 t = self._bench_one(config, args, kwargs)
                 results.append((config, t))
                 print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
             except Exception as e:
+                # Keep the cause: without it a preflight rejection is indistinguishable
+                # from a compile failure once the loop ends.
+                last_error = e
                 print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
 
         if not results:
-            raise RuntimeError("All autotune configs failed")
+            raise RuntimeError("All autotune configs failed") from last_error
 
-        best_config, best_time = min(results, key=lambda x: x[1])
+        if self.select_config is None:
+            best_config, best_time = min(results, key=lambda x: x[1])
+        else:
+            best_config, best_time = self.select_config(results)
+            if not any(best_config is config and best_time == elapsed for config, elapsed in results):
+                raise ValueError("select_config must return one of the measured (config, time) pairs")
         print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
 
+        if force and artifact is not None:
+            self._emit_artifact(best_config, artifact, args, kwargs)
         self.cache[key] = best_config
         self._save_disk_cache()
 
-        return self._run_config(best_config, args, kwargs)
+        return best_config
+
+    def __call__(self, *args, **kwargs):
+        config = self.resolve_config(*args, **kwargs)
+        return self._run_config(config, args, kwargs)
 
     # --- Disk cache ---
     def _load_disk_cache(self):
@@ -373,7 +766,7 @@ class Autotuner:
 
 
 def autotune(
-    configs: List[Config],
+    configs,
     key: List[str] = None,
     warmup: int = 5,
     rep: int = 25,
@@ -383,6 +776,10 @@ def autotune(
     pre_hook: Callable = None,
     post_hook: Callable = None,
     do_bench: Callable = None,
+    default: Callable = None,
+    artifact_name: str = None,
+    validate_hook: Callable = None,
+    select_config: Callable = None,
 ):
     """Autotune decorator for @jit functions.
 
@@ -392,13 +789,35 @@ def autotune(
         def myKernel(..., BLOCK: fx.Constexpr[int], ...):
             ...
 
+    A ``@jit`` function is benchmarked through one ``flyc.compile`` handle per
+    config. A plain callable is benchmarked as called, so it must launch through
+    cached compiled handles: every ordinary ``@jit`` call retraces.
+
     Args:
+        configs: sequence of :class:`Config`, or a callable returning one for
+            the current arguments.
+        default: optional heuristic ``default(*args, **kwargs) -> Config`` used
+            without benchmarking unless ``FLYDSL_AUTOTUNE`` forces a search.
+        artifact_name: stable name for opt-in config lookup and emission through
+            ``FLYDSL_AUTOTUNE_CONFIG_DIR``. The existing ``key`` defines the
+            portable call axes; forced tuning emits a matching artifact.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
             tuning any in-place kernel (e.g. fused-add rmsnorm).
         reset_to_zero: tensor args to zero before each rep (accumulate-into-zero
             kernels).
+        validate_hook: optional ``validate_hook(sig_args)`` context manager around
+            one untimed candidate launch. Setup before ``yield`` can poison outputs;
+            checking after ``yield`` can reject missing stores or wrong numerics.
+            The launch uses the same stream, compile hints, reset/restore policy and
+            call arguments as timing. ``sig_args`` maps every kernel parameter name
+            to its value, including positional tensors. Raising rejects the candidate;
+            if every candidate is rejected, the last failure is chained.
+        select_config: optional ``select_config(results) -> (config, time)``
+            policy over the successfully measured pairs. The default chooses the
+            exact minimum; adopters may use a documented tie band to avoid
+            persisting a noise-only winner.
     """
 
     def decorator(fn):
@@ -414,6 +833,10 @@ def autotune(
             pre_hook=pre_hook,
             post_hook=post_hook,
             do_bench_fn=do_bench,
+            default=default,
+            artifact_name=artifact_name,
+            validate_hook=validate_hook,
+            select_config=select_config,
         )
 
     return decorator
