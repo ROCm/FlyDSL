@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-10T09:24:40Z",
+ "updated": "2026-11-10T10:07:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42791655621,
+   "pr": 987,
+   "commit": "4fc0882dc999c430e4ce5e9bd61a29466760fa5d",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42791655621",
+   "created_at": "2026-11-10T09:33:08Z",
+   "updated_at": "2026-11-10T09:57:08Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T09:49:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42791655621/job/129753399251"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T09:48:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42791655621/job/129753399383"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-10T09:48:16Z",
+     "completed_at": "2026-11-10T09:56:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42791655621/job/129753399437"
+    }
+   ]
+  },
   {
    "run_id": 42761723146,
    "pr": 987,
@@ -57,20 +100,23 @@
    "event": "push",
    "title": "[JIT] Add compile_only to flyc.compile (#1392)",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224",
    "created_at": "2026-11-10T04:13:33Z",
-   "updated_at": "2026-11-10T05:52:07Z",
+   "updated_at": "2026-11-10T10:05:36Z",
    "actor": "coderfeli",
    "jobs": [
     {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
      "status": "completed",
      "conclusion": "success",
-     "started_at": "2026-11-10T04:33:47Z",
-     "completed_at": "2026-11-10T04:45:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129632332874"
+     "started_at": "2026-11-10T09:31:56Z",
+     "completed_at": "2026-11-10T10:05:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129745256455",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -79,16 +125,16 @@
      "conclusion": "success",
      "started_at": "2026-11-10T05:05:36Z",
      "completed_at": "2026-11-10T05:48:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129632332902"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129745257587"
     },
     {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-10T04:34:38Z",
-     "completed_at": "2026-11-10T04:41:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129632332908"
+     "conclusion": "success",
+     "started_at": "2026-11-10T04:33:47Z",
+     "completed_at": "2026-11-10T04:45:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129745258439"
     }
    ]
   },
@@ -1684,21 +1730,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273832602/job/128085495018"
     }
    ]
-  },
-  {
-   "run_id": 42273818325,
-   "pr": 1227,
-   "commit": "88b87ff82de5f1a7f0b8a00fb97bfc3e31d96f85",
-   "branch": "perf/gfx1250-rmsnorm-vector-tail",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Tune RMSNorm for gfx1250: BF16 hardware conversion, early loads, small-N kernel choice",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273818325",
-   "created_at": "2026-11-06T18:47:06Z",
-   "updated_at": "2026-11-06T18:47:50Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
