@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-11-10T00:40:10Z",
+ "updated": "2026-11-10T03:24:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42748333770,
+   "pr": 1350,
+   "commit": "2c58ffdc820cfd6de2776f4e28333a6a5a9fe825",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42748333770",
+   "created_at": "2026-11-10T03:16:18Z",
+   "updated_at": "2026-11-10T03:20:48Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 42742602646,
+   "pr": 1390,
+   "commit": "085a1ea3a29777bc76bccce0c7b35e1cbb95542c",
+   "branch": "pr/enh-coop-warp-rocdl",
+   "event": "pull_request",
+   "title": "[Coop] Optimize warp-level prims on the rocdl",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646",
+   "created_at": "2026-11-10T02:24:59Z",
+   "updated_at": "2026-11-10T03:16:06Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T02:45:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646/job/129594464131"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-10T02:45:25Z",
+     "completed_at": "2026-11-10T03:16:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646/job/129594464156"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-10T02:45:44Z",
+     "completed_at": "2026-11-10T03:06:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42742602646/job/129594464182",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 42621344417,
    "pr": 1391,
@@ -1549,36 +1610,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273791789",
    "created_at": "2026-11-06T18:46:56Z",
    "updated_at": "2026-11-06T18:47:38Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273784211,
-   "pr": 1113,
-   "commit": "d5842b3a0e5de7f03aeed876d0f8e7517a92fb5b",
-   "branch": "fix/fused-rope-head-dim-96",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fused RoPE for head dimension 96",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273784211",
-   "created_at": "2026-11-06T18:46:53Z",
-   "updated_at": "2026-11-06T18:46:53Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273781963,
-   "pr": 1108,
-   "commit": "3d62b45de802445860387cb11fef8b56414300d7",
-   "branch": "fix/benchmark-compiler-api",
-   "event": "pull_request",
-   "title": "[Bugfix][Benchmark] Fix compiler API usage in Softmax and RMSNorm benchmarks",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273781963",
-   "created_at": "2026-11-06T18:46:52Z",
-   "updated_at": "2026-11-06T18:46:52Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
