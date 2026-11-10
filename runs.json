@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-10T05:12:06Z",
+ "updated": "2026-11-10T05:54:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42761723146,
+   "pr": 987,
+   "commit": "01d1c30733f11509a041f6d52439be3daa841c83",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146",
+   "created_at": "2026-11-10T05:22:25Z",
+   "updated_at": "2026-11-10T05:49:10Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-10T05:49:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146/job/129657634379"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-10T05:49:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146/job/129657634401"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-10T05:49:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42761723146/job/129657634420"
+    }
+   ]
+  },
   {
    "run_id": 42754478224,
    "pr": null,
@@ -10,11 +53,11 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Add compile_only to flyc.compile (#1392)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224",
    "created_at": "2026-11-10T04:13:33Z",
-   "updated_at": "2026-11-10T05:05:36Z",
+   "updated_at": "2026-11-10T05:52:07Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -29,10 +72,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-10T05:05:36Z",
-     "completed_at": null,
+     "completed_at": "2026-11-10T05:48:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42754478224/job/129632332902"
     },
     {
@@ -1651,21 +1694,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273818325",
    "created_at": "2026-11-06T18:47:06Z",
    "updated_at": "2026-11-06T18:47:50Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273814179,
-   "pr": 1155,
-   "commit": "531b88dc69311047433bfcec4bb2d948773d7a6d",
-   "branch": "rchamber/flex-tile16-2wave",
-   "event": "pull_request",
-   "title": "gfx950 flex attention with user score/mask mods",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273814179",
-   "created_at": "2026-11-06T18:47:05Z",
-   "updated_at": "2026-11-06T18:48:05Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
