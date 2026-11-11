@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-11T06:31:48Z",
+ "updated": "2026-11-11T06:45:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42973063319,
+   "pr": 1387,
+   "commit": "9c032e579ae5b31462c9cf7eed5d6bbd47e299de",
+   "branch": "ci/aiter-a4w4-fmoe-csv",
+   "event": "pull_request",
+   "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319",
+   "created_at": "2026-11-11T06:31:46Z",
+   "updated_at": "2026-11-11T06:37:19Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 42958470373,
    "pr": 987,
@@ -10,21 +25,24 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373",
    "created_at": "2026-11-11T04:19:27Z",
-   "updated_at": "2026-11-11T06:17:46Z",
+   "updated_at": "2026-11-11T06:43:35Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-11T06:17:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373/job/130360399951"
+     "completed_at": "2026-11-11T06:42:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373/job/130360399951",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1775,21 +1793,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273870789",
    "created_at": "2026-11-06T18:47:28Z",
    "updated_at": "2026-11-06T18:48:20Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273865084,
-   "pr": 1316,
-   "commit": "8509c42d2d7fe5d1e462ed91b73564f019fc0857",
-   "branch": "perf/softmax-refactor",
-   "event": "pull_request",
-   "title": "[Kernel][Refactor] Extract shared softmax row-copy helpers",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273865084",
-   "created_at": "2026-11-06T18:47:26Z",
-   "updated_at": "2026-11-06T18:47:26Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
