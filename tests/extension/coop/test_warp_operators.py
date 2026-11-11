@@ -17,6 +17,7 @@ from flydsl.compiler.protocol import dsl_align_of, dsl_size_of, extract_to_ir_va
 OPERATORS = (
     ("WarpReduce", False),
     ("WarpScan", False),
+    ("WarpVote", False),
     ("WarpReduceBatched", True),
     ("WarpBitonicSort", True),
     ("WarpMergeSort", True),
@@ -144,10 +145,18 @@ def test_member_dispatch_and_portable_namespace(monkeypatch, insert_point):
     monkeypatch.setattr(warp._dispatch, "_resolve", resolve)
     value = fx.Int32(1)
     assert fx.coop.WarpReduce[fx.Int32, 8].reduce(value, fx.ReductionOp.ADD) == "target-result"
+    assert fx.coop.WarpReduce[fx.Int32, 8].argmax(value) == "target-result"
     assert fx.coop.WarpScan[fx.Int32, 8].inclusive_scan(value, fx.ReductionOp.ADD) == "target-result"
-    assert seen == [("rocm", "warp_reduce"), ("rocm", "warp_inclusive_scan")]
+    assert fx.coop.WarpVote[fx.Int32, 8].ballot(value) == "target-result"
+    assert seen == [
+        ("rocm", "warp_reduce"),
+        ("rocm", "warp_argmax"),
+        ("rocm", "warp_inclusive_scan"),
+        ("rocm", "warp_ballot"),
+    ]
     assert fx.coop.universal.WarpReduce[fx.Int32, 8]._dispatcher is None
     assert fx.coop.universal.WarpScan[fx.Int32, 8]._dispatcher is None
+    assert fx.coop.universal.WarpVote[fx.Int32, 8]._dispatcher is None
 
 
 @pytest.mark.l2_device
@@ -322,6 +331,7 @@ def test_compile_operator_pipeline(monkeypatch, arch, api, default_device):
         M = api.WarpMergeSort[fx.Int32, 8, 2]
         R = api.WarpReduce[fx.Int32, 8]
         S = api.WarpScan[fx.Int32, 8]
+        V = api.WarpVote[fx.Int32, 8]
         RB = api.WarpReduceBatched[fx.Int32, 8, 2]
         ST = api.WarpStore[fx.Int32, 8, 2, api.WarpStoreAlgorithm.TRANSPOSE]
         value = L.load(a, offset=tid // 8 * 16, storage=warp_storage(L, allocator))
@@ -329,7 +339,9 @@ def test_compile_operator_pipeline(monkeypatch, arch, api, default_device):
         value = B.sort(value, compare_op=lambda a, b: a < b, storage=warp_storage(B, allocator))
         value = M.sort(value, compare_op=lambda a, b: a < b, storage=warp_storage(M, allocator))
         reduced = R.reduce(value, fx.ReductionOp.ADD, storage=warp_storage(R, allocator))
-        scanned = S.inclusive_scan(reduced, fx.ReductionOp.ADD, storage=warp_storage(S, allocator))
+        _, max_idx = R.argmax(reduced, storage=warp_storage(R, allocator))
+        rank, _ = V.ballot_rank(reduced, storage=warp_storage(V, allocator))
+        scanned = S.inclusive_scan(reduced + max_idx + rank, fx.ReductionOp.ADD, storage=warp_storage(S, allocator))
         batches = RB.reduce_to_striped(value, fx.ReductionOp.ADD, storage=warp_storage(RB, allocator))
         value = fx.Vector.from_elements([scanned, batches[0]])
         ST.store(out, value, offset=tid // 8 * 16, storage=warp_storage(ST, allocator))
@@ -393,6 +405,8 @@ def test_explicit_storage_type_is_checked(insert_point):
     value = fx.Int32(1)
     with pytest.raises(TypeError, match="SharedStorage"):
         fx.coop.WarpReduce[fx.Int32, 8].reduce(value, fx.ReductionOp.ADD, storage=value)
+    with pytest.raises(TypeError, match="SharedStorage"):
+        fx.coop.WarpVote[fx.Int32, 8].any(value, storage=value)
     with pytest.raises(TypeError, match="SharedStorage"):
         fx.coop.WarpLoad[fx.Int32, 8, 2].load(None, storage=value)
     with pytest.raises(TypeError, match="SharedStorage"):

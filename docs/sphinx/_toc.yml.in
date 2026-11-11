@@ -29,6 +29,8 @@ subtrees:
         title: DSL protocols
   - caption: Extension
     entries:
+      - file: extension/coop
+        title: Cooperative algorithms
       - file: extension/rand
         title: Random number generation
   - caption: Guides

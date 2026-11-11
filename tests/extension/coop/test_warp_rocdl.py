@@ -5,9 +5,11 @@
 
 """The ROCm override for the warp collectives, and the portable form it displaces.
 
-``coop/warp/rocdl.py`` replaces the shuffles behind ``warp_reduce`` and the
-three scan entry points with a DPP sequence on gfx9. Two things have to hold
-for that to be a safe swap, and they are what this file checks:
+``coop/warp/rocdl.py`` replaces the shuffles behind ``warp_reduce``, the scan
+entry points, ``warp_argmax``/``warp_argmin``, and the ``WarpVote`` family with
+native VALU DPP + ``ballot``/``mbcnt`` sequences on both wave64 CDNA (``gfx9*``)
+and wave32 GFX10+/RDNA/CDNA5 (``gfx10*``, ``gfx11*``, ``gfx12*``). Two things
+have to hold for that to be a safe swap, and they are what this file checks:
 
 - **It computes the same thing.** Every case runs through both implementations
   and compares them against each other, not only against a host reference — a
@@ -15,18 +17,16 @@ for that to be a safe swap, and they are what this file checks:
   on ones or on a symmetric distribution.
 - **It is actually the code that runs.** A DPP sequence that quietly fell back
   would still be correct, so the shape of the fold is only observable in the
-  generated ISA: on gfx9 every power-of-two width has to come out of the VALU,
-  with the single ``ds_swizzle_b32`` a 32-lane reduce needs as the one
-  exception. Everything the sequence does not cover — a non-gfx9 target, a
-  value that is not a 32-bit ``Numeric`` — has to reach the portable
-  implementation instead.
-
-The primitive contracts live in ``test_warp_reduce.py``,
-``test_warp_reduce_batched.py`` and ``test_warp_scan.py``. This module focuses
-on agreement between backend implementations and their generated instructions.
+  generated ISA: on wave32 GFX10+/RDNA/CDNA5 every power-of-two width comes out
+  of VALU with zero cross-lane LDS instructions, and on wave64 CDNA every width
+  comes out of VALU with the single ``ds_swizzle_b32`` a 32-lane reduce needs as
+  the one exception.
 """
 
 from __future__ import annotations
+
+import os
+from pathlib import Path
 
 import pytest
 from coop_common import WARP_WIDTHS
@@ -49,22 +49,24 @@ except ImportError:
 # is the displaced code rather than a second route to the override.
 portable = fx.coop.universal
 
-# ``WARP_WIDTHS`` is every width the DPP sequence takes a different route
-# through: 2 and 4 are ``quad_perm`` alone, 8 brings in ``row_half_mirror``, 16
-# ``row_ror:8``, 32 the one cross-row step, and the full wave the raking
-# ``row_bcast`` ladder.
 CROSS_LANE_LDS = ("ds_swizzle_b32", "ds_bpermute_b32", "ds_permute_b32")
+CROSS_ARCH_TARGETS = ("gfx942", "gfx950", "gfx1100", "gfx1201", "gfx1250")
 
 
 def _is_gfx9():
     return current_target().arch.startswith("gfx9")
 
 
+def _is_dpp_target():
+    arch = current_target().arch
+    return arch.startswith(("gfx9", "gfx10", "gfx11", "gfx12"))
+
+
 def width_id(width):
     return "full" if width is None else f"w{width}"
 
 
-requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP sequence is gfx9-only")
+requires_dpp = pytest.mark.skipif(not _is_dpp_target(), reason="requires CDNA or GFX10+/RDNA/CDNA5 DPP target")
 
 
 @pytest.mark.l1b_target_dialect
@@ -81,7 +83,10 @@ def test_rocm_declares_its_implemented_warp_overrides():
     # The portable implementations are still reachable, which is what lets the
     # override fall back to them and this file compare against them.
     assert portable.warp_reduce is not rocdl.warp_reduce
+    assert portable.warp_argmax is not rocdl.warp_argmax
     assert portable.warp_inclusive_scan is not rocdl.warp_inclusive_scan
+    assert portable.warp_ballot is not rocdl.warp_ballot
+    assert portable.warp_ballot_rank is not rocdl.warp_ballot_rank
 
 
 # ── the override and the portable form agree ───────────────────────────────
@@ -222,11 +227,8 @@ def test_max_keeps_its_identity_inside_the_group(form, width):
 # ── the override is actually the code that runs ────────────────────────────
 
 
-def _isa(call, torch_dtype, *, tmp_path):
+def _isa(call, torch_dtype, *, tmp_path, compile_only=False):
     """Compile a lone collective and return its final ISA as text."""
-    import os
-    from pathlib import Path
-
     warp_threads = fx.num_warp_threads()
 
     @flyc.kernel(known_block_size=[warp_threads, 1, 1])
@@ -238,14 +240,21 @@ def _isa(call, torch_dtype, *, tmp_path):
     def launch(A: fx.Tensor, Out: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
         kernel(A, Out).launch(grid=(1, 1, 1), block=(warp_threads, 1, 1), stream=stream)
 
-    values = torch.ones(warp_threads, dtype=torch_dtype, device="cuda")
+    dev = "cpu" if compile_only else "cuda"
+    values = torch.ones(warp_threads, dtype=torch_dtype, device=dev)
     out = torch.zeros_like(values)
 
-    previous = {k: os.environ.get(k) for k in ("FLYDSL_DUMP_IR", "FLYDSL_DUMP_DIR", "FLYDSL_RUNTIME_ENABLE_CACHE")}
+    keys = ("FLYDSL_DUMP_IR", "FLYDSL_DUMP_DIR", "FLYDSL_RUNTIME_ENABLE_CACHE", "COMPILE_ONLY")
+    previous = {k: os.environ.get(k) for k in keys}
     os.environ.update(FLYDSL_DUMP_IR="1", FLYDSL_DUMP_DIR=str(tmp_path), FLYDSL_RUNTIME_ENABLE_CACHE="0")
+    if compile_only:
+        os.environ["COMPILE_ONLY"] = "1"
     try:
-        launch(values, out, stream=torch.cuda.Stream())
-        torch.cuda.synchronize()
+        if compile_only:
+            launch(values, out)
+        else:
+            launch(values, out, stream=torch.cuda.Stream())
+            torch.cuda.synchronize()
     finally:
         for key, value in previous.items():
             os.environ.pop(key, None) if value is None else os.environ.update({key: value})
@@ -267,21 +276,19 @@ def _count(isa, *needles):
 def test_the_fold_stays_out_of_lds(width, tmp_path):
     """The whole point: the fold is VALU, so the LDS pipe stays free for the kernel.
 
-    The one exception is a 32-lane reduce. Its last butterfly step is XOR by 16,
-    which crosses the 16-lane rows DPP is built around, and gfx9 has no control
-    for that — ``ds_swizzle_b32`` is the cheapest instruction that does it. The
-    scans reach across the same boundary with ``row_bcast:15`` instead, because
-    they only ever carry a value upwards.
+    On wave32 GFX10+/RDNA/CDNA5, ``row_xmask``, ``row_share``, ``permlanex16``,
+    and ``readlane`` cover every width with zero LDS ops. On wave64 CDNA, the
+    one exception is a 32-lane sub-wave reduce (``ds_swizzle_b32`` XOR 16).
     """
 
     def call(v):
         reduced = fx.coop.warp_reduce(v, fx.ReductionOp.ADD, width=width)
-        inclusive, exclusive = fx.coop.warp_scan(v, fx.ReductionOp.ADD, width=width)
-        return reduced + inclusive + exclusive
+        inclusive, exclusive, aggregate = fx.coop.warp_scan_with_aggregate(v, fx.ReductionOp.ADD, width=width)
+        return reduced + inclusive + exclusive + aggregate if not _is_gfx9() else reduced + inclusive + exclusive
 
     isa = _isa(call, torch.float32, tmp_path=tmp_path)
 
-    expected_lds = 1 if width == 32 else 0
+    expected_lds = 1 if (_is_gfx9() and width == 32) else 0
     assert _count(isa, *CROSS_LANE_LDS) == expected_lds, "the DPP sequence did not take"
 
 
@@ -292,13 +299,17 @@ def test_the_fold_stays_out_of_lds(width, tmp_path):
 def test_a_full_wave_fold_rakes_and_lifts_the_total_into_an_sgpr(tmp_path):
     """At full width the fold is the ``row_shr`` ladder, not the butterfly.
 
-    A whole wave has one lane holding the total once the ladder has run, so
-    ``v_readlane_b32`` broadcasts it for free out of an SGPR; a narrower group
-    has no such lane and has to butterfly instead.
+    A whole wave has one lane holding the total once the ladder has run (lane 63
+    on CDNA via ``row_bcast``, lane 31 on RDNA/GFX12 via ``v_permlanex16_b32``),
+    so ``v_readlane_b32`` broadcasts it for free out of an SGPR.
     """
     isa = _isa(lambda v: fx.coop.warp_reduce(v, fx.ReductionOp.ADD), torch.float32, tmp_path=tmp_path)
 
-    assert "row_shr:1" in isa and "row_bcast:15" in isa and "row_bcast:31" in isa
+    assert "row_shr:1" in isa
+    if _is_gfx9():
+        assert "row_bcast:15" in isa and "row_bcast:31" in isa
+    else:
+        assert "v_permlanex16_b32" in isa
     assert "v_readlane_b32" in isa
     assert _count(isa, *CROSS_LANE_LDS) == 0
 
@@ -308,16 +319,7 @@ def test_a_full_wave_fold_rakes_and_lifts_the_total_into_an_sgpr(tmp_path):
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @requires_dpp
 def test_universal_is_still_the_shuffles(tmp_path):
-    """``fx.coop.universal`` keeps the LDS fold, which only the ISA can show.
-
-    Every comparison above holds the two implementations against each other by
-    their results, and a ``universal`` that had quietly resolved to the
-    override would agree with itself perfectly. A narrow group is where the
-    difference is unambiguous: LLVM rewrites a whole-wave shuffle fold into DPP
-    on its own, but not one confined to a group, so the shuffles survive into
-    the ISA — where the same width through ``fx.coop`` reaches no LDS at all
-    (``test_the_fold_stays_out_of_lds``).
-    """
+    """``fx.coop.universal`` keeps the LDS fold, which only the ISA can show."""
     isa = _isa(lambda v: portable.warp_reduce(v, fx.ReductionOp.ADD, width=8), torch.float32, tmp_path=tmp_path)
 
     assert _count(isa, *CROSS_LANE_LDS) > 0, "universal did not reach the portable implementation"
@@ -329,7 +331,92 @@ def test_universal_is_still_the_shuffles(tmp_path):
 @requires_dpp
 def test_a_dtype_the_sequence_cannot_move_falls_back(tmp_path):
     """DPP moves 32 bits at a time, so a 16-bit fold has to keep the shuffles."""
-    isa = _isa(lambda v: fx.coop.warp_reduce(v, fx.ReductionOp.ADD), torch.int16, tmp_path=tmp_path)
+    isa = _isa(lambda v: fx.coop.warp_reduce(v, fx.ReductionOp.ADD, width=8), torch.int16, tmp_path=tmp_path)
 
-    assert "row_bcast" not in isa, "the DPP sequence took a dtype it cannot move"
+    assert "row_bcast" not in isa and "row_xmask" not in isa, "the DPP sequence took a dtype it cannot move"
     assert _count(isa, *CROSS_LANE_LDS) > 0
+
+
+# ── cross-architecture wave32 / wave64 ISA and True16 checks ───────────────
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
+@pytest.mark.parametrize("arch", CROSS_ARCH_TARGETS)
+def test_cross_arch_reduce_scan_vote_argmax_isa(monkeypatch, tmp_path, arch):
+    """Verify native wave64 vs wave32 ISA selection and zero ``_fake16`` across architectures."""
+    monkeypatch.setenv("ARCH", arch)
+    is_wave64 = arch.startswith("gfx9")
+
+    # 1) Full-wave reduce + scan_with_aggregate + vote + ballot_rank + argmax
+    def full_wave_call(v):
+        red = fx.coop.warp_reduce(v, fx.ReductionOp.ADD)
+        inc, exc, agg = fx.coop.warp_scan_with_aggregate(v, fx.ReductionOp.ADD)
+        rank, cnt = fx.coop.warp_ballot_rank(v > fx.Float32(0.0))
+        max_v, max_i = fx.coop.warp_argmax(v)
+        return red + inc + exc + agg + max_v + fx.Float32(rank + cnt + max_i)
+
+    isa_full = _isa(full_wave_call, torch.float32, tmp_path=tmp_path / "full", compile_only=True)
+    assert "_fake16" not in isa_full
+    assert _count(isa_full, *CROSS_LANE_LDS) == 0
+    assert "v_readlane_b32" in isa_full
+    assert "v_mbcnt_lo_u32_b32" in isa_full
+    if is_wave64:
+        assert "row_bcast:15" in isa_full and "row_bcast:31" in isa_full
+        assert "v_mbcnt_hi_u32_b32" in isa_full
+        assert "v_permlanex16_b32" not in isa_full
+    else:
+        assert "v_permlanex16_b32" in isa_full
+        assert "v_mbcnt_hi_u32_b32" not in isa_full
+        assert "row_bcast" not in isa_full
+
+    # 2) Narrow subgroup (width=8) reduce + scan_with_aggregate + ballot_rank + Float16 argmax (True16 check)
+    def subwarp_f16_call(v):
+        max_v, max_i = fx.coop.warp_argmax(v, width=8)
+        min_v, min_i = fx.coop.warp_argmin(v, width=8)
+        rank, cnt = fx.coop.warp_ballot_rank(fx.Float32(v) > fx.Float32(0.0), width=8)
+        inc, exc, agg = fx.coop.warp_scan_with_aggregate(fx.Float32(v), fx.ReductionOp.ADD, width=8)
+        return fx.Float16(
+            fx.Float32(max_v) + fx.Float32(min_v) + inc + exc + agg + fx.Float32(max_i + min_i + rank + cnt)
+        )
+
+    isa_sub = _isa(subwarp_f16_call, torch.float16, tmp_path=tmp_path / "sub_f16", compile_only=True)
+    assert "_fake16" not in isa_sub
+    if is_wave64:
+        # On wave64 CDNA, width=8 scan_with_aggregate uses one ds_swizzle_b32 for aggregate broadcast.
+        assert _count(isa_sub, "ds_bpermute_b32", "ds_permute_b32") == 0
+        assert "v_mbcnt_lo_u32_b32" in isa_sub and "v_mbcnt_hi_u32_b32" in isa_sub
+    else:
+        # On wave32 GFX10+/RDNA/CDNA5, width=8 stays 100% in VALU (row_xmask + row_share + mbcnt_lo).
+        assert _count(isa_sub, *CROSS_LANE_LDS) == 0
+        assert "row_xmask" in isa_sub
+        assert "row_share" in isa_sub
+        assert "v_mbcnt_lo_u32_b32" in isa_sub
+        assert "v_mbcnt_hi_u32_b32" not in isa_sub
+
+
+@pytest.mark.skip(
+    reason=(
+        "warp_reduce_e4m3x4, warp_reduce_e5m2x4, warp_argmax_e4m3x4, and warp_argmin_e4m3x4 "
+        "are commented out until upstream llvm/llvm-project#231721 lands (ROCm/FlyDSL#1376): "
+        "unmodified LLVM VOP1Instructions.td maps HasCvtFP8ByteSel v_cvt_pk_f32_{fp8,bf8} "
+        "only to _fake16 pseudos on +real-true16 targets."
+    )
+)
+def test_packed_fp8_reduce_and_argmax_disabled_until_llvm_true16_fix(monkeypatch, tmp_path):
+    """Uncomment alongside packed FP8 warp collectives once llvm/llvm-project#231721 lands (ROCm/FlyDSL#1376)."""
+    # for arch in ("gfx950", "gfx1201", "gfx1250"):
+    #     monkeypatch.setenv("ARCH", arch)
+    #
+    #     def fp8_call(w):
+    #         red_fp8 = fx.coop.warp_reduce_e4m3x4(w, fx.ReductionOp.ADD, width=16)
+    #         red_bf8 = fx.coop.warp_reduce_e5m2x4(w, fx.ReductionOp.MAX, width=16)
+    #         max_v, max_i = fx.coop.warp_argmax_e4m3x4(w, width=16)
+    #         min_v, min_i = fx.coop.warp_argmin_e4m3x4(w, width=16)
+    #         return (red_fp8 + red_bf8 + max_v + min_v).bitcast(fx.Int32) + max_i + min_i
+    #
+    #     isa = _isa(fp8_call, torch.int32, tmp_path=tmp_path / arch, compile_only=True)
+    #     assert "_fake16" not in isa
+    #     assert "v_cvt_pk_f32_fp8" in isa
+    #     assert "v_cvt_pk_f32_bf8" in isa

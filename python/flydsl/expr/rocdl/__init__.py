@@ -670,6 +670,31 @@ def _to_ir(v):
     return v
 
 
+def _to_ir_typed(v, ty):
+    """Coerce DSL Numeric or Python scalar literal to ``ir.Value`` of ``ty``."""
+    from ..._mlir import ir as _ir
+    from .. import arith as _arith_ext
+
+    if isinstance(v, (int, float)):
+        val = int(v) if isinstance(ty, _ir.IntegerType) else float(v)
+        return _arith_ext.unwrap(_arith_ext.constant(val, type=ty))
+    if not isinstance(v, _ir.Value) and hasattr(v, "ir_value"):
+        return v.ir_value()
+    return v
+
+
+def _coerce_fdot2_vec(v, elem_ty):
+    """Coerce a 2-element half/bf16 vector or packed 32-bit integer to ``vector<2xelem_ty>``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects import llvm as _llvm
+
+    v_ir = _to_ir(v)
+    vec_ty = _ir.VectorType.get([2], elem_ty)
+    if v_ir.type != vec_ty:
+        v_ir = _llvm.bitcast(vec_ty, v_ir)
+    return v_ir
+
+
 @dsl_loc_tracing
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux=None, **kw):
     from ..._mlir import ir as _ir
@@ -713,16 +738,172 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
 
 
 @dsl_loc_tracing
+def cvt_pk_bf8_f32(res, src_a, src_b, old, word_sel, **kw):
+    """ROCDL ``cvt_pk_bf8_f32``: pack two f32 values into bf8 in the low/high word of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_pk_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_sr_fp8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_fp8_f32``: stochastic-round ``src_a`` with ``src_b`` into fp8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_fp8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_sr_bf8_f32(res, src_a, src_b, old, byte_sel, **kw):
+    """ROCDL ``cvt_sr_bf8_f32``: stochastic-round ``src_a`` with ``src_b`` into bf8 byte ``byte_sel`` of ``old``."""
+    from ..._mlir.dialects.rocdl import cvt_sr_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        byte_sel=byte_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_pkrtz(res, src_a, src_b, **kw):
+    """ROCDL ``cvt_pkrtz``: pack two f32 values into ``vector<2xf16>`` with round-toward-zero."""
+    from ..._mlir.dialects.rocdl import cvt_pkrtz as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_fp8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_fp8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from fp8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_fp8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_bf8(res, src_a, byte_sel, **kw):
+    """ROCDL ``cvt_f32_bf8``: unpack byte ``byte_sel`` (0..3) of ``src_a`` from bf8 to ``f32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_bf8 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), byte_sel=byte_sel, **kw)
+
+
+@dsl_loc_tracing
 def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
 
     ``word_sel=False`` decodes the low half (fp8 elems 0,1); ``word_sel=True`` the
     high half (fp8 elems 2,3). A full v4f32 unpack requires both halves stitched
     via a shuffle.
+
+    .. note::
+       Works today on ``gfx942``/``gfx950`` (``HasCvtFP8SDWASrcSel``). On
+       ``+real-true16`` targets (``gfx117x``/``gfx120x``/``gfx125x``), FlyDSL's
+       pinned LLVM omits ``_t16`` ISel patterns until
+       https://github.com/llvm/llvm-project/pull/231721 lands (tracked in
+       https://github.com/ROCm/FlyDSL/issues/1376); use ``cvt_f32_fp8(..., byte_sel)``
+       (0..3) on those targets in the meantime.
     """
     from ..._mlir.dialects.rocdl import cvt_pk_f32_fp8 as _op
 
     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+# NOTE: ``cvt_pk_f32_bf8``, ``fp8x4_to_bf16x2_pair``, and ``bf8x4_to_bf16x2_pair``
+# are intentionally disabled until upstream LLVM PR
+# https://github.com/llvm/llvm-project/pull/231721 lands and FlyDSL's pinned LLVM
+# commit includes it (tracked in https://github.com/ROCm/FlyDSL/issues/1376).
+# In unmodified LLVM (AMDGPU/VOP1Instructions.td), ``HasCvtFP8ByteSel`` defines ISel
+# patterns only for ``V_CVT_PK_F32_{FP8,BF8}_fake16`` and omits ``UseRealTrue16Insts``
+# (``_t16``) patterns, failing MC assembly under ``+real-true16``
+# (gfx117x/gfx120x/gfx125x) or treating the 16-bit source as Fake16 instead of True16
+# ``lo16``/``hi16`` subregisters. Use ``cvt_f32_{fp8,bf8}(..., byte_sel)`` (0..3)
+# until the LLVM True16 fix is merged.
+#
+# @dsl_loc_tracing
+# def cvt_pk_f32_bf8(res, src, word_sel, **kw):
+#     """ROCDL ``cvt_pk_f32_bf8``: unpack one i32 (4 packed bf8) into ``vector<2xf32>``.
+#
+#     ``word_sel=False`` decodes the low half (bf8 elems 0,1); ``word_sel=True`` the
+#     high half (bf8 elems 2,3).
+#     """
+#     from ..._mlir.dialects.rocdl import cvt_pk_f32_bf8 as _op
+#
+#     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+#
+#
+# @dsl_loc_tracing
+# def fp8x4_to_bf16x2_pair(src, **kw):
+#     """Losslessly unpack one i32 (4 packed fp8 bytes) into two bf16x2 i32 words.
+#
+#     Unpacks both halves via ``cvt_pk_f32_fp8`` and packs the upper 16 bits of each
+#     f32 pair via ``perm_b32(..., 0x07060302)``. Because E4M3 has 3 mantissa bits,
+#     every unpacked IEEE f32 value has 20 trailing zero mantissa bits, so extracting
+#     the upper 16 bits is bit-exact with RNE bf16 conversion.
+#     """
+#     from ..._mlir import ir as _ir
+#     from ..._mlir.dialects import llvm as _llvm
+#     from ..._mlir.dialects import vector as _vector
+#     from ..typing import T
+#
+#     src_ir = _to_ir(src)
+#     v2i32 = _ir.VectorType.get([2], T.i32)
+#     lo = _llvm.bitcast(v2i32, cvt_pk_f32_fp8(T.f32x2, src_ir, False, **kw))
+#     hi = _llvm.bitcast(v2i32, cvt_pk_f32_fp8(T.f32x2, src_ir, True, **kw))
+#     lo0 = _vector.extract(lo, static_position=[0], dynamic_position=[])
+#     lo1 = _vector.extract(lo, static_position=[1], dynamic_position=[])
+#     hi0 = _vector.extract(hi, static_position=[0], dynamic_position=[])
+#     hi1 = _vector.extract(hi, static_position=[1], dynamic_position=[])
+#     return (
+#         perm_b32(lo1, lo0, 0x07060302, **kw),
+#         perm_b32(hi1, hi0, 0x07060302, **kw),
+#     )
+#
+#
+# @dsl_loc_tracing
+# def bf8x4_to_bf16x2_pair(src, **kw):
+#     """Losslessly unpack one i32 (4 packed bf8 bytes) into two bf16x2 i32 words.
+#
+#     Unpacks both halves via ``cvt_pk_f32_bf8`` and packs the upper 16 bits of each
+#     f32 pair via ``perm_b32(..., 0x07060302)``. Because E5M2 has 2 mantissa bits,
+#     every unpacked IEEE f32 value has 21 trailing zero mantissa bits, so extracting
+#     the upper 16 bits is bit-exact with RNE bf16 conversion.
+#     """
+#     from ..._mlir import ir as _ir
+#     from ..._mlir.dialects import llvm as _llvm
+#     from ..._mlir.dialects import vector as _vector
+#     from ..typing import T
+#
+#     src_ir = _to_ir(src)
+#     v2i32 = _ir.VectorType.get([2], T.i32)
+#     lo = _llvm.bitcast(v2i32, cvt_pk_f32_bf8(T.f32x2, src_ir, False, **kw))
+#     hi = _llvm.bitcast(v2i32, cvt_pk_f32_bf8(T.f32x2, src_ir, True, **kw))
+#     lo0 = _vector.extract(lo, static_position=[0], dynamic_position=[])
+#     lo1 = _vector.extract(lo, static_position=[1], dynamic_position=[])
+#     hi0 = _vector.extract(hi, static_position=[0], dynamic_position=[])
+#     hi1 = _vector.extract(hi, static_position=[1], dynamic_position=[])
+#     return (
+#         perm_b32(lo1, lo0, 0x07060302, **kw),
+#         perm_b32(hi1, hi0, 0x07060302, **kw),
+#     )
 
 
 @dsl_loc_tracing
@@ -783,6 +964,22 @@ def rcp(res, arg, **kw):
 
 
 @dsl_loc_tracing
+def exp2(res, arg, **kw):
+    """ROCDL ``exp2``: hardware base-2 exponential (``v_exp_f32`` / ``v_exp_f16``)."""
+    from ..._mlir.dialects.rocdl import exp2 as _op
+
+    return _op(res=res, arg=_to_ir(arg), **kw)
+
+
+@dsl_loc_tracing
+def rsq(res, arg, **kw):
+    """ROCDL ``rsq``: hardware reciprocal square root (``v_rsq_f32`` / ``v_rsq_f16``)."""
+    from ..._mlir.dialects.rocdl import rsq as _op
+
+    return _op(res=res, arg=_to_ir(arg), **kw)
+
+
+@dsl_loc_tracing
 def perm_b32(src_hi, src_lo, sel, **kw):
     """Wrapper for ``llvm.amdgcn.perm`` returning one i32 lane value."""
     from ..._mlir.dialects import llvm as _llvm
@@ -794,6 +991,138 @@ def perm_b32(src_hi, src_lo, sel, **kw):
         [_to_ir(src_hi), _to_ir(src_lo), _to_ir(sel)],
         [],
         [],
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def fdot2(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``fdot2``: intra-lane ``vector<2xf16>`` dot-accumulate into ``f32``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import fdot2_ as _op
+
+    f16 = _ir.F16Type.get()
+    return _op(
+        res=res,
+        a=_coerce_fdot2_vec(a, f16),
+        b=_coerce_fdot2_vec(b, f16),
+        c=_to_ir_typed(c, res),
+        clamp=clamp,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def fdot2_f32_bf16(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``fdot2_f32_bf16``: intra-lane ``vector<2xbf16>`` dot-accumulate into ``f32``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import fdot2_f32_bf16_ as _op
+
+    bf16 = _ir.BF16Type.get()
+    return _op(
+        res=res,
+        a=_coerce_fdot2_vec(a, bf16),
+        b=_coerce_fdot2_vec(b, bf16),
+        c=_to_ir_typed(c, res),
+        clamp=clamp,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def fdot2_f16_f16(res, a, b, c, **kw):
+    """ROCDL ``fdot2_f16_f16``: intra-lane ``vector<2xf16>`` dot-accumulate into ``f16``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import fdot2_f16_f16_ as _op
+
+    f16 = _ir.F16Type.get()
+    return _op(
+        res=res,
+        a=_coerce_fdot2_vec(a, f16),
+        b=_coerce_fdot2_vec(b, f16),
+        c=_to_ir_typed(c, res),
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def fdot2_bf16_bf16(res, a, b, c, **kw):
+    """ROCDL ``fdot2_bf16_bf16``: intra-lane ``vector<2xbf16>`` dot-accumulate into ``bf16``."""
+    from ..._mlir import ir as _ir
+    from ..._mlir.dialects.rocdl import fdot2_bf16_bf16_ as _op
+
+    bf16 = _ir.BF16Type.get()
+    return _op(
+        res=res,
+        a=_coerce_fdot2_vec(a, bf16),
+        b=_coerce_fdot2_vec(b, bf16),
+        c=_to_ir_typed(c, res),
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def sdot4(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``sdot4``: signed 4xi8 intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import sdot4_ as _op
+
+    return _op(res=res, a=_to_ir(a), b=_to_ir(b), c=_to_ir_typed(c, res), clamp=clamp, **kw)
+
+
+@dsl_loc_tracing
+def udot4(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``udot4``: unsigned 4xu8 intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import udot4_ as _op
+
+    return _op(res=res, a=_to_ir(a), b=_to_ir(b), c=_to_ir_typed(c, res), clamp=clamp, **kw)
+
+
+@dsl_loc_tracing
+def sudot4(res, a, b, c, sign_a=False, sign_b=False, clamp=False, **kw):
+    """ROCDL ``sudot4``: mixed-signedness 4x8-bit intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import sudot4_ as _op
+
+    return _op(
+        res=res,
+        a=_to_ir(a),
+        b=_to_ir(b),
+        c=_to_ir_typed(c, res),
+        sign_a=sign_a,
+        sign_b=sign_b,
+        clamp=clamp,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def sdot8(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``sdot8``: signed 8xi4 intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import sdot8_ as _op
+
+    return _op(res=res, a=_to_ir(a), b=_to_ir(b), c=_to_ir_typed(c, res), clamp=clamp, **kw)
+
+
+@dsl_loc_tracing
+def udot8(res, a, b, c, clamp=False, **kw):
+    """ROCDL ``udot8``: unsigned 8xu4 intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import udot8_ as _op
+
+    return _op(res=res, a=_to_ir(a), b=_to_ir(b), c=_to_ir_typed(c, res), clamp=clamp, **kw)
+
+
+@dsl_loc_tracing
+def sudot8(res, a, b, c, sign_a=False, sign_b=False, clamp=False, **kw):
+    """ROCDL ``sudot8``: mixed-signedness 8x4-bit intra-lane dot-accumulate into ``i32``."""
+    from ..._mlir.dialects.rocdl import sudot8_ as _op
+
+    return _op(
+        res=res,
+        a=_to_ir(a),
+        b=_to_ir(b),
+        c=_to_ir_typed(c, res),
+        sign_a=sign_a,
+        sign_b=sign_b,
+        clamp=clamp,
         **kw,
     )
 
@@ -886,6 +1215,14 @@ def ds_bpermute(res, index, src, **kw):
 
 
 @dsl_loc_tracing
+def ds_swizzle(res, src, offset, **kw):
+    """ROCDL ``ds_swizzle``: intra-wave 32-lane crossbar shuffle via ``ds_swizzle_b32``."""
+    from ..._mlir.dialects.rocdl import ds_swizzle as _op
+
+    return _op(res=res, src=_to_ir(src), offset=_to_ir(offset), **kw)
+
+
+@dsl_loc_tracing
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
@@ -907,6 +1244,56 @@ def ballot(res, pred, **kw):
 
 
 @dsl_loc_tracing
+def mbcnt_lo(res, in0, in1, **kw):
+    """ROCDL ``mbcnt_lo``: count set bits in ``in0`` below ``lane_id`` (lanes 0..31), plus ``in1``."""
+    from ..._mlir.dialects.rocdl import mbcnt_lo as _op
+
+    return _op(res=res, in0=_to_ir(in0), in1=_to_ir(in1), **kw)
+
+
+@dsl_loc_tracing
+def mbcnt_hi(res, in0, in1, **kw):
+    """ROCDL ``mbcnt_hi``: count set bits in ``in0`` below ``lane_id - 32`` (lanes 32..63), plus ``in1``."""
+    from ..._mlir.dialects.rocdl import mbcnt_hi as _op
+
+    return _op(res=res, in0=_to_ir(in0), in1=_to_ir(in1), **kw)
+
+
+@dsl_loc_tracing
 def readlane(res, src, lane, **kw):
     """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
     return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)
+
+
+@dsl_loc_tracing
+def update_dpp(res, old, src, dpp_ctrl, row_mask=0xF, bank_mask=0xF, bound_ctrl=False, **kw):
+    """ROCDL ``update_dpp``: lane-level DPP shuffle merging into ``old``."""
+    from ..._mlir.dialects.rocdl import update_dpp as _op
+
+    return _op(
+        res=res,
+        old=_to_ir(old),
+        src=_to_ir(src),
+        dpp_ctrl=dpp_ctrl,
+        row_mask=row_mask,
+        bank_mask=bank_mask,
+        bound_ctrl=bound_ctrl,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def permlanex16(res, old, src0, src1, src2, fi=False, bound_control=False, **kw):
+    """ROCDL ``permlanex16``: cross-row 16-lane permute (``v_permlanex16_b32``)."""
+    from ..._mlir.dialects.rocdl import permlanex16 as _op
+
+    return _op(
+        res=res,
+        old=_to_ir(old),
+        src0=_to_ir(src0),
+        src1=_to_ir(src1),
+        src2=_to_ir(src2),
+        fi=fi,
+        bound_control=bound_control,
+        **kw,
+    )
