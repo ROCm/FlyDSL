@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-11T07:36:29Z",
+ "updated": "2026-11-11T07:59:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Core] Replace the Fly layout implementation with the Core library (#\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061",
    "created_at": "2026-11-11T07:31:53Z",
-   "updated_at": "2026-11-11T07:34:27Z",
+   "updated_at": "2026-11-11T07:54:07Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-11T07:54:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132363"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-11T07:54:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132528"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-11T07:54:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132563"
+    }
+   ]
   },
   {
    "run_id": 42973063319,
