@@ -103,7 +103,7 @@ jobs:
             cat *.log || true
           fi
 
-      # aiter CSV MoE (kimik3 a8w4+a4w4/dsv4/glm5 from aiter main) + HGEMM.
+      # aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
       # Current: wheel under test (PyPI tag / nightly) + aiter at aiter_ref.
       # Baseline: flydsl== pinned in aiter main requirements.txt, same aiter + CSV.
       # Opt-in (caller passes aiter_ref) and restricted to gfx950 runners: the CSVs
@@ -170,14 +170,30 @@ jobs:
             MAIN_ROOT=/tmp/aiter-main
           fi
           CFG="${MAIN_ROOT}/aiter/configs/model_configs"
-          # aiter's startup test_presorted_moe_hook needs the BM=16 kimik3_a4w4
-          # rows; without them fused_moe falls back to BM=64 and ignores the presort.
-          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/kimik3_a4w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
           PIN="$(awk -F== '/^flydsl==/{print $2; exit}' "${MAIN_ROOT}/requirements.txt" | awk -F';' '{print $1}' | tr -d '[:space:]')"
           if [ -z "${PIN}" ]; then
             echo "aiter main requirements.txt has no flydsl== pin" >&2
             exit 1
           fi
+
+          # test_moe_2stage.py runs aiter's own dispatch/presort regression tests
+          # at import time (CK-Tile, asm, E=896 presort hook) before the CSV sweep.
+          # They are not FlyDSL coverage and break whenever aiter main adds one,
+          # so run a copy with those top-level test_*() calls stubbed out.
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          src = Path("/tmp/aiter/op_tests/test_moe_2stage.py").read_text()
+          start = src.index("\n_case_iters = []\n")
+          end = src.index("\ncase_iter = itertools.chain(*_case_iters)\n")
+          setup, n = re.subn(r"(?m)^(\s*)test_\w+\(\)$", r"\1pass", src[start:end])
+          if n == 0:
+              raise SystemExit("test_moe_2stage.py: no startup test_*() calls found to skip")
+          Path("/tmp/aiter/op_tests/test_moe_2stage_csv_only.py").write_text(src[:start] + setup + src[end:])
+          print(f"test_moe_2stage_csv_only.py: skipped {n} startup regression tests")
+          PY
 
           run_moe_csv() {
             out="$1"
@@ -188,7 +204,7 @@ jobs:
             export AITER_CONFIG_FMOE="${FMOE}"
             export AITER_TUNED_OP_BENCH_CSV="${out}"
             export FLYDSL_RUNTIME_CACHE_DIR="${cache}"
-            python3 /tmp/aiter/op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
+            python3 /tmp/aiter/op_tests/test_moe_2stage_csv_only.py --no-legacy --csv-filter flydsl_
           }
 
           # The baseline pin below replaces the wheel under test in this container.
