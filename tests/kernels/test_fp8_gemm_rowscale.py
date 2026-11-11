@@ -257,6 +257,24 @@ def test_fp8_gemm_rowscale(use_8w, shape_index, M, N, K, tile_m, tile_n, preshuf
     )
 
 
+# M <= SMALL_M_MAX sends the 8-wave GEMM to its skinny-M kernel: both prefetch depths, a partial
+# second 16-row tile, and the first M past the threshold.
+_FP8_GEMM_8W_SMALL_M_SHAPES = (
+    (1, 2112, 7168),
+    (17, 7168, 2048),
+    (32, 8192, 8192),
+    (16, 40960, 5120),
+    (33, 8192, 8192),
+)
+
+
+@pytest.mark.parametrize(
+    "M,N,K", _FP8_GEMM_8W_SMALL_M_SHAPES, ids=[f"{m}x{n}x{k}" for m, n, k in _FP8_GEMM_8W_SMALL_M_SHAPES]
+)
+def test_fp8_gemm_8w_small_m(M, N, K):
+    _bench_fp8_gemm(M=M, N=N, K=K, use_8w=True, tile_m=256, tile_n=256)
+
+
 def test_fp8_gemm_case_list_preserves_pairwise_coverage():
     def _projection(cases):
         return {
