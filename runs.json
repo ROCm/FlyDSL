@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-11T00:41:46Z",
+ "updated": "2026-11-11T02:43:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42941520113,
+   "pr": 987,
+   "commit": "6ae908293bf5b1966f311edd08984cc4ff1ee08b",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42941520113",
+   "created_at": "2026-11-11T01:47:53Z",
+   "updated_at": "2026-11-11T02:41:33Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T02:04:18Z",
+     "completed_at": "2026-11-11T02:41:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42941520113/job/130270150362"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T02:16:38Z",
+     "completed_at": "2026-11-11T02:32:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42941520113/job/130270150397"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T02:04:15Z",
+     "completed_at": "2026-11-11T02:36:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42941520113/job/130270150420",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 42791655621,
    "pr": 987,
@@ -1687,52 +1733,6 @@
    "updated_at": "2026-11-06T18:48:19Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 42273832602,
-   "pr": 1244,
-   "commit": "ad9f336a40d572dcf84e6e0054359e27bf740068",
-   "branch": "docs/monokernel-perf",
-   "event": "pull_request",
-   "title": "[Doc] Add GLM and Kimi-K3 mono-kernel performance reports",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273832602",
-   "created_at": "2026-11-06T18:47:12Z",
-   "updated_at": "2026-11-06T18:48:56Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T18:48:51Z",
-     "completed_at": "2026-11-06T18:48:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273832602/job/128085494836",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T18:48:51Z",
-     "completed_at": "2026-11-06T18:48:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273832602/job/128085494926"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-06T18:48:52Z",
-     "completed_at": "2026-11-06T18:48:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273832602/job/128085495018"
-    }
-   ]
   }
  ]
 }
