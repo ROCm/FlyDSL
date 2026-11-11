@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-11T04:19:08Z",
+ "updated": "2026-11-11T06:10:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42958470373,
+   "pr": 987,
+   "commit": "6bf068fd645570b5aee310682e1c4d53f7cabea9",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373",
+   "created_at": "2026-11-11T04:19:27Z",
+   "updated_at": "2026-11-11T06:08:21Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T05:07:42Z",
+     "completed_at": "2026-11-11T05:34:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373/job/130324608736"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-11T04:35:27Z",
+     "completed_at": "2026-11-11T04:40:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373/job/130324608744"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T04:35:21Z",
+     "completed_at": "2026-11-11T04:46:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958470373/job/130324608803"
+    }
+   ]
+  },
   {
    "run_id": 42958059492,
    "pr": 987,
@@ -1747,21 +1790,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273865084",
    "created_at": "2026-11-06T18:47:26Z",
    "updated_at": "2026-11-06T18:47:26Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273860340,
-   "pr": 1303,
-   "commit": "3b4e1c91dbcd2d15cf946d13db78f4e39ae26bd6",
-   "branch": "feat/rdna3-gemm-small-tiles",
-   "event": "pull_request",
-   "title": "[Kernel] rdna3 GEMM: serve any M and any N, down to a 16x16 tile",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273860340",
-   "created_at": "2026-11-06T18:47:24Z",
-   "updated_at": "2026-11-06T18:48:20Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
