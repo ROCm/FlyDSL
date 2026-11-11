@@ -216,9 +216,8 @@ jobs:
 
           echo "=== current wheel CSV MoE (aiter ${REF}) ==="
           run_moe_csv /tmp/tuned_op_bench_current.csv /tmp/flydsl_cache_current
-          PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
 
-          # Everything above validates the wheel under test and is fatal.
+          # The MoE run above validates the wheel under test and is fatal.
           # The baseline comparison below is informational: it benchmarks a
           # different published flydsl, so kernel choice legitimately differs and
           # a single noisy config out of ~250 must not fail the release job.
@@ -235,6 +234,22 @@ jobs:
           }
           if ! perf_compare; then
             echo "WARNING: perf comparison did not complete; reported but not failing the job" >&2
+          fi
+
+          # HGEMM validates the wheel under test (fatal), so put it back first.
+          # Its atol=0 bf16 split-K checks reduce through bf16 atomics whose
+          # order varies, so they fail ~1 in 15 full runs on a correct wheel;
+          # retry once and fail only when both runs fail.
+          restore_wheel
+          run_hgemm() {
+            PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter \
+              FLYDSL_RUNTIME_CACHE_DIR=/tmp/flydsl_cache_current \
+              python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
+          }
+          echo "=== current wheel HGEMM (aiter ${REF}) ==="
+          if ! run_hgemm; then
+            echo "WARNING: HGEMM failed; retrying once" >&2
+            run_hgemm
           fi
           BASH
 
