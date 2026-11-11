@@ -51,14 +51,17 @@ def _has_inprocess_lld() -> bool:
 HAS_INPROCESS_LLD = _has_inprocess_lld()
 
 
+def _lld_basename() -> str:
+    return "ld.lld.exe" if os.name == "nt" else "ld.lld"
+
+
 def _has_device_bitcode(root: Path) -> bool:
     return (root / "amdgcn" / "bitcode" / "ocml.bc").is_file()
 
 
 def _has_toolkit_lld(root: Path) -> bool:
     """True when *root* has the ``ld.lld`` layout upstream ``gpu-module-to-binary`` expects."""
-    lld_name = "ld.lld.exe" if os.name == "nt" else "ld.lld"
-    return (root / "llvm" / "bin" / lld_name).is_file()
+    return (root / "llvm" / "bin" / _lld_basename()).is_file()
 
 
 def _validate_toolkit_option_path(path: str) -> str:
@@ -73,6 +76,66 @@ def _validate_toolkit_option_path(path: str) -> str:
             "commas, braces, or quotes."
         )
     return path
+
+
+def _stage_lib_llvm_as_canonical(llvm: Path) -> Path:
+    """Stage TheRock ``lib/llvm`` into the ``llvm/bin`` + ``amdgcn/bitcode`` layout ROCDL expects."""
+    import shutil
+
+    key = hashlib.sha256(os.path.normcase(os.path.abspath(llvm)).encode()).hexdigest()[:16]
+    dest = Path.home() / ".flydsl" / "rocm-toolkit" / key
+    lld = _lld_basename()
+    pairs = [(llvm / "bin" / lld, dest / "llvm" / "bin" / lld)]
+    bitcode_dir = llvm / "amdgcn" / "bitcode"
+    if bitcode_dir.is_dir():
+        pairs.extend((src, dest / "amdgcn" / "bitcode" / src.name) for src in sorted(bitcode_dir.glob("*.bc")))
+    for src, dst in pairs:
+        if not src.is_file():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            st = src.stat()
+            have = dst.stat()
+            if (have.st_size, have.st_mtime_ns) == (st.st_size, st.st_mtime_ns):
+                continue
+        except FileNotFoundError:
+            pass
+        tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+        try:
+            try:
+                os.link(src, tmp)
+            except OSError:
+                shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return dest
+
+
+def _normalize_toolkit_root(root: Path, *, require_lld: bool) -> Path | None:
+    """Map an install prefix to a toolkit root ROCDL can consume, or None.
+
+    Accepts the canonical ``<root>/{amdgcn/bitcode, llvm/bin/ld.lld}`` layout and
+    TheRock's ``<root>/lib/llvm/{amdgcn/bitcode, bin/ld.lld}`` layout.  When
+    in-process LLD is used only bitcode matters, so ``lib/llvm`` can be returned
+    directly; when upstream must spawn ``ld.lld``, TheRock trees are staged into
+    the canonical layout under ``~/.flydsl/rocm-toolkit/``.
+    """
+    root = root.expanduser()
+    if _has_device_bitcode(root) and (not require_lld or _has_toolkit_lld(root)):
+        return root
+
+    for llvm in (root / "lib" / "llvm", root):
+        if not _has_device_bitcode(llvm):
+            continue
+        if not require_lld:
+            # appendStandardLibs only reads <toolkit>/amdgcn/bitcode.
+            return llvm
+        if _has_toolkit_lld(llvm):
+            return llvm
+        if (llvm / "bin" / _lld_basename()).is_file():
+            return _stage_lib_llvm_as_canonical(llvm)
+    return None
 
 
 def _windows_therock_toolkit_root() -> Path | None:
@@ -104,8 +167,9 @@ def rocm_toolkit_path(*, for_external: bool = False) -> str:
     ``for_external`` is retained for call-site clarity; with the current link
     split it does not change toolkit requirements.
 
-    On Windows, a TheRock / HIP SDK install is staged through
-    ``_rocm_toolkit_root()`` so both layouts work.
+    Install prefixes may use either the canonical ROCDL layout or TheRock's
+    ``lib/llvm`` layout; both are accepted.  On Windows, a TheRock / HIP SDK
+    install is also staged through ``_rocm_toolkit_root()``.
 
     Returns an empty string when nothing is found, which leaves the upstream
     ``ROCM_PATH`` lookup in place rather than forcing a bad path on it.
@@ -116,19 +180,7 @@ def rocm_toolkit_path(*, for_external: bool = False) -> str:
     candidates: List[Tuple[str, Path]] = []
     override = env.compile.rocm_path
     if override:
-        override_root = Path(override)
-        override_ok = _has_device_bitcode(override_root) and (not require_lld or _has_toolkit_lld(override_root))
-        if override_ok:
-            candidates.append(("FLYDSL_COMPILE_ROCM_PATH", override_root))
-        else:
-            reason = "missing amdgcn/bitcode/ocml.bc"
-            if _has_device_bitcode(override_root) and require_lld and not _has_toolkit_lld(override_root):
-                reason = "missing llvm/bin/ld.lld (required without in-process LLD)"
-            warnings.warn(
-                f"FLYDSL_COMPILE_ROCM_PATH={override!r} is ignored ({reason}); "
-                "falling back to bundled bitcode or ROCM_PATH/ROCM_ROOT/ROCM_HOME.",
-                stacklevel=2,
-            )
+        candidates.append(("FLYDSL_COMPILE_ROCM_PATH", Path(override)))
 
     if not require_lld:
         candidates.append(("bundled with flydsl", BUNDLED_ROCM_PATH))
@@ -142,12 +194,18 @@ def rocm_toolkit_path(*, for_external: bool = False) -> str:
     if therock is not None:
         candidates.append(("Windows TheRock/HIP SDK", therock))
 
-    for _, root in candidates:
-        if not _has_device_bitcode(root):
+    for label, root in candidates:
+        normalized = _normalize_toolkit_root(root, require_lld=require_lld)
+        if normalized is None:
+            if label == "FLYDSL_COMPILE_ROCM_PATH":
+                warnings.warn(
+                    f"FLYDSL_COMPILE_ROCM_PATH={str(root)!r} is ignored "
+                    "(missing amdgcn/bitcode/ocml.bc or llvm/bin/ld.lld); "
+                    "falling back to bundled bitcode or ROCM_PATH/ROCM_ROOT/ROCM_HOME.",
+                    stacklevel=2,
+                )
             continue
-        if require_lld and not _has_toolkit_lld(root):
-            continue
-        return _validate_toolkit_option_path(str(root))
+        return _validate_toolkit_option_path(str(normalized))
     return ""
 
 

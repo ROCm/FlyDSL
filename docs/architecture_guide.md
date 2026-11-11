@@ -275,10 +275,14 @@ depend on where the container installs ROCm either.
 `rocm_toolkit_path()` (module-level in `rocm.py`) resolves it in order:
 
 1. `FLYDSL_COMPILE_ROCM_PATH` (ignored with a warning if the path lacks bitcode,
-   or lacks `llvm/bin/ld.lld` when the build has no in-process LLD)
+   or lacks `ld.lld` when the build has no in-process LLD)
 2. the bitcode bundled with the package (when in-process LLD is available)
 3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
 4. on Windows, a TheRock / HIP SDK root staged by `_rocm_toolkit_root()`
+
+Each install prefix is accepted in either the canonical ROCDL layout
+(`amdgcn/bitcode` + `llvm/bin/ld.lld`) or TheRock's `lib/llvm` layout
+(`lib/llvm/amdgcn/bitcode` + `lib/llvm/bin/ld.lld`).
 
 External codegen (`FLYDSL_COMPILE_LLVM_DIR`) uses the same bitcode-only toolkit
 resolution when in-process LLD is available: external `mlir-opt` emits

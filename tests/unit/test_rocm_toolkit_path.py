@@ -155,3 +155,33 @@ def test_toolkit_fingerprint_matches_hash_resolver(monkeypatch, tmp_path):
     assert backend.toolkit_fingerprint().startswith("rocm-bitcode:")
     # Both paths must hash the same resolved toolkit (not MLIR's bake-in ROCM_PATH).
     assert backend.hash().rsplit(":", 1)[-1] == backend.toolkit_fingerprint().split(":", 1)[-1]
+
+
+def test_therock_lib_llvm_layout_is_accepted(monkeypatch, tmp_path):
+    """TheRock keeps bitcode under lib/llvm rather than the ROCDL top-level layout."""
+    for var in _ROCM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("FLYDSL_COMPILE_ROCM_PATH", raising=False)
+
+    prefix = tmp_path / "rocm_sdk"
+    llvm = prefix / "lib" / "llvm"
+    bitcode = llvm / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    (bitcode / "ocml.bc").write_bytes(b"therock")
+    if not HAS_INPROCESS_LLD:
+        lld_dir = llvm / "bin"
+        lld_dir.mkdir(parents=True)
+        lld_name = "ld.lld.exe" if os.name == "nt" else "ld.lld"
+        (lld_dir / lld_name).write_bytes(b"")
+
+    monkeypatch.setenv("ROCM_PATH", str(prefix))
+    # Prefer the env candidate over bundled so this layout is what we resolve.
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(prefix))
+
+    toolkit = Path(rocm_toolkit_path())
+    assert (toolkit / "amdgcn" / "bitcode" / "ocml.bc").is_file()
+    if HAS_INPROCESS_LLD:
+        assert toolkit == llvm
+    else:
+        # Upstream needs llvm/bin/ld.lld, so TheRock trees are staged.
+        assert (toolkit / "llvm" / "bin" / ("ld.lld.exe" if os.name == "nt" else "ld.lld")).is_file()

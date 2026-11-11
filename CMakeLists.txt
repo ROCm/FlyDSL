@@ -35,9 +35,13 @@ if(NOT FLYDSL_ROCM_BITCODE_DIR)
   find_path(FLYDSL_ROCM_BITCODE_DIR ocml.bc
     HINTS
       "$ENV{ROCM_PATH}/amdgcn/bitcode"
+      "$ENV{ROCM_PATH}/lib/llvm/amdgcn/bitcode"
       "$ENV{ROCM_ROOT}/amdgcn/bitcode"
+      "$ENV{ROCM_ROOT}/lib/llvm/amdgcn/bitcode"
       "$ENV{ROCM_HOME}/amdgcn/bitcode"
+      "$ENV{ROCM_HOME}/lib/llvm/amdgcn/bitcode"
       "/opt/rocm/amdgcn/bitcode"
+      "/opt/rocm/lib/llvm/amdgcn/bitcode"
     NO_DEFAULT_PATH)
 endif()
 if(FLYDSL_ROCM_BITCODE_DIR)
