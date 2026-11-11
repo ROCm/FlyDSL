@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // GFX11 (RDNA3 / RDNA3.5) WMMA wave32 atom lowering tests:
 //   fly.mma_atom_call -> rocdl.wmma.f32.16x16x16.bf16 intrinsic

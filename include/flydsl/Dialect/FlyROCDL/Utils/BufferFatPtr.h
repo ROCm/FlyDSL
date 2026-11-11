@@ -53,8 +53,10 @@ public:
     return LLVM::ExtractValueOp::create(b, loc, fatPtr, ArrayRef<int64_t>{1});
   }
 
+  // The carrier holds an element offset; it becomes a byte offset at the access.
+  // i1 is stored in a whole byte, so its byte offset is its element offset.
   Value byteOffset(OpBuilder &b, Location loc) const {
-    int64_t bits = ptrTy.getElemTy().getIntOrFloatBitWidth();
+    int64_t bits = ptrTy.getRef().storageElementBitWidth();
     Value off = valOffset(b, loc);
     if (bits == 8)
       return off;
@@ -75,12 +77,14 @@ public:
     if (swizzle.isTrivialSwizzle())
       return off;
     auto offsetTy = IntegerType::get(b.getContext(), kOffsetBitWidth);
+    int32_t shift = swizzle.getShift();
     int64_t bitMaskValue = ((int64_t{1} << swizzle.getMask()) - 1)
-                           << (swizzle.getBase() + swizzle.getShift());
+                           << (swizzle.getBase() + std::max(shift, 0));
     Value bitMask = arith::ConstantIntOp::create(b, loc, offsetTy, bitMaskValue);
-    Value shiftAmt = arith::ConstantIntOp::create(b, loc, offsetTy, swizzle.getShift());
+    Value shiftAmt = arith::ConstantIntOp::create(b, loc, offsetTy, std::abs(shift));
     Value masked = arith::AndIOp::create(b, loc, off, bitMask);
-    Value shifted = arith::ShRUIOp::create(b, loc, masked, shiftAmt);
+    Value shifted = shift >= 0 ? Value(arith::ShRUIOp::create(b, loc, masked, shiftAmt))
+                               : Value(arith::ShLIOp::create(b, loc, masked, shiftAmt));
     return arith::XOrIOp::create(b, loc, off, shifted);
   }
 

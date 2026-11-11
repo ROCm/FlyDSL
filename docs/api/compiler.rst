@@ -51,8 +51,8 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    A. ``pre_binary_fragments`` (Fly → ROCDL):
 
-      - ``fly-rewrite-func-signature``
       - ``fly-canonicalize``
+      - ``fly-rocdl-expand-ops``
       - ``fly-layout-lowering``
       - ``fly-int-swizzle-simplify``
       - ``canonicalize``

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl --convert-arith-to-llvm --canonicalize | FileCheck %s --check-prefix=LLVM
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl --convert-arith-to-llvm --canonicalize | FileCheck %s --check-prefix=LLVM
 
 // BufferCopyLDS (buffer_desc -> shared) lowering tests
 
@@ -89,8 +89,8 @@ func.func @test_buffer_copy_lds_set_both(
     %dst: !fly.memref<f32, shared, 1:1>) {
   %a1 = fly.atom.set_value(%atom, "soffset", %soff) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>
   %a2 = fly.atom.set_value(%a1, "imm_offset", %imm) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>
-  // CHECK: %[[SOFF_RAW:.*]] = llvm.extractvalue %{{.*}}[0]
-  // CHECK: %[[IMM_OFF:.*]] = llvm.extractvalue %{{.*}}[1]
+  // CHECK: %[[SOFF_RAW:.*]] = llvm.extractvalue %{{.*}}[0] : !llvm.struct<(i32, i32)>
+  // CHECK: %[[IMM_OFF:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(i32, i32)>
   // CHECK: %[[SOFF_BYTES:.*]] = arith.muli %[[SOFF_RAW]], %{{.*}}
   // CHECK: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SOFF_BYTES]], %[[IMM_OFF]]
   fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128>, 128>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
