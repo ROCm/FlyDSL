@@ -281,8 +281,8 @@ depend on where the container installs ROCm either.
 4. on Windows, a TheRock / HIP SDK root staged by `_rocm_toolkit_root()`
 
 Each install prefix is accepted in either the canonical ROCDL layout
-(`amdgcn/bitcode` + `llvm/bin/ld.lld`) or TheRock's `lib/llvm` layout
-(`lib/llvm/amdgcn/bitcode` + `lib/llvm/bin/ld.lld`).
+(`<prefix>/amdgcn/bitcode` + `<prefix>/llvm/bin/ld.lld`) or TheRock's nested
+layout (`<prefix>/lib/llvm/amdgcn/bitcode` + `<prefix>/lib/llvm/bin/ld.lld`).
 
 External codegen (`FLYDSL_COMPILE_LLVM_DIR`) uses the same bitcode-only toolkit
 resolution when in-process LLD is available: external `mlir-opt` emits
