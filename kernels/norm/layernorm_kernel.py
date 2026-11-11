@@ -12,6 +12,8 @@ Two paths:
     implementation.
 """
 
+import math
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
@@ -293,7 +295,7 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
     return launch_layernorm
 
 
-def build_layernorm_bwd_module(N: int, dtype_str: str):
+def _build_layernorm_bwd_row_module(N: int, dtype_str: str):
     """Fused LayerNorm backward: grid=(M,), one block per row.
 
     With x_hat = (x - mean)*rstd, wdy = dy*gamma:
@@ -304,9 +306,8 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
       dbias_elem  = dy        (fp32)               -> atomicAdd into DBias[idx].
     eps is baked into Rstd by the forward, so it is not needed here.
 
-    Perf follow-ups (deferred; correctness-complete as-is): generic scalar path
-    only — a vectorized fast path (mirroring the forward) and caching x/dy/gamma
-    between pass 1 and pass 2 would cut global traffic.
+    Scalar and two-pass, but a single launch: ``build_layernorm_bwd_module``
+    only sends it problems small enough for launch latency to dominate.
     """
     BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
     SharedStorage = BlockReduce.SharedStorage
@@ -414,6 +415,408 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
     ):
         launcher = layernorm_bwd_kernel(Input, Gamma, DY, Mean, Rstd, DX, DGamma, DBias)
         launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    return launch_layernorm_bwd
+
+
+# The dgamma/dbias kernel gives every 32-thread row lane one row at a time: a lane
+# loads one column tile of one row (a single coalesced request) and the block folds
+# its row lanes in shared memory, so a column costs one atomic add per row group.
+BWD_DPARAM_THREADS = 1024
+# Enough (column tile, row group) blocks to keep every CU of an MI355X busy.
+BWD_DPARAM_TARGET_BLOCKS = 256
+# A row group is never shorter than this, so each row lane still walks a few rows.
+BWD_DPARAM_MIN_ROWS = 64
+# Rows each row lane has in flight per step.
+BWD_DPARAM_UNROLL = 4
+# Rows wider than this many tiles run half-height blocks: more, smaller programs.
+BWD_DPARAM_WIDE_TILES = 512
+# The widest access that still leaves a full 32-lane group of tiles on a row.
+BWD_MIN_TILES = 32
+
+# The dx kernel walks one row at a time with the whole block on the row, over a
+# persistent grid of this many programs (blocks of at most 64 threads get twice as many).
+BWD_DX_PROGRAMS = 1024
+BWD_DX_PROGRAMS_NARROW = 2048
+# A row stays in registers between the two passes while each thread holds at most
+# this many tiles of it; longer rows are read twice.
+BWD_DX_MAX_CACHED_ITERS = 4
+
+# On small problems the row kernel's single launch beats the split kernels' two.
+# Measured on MI355X it wins up to 64 rows at N = 4096, 64 rows more each time N
+# halves, and never past 320 rows; on wider rows the split kernels always win.
+BWD_ROW_KERNEL_MAX_N = 4096
+BWD_ROW_KERNEL_ROWS_PER_HALVING = 64
+BWD_ROW_KERNEL_MAX_ROWS = 320
+
+
+def _ln_bwd_vec(N: int, dtype_str: str) -> int:
+    """Widest power-of-two element count of a 128-bit access that divides N.
+
+    Narrow rows step the width down so a full wave still covers the row: a
+    latency-bound shape gains more from 32 active lanes than from 16 wide ones.
+    """
+    elem_bits = 32 if dtype_str == "f32" else 16
+    choices = (8, 4, 2, 1) if elem_bits == 16 else (4, 2, 1)
+    min_tiles = BWD_MIN_TILES
+    for v in choices:
+        if N % v == 0 and N // v >= min_tiles:
+            return v
+    return next(v for v in choices if N % v == 0)
+
+
+def _ln_bwd_copy_op(vec: int, elem_bits: int):
+    return {
+        16: fx.rocdl.BufferCopy16b,
+        32: fx.rocdl.BufferCopy32b,
+        64: fx.rocdl.BufferCopy64b,
+        128: fx.rocdl.BufferCopy128b,
+    }[vec * elem_bits]
+
+
+def _ln_bwd_dparam_storage(dp_cols: int, dp_lanes: int):
+    """Shared staging for the row-lane fold of the dgamma/dbias kernel."""
+
+    @fx.struct
+    class DpStorage:
+        s_fold: fx.Array[fx.Float32, dp_cols * dp_lanes, 16]
+
+    return DpStorage
+
+
+def _ln_bwd_dx_config(N: int, vec: int):
+    """(threads, programs) for the persistent dx row kernel."""
+    ntiles = (N + vec - 1) // vec
+    threads = 32
+    for cand in (32, 64, 128, 256, 512):
+        if ntiles >= cand:
+            threads = cand
+    progs = BWD_DX_PROGRAMS_NARROW if threads <= 64 else BWD_DX_PROGRAMS
+    return threads, progs
+
+
+def build_layernorm_bwd_module(N: int, dtype_str: str):
+    """LayerNorm backward (dx, fp32 dgamma/dbias) as two vectorized kernels.
+
+    With ``x_hat = (x - mean) * rstd`` and ``wdy = dy * gamma`` the row sums are
+    ``c1 = mean_N(wdy)`` and ``c2 = mean_N(wdy * x_hat)``, giving
+
+        dx      = (wdy - c1 - x_hat * c2) * rstd      -> DX (elem dtype)
+        dgamma += dy * x_hat                          -> DGamma (fp32)
+        dbias  += dy                                  -> DBias (fp32)
+
+    ``dx`` needs a whole row, so it runs as a persistent row kernel: a block owns
+    one row at a time, keeps that row's ``x``/``dy`` in registers across the two
+    passes (so a row is read once) and reduces ``c1``/``c2`` over the block.
+
+    ``dgamma``/``dbias`` are column sums over rows, so a second kernel runs the
+    columns in parallel: every warp owns one column tile of one row lane and the
+    block folds its row lanes in shared memory, which turns ``M * N`` atomic adds
+    into ``row_groups * N``.  The row groups follow M, so both kernels stay
+    saturated at any row count.  ``eps`` is baked into ``Rstd`` by the forward.
+
+    Small problems (see ``BWD_ROW_KERNEL_*``) run the one-launch row kernel of
+    ``_build_layernorm_bwd_row_module`` instead.
+    """
+    vec = _ln_bwd_vec(N, dtype_str)
+    elem_bits = 32 if dtype_str == "f32" else 16
+    ntiles = (N + vec - 1) // vec
+    arch = get_rocm_arch()
+    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    CopyOp = _ln_bwd_copy_op(vec, elem_bits)
+
+    dx_threads, dx_progs = _ln_bwd_dx_config(N, vec)
+    dx_iters = (ntiles + dx_threads - 1) // dx_threads
+    # Keep the row in registers between the two passes unless that would need
+    # more registers than the ISA has; very long rows re-read instead.
+    dx_cache = dx_iters <= BWD_DX_MAX_CACHED_ITERS
+
+    # dgamma/dbias kernel: a wave covers a 32-tile column group and the block
+    # stacks row lanes on top of it.  Wide rows run faster with the shorter
+    # block (more, smaller programs); narrow ones with the taller block, where a
+    # column settles with a handful of atomic adds.
+    if ntiles > BWD_DPARAM_WIDE_TILES:
+        dp_threads, dp_target_blocks = BWD_DPARAM_THREADS // 2, 3 * BWD_DPARAM_TARGET_BLOCKS
+    else:
+        dp_threads, dp_target_blocks = BWD_DPARAM_THREADS, BWD_DPARAM_TARGET_BLOCKS
+    dp_lanes = dp_threads // 32
+    dp_groups = max(1, min(32, ntiles))
+    dp_cols = dp_groups * vec
+    dp_col_tiles = (N + dp_cols - 1) // dp_cols
+    # Row groups only exist to keep the grid full: each one costs one atomic add
+    # per column, and every row lane should still see a few rows.
+    dp_row_groups = max(1, dp_target_blocks // dp_col_tiles)
+    dp_unroll = BWD_DPARAM_UNROLL
+    dp_stride = dp_lanes * dp_unroll
+
+    DpStorage = _ln_bwd_dparam_storage(dp_cols, dp_lanes)
+    DxBlockReduce = fx.coop.BlockReduce[fx.Float32x2, dx_threads]
+    DxSharedStorage = DxBlockReduce.SharedStorage
+
+    # ── kernel 1: dgamma / dbias (column-parallel over rows) ──────────────
+    @flyc.kernel
+    def layernorm_bwd_dparam_kernel(
+        Input: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DGamma: fx.Pointer,
+        DBias: fx.Pointer,
+        MIn: fx.Int32,
+    ):
+        cid = fx.block_idx.x
+        gid = fx.block_idx.y
+        tid = fx.thread_idx.x
+        num_row_groups = fx.grid_dim.y
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        c_zero_f = fx.Float32(0.0)
+        copy_atom = fx.make_copy_atom(CopyOp(), elem_bits)
+        lds = fx.SharedAllocator().allocate(DpStorage).peek()
+        s_fold = lds.s_fold.view(fx.make_layout(dp_cols * dp_lanes, 1))
+
+        row_layout = fx.make_layout(N, 1)
+        scalar_layout = fx.make_layout(1, 1)
+        dgamma_view = DGamma.view(fx.make_layout(N, 1))
+        dbias_view = DBias.view(fx.make_layout(N, 1))
+
+        lane = tid % 32
+        warp = tid // 32
+        lane_ok = lane < dp_groups
+        col0 = cid * dp_cols + lane * vec
+        col_ok = col0 < N
+        col_tile = col_ok.select(cid * dp_groups + lane, 0)
+
+        rows_per_group = (MIn + num_row_groups - 1) // num_row_groups
+        row_begin = gid * rows_per_group
+        row_end = row_begin + rows_per_group
+
+        acc_g = fx.full(vec, 0.0, fx.Float32)
+        acc_b = fx.full(vec, 0.0, fx.Float32)
+
+        if row_begin < MIn:
+            num_steps = (rows_per_group + dp_stride - 1) // dp_stride
+            for step in range(0, num_steps):
+                for u in range_constexpr(dp_unroll):
+                    row = row_begin + warp + (step * dp_unroll + u) * dp_lanes
+                    ok = (row < row_end) & (row < MIn) & col_ok
+                    row_s = ok.select(row, 0)
+                    row_off = fx.Int64(row_s) * N
+                    x_div = fx.logical_divide(
+                        fx.rocdl.make_buffer_tensor((Input + row_off).view(row_layout)),
+                        fx.make_layout(vec, 1),
+                    )
+                    dy_div = fx.logical_divide(
+                        fx.rocdl.make_buffer_tensor((DY + row_off).view(row_layout)),
+                        fx.make_layout(vec, 1),
+                    )
+                    mean = fx.rocdl.make_buffer_tensor((Mean + fx.Int64(row_s)).view(scalar_layout))[0]
+                    rstd = fx.rocdl.make_buffer_tensor((Rstd + fx.Int64(row_s)).view(scalar_layout))[0]
+                    x_e = _load_vec(copy_atom, vec, elem_dtype, x_div, col_tile)
+                    dy_e = _load_vec(copy_atom, vec, elem_dtype, dy_div, col_tile)
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                    dgv = dy * ((x - mean) * rstd)
+                    gi = []
+                    bi = []
+                    for i in range_constexpr(vec):
+                        gi.append(ok.select(dgv[i], c_zero_f))
+                        bi.append(ok.select(dy[i], c_zero_f))
+                    acc_g = acc_g + fx.Vector.from_elements(gi, fx.Float32)
+                    acc_b = acc_b + fx.Vector.from_elements(bi, fx.Float32)
+
+        # Stage each row lane's columns, fold the lanes in shared memory, then
+        # flush one coalesced atomic add per column: uncoalesced atomics against a
+        # narrow DGamma serialize, and the fold is what keeps them coalesced.
+        if lane_ok:
+            for i in range_constexpr(vec):
+                fx.memref_store(acc_g[i], s_fold, warp * dp_cols + lane * vec + i)
+        gpu.barrier()
+        if tid < dp_cols:
+            col = cid * dp_cols + tid
+            if col < N:
+                total = c_zero_f
+                for lane_row in range_constexpr(dp_lanes):
+                    total = total + fx.memref_load(s_fold, lane_row * dp_cols + tid)
+                atomic_add(dgamma_view, col, total, dtype_bytes=4)
+        gpu.barrier()
+        if lane_ok:
+            for i in range_constexpr(vec):
+                fx.memref_store(acc_b[i], s_fold, warp * dp_cols + lane * vec + i)
+        gpu.barrier()
+        if tid < dp_cols:
+            col = cid * dp_cols + tid
+            if col < N:
+                total = c_zero_f
+                for lane_row in range_constexpr(dp_lanes):
+                    total = total + fx.memref_load(s_fold, lane_row * dp_cols + tid)
+                atomic_add(dbias_view, col, total, dtype_bytes=4)
+
+    # ── kernel 2: dx (persistent row kernel) ──────────────────────────────
+    @flyc.kernel
+    def layernorm_bwd_dx_kernel(
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DX: fx.Pointer,
+        MIn: fx.Int32,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        n_float = float(N)
+        c_zero_f = fx.Float32(0.0)
+        lds = fx.SharedAllocator().allocate(DxSharedStorage).peek()
+        copy_atom = fx.make_copy_atom(CopyOp(), elem_bits)
+
+        def block_reduce_add2(val0, val1):
+            with fx.fastmath(fm_fast):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                total = DxBlockReduce(values, fx.ReductionOp.ADD, storage=lds)
+            return total[0], total[1]
+
+        row_layout = fx.make_layout(N, 1)
+        scalar_layout = fx.make_layout(1, 1)
+        gamma_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Gamma.view(row_layout)), fx.make_layout(vec, 1))
+        gamma_local = []
+        if const_expr(dx_cache):
+            for it in range_constexpr(dx_iters):
+                idx = tid + it * dx_threads
+                gamma_local.append(_load_vec(copy_atom, vec, elem_dtype, gamma_div, (idx < ntiles).select(idx, 0)))
+
+        for row in range(bid, MIn, dx_progs):
+            row_off = fx.Int64(row) * N
+            row_in = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor((Input + row_off).view(row_layout)),
+                fx.make_layout(vec, 1),
+            )
+            row_dy = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor((DY + row_off).view(row_layout)),
+                fx.make_layout(vec, 1),
+            )
+            row_dx = fx.logical_divide(
+                fx.rocdl.make_buffer_tensor((DX + row_off).view(row_layout)),
+                fx.make_layout(vec, 1),
+            )
+            mean = fx.rocdl.make_buffer_tensor((Mean + fx.Int64(row)).view(scalar_layout))[0]
+            rstd = fx.rocdl.make_buffer_tensor((Rstd + fx.Int64(row)).view(scalar_layout))[0]
+
+            x_local = []
+            dy_local = []
+            thread_c1 = c_zero_f
+            thread_c2 = c_zero_f
+            for it in range_constexpr(dx_iters):
+                idx = tid + it * dx_threads
+                is_valid = idx < ntiles
+                idx_safe = is_valid.select(idx, 0)
+                x_e = _load_vec(copy_atom, vec, elem_dtype, row_in, idx_safe)
+                dy_e = _load_vec(copy_atom, vec, elem_dtype, row_dy, idx_safe)
+                if const_expr(dx_cache):
+                    x_local.append(x_e)
+                    dy_local.append(dy_e)
+                    g_e = gamma_local[it]
+                else:
+                    g_e = _load_vec(copy_atom, vec, elem_dtype, gamma_div, idx_safe)
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                x_hat = (x - mean) * rstd
+                wdy = dy * g
+                with fx.fastmath(fm_fast):
+                    red1 = wdy.reduce(ReductionOp.ADD)
+                    red2 = (wdy * x_hat).reduce(ReductionOp.ADD)
+                thread_c1 = thread_c1 + is_valid.select(red1, c_zero_f)
+                thread_c2 = thread_c2 + is_valid.select(red2, c_zero_f)
+
+            sum_c1, sum_c2 = block_reduce_add2(thread_c1, thread_c2)
+            c1 = sum_c1 / n_float
+            c2 = sum_c2 / n_float
+
+            for it in range_constexpr(dx_iters):
+                idx = tid + it * dx_threads
+                is_valid = idx < ntiles
+                idx_safe = is_valid.select(idx, 0)
+                if const_expr(dx_cache):
+                    x_e = x_local[it]
+                    dy_e = dy_local[it]
+                    g_e = gamma_local[it]
+                else:
+                    x_e = _load_vec(copy_atom, vec, elem_dtype, row_in, idx_safe)
+                    dy_e = _load_vec(copy_atom, vec, elem_dtype, row_dy, idx_safe)
+                    g_e = _load_vec(copy_atom, vec, elem_dtype, gamma_div, idx_safe)
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                x_hat = (x - mean) * rstd
+                wdy = dy * g
+                with fx.fastmath(fm_fast):
+                    dx = (wdy - c1 - x_hat * c2) * rstd
+                if is_valid:
+                    dx_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, dx)
+                    _store_vec(copy_atom, vec, elem_dtype, dx_e, row_dx, idx)
+
+    @flyc.jit
+    def launch_split(
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DX: fx.Pointer,
+        DGamma: fx.Pointer,
+        DBias: fx.Pointer,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        # Row groups scale with M: enough of them to fill the grid, no more than
+        # one per `BWD_DPARAM_MIN_ROWS` rows so each row lane keeps a few rows.
+        row_groups = fx.Int32(dp_row_groups)
+        rows_cap = fx.Int32(m_in) // BWD_DPARAM_MIN_ROWS
+        rows_cap = (rows_cap > 0).select(rows_cap, fx.Int32(1))
+        row_groups = (row_groups < rows_cap).select(row_groups, rows_cap)
+        dparam = layernorm_bwd_dparam_kernel(Input, DY, Mean, Rstd, DGamma, DBias, m_in)
+        dparam.launch(grid=(dp_col_tiles, row_groups, 1), block=(dp_threads, 1, 1), stream=stream)
+        dxk = layernorm_bwd_dx_kernel(Input, Gamma, DY, Mean, Rstd, DX, m_in)
+        dxk.launch(grid=(dx_progs, 1, 1), block=(dx_threads, 1, 1), stream=stream)
+
+    if N > BWD_ROW_KERNEL_MAX_N:
+        return launch_split
+
+    launch_rows = _build_layernorm_bwd_row_module(N, dtype_str)
+    halvings = math.log2(2 * BWD_ROW_KERNEL_MAX_N / N)
+    ROW_KERNEL_MAX_ROWS = min(BWD_ROW_KERNEL_MAX_ROWS, int(BWD_ROW_KERNEL_ROWS_PER_HALVING * halvings))
+
+    @flyc.jit
+    def launch_layernorm_bwd(
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DX: fx.Pointer,
+        DGamma: fx.Pointer,
+        DBias: fx.Pointer,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        def launch_split_kernels():
+            launch_split(Input, Gamma, DY, Mean, Rstd, DX, DGamma, DBias, m_in, stream)
+
+        def launch_row_kernel():
+            launch_rows(Input, Gamma, DY, Mean, Rstd, DX, DGamma, DBias, m_in, stream)
+
+        @flyc.jit
+        def dispatch():
+            if m_in > fx.Int32(ROW_KERNEL_MAX_ROWS):
+                launch_split_kernels()
+            else:
+                launch_row_kernel()
+
+        dispatch()
 
     return launch_layernorm_bwd
 
