@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-11T06:45:33Z",
+ "updated": "2026-11-11T07:34:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42980160061,
+   "pr": null,
+   "commit": "bcf8a3ea68e89d1150efae011aff186da10c5ea5",
+   "branch": "main",
+   "event": "push",
+   "title": "[Core] Replace the Fly layout implementation with the Core library (#\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061",
+   "created_at": "2026-11-11T07:31:53Z",
+   "updated_at": "2026-11-11T07:31:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 42973063319,
    "pr": 1387,
@@ -14,9 +29,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319",
    "created_at": "2026-11-11T06:31:46Z",
-   "updated_at": "2026-11-11T06:37:19Z",
+   "updated_at": "2026-11-11T07:12:08Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T06:56:57Z",
+     "completed_at": "2026-11-11T07:23:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881314",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T06:57:41Z",
+     "completed_at": "2026-11-11T07:25:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881346"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-11T07:12:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881375"
+    }
+   ]
   },
   {
    "run_id": 42958470373,
@@ -965,7 +1011,7 @@
   },
   {
    "run_id": 42549883558,
-   "pr": 1313,
+   "pr": null,
    "commit": "19a53cff1a1b4461d426e33103f93e6bac07fe25",
    "branch": "pr/feat-core-layout-replacement",
    "event": "pull_request",
@@ -1778,21 +1824,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273874479",
    "created_at": "2026-11-06T18:47:29Z",
    "updated_at": "2026-11-06T18:48:19Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273870789,
-   "pr": 1246,
-   "commit": "86a1220586a36da1c54aad171af62c3394ea32b4",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr2-attention-common",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add arch-neutral attention common, abi, philox and dispatch modules (2/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273870789",
-   "created_at": "2026-11-06T18:47:28Z",
-   "updated_at": "2026-11-06T18:48:20Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
