@@ -1235,19 +1235,269 @@ def build_rmsnorm_dynamicquant_module(
     )
 
 
+# Persistent-row RMSNorm + per-row int8 smooth quantization.
+# The block-per-row form reloads gamma and xscale for every row, so those two
+# streams cost 2x the activation read traffic in L2 and two extra 128-bit loads
+# per element tile. Instead one block owns a strided set of rows: it folds
+# gamma*xscale into registers once, then streams rows through a fixed register
+# budget. The per-row rescale is also folded -- u = x*gamma*xscale is the only
+# value carried between the two passes, so the row max of |u| and the sum of x^2
+# can be reduced together in a single barrier, and the quantized store needs no
+# second weight read.
+SMOOTHQUANT_BLOCK_THREADS = 256
+SMOOTHQUANT_MAX_BLOCK_THREADS = 512
+# Each thread keeps gamma*xscale and u for its tiles in registers; past this many
+# 128-bit tiles per thread they spill (16-bit rows at N >= 98304 ran at 0.72x of the
+# block-per-row kernel on MI355X), so wider rows keep that kernel.
+SMOOTHQUANT_MAX_VEC_ITERS = 16
+# Grid caps. A shorter grid amortizes the weight pass over more rows; a longer
+# one keeps more independent row pipelines resident per CU. Streaming loads keep
+# gamma*xscale in L1, so the long grid is affordable exactly there.
+SMOOTHQUANT_MAX_BLOCKS = 1024
+SMOOTHQUANT_MAX_BLOCKS_STREAMING = 8192
+
+
+def _smoothquant_block_threads(N: int, elem_bits: int) -> int:
+    """Pick a block width so each thread owns a few 128-bit tiles.
+
+    Four tiles per thread keeps the cached row scale and weight vectors inside
+    the register budget; only the widest hidden sizes need a wider block.
+    """
+    vec_width = 128 // elem_bits
+    vec_tiles = N // vec_width
+    cap = SMOOTHQUANT_MAX_BLOCK_THREADS if vec_tiles > 4 * SMOOTHQUANT_BLOCK_THREADS else SMOOTHQUANT_BLOCK_THREADS
+    warps = max(1, (vec_tiles + WARP_SIZE - 1) // WARP_SIZE)
+    return min(cap, max(WARP_SIZE, warps * WARP_SIZE))
+
+
+def _build_smoothquant_kernel(N: int, dtype_str: str, threads: int, nt_in: int, quant_dtype_str: str, eps: float):
+    """One (N, dtype, block width, cache policy) specialization."""
+    elem_bits = 32 if dtype_str == "f32" else 16
+    vec_width = 128 // elem_bits
+    VEC_TILES = N // vec_width
+    TAIL_ELEMS = N - VEC_TILES * vec_width
+    NUM_VEC_ITERS = (VEC_TILES + threads - 1) // threads
+    NUM_WARPS = threads // WARP_SIZE
+
+    elem_dtype = dtype_to_elem_type(dtype_str)
+    quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
+    quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+
+    @fx.struct
+    class QuantShared:
+        s_red: fx.Array[fx.Float32, 2 * NUM_WARPS, 16]
+
+    @flyc.kernel
+    def rmsnorm_smoothquant_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        XScale: fx.Tensor,
+        YScale: fx.Tensor,
+        Output: fx.Tensor,
+        MIn: fx.Int32,
+        Stride: fx.Int32,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        fm_fast = arith.FastMathFlags.fast
+        n_float = float(N)
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_dtype_max = fx.Float32(quant_dtype_max)
+        abs_mask = fx.full(vec_width, 0x7FFFFFFF, fx.Uint32)
+
+        red = fx.SharedAllocator().allocate(QuantShared).peek()
+
+        YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
+        Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(vec_width, 1))
+        xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(vec_width, 1))
+
+        load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(nt_in), elem_bits)
+        weight_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+        # One 128-bit input tile of vec_width elements quantizes to vec_width int8.
+        store_atom_q = fx.make_copy_atom(
+            fx.rocdl.BufferCopy64b() if vec_width * 8 == 64 else fx.rocdl.BufferCopy32b(), 8
+        )
+
+        def load_v(atom, div, idx, dt):
+            r = fx.make_rmem_tensor(vec_width, dt)
+            fx.copy(atom, fx.slice(div, (None, idx)), r)
+            return fx.memref_load_vec(r)
+
+        def store_v(atom, val, div, idx, dt):
+            r = fx.make_rmem_tensor(vec_width, dt)
+            fx.memref_store_vec(val, r)
+            fx.copy(atom, r, fx.slice(div, (None, idx)))
+
+        lane = tid % WARP_SIZE
+        warp = tid // WARP_SIZE
+
+        # Fold gamma*xscale once: every later row reuses these registers.
+        weight_local = []
+        for tile_i in range_constexpr(NUM_VEC_ITERS):
+            idx = tid + tile_i * threads
+            idx_safe = (idx < VEC_TILES).select(idx, 0)
+            g = load_v(weight_atom, gamma_div, idx_safe, elem_dtype).to(fx.Float32)
+            s = load_v(weight_atom, xscale_div, idx_safe, elem_dtype).to(fx.Float32)
+            weight_local.append(g * s)
+        if const_expr(TAIL_ELEMS > 0):
+            tail_valid = tid < TAIL_ELEMS
+            tail_idx = tail_valid.select(tid + VEC_TILES * vec_width, 0)
+            weight_tail = Gamma_buf[tail_idx].to(fx.Float32) * XScale_buf[tail_idx].to(fx.Float32)
+
+        for row in range(bid, MIn, Stride):
+            row_in = fx.slice(Input_buf, (row, None))
+            row_out = fx.slice(Output_buf, (row, None))
+            in_div = fx.logical_divide(row_in, fx.make_layout(vec_width, 1))
+            out_div = fx.logical_divide(row_out, fx.make_layout(vec_width, 1))
+
+            thread_sum = c_zero_f
+            thread_max = c_zero_f
+            u_local = []
+            with fx.fastmath(fm_fast):
+                # Pass 1: accumulate sum(x^2) and max|x*gamma*xscale| over the row.
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    vidx = tid + tile_i * threads
+                    valid = vidx < VEC_TILES
+                    vsafe = valid.select(vidx, 0)
+                    x = load_v(load_atom, in_div, vsafe, elem_dtype).to(fx.Float32)
+                    u = x * weight_local[tile_i]
+                    u_local.append(u)
+                    thread_sum = thread_sum + valid.select((x * x).reduce(ReductionOp.ADD), c_zero_f)
+                    u_abs = (u.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
+                    thread_max = fx.max(thread_max, valid.select(u_abs.reduce(ReductionOp.MAX), c_zero_f))
+
+                if const_expr(TAIL_ELEMS > 0):
+                    t_valid = tid < TAIL_ELEMS
+                    t_idx = t_valid.select(tid + VEC_TILES * vec_width, 0)
+                    x_tail = row_in[t_idx].to(fx.Float32)
+                    u_tail = x_tail * weight_tail
+                    thread_sum = thread_sum + t_valid.select(x_tail * x_tail, c_zero_f)
+                    u_tail_abs = (u_tail.bitcast(fx.Uint32) & 0x7FFFFFFF).bitcast(fx.Float32)
+                    thread_max = fx.max(thread_max, t_valid.select(u_tail_abs, c_zero_f))
+
+                # One collective serves both reductions: warp butterflies, then a
+                # single shared-memory fold and barrier.
+                warp_sum = fx.coop.warp_reduce(thread_sum, ReductionOp.ADD, width=WARP_SIZE)
+                warp_max = fx.coop.warp_reduce(thread_max, ReductionOp.MAX, width=WARP_SIZE)
+                if const_expr(NUM_WARPS > 1):
+                    if lane == 0:
+                        red.s_red[warp] = warp_sum
+                        red.s_red[NUM_WARPS + warp] = warp_max
+                    gpu.barrier()
+                    sum_sq = red.s_red[0]
+                    row_max_u = red.s_red[NUM_WARPS]
+                    for w in range_constexpr(1, NUM_WARPS):
+                        sum_sq = sum_sq + red.s_red[w]
+                        row_max_u = fx.max(row_max_u, red.s_red[NUM_WARPS + w])
+                else:
+                    sum_sq = warp_sum
+                    row_max_u = warp_max
+
+                mean_sq = sum_sq / n_float
+                rrms = fmath.rsqrt(mean_sq + eps, fastmath=fm_fast)
+                scale = (row_max_u * rrms) / c_dtype_max
+                final_scale = (scale == c_zero_f).select(c_one_f, scale)
+                # y / yscale == u * (127 / max|u|); read the all-zero row as 1.0.
+                inv_scale = (row_max_u == c_zero_f).select(c_one_f, c_dtype_max / row_max_u)
+
+                if tid == 0:
+                    YScale_buf[row] = final_scale
+
+                # Pass 2: quantize the cached u, one int8 per element.
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    qidx = tid + tile_i * threads
+                    if qidx < VEC_TILES:
+                        q = (u_local[tile_i] * inv_scale).to(quant_dtype)
+                        store_v(store_atom_q, q, out_div, qidx, quant_dtype)
+
+                if const_expr(TAIL_ELEMS > 0):
+                    if tid < TAIL_ELEMS:
+                        row_out[tid + VEC_TILES * vec_width] = (u_tail * inv_scale).to(quant_dtype)
+
+            # Protect the shared fold slots from the next row's writes.
+            gpu.barrier()
+
+    return rmsnorm_smoothquant_kernel
+
+
 def build_rmsnorm_smoothquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
     eps: float = EPS,
 ):
-    return _build_rmsnorm_quant_module(
-        N,
-        dtype_str,
-        is_smooth=True,
-        quant_dtype_str=quant_dtype_str,
-        eps=eps,
-    )
+    elem_bits = 32 if dtype_str == "f32" else 16
+    threads = _smoothquant_block_threads(N, elem_bits)
+    if (N // (128 // elem_bits) + threads - 1) // threads > SMOOTHQUANT_MAX_VEC_ITERS:
+        return _build_rmsnorm_quant_module(N, dtype_str, is_smooth=True, quant_dtype_str=quant_dtype_str, eps=eps)
+
+    cached_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 0, quant_dtype_str, eps)
+    # As for the plain RMSNorm: on gfx95x, rows whose working set outgrows the LLC stream x
+    # non-temporally. x is read once (its u stays in registers), so caching it only evicts.
+    if not str(get_rocm_arch()).startswith("gfx95"):
+
+        @flyc.jit
+        def launch_rmsnorm_smoothquant(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            XScale: fx.Tensor,
+            Output: fx.Tensor,
+            YScale: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, XScale=XScale)
+            nblocks = fx.min(m_in, SMOOTHQUANT_MAX_BLOCKS)
+            cached_kernel(Input, Gamma, XScale, YScale, Output, m_in, nblocks).launch(
+                grid=(nblocks, 1, 1), block=(threads, 1, 1), stream=stream
+            )
+
+        return launch_rmsnorm_smoothquant
+
+    streaming_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 2, quant_dtype_str, eps)
+    NT_MIN_ROWS = NT_MIN_WORKING_SET // (N * (elem_bits // 8 + 1))
+
+    @flyc.jit
+    def launch_rmsnorm_smoothquant(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        XScale: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, XScale=XScale)
+
+        def launch_streaming():
+            nblocks = fx.min(m_in, SMOOTHQUANT_MAX_BLOCKS_STREAMING)
+            streaming_kernel(Input, Gamma, XScale, YScale, Output, m_in, nblocks).launch(
+                grid=(nblocks, 1, 1), block=(threads, 1, 1), stream=stream
+            )
+
+        def launch_cached():
+            nblocks = fx.min(m_in, SMOOTHQUANT_MAX_BLOCKS)
+            cached_kernel(Input, Gamma, XScale, YScale, Output, m_in, nblocks).launch(
+                grid=(nblocks, 1, 1), block=(threads, 1, 1), stream=stream
+            )
+
+        @flyc.jit
+        def dispatch():
+            if m_in > fx.Int32(NT_MIN_ROWS):
+                launch_streaming()
+            else:
+                launch_cached()
+
+        dispatch()
+
+    return launch_rmsnorm_smoothquant
 
 
 def _build_fused_add_rmsnorm_quant_module(
