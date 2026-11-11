@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-11T04:06:42Z",
+ "updated": "2026-11-11T04:19:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 42958059492,
+   "pr": 987,
+   "commit": "2b94cf230c888434c6dcf0e675c4a20cb026cc04",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42958059492",
+   "created_at": "2026-11-11T04:15:40Z",
+   "updated_at": "2026-11-11T04:17:05Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 42950123384,
    "pr": 1387,
@@ -1747,21 +1762,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273860340",
    "created_at": "2026-11-06T18:47:24Z",
    "updated_at": "2026-11-06T18:48:20Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273852553,
-   "pr": 1264,
-   "commit": "949695e1793b705c9e223da80de95029286314ac",
-   "branch": "fix/gfx1250-fp8-tile-check",
-   "event": "pull_request",
-   "title": "[Bugfix][gfx1250] Reject FP8 and A8W4 GEMM tiles that issue no WMMA",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273852553",
-   "created_at": "2026-11-06T18:47:20Z",
-   "updated_at": "2026-11-06T18:48:19Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
