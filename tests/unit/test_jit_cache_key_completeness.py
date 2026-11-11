@@ -340,6 +340,12 @@ def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
     ocml = toolkit / "amdgcn" / "bitcode" / "ocml.bc"
     ocml.parent.mkdir(parents=True)
     ocml.write_bytes(b"v1")
+    # Without in-process LLD the resolver requires llvm/bin/ld.lld; a bitcode-only
+    # tree is ignored and the fingerprint would stay on the bundled/ROCm install.
+    if not rocm.HAS_INPROCESS_LLD:
+        lld_dir = toolkit / "llvm" / "bin"
+        lld_dir.mkdir(parents=True)
+        (lld_dir / "ld.lld").write_bytes(b"")
     # Override wins over the bundled bitcode tree that rocm_toolkit_path prefers.
     monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(toolkit))
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
@@ -354,6 +360,8 @@ def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
         return seen[-1]
 
     first = key(bust_bitcode_cache=True)
+    # Sanity: the override must be the toolkit that was fingerprinted.
+    assert str(toolkit) == rocm.rocm_toolkit_path()
     ocml.write_bytes(b"v2")
     changed = key(bust_bitcode_cache=True)
     assert changed != first
