@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T18:27:30Z",
+ "updated": "2026-11-12T21:24:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "pr/fix-compiled-defaults",
    "event": "pull_request",
    "title": "[Fix] Support default trailed arguments in the CompiledFunction",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390",
    "created_at": "2026-11-12T17:16:00Z",
-   "updated_at": "2026-11-12T17:52:51Z",
+   "updated_at": "2026-11-12T19:00:45Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -41,10 +41,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T17:43:06Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T19:00:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390/job/131371307189"
     }
    ]
