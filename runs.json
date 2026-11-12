@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T15:58:39Z",
+ "updated": "2026-11-12T16:12:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "moe/k5p-pr",
    "event": "pull_request",
    "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881",
    "created_at": "2026-11-12T14:36:55Z",
-   "updated_at": "2026-11-12T14:56:25Z",
+   "updated_at": "2026-11-12T16:07:41Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-12T14:56:25Z",
+     "started_at": "2026-11-12T16:07:40Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094582"
     },
@@ -1178,11 +1178,11 @@
    "branch": "fix-split-symlink-install",
    "event": "pull_request",
    "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
    "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-12T15:00:15Z",
+   "updated_at": "2026-11-12T16:07:18Z",
    "actor": "cp2923",
    "jobs": [
     {
@@ -1209,10 +1209,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T14:26:24Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T16:07:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247571"
     }
    ]
