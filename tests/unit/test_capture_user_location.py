@@ -25,6 +25,11 @@ def _source_position(marker, call="capture_user_location"):
     raise AssertionError(f"no line ends in # {marker}")
 
 
+def _printed(path):
+    """*path* as MLIR prints it in a location, which escapes the backslashes of Windows paths."""
+    return str(path).replace("\\", "\\\\")
+
+
 def _capture_two():
     first = capture_user_location()  # first
     second = [capture_user_location()][0]  # second
@@ -56,7 +61,7 @@ def test_each_capture_records_its_own_line_and_column():
 
     for loc, marker in zip(locs, ("first", "second")):
         line, col = _source_position(marker)
-        assert str(loc).startswith(f'loc(callsite("{_SOURCE}":{line}:{col} at ')
+        assert str(loc).startswith(f'loc(callsite("{_printed(_SOURCE)}":{line}:{col} at ')
 
 
 def test_identical_code_in_two_files_keeps_each_file(tmp_path):
@@ -74,7 +79,7 @@ def test_identical_code_in_two_files_keeps_each_file(tmp_path):
     # One tracing scope, so both captures go through the same position cache.
     with ir.Context(), ir.Location.unknown(), tracing_context(_boundary):
         for helper, path in helpers:
-            assert str(helper(capture_user_location)).startswith(f'loc(callsite("{path}":2:')
+            assert str(helper(capture_user_location)).startswith(f'loc(callsite("{_printed(path)}":2:')
 
 
 def test_kernel_frame_is_kept_at_the_depth_limit(monkeypatch):
@@ -84,7 +89,7 @@ def test_kernel_frame_is_kept_at_the_depth_limit(monkeypatch):
 
     for marker, call in (("inner", "capture_user_location"), ("boundary", "_inner_capture")):
         line, col = _source_position(marker, call)
-        assert f'"{_SOURCE}":{line}:{col}' in loc, loc
+        assert f'"{_printed(_SOURCE)}":{line}:{col}' in loc, loc
 
 
 def test_position_cache_lives_for_one_trace():

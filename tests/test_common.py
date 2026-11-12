@@ -60,14 +60,7 @@ def perftest(num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, nee
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
             if int(os.environ.get("FLYDSL_PERFTEST_USE_EVENTS", 0)):
                 # HIP-event timing, avoids nesting torch.profiler under an external rocprofv3 session.
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
-                data = run_iters_rotate(num_iters, func, rotate_args)
-                end_event.record()
-                end_event.synchronize()
-                torch.cuda.empty_cache()
-                avg = start_event.elapsed_time(end_event) / num_iters * 1000
+                data, avg = run_iters_event_timed(num_iters, func, rotate_args)
             else:
                 import torch.profiler as tpf
 
@@ -80,7 +73,11 @@ def perftest(num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, nee
                     data = run_iters_rotate(num_iters, func, rotate_args)
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                avg = get_trace_perf(prof, num_iters)
+                if any(el.device_type == torch.autograd.DeviceType.CUDA for el in prof.events()):
+                    avg = get_trace_perf(prof, num_iters)
+                else:
+                    # A torch without Kineto (the Windows ROCm builds) records no device events.
+                    data, avg = run_iters_event_timed(num_iters, func, rotate_args)
 
             if testGraph:
                 import torch.profiler as tpf
@@ -158,6 +155,18 @@ def run_iters_rotate(num_iters, func, rotate_args):
         data = func(*args, **kwargs)
 
     return data
+
+
+def run_iters_event_timed(num_iters, func, rotate_args):
+    """``run_iters_rotate`` between two HIP events; returns its data and the average us per iteration."""
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    data = run_iters_rotate(num_iters, func, rotate_args)
+    end_event.record()
+    end_event.synchronize()
+    torch.cuda.empty_cache()
+    return data, start_event.elapsed_time(end_event) / num_iters * 1000
 
 
 def run_perftest(

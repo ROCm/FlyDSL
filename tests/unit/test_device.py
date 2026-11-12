@@ -29,6 +29,12 @@ def _clear_arch_caches(monkeypatch):
     clear_count()
 
 
+@pytest.fixture
+def linux_detection(monkeypatch):
+    """Take the rocm_agent_enumerator/rocminfo path these tests mock; Windows asks torch and HIP instead."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
 def test_arch_detection_uses_visible_device_query(monkeypatch):
     calls = []
 
@@ -42,6 +48,7 @@ def test_arch_detection_uses_visible_device_query(monkeypatch):
     assert calls[0][0] == ["rocm_agent_enumerator", "-name"]
 
 
+@pytest.mark.usefixtures("linux_detection")
 def test_arch_detection_ignores_hidden_heterogeneous_gpu(monkeypatch):
     """KFD counting order must not choose the architecture of a hidden GPU."""
 
@@ -57,6 +64,7 @@ def test_arch_detection_ignores_hidden_heterogeneous_gpu(monkeypatch):
     assert device._arch_from_hardware() == "gfx950"
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout", "exit", "empty", "cpu-only"])
 def test_hardware_detection_falls_back_to_rocminfo(monkeypatch, failure):
     def check_output(command, **_kwargs):
@@ -76,6 +84,7 @@ def test_hardware_detection_falls_back_to_rocminfo(monkeypatch, failure):
     assert device._arch_from_hardware() == "gfx950"
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout", "exit", "empty"])
 def test_hardware_detection_does_not_default_to_gfx942(monkeypatch, failure):
     calls = []
@@ -97,6 +106,18 @@ def test_hardware_detection_does_not_default_to_gfx942(monkeypatch, failure):
             device.get_rocm_arch()
 
     assert calls == ["rocm_agent_enumerator", "rocminfo"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "tried"), [("linux", "rocm_agent_enumerator or rocminfo"), ("win32", "torch.cuda")]
+)
+def test_detection_failure_names_what_was_tried(monkeypatch, platform, tried):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(subprocess, "check_output", lambda command, **_kwargs: "")
+    monkeypatch.setattr(device, "_arch_from_torch", lambda: "")
+
+    with pytest.raises(RuntimeError, match=f"with {tried}\\. Set FLYDSL_GPU_ARCH"):
+        device.get_rocm_arch()
 
 
 @pytest.mark.parametrize("override", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION", "ARCH"])
@@ -123,6 +144,7 @@ def test_arch_overrides_take_precedence_over_compile_arch(monkeypatch, name):
     assert device.get_rocm_arch() == "gfx950"
 
 
+@pytest.mark.usefixtures("linux_detection")
 def test_device_count_counts_gpus_not_supported_isas(monkeypatch):
     """Two identical GPUs must count as two, even when each exposes two ISAs."""
 
@@ -137,6 +159,7 @@ def test_device_count_counts_gpus_not_supported_isas(monkeypatch):
     assert device.get_rocm_device_count() == 2
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout"])
 def test_device_count_remains_best_effort(monkeypatch, failure):
     def check_output(command, **_kwargs):
