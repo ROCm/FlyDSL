@@ -40,7 +40,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.act import silu_mul_batch
 from kernels.common.tensor_shim import _run_compiled
-from kernels.common.utils import global_pointer_from_addr
+from kernels.common.utils import cdiv, global_pointer_from_addr
 from kernels.gemm.rdna3_f16_gemm import K_PAD, WAVE_SIZE, WMMA_K, WMMA_M, WMMA_N
 from kernels.moe.moe_gemm_2stage import compile_moe_reduction
 from kernels.moe.topk_gating_softmax_kernel import build_topk_gating_softmax_module
@@ -115,27 +115,12 @@ _ROUTING_BLOCK = 256
 # The one workgroup walks every row twice (histogram, scatter), so prefill row counts take a wider one.
 _WIDE_ROUTING_BLOCK = 1024
 _ROWS_FOR_WIDE_ROUTING = 2048
-# One LDS counter per expert next to the block's scan scratch.
+# One LDS counter per expert, next to the block scan's storage.
 MAX_EXPERTS = 1024
 
 
 def _routing_block_for(rows: int) -> int:
     return _ROUTING_BLOCK if rows < _ROWS_FOR_WIDE_ROUTING else _WIDE_ROUTING_BLOCK
-
-
-def _scan_offsets(width: int) -> tuple[int, ...]:
-    return tuple(1 << i for i in range((int(width) - 1).bit_length()))
-
-
-def _lds_atomic_add(ptr, idx, val):
-    # ds_add_rtn_u32 at workgroup scope: in the scatter the returned old value is the row's slot.
-    llvm_ptr = fx.to_llvm_ptr(fx.add_offset(ptr, fx.make_int_tuple(idx)))
-    raw = val.ir_value() if hasattr(val, "ir_value") else val
-    return fx.Int32(
-        _llvm.AtomicRMWOp(
-            _llvm.AtomicBinOp.add, llvm_ptr, raw, _llvm.AtomicOrdering.monotonic, syncscope="workgroup", alignment=4
-        ).result
-    )
 
 
 def _global_ptr(ptr, dtype, alignment: int):
@@ -156,13 +141,13 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
     if TILE < 1:
         raise ValueError(f"tile_m must be positive, got {TILE}")
 
-    CHUNKS = -(-E // BLOCK)
+    CHUNKS = cdiv(E, BLOCK)
+    SCAN = fx.coop.BlockScan[fx.Int32, BLOCK]
 
     @fx.struct
     class _Shared:
         # Per expert: the row count, then the slot its rows start at, then the scatter's cursor.
         cnt: fx.Array[fx.Int32, E, 16]
-        scan: fx.Array[fx.Int32, BLOCK, 16]
 
     @flyc.kernel(known_block_size=[BLOCK, 1, 1])
     def routing_kernel(
@@ -174,13 +159,18 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
         i32_max_blocks: fx.Int32,
     ):
         ids, out, eout, aux = (_global_ptr(p, fx.Int32, 4) for p in (TopkIds, SortedIds, ExpertIds, Aux))
-        lds = fx.SharedAllocator().allocate(_Shared).peek()
-        cnt_mr, scan_mr = lds.cnt.ptr, lds.scan.ptr
+        alloc = fx.SharedAllocator()
+        cnt_mr = alloc.allocate(_Shared).peek().cnt.ptr
+        scan_lds = alloc.allocate(SCAN.SharedStorage).peek()
 
         tid = gpu.thread_idx.x
         c0, c1 = fx.Int32(0), fx.Int32(1)
         c_tile = fx.Int32(TILE)
         c_e = fx.Int32(E)
+
+        def _claim(eid):
+            # ds_add_rtn_u32 at workgroup scope: in the scatter the returned old value is the row's slot.
+            return fx.llvm.atomic_add(cnt_mr + eid, c1, syncscope=fx.rocdl.SyncScope.Workgroup)
 
         def _tiles(count):
             # An expert with no rows owns no tile: an all-padding tile still streams its expert's weights.
@@ -209,7 +199,7 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
             row, inb = _my_row(_i)
             eid, keep = _expert_of(row, inb)
             if keep:
-                _lds_atomic_add(cnt_mr, eid, c1)
+                _claim(eid)
         gpu.barrier()
 
         nblocks = c0
@@ -218,18 +208,7 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
             inr = e < c_e
             count = inr.select(cnt_mr[inr.select(e, c0)], c0)
             mine = _tiles(count)
-            fx.ptr_store(mine, scan_mr + tid)
-            gpu.barrier()
-
-            cur = mine
-            for off in _scan_offsets(BLOCK):
-                src = tid - fx.Int32(off)
-                prev = scan_mr[(src >= c0).select(src, c0)]
-                # The next step reads this step's values out of the same array.
-                gpu.barrier()
-                cur = (src >= c0).select(cur + prev, cur)
-                fx.ptr_store(cur, scan_mr + tid)
-                gpu.barrier()
+            cur, chunk_tiles = SCAN.inclusive_with_aggregate(mine, fx.ReductionOp.ADD, storage=scan_lds)
 
             first = nblocks + cur - mine
             row0 = first * c_tile
@@ -244,7 +223,7 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
             for _p in range(fx.Index(0), pad, fx.Index(1)):
                 fx.ptr_store(sentinel, out + (row0 + count + fx.Int32(_p)))
 
-            nblocks = nblocks + scan_mr[fx.Int32(BLOCK - 1)]
+            nblocks = nblocks + chunk_tiles
             gpu.barrier()
 
         for _i in range(fx.Index(0), steps, fx.Index(1)):
@@ -253,7 +232,7 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
             safe = inb.select(row, c0)
             packed = ((safe % fx.Int32(TOPK)) << fx.Int32(SLOT_SHIFT)) | (safe // fx.Int32(TOPK))
             if keep:
-                fx.ptr_store(packed, out + _lds_atomic_add(cnt_mr, eid, c1))
+                fx.ptr_store(packed, out + _claim(eid))
 
         if tid == c0:
             fx.ptr_store(nblocks, aux)
@@ -473,7 +452,7 @@ def create_grouped_gemm_module(
     if b_wmma and N % WMMA_N:
         raise ValueError(f"b_wmma groups the weight by {WMMA_N} rows, so n_out={N} must be a multiple of it")
 
-    num_k_tiles = -(-K // BLOCK_K)
+    num_k_tiles = cdiv(K, BLOCK_K)
     if num_k_tiles < 2:
         raise ValueError(
             f"the prefetch pipeline needs at least 2 K-tiles; k_dim={K} over BLOCK_K={BLOCK_K} gives {num_k_tiles}"
@@ -519,14 +498,14 @@ def create_grouped_gemm_module(
     C_REPS_M = BLOCK_M // ROWS_PER_PASS
 
     # The pipeline buffers and the staging tile are never live at once, so they share one allocation.
-    cshuf_elems = -(-BLOCK_M * C_ROW_STRIDE * out_bytes // elem_bytes)
+    cshuf_elems = cdiv(BLOCK_M * C_ROW_STRIDE * out_bytes, elem_bytes)
     LDS_TOTAL = cshuf_elems if g2r else max(2 * LDS_ONE_BUF, cshuf_elems)
     if LDS_TOTAL * elem_bytes > LDS_BYTES:
         raise ValueError(
             f"tile needs {LDS_TOTAL * elem_bytes} B of LDS, over the {LDS_BYTES} B a gfx11 workgroup may allocate"
         )
 
-    grid_n = -(-N // BLOCK_N)
+    grid_n = cdiv(N, BLOCK_N)
     is_bf16 = in_dtype == "bf16"
 
     def _wmma_op(a_vec, b_vec, acc):
@@ -1021,7 +1000,7 @@ def compile_token_down(*, model_dim: int, inter_dim: int, experts: int, topk: in
         )
     LANES, CHANNELS = _TD_LANES, _TD_CHANNELS
     CHUNKS = K // LOAD_VEC
-    STEPS = -(-CHUNKS // LANES)
+    STEPS = cdiv(CHUNKS, LANES)
     elem = IN_DTYPES[in_dtype]
     tokens_inner = int(experts) * N * K * (elem.width // 8) > _INFINITY_CACHE_BYTES
 
