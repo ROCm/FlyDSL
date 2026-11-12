@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-12T11:51:06Z",
+ "updated": "2026-11-12T12:30:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43215145259,
+   "pr": 1404,
+   "commit": "475a1f6fbd55a78e16b0071f5c8d215bc8f3edda",
+   "branch": "moe/k5p-pr",
+   "event": "pull_request",
+   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43215145259",
+   "created_at": "2026-11-12T12:08:04Z",
+   "updated_at": "2026-11-12T12:27:30Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T12:27:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43215145259/job/131182245193"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T12:28:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43215145259/job/131182245253"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T12:27:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43215145259/job/131182245319"
+    }
+   ]
+  },
   {
    "run_id": 43196689136,
    "pr": 869,
@@ -102,11 +145,11 @@
    "branch": "experiment/register-placement-sched-hints",
    "event": "pull_request",
    "title": "[Feat] Introduce experimental register_allocation on ROCDL",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43193037240",
    "created_at": "2026-11-12T09:37:05Z",
-   "updated_at": "2026-11-12T09:59:35Z",
+   "updated_at": "2026-11-12T12:24:38Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -121,9 +164,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-12T09:59:34Z",
+     "started_at": "2026-11-12T12:24:38Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43193037240/job/131108172320"
     },
@@ -148,11 +191,11 @@
    "branch": "pr/enh-binary-prep-passes",
    "event": "pull_request",
    "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045",
    "created_at": "2026-11-12T09:30:28Z",
-   "updated_at": "2026-11-12T09:46:40Z",
+   "updated_at": "2026-11-12T11:48:45Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -167,10 +210,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-12T09:46:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T11:48:45Z",
+     "completed_at": "2026-11-12T12:24:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045/job/131101705832"
     },
     {
@@ -332,10 +375,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T11:28:48Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T12:07:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750/job/131091759005"
     }
    ]
@@ -2299,21 +2342,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42398013192",
    "created_at": "2026-11-07T17:47:11Z",
    "updated_at": "2026-11-07T17:47:11Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42397754756,
-   "pr": 1384,
-   "commit": "c89db30659ae1dbd713629f9aa3cee6849ab5927",
-   "branch": "ext-coop-ballot-rdna-argmax",
-   "event": "pull_request",
-   "title": "[Feature][DSL] Add warp vote collectives, RDNA DPP, and warp argmax/argmin",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42397754756",
-   "created_at": "2026-11-07T17:44:04Z",
-   "updated_at": "2026-11-07T17:44:04Z",
    "actor": "dimitri91209",
    "jobs": []
   }
