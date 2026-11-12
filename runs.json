@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-12T13:36:48Z",
+ "updated": "2026-11-12T13:40:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43228800235,
+   "pr": null,
+   "commit": "d7c7a712aa0abbb523bf2f3c3d5becd61dd73b0f",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline (#1402)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235",
+   "created_at": "2026-11-12T13:35:43Z",
+   "updated_at": "2026-11-12T13:36:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 43228678355,
+   "pr": null,
+   "commit": "56fab5e46242229b882a9dd28524666f436f075c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Coop] Optimize warp-level prims on the rocdl (#1390)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228678355",
+   "created_at": "2026-11-12T13:34:59Z",
+   "updated_at": "2026-11-12T13:35:59Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 43221550793,
    "pr": 1216,
@@ -29,18 +59,21 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T13:12:10Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43221550793/job/131205437911"
+     "completed_at": "2026-11-12T13:35:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43221550793/job/131205437911",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-12T13:11:19Z",
+     "started_at": "2026-11-12T13:34:03Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43221550793/job/131205437959"
     }
@@ -53,11 +86,11 @@
    "branch": "moe/k5p-pr",
    "event": "pull_request",
    "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43215145259",
    "created_at": "2026-11-12T12:08:04Z",
-   "updated_at": "2026-11-12T12:27:30Z",
+   "updated_at": "2026-11-12T13:34:00Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -1601,7 +1634,7 @@
   },
   {
    "run_id": 42613118876,
-   "pr": 1390,
+   "pr": null,
    "commit": "7720e8ac405d64b0d20332897d791ab4b3efe353",
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
@@ -1647,7 +1680,7 @@
   },
   {
    "run_id": 42610918296,
-   "pr": 1390,
+   "pr": null,
    "commit": "41d67361fc116a7be6256676e97738d1946a6906",
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
@@ -1662,7 +1695,7 @@
   },
   {
    "run_id": 42608598588,
-   "pr": 1390,
+   "pr": null,
    "commit": "176f5786c5382539cf73ac4ea32219cdffe28f47",
    "branch": "pr/enh-coop-warp-rocdl",
    "event": "pull_request",
@@ -2286,95 +2319,6 @@
    "updated_at": "2026-11-08T11:14:17Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 42429293173,
-   "pr": 1380,
-   "commit": "a012335a3bef37c02e123334107193f43a6879de",
-   "branch": "feat/windows-ci",
-   "event": "pull_request",
-   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173",
-   "created_at": "2026-11-08T00:20:20Z",
-   "updated_at": "2026-11-08T01:21:01Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-08T00:33:36Z",
-     "completed_at": "2026-11-08T01:15:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388776"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-08T00:33:23Z",
-     "completed_at": "2026-11-08T01:02:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388795"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-08T00:33:39Z",
-     "completed_at": "2026-11-08T01:00:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42429293173/job/128577388855",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42425720807,
-   "pr": 1380,
-   "commit": "17f9224bcc94c0724652206d9a8adaea98f37a40",
-   "branch": "feat/windows-ci",
-   "event": "pull_request",
-   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42425720807",
-   "created_at": "2026-11-07T23:32:36Z",
-   "updated_at": "2026-11-08T00:21:02Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-07T23:52:29Z",
-     "completed_at": "2026-11-08T00:20:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42425720807/job/128567807683"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-07T23:52:04Z",
-     "completed_at": "2026-11-08T00:20:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42425720807/job/128567807693"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-07T23:52:31Z",
-     "completed_at": "2026-11-08T00:20:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42425720807/job/128567807734"
-    }
-   ]
   }
  ]
 }
