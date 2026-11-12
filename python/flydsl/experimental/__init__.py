@@ -9,8 +9,8 @@ into this package, so every use is visibly experimental. For example::
 
     fx.experimental.register_allocation.register_place(frag_A, ..., start_idx=0)
 
-    from flydsl.experimental import register_allocation as fx_regalloc
-    fx_regalloc.register_place(frag_A, fx_regalloc.rocdl.AGPR32, start_idx=0)
+    from flydsl.experimental import register_allocation as reg
+    reg.register_place(frag_A, reg.rocdl.AGPR32, start_idx=0)
 
 Names here are not part of the stable ``fx`` surface and may change or be
 removed without a deprecation period.

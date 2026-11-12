@@ -8,7 +8,7 @@ import pytest
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.protocol import construct_from_ir_values, dsl_align_of, dsl_size_of, extract_to_ir_values
-from flydsl.experimental import register_allocation as fx_regalloc
+from flydsl.experimental import register_allocation as reg
 from tests.language.conftest import frontend_only_jit  # noqa: F401  (autouse: L1a cases skip backend compile)
 from tests.language.lang_utils import launch_ir, source_ir
 
@@ -34,9 +34,9 @@ def test_register_api_is_reached_only_through_its_subpackage():
 
     # Like fx.<extension> libraries: fx.experimental is the flydsl.experimental package.
     assert experimental is fx.experimental is flydsl.experimental
-    assert fx.experimental.register_allocation is fx_regalloc
-    for name in ("RegisterAllocator", "RegisterClass", "register_place"):
-        assert getattr(fx_regalloc, name) is getattr(fx_regalloc.register, name)
+    assert fx.experimental.register_allocation is reg
+    for name in ("RegisterAllocator", "RegisterClass", "register_place", "register_value"):
+        assert getattr(reg, name) is getattr(reg.register, name)
         assert not hasattr(fx.experimental, name)
         assert not hasattr(fx, name)
     assert not hasattr(fx.experimental, "rocdl")
@@ -48,7 +48,7 @@ def test_allocator_uses_absolute_alignment_and_whole_registers():
     captured = {}
 
     def body():
-        regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=65)
+        regs = reg.RegisterAllocator(reg.rocdl.VGPR32, start_idx=65)
         regs.allocate(fx.Int8)
         regs.allocate(fx.Align[fx.Float32, 16])
         regs.allocate(RegisterPayload)
@@ -66,7 +66,7 @@ def test_allocator_uses_absolute_alignment_and_whole_registers():
 def test_scalar_vector_and_composite_storage_access():
     @flyc.kernel
     def kernel():
-        regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32)
+        regs = reg.RegisterAllocator(reg.rocdl.VGPR32, 32)
         scalar = regs.allocate(fx.Int32)
         scalar.poke(fx.Int32(fx.thread_idx.x))
         scalar.poke(scalar.peek() + 1)
@@ -93,7 +93,7 @@ def test_scalar_vector_and_composite_storage_access():
 @pytest.mark.parametrize("alignment", [0, -1, 3, True, 1.5])
 def test_invalid_alignment(alignment):
     def body():
-        fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(fx.Int32, alignment=alignment)
+        reg.RegisterAllocator(reg.rocdl.VGPR32, 32).allocate(fx.Int32, alignment=alignment)
 
     with pytest.raises(Exception, match="alignment must be a positive power of two"):
         source_ir(body)
@@ -102,13 +102,13 @@ def test_invalid_alignment(alignment):
 @pytest.mark.parametrize("offset", [None, -1, True, 1.5])
 def test_invalid_start(offset):
     with pytest.raises(ValueError, match="start_idx"):
-        fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, offset)
+        reg.RegisterAllocator(reg.rocdl.VGPR32, offset)
 
 
 def test_storage_roundtrip_and_loop():
     @flyc.kernel
     def kernel(n: fx.Int32):
-        buf = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(RegisterPayload)
+        buf = reg.RegisterAllocator(reg.rocdl.VGPR32, 32).allocate(RegisterPayload)
         rebuilt = construct_from_ir_values(type(buf), buf, extract_to_ir_values(buf))
         rebuilt.scalar.poke(1.0)
         for _ in range(0, n):
@@ -136,7 +136,7 @@ def test_custom_storable_and_aligned_composite():
             fx.Int32.__poke_into_ptr__(ptr, value)
 
     def body():
-        regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 65)
+        regs = reg.RegisterAllocator(reg.rocdl.VGPR32, 65)
         word = regs.allocate(Word)
         word.poke(42)
         assert isinstance(word.peek(), fx.Int32)
@@ -149,7 +149,7 @@ def test_custom_storable_and_aligned_composite():
 
 def test_fixed_allocator_rounds_to_byte_alignment():
     def body():
-        regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 65)
+        regs = reg.RegisterAllocator(reg.rocdl.VGPR32, 65)
         regs.allocate(fx.Int32, alignment=16)
         regs.allocate(fx.Align[fx.Int32, 16])
         regs.allocate(fx.Int64)
@@ -160,9 +160,9 @@ def test_fixed_allocator_rounds_to_byte_alignment():
 
 def test_allocator_requires_register_class():
     with pytest.raises(TypeError):
-        fx_regalloc.RegisterAllocator()
+        reg.RegisterAllocator()
     with pytest.raises(TypeError, match="register_class must be a RegisterClass"):
-        fx_regalloc.RegisterAllocator(None, start_idx=32)
+        reg.RegisterAllocator(None, start_idx=32)
 
 
 @fx.struct
@@ -183,10 +183,10 @@ def test_struct_groups_independent_storage_across_classes_and_jit_loop():
     @flyc.kernel
     def kernel(n: fx.Int32):
         refs = MixedRegisterRefs(
-            scalar=fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.SGPR32, 40).allocate(fx.Int32),
-            vector=fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 32).allocate(fx.Vector[fx.Float32, 4]),
-            accumulator=fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.AGPR32, 64).allocate(fx.Float32),
-            scratch=fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, 36).allocate(fx.Int16),
+            scalar=reg.RegisterAllocator(reg.rocdl.SGPR32, 40).allocate(fx.Int32),
+            vector=reg.RegisterAllocator(reg.rocdl.VGPR32, 32).allocate(fx.Vector[fx.Float32, 4]),
+            accumulator=reg.RegisterAllocator(reg.rocdl.AGPR32, 64).allocate(fx.Float32),
+            scratch=reg.RegisterAllocator(reg.rocdl.VGPR32, 36).allocate(fx.Int16),
         )
         refs = construct_from_ir_values(type(refs), refs, extract_to_ir_values(refs))
         refs.scalar.poke(fx.Int32(fx.block_idx.x))

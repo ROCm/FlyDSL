@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright (c) 2026 FlyDSL Project Contributors -->
 
@@ -8,41 +12,45 @@ memory at chosen numbers of a register class, such as the A/B operands of an MFM
 accumulator in a given VGPR range, a few uniform values in fixed SGPRs.
 
 The feature is experimental and may change or be removed without a deprecation period. It is
-reached only as the subpackage `fx.experimental.register_allocation`; this page binds it to a short
-name:
+reached only as the subpackage `flydsl.experimental.register_allocation` (also
+`fx.experimental.register_allocation`); this page imports it as `reg`:
 
 ```python
-import flydsl.expr as fx
-
-fx_regalloc = fx.experimental.register_allocation
-# or, equivalently:
-from flydsl.experimental import register_allocation as fx_regalloc
+from flydsl.experimental import register_allocation as reg
 ```
 
-| API                                                                 | Description                                                                                        |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `fx_regalloc.RegisterAllocator(register_class, start_idx)`          | Allocates new register memory in `register_class`, from `start_idx` upward                         |
-| `fx_regalloc.register_place(storage, register_class, *, start_idx)` | Places register memory created elsewhere, such as MMA fragments                                    |
-| `fx_regalloc.rocdl.SGPR32`, `.VGPR32`, `.AGPR32`                    | The AMDGPU register classes; numbers are the ISA `sN`, `vN`, `aN`                                  |
-| `fx_regalloc.RegisterClass(target, name, register_bits)`            | Any LLVM register class by name and member width, such as `RegisterClass("amdgcn", "VGPR_32", 32)` |
+| API                                                         | Description                                                                                        |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `reg.RegisterAllocator(register_class, start_idx)`          | Allocates new register memory in `register_class`, from `start_idx` upward                         |
+| `reg.register_place(storage, register_class, *, start_idx)` | Places register memory created elsewhere, such as MMA fragments                                    |
+| `reg.register_value(value, register_class, *, start_idx)`   | Returns an SSA value, such as a `Numeric` or a `Vector`, placed in `register_class`                |
+| `register_class[n](value)`, `register_class[a:b](value)`    | `register_value` at `a`, for a value of at most `b - a` registers; `[n]` is `[n:n+1]`              |
+| `reg.rocdl.SGPR32`, `.VGPR32`, `.AGPR32`                    | The AMDGPU register classes; numbers are the ISA `sN`, `vN`, `aN`                                  |
+| `reg.RegisterClass(target, name, register_bits)`            | Any LLVM register class by name and member width, such as `RegisterClass("amdgcn", "VGPR_32", 32)` |
 
-[`examples/experimental/register_allocation.py`](../../examples/experimental/register_allocation.py)
-uses both entry points in complete kernels.
+[`examples/experimental/register_allocation/register_allocation.py`](../../examples/experimental/register_allocation/register_allocation.py)
+uses register class indexing and `register_place` in complete kernels.
 
 ## Register classes and numbers
 
 The register class is required: it is what the feature places values in. Register memory without
 placement, where the compiler chooses both the class and the numbers, is created with
-`fx.make_rmem_tensor` or `fx.make_fragment`.
+`fx.make_rmem_tensor` or `fx.make_fragment_like`.
 
 Numbers index the members of the class and count whole members: `start_idx=40` in `SGPR32` is
-`s40`. Both entry points take `start_idx`, the first register; the storage occupies it and the
-registers after it, exactly.
+`s40`. Every entry point takes `start_idx`, the first register; the storage or value occupies it
+and the registers after it, exactly.
 
 Placement is a register allocation hint, not a guarantee. Nothing checks the result. When the
 requested registers are taken, unusable, or the value has to be split or spilled, LLVM places the
-value or part of it elsewhere and compilation still succeeds, in a few cases with wrong code (see
-[Limitations](#limitations)). Check the final ISA.
+value or part of it elsewhere, normally in the same register class, and compilation still succeeds
+without a diagnostic, in a few cases with wrong code (see [Limitations](#limitations)). Check the
+final ISA.
+
+Even without such conflicts, the result can still fall short of the request in ordinary code, such
+as an accumulator read element by element or carried around a loop: part of the value's live range
+ends up in other registers. How closely a request is met also depends on the rest of the kernel and
+on the LLVM version.
 
 The registers are not reserved for the whole kernel: other values may use them before the first
 write and after the last read. Because a fixed number sets a floor on the kernel's register count
@@ -50,7 +58,7 @@ write and after the last read. Because a fixed number sets a floor on the kernel
 numbers. The lowest registers hold kernel inputs such as the thread ID, the kernel argument
 pointer, and the workgroup ID, so start fixed ranges above them.
 
-## `fx_regalloc.RegisterAllocator` — the register memory allocator
+## `reg.RegisterAllocator` — the register memory allocator
 
 `RegisterAllocator` has the `allocate(T)` / `Storage[T]` interface of
 [`fx.SharedAllocator`](../language/storage_and_allocator.md#fxsharedallocator--the-shared-memory-allocator)
@@ -71,8 +79,8 @@ class LaneRegisters:  # one value per lane
     result: fx.Int32
 
 # Inside a @flyc.kernel body:
-sgprs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.SGPR32, start_idx=40)
-vgprs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=32)
+sgprs = reg.RegisterAllocator(reg.rocdl.SGPR32, start_idx=40)
+vgprs = reg.RegisterAllocator(reg.rocdl.VGPR32, start_idx=32)
 block = sgprs.allocate(BlockRegisters)  # s40-s41
 lane = vgprs.allocate(LaneRegisters)    # v32-v34
 
@@ -86,7 +94,7 @@ numbers: an allocation aligned to 16 bytes starts at a multiple of 4 registers, 
 rounds its next number up.
 
 ```python
-regs = fx_regalloc.RegisterAllocator(fx_regalloc.rocdl.VGPR32, start_idx=65)
+regs = reg.RegisterAllocator(reg.rocdl.VGPR32, start_idx=65)
 count = regs.allocate(fx.Int32)                               # v65
 tile = regs.allocate(fx.Vector[fx.Float32, 4], alignment=16)  # v68-v71
 ```
@@ -97,7 +105,7 @@ A type's alignment describes its byte layout, not hardware register rules. On gf
 requires it; a misaligned start leaves the hint without a usable register (see
 [Limitations](#limitations)).
 
-## `fx_regalloc.register_place` — placing existing register memory
+## `reg.register_place` — placing existing register memory
 
 `register_place` places register memory that the allocator did not create, such as the fragments
 made by the MMA API. Call it on the fragment itself, not on a view or slice of it, in the block that
@@ -112,37 +120,63 @@ frag_B = thr_mma.make_fragment_B(B)
 frag_C = thr_mma.make_fragment_C(C)
 
 # Request A/B in AGPRs and C in VGPRs.
-fx_regalloc.register_place(frag_A, fx_regalloc.rocdl.AGPR32, start_idx=0)  # a0-a3
-fx_regalloc.register_place(frag_B, fx_regalloc.rocdl.AGPR32, start_idx=4)  # a4-a7
-fx_regalloc.register_place(frag_C, fx_regalloc.rocdl.VGPR32, start_idx=64)  # v64-v79
+reg.register_place(frag_A, reg.rocdl.AGPR32, start_idx=0)  # a0-a3
+reg.register_place(frag_B, reg.rocdl.AGPR32, start_idx=4)  # a4-a7
+reg.register_place(frag_C, reg.rocdl.VGPR32, start_idx=64)  # v64-v79
 ```
 
-`RegisterAllocator` is a layout convenience over `register_place`; the limitations below apply to
-both.
+`RegisterAllocator` is a layout convenience over `register_place`.
+
+## `reg.register_value` — placing an SSA value
+
+`register_value` places a value instead of register memory: a `Numeric` or a `Vector` computed in
+the kernel, or a kernel argument. It returns the value with the placement; only the returned value
+is placed, so use it instead of the original.
+
+```python
+bias = reg.register_value(bias, reg.rocdl.SGPR32, start_idx=40)        # s40
+x = reg.register_value(X[i], reg.rocdl.VGPR32, start_idx=32)           # v32
+y = reg.register_value(x * 3 + bias, reg.rocdl.VGPR32, start_idx=33)  # v33
+```
+
+Indexing a register class gives the same call with a size check. `[a:b]` places a value of at most
+`b - a` registers (32 bits each for the classes in `reg.rocdl`) at registers `a` to `b - 1`, and
+`[n]` is `[n:n+1]`. A range takes both a start and a stop, and a value that does not fit raises
+`ValueError`:
+
+```python
+bias = reg.rocdl.SGPR32[40](bias)   # reg.register_value(bias, reg.rocdl.SGPR32, start_idx=40)
+acc = reg.rocdl.VGPR32[64:68](acc)  # v64-v67; acc has at most 4 x 32 bits
+```
+
+The instructions that compute the value are chosen as without placement; when one of them writes
+other registers, its result is copied into the requested ones. In particular, placing the value read
+from an MMA fragment (`frag.load()`) does not make the MMAs accumulate there: place the fragment
+itself with `register_place` for that.
+
+The limitations below apply to every entry point.
 
 ## Limitations
 
-Placement does not change which instructions compute a value.
+Placement does not change which instructions compute a value. The list below describes behavior
+observed so far; it is not exhaustive, and other kernels may show other gaps between the request and
+the result.
 
 - **Conflicts move values silently.** If the requested registers are held by another live value,
-  including another placed value, or register pressure forces a split or spill, the value or part
-  of its live range ends up in other registers, with copies. Keeping an old `peek()` result alive
-  across a `poke()` to the same storage is an easy way to cause this.
+  including another placed value, cannot hold the value (a misaligned start, or a range past the end
+  of the register file), or register pressure forces a split or spill, the value or part of its
+  live range ends up in other registers, with copies.
 - **Placing part of a placed value.** Every read of placed storage is hinted, including a read of a
-  single element, such as storing an MMA accumulator element by element. The element's hint can
-  override the hint of the whole value, which then usually ends up elsewhere, with copies.
-- **SGPRs hold uniform values only.** Placing a value that differs between lanes in SGPRs fails with
-  "illegal VGPR to SGPR copy", with the same consequence: the error is printed and the code is
-  wrong.
-- **Constants are materialized.** A placed constant, such as an accumulator filled with zero, is
-  computed into registers instead of being folded into the instructions that use it.
-- **Whole registers only.** Each read or write of placed storage covers whole 32-bit registers;
-  for example, a single `Float16` element of an MMA fragment is rejected at compile time. Storage
-  from `RegisterAllocator` is byte-backed and is placed through the registers covering each access,
-  so its sub-word fields can be accessed individually.
-- **Static access only.** Register memory is accessed at offsets known while tracing; dynamic
-  indexing is not supported. Values that are optimized away occupy nothing. Do not rely on
-  uninitialized contents or padding.
-- **Supported configurations.** AMDGPU targets with optimized code generation; at `O0` the hints are
-  ignored. External LLVM code generation (`FLYDSL_COMPILE_LLVM_DIR`) needs an LLVM built with
-  FlyDSL's `schedule-bank-and-gpr.patch`.
+  single element, such as storing an MMA accumulator element by element. The hint of the element
+  and the hint of the whole value compete, so the element can be copied out of the whole value,
+  often through other registers, may not end up in its own register, and later reads of the whole
+  value may come from a copy; the instructions that last write the whole value, such as the final
+  MMAs into an accumulator, may write other registers. Where possible, read the whole storage once
+  (for example `frag.load()`) and work on that value.
+- **Loop-carried VGPR values may leave their registers.** A placed VGPR value carried around a
+  loop, such as an MMA accumulator in VGPRs, can be in its registers within each iteration but not
+  across the loop's back edge. Whether this happens depends on the rest of the kernel: with the
+  accumulators of `examples/04-preshuffle_gemm.py` placed in VGPRs, the last MMA of each iteration
+  writes other registers and the first MMA of the next iteration writes the placed ones again; a
+  simpler K loop keeps them in place. MMA accumulators placed in AGPRs stayed in their registers
+  across iterations in every kernel tried.
