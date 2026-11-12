@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T13:48:47Z",
+ "updated": "2026-11-12T14:23:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957",
    "created_at": "2026-11-12T13:45:44Z",
-   "updated_at": "2026-11-12T13:46:31Z",
+   "updated_at": "2026-11-12T14:03:17Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175",
    "created_at": "2026-11-12T13:39:23Z",
-   "updated_at": "2026-11-12T13:41:39Z",
+   "updated_at": "2026-11-12T13:56:22Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline (#1402)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235",
    "created_at": "2026-11-12T13:35:43Z",
-   "updated_at": "2026-11-12T13:38:05Z",
+   "updated_at": "2026-11-12T13:54:45Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -162,20 +162,20 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43196689136",
    "created_at": "2026-11-12T10:01:51Z",
-   "updated_at": "2026-11-12T13:08:38Z",
+   "updated_at": "2026-11-12T14:20:18Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T13:08:37Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T14:20:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43196689136/job/131137604313"
     },
     {
@@ -477,7 +477,9 @@
      "started_at": "2026-11-12T09:31:41Z",
      "completed_at": "2026-11-12T09:54:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750/job/131091758928",
-     "log_fetch_failed": true
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1043,11 +1045,11 @@
    "branch": "fix-split-symlink-install",
    "event": "pull_request",
    "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
    "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-12T13:40:17Z",
+   "updated_at": "2026-11-12T13:55:46Z",
    "actor": "cp2923",
    "jobs": []
   },
