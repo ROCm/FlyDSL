@@ -1,8 +1,158 @@
 {
  "schema": 1,
- "updated": "2026-11-11T21:25:00Z",
+ "updated": "2026-11-12T00:11:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43113770129,
+   "pr": 1397,
+   "commit": "e856955aa6b31cff86c1cb98ffdb6b1444ddc9cd",
+   "branch": "pr/rmsnorm-smoothquant",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add a persistent-row RMSNorm SmoothQuant kernel",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113770129",
+   "created_at": "2026-11-11T22:40:48Z",
+   "updated_at": "2026-11-12T00:09:04Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T22:58:16Z",
+     "completed_at": "2026-11-12T00:09:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113770129/job/130843782019"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T22:57:19Z",
+     "completed_at": "2026-11-11T23:19:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113770129/job/130843782053",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T23:06:23Z",
+     "completed_at": "2026-11-11T23:16:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113770129/job/130843782095"
+    }
+   ]
+  },
+  {
+   "run_id": 43113764149,
+   "pr": 1396,
+   "commit": "b336017b5314d2208bc1476aa90f40051d396c38",
+   "branch": "pr/fp8-rowscale-8wave",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add a small-M kernel to the FP8 8-wave GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149",
+   "created_at": "2026-11-11T22:40:45Z",
+   "updated_at": "2026-11-11T23:47:38Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T23:04:26Z",
+     "completed_at": "2026-11-11T23:33:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149/job/130846942853"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-11T23:04:20Z",
+     "completed_at": "2026-11-11T23:09:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149/job/130846942923"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T23:16:44Z",
+     "completed_at": "2026-11-11T23:26:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149/job/130846942963"
+    }
+   ]
+  },
+  {
+   "run_id": 43113759975,
+   "pr": 1395,
+   "commit": "92db3d8fcbd40bafa55525df0518c94530d2ecd2",
+   "branch": "pr/layernorm-bwd",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975",
+   "created_at": "2026-11-11T22:40:43Z",
+   "updated_at": "2026-11-11T23:38:27Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T23:19:59Z",
+     "completed_at": "2026-11-11T23:41:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161240",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-11T23:34:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161269"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-11T23:38:27Z",
+     "completed_at": "2026-11-11T23:47:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161304"
+    }
+   ]
+  },
+  {
+   "run_id": 43110934673,
+   "pr": 1394,
+   "commit": "09452ca4607bf7dc0143fa9ca44bd1c673848b34",
+   "branch": "fix-split-symlink-install",
+   "event": "pull_request",
+   "title": "[Bugfix] Find native libraries when the package is split across symlinks",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
+   "created_at": "2026-11-11T22:20:29Z",
+   "updated_at": "2026-11-11T22:20:29Z",
+   "actor": "cp2923",
+   "jobs": []
+  },
   {
    "run_id": 42980160061,
    "pr": null,
@@ -1794,66 +1944,6 @@
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273897654",
    "created_at": "2026-11-06T18:47:38Z",
-   "updated_at": "2026-11-06T18:48:19Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273891081,
-   "pr": 1250,
-   "commit": "ac544bb541356255d8e04f4a1c0fb316c844f539",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr6-backward",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add gfx950 attention backward (dQ and dK/dV) ported from AOTriton 0.14 (6/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273891081",
-   "created_at": "2026-11-06T18:47:35Z",
-   "updated_at": "2026-11-06T18:48:20Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273885982,
-   "pr": 1249,
-   "commit": "b839e36c3527408fe65847ff05594872a44f024a",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr5-optional-inputs",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Port gfx950 attention ALiBi, sink, paged KV, split-K and XCD swizzle to the new forward (5/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273885982",
-   "created_at": "2026-11-06T18:47:33Z",
-   "updated_at": "2026-11-06T18:48:18Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273881128,
-   "pr": 1248,
-   "commit": "5bc612a3496f2e32b413112010535cdbfdfe87fd",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr4-forward",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add the gfx950 attention forward kernel (dual-wave and wide bodies) (4/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273881128",
-   "created_at": "2026-11-06T18:47:31Z",
-   "updated_at": "2026-11-06T18:48:18Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42273874479,
-   "pr": 1247,
-   "commit": "00afb26c98c924eca816bd01b39c0067c457edf1",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr3-config",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add gfx950 attention metadata, knobs and traits config (3/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273874479",
-   "created_at": "2026-11-06T18:47:29Z",
    "updated_at": "2026-11-06T18:48:19Z",
    "actor": "sjfeng1999",
    "jobs": []
