@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright (c) 2026 FlyDSL Project Contributors -->
 
@@ -33,7 +37,7 @@ uses both entry points in complete kernels.
 
 The register class is required: it is what the feature places values in. Register memory without
 placement, where the compiler chooses both the class and the numbers, is created with
-`fx.make_rmem_tensor` or `fx.make_fragment`.
+`fx.make_rmem_tensor` or `fx.make_fragment_like`.
 
 Numbers index the members of the class and count whole members: `start_idx=40` in `SGPR32` is
 `s40`. Both entry points take `start_idx`, the first register; the storage occupies it and the
