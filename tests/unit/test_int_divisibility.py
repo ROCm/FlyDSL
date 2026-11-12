@@ -32,6 +32,9 @@ def test_arithmetic_follows_core_leaf_rules():
         assert ((x * 8) << 2).divisibility == 32 and ((x * 16) >> 2).divisibility == 4
         assert (-x12).divisibility == 12 and Int64(x12).divisibility == 12
         assert (x > 0).select(x * 16, x * 24).divisibility == 8
+        # A compile-time magnitude beyond int32 tells nothing, as for an int_tuple leaf.
+        wide = (x > 0).select(Int64(1 << 40), Int64(0))
+        assert Int64(1 << 40).divisibility == 1 and (wide | Int64(x)).divisibility == 1
         assert Int32(x12, divisibility=64).divisibility == 192 and x12.divisibility == 12
 
     with ir.Context() as ctx, ir.Location.unknown():

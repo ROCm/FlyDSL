@@ -124,9 +124,9 @@ forced to a Python value.
 ### Divisibility of run-time integers
 
 An integer knows a divisor its value always has: `x.divisibility`. For a
-compile-time integer it is the magnitude of the value; for a run-time integer it
-is what tracing could establish, and `1` when nothing is known. `str(x)` shows a
-known divisor of a run-time integer.
+compile-time integer it is the magnitude of the value, or `1` beyond the int32
+range; for a run-time integer it is what tracing could establish, and `1` when
+nothing is known. `str(x)` shows a known divisor of a run-time integer.
 
 ```python
 row = fx.thread_idx.x              # row.divisibility == 1

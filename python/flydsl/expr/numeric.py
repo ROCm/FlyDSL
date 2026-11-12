@@ -793,7 +793,9 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
     @property
     def divisibility(self) -> int:
         if not isinstance(self.value, ir.Value):
-            return abs(int(self.value))
+            # As for a static int_tuple leaf: a magnitude beyond int32 tells nothing.
+            magnitude = abs(int(self.value))
+            return magnitude if magnitude < 2**31 else 1
         return self.__dict__.get("_divisibility", 1)
 
     def __str__(self) -> str:
