@@ -127,12 +127,11 @@ class RocmBackend(BaseBackend):
         ]
         binary_prep_fragments = [
             f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            # gpu.module bodies already went through convert-scf-to-cf above; only host functions remain.
+            "func.func(convert-scf-to-cf)",
+            # gpu-to-llvm applies every loaded dialect's ConvertToLLVM patterns.
             "convert-vector-to-llvm",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
+            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "reconcile-unrealized-casts",
             *(
                 ["ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"]
