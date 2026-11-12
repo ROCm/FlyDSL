@@ -149,7 +149,6 @@ _WINDOWS_SKIPS = {
     "test_python_interpreter_pinning.py": "drives the Linux bash build scripts",
     "test_external_llvm_codegen.py": "fake tools are POSIX shebang scripts",
     "test_inject_asm.py": "redirects HOME; Windows reads USERPROFILE",
-    "test_compile_error_locations.py": "compares unescaped Windows paths",
 }
 
 
