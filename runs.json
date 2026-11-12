@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-11-12T09:25:16Z",
+ "updated": "2026-11-12T09:52:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43194855680,
+   "pr": 1400,
+   "commit": "cd6cf4baa8d977eb59703b571de9e41251664a8a",
+   "branch": "pr/enh-int-divisibility",
+   "event": "pull_request",
+   "title": "[Feat] Honor divisibility info in the Int32/64 type",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680",
+   "created_at": "2026-11-12T09:49:22Z",
+   "updated_at": "2026-11-12T09:49:40Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 43193037240,
+   "pr": 1401,
+   "commit": "aa59cbdfed6ba576c20a987e25a6e2b7c5dc8929",
+   "branch": "experiment/register-placement-sched-hints",
+   "event": "pull_request",
+   "title": "[Feat] Introduce experimental register_allocation on ROCDL",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43193037240",
+   "created_at": "2026-11-12T09:37:05Z",
+   "updated_at": "2026-11-12T09:39:05Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 43192064045,
+   "pr": 1402,
+   "commit": "b3e44b1ea8d674025df7f1d0381df88d28ca9ced",
+   "branch": "pr/enh-binary-prep-passes",
+   "event": "pull_request",
+   "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045",
+   "created_at": "2026-11-12T09:30:28Z",
+   "updated_at": "2026-11-12T09:46:40Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:46:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045/job/131101705831"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:46:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045/job/131101705832"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:47:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43192064045/job/131101705915"
+    }
+   ]
+  },
   {
    "run_id": 43189120554,
    "pr": 1401,
@@ -44,20 +117,23 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-12T09:06:12Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T09:26:33Z",
+     "completed_at": "2026-11-12T09:38:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184924023/job/131081500291"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T09:06:34Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184924023/job/131081500307"
+     "completed_at": "2026-11-12T09:31:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184924023/job/131081500307",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -96,11 +172,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-12T09:08:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184919524/job/131082650896"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T09:23:40Z",
+     "completed_at": "2026-11-12T09:47:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184919524/job/131082650896",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -111,13 +190,41 @@
    "branch": "pr/layernorm-bwd",
    "event": "pull_request",
    "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750",
    "created_at": "2026-11-12T08:40:42Z",
-   "updated_at": "2026-11-12T09:09:22Z",
+   "updated_at": "2026-11-12T09:26:44Z",
    "actor": "Arist12",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:26:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750/job/131091758915"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:31:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750/job/131091758928"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T09:26:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750/job/131091759005"
+    }
+   ]
   },
   {
    "run_id": 43182953617,
@@ -126,11 +233,11 @@
    "branch": "pr/enh-int-divisibility",
    "event": "pull_request",
    "title": "[Feat] Honor divisibility info in the Int32/64 type",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43182953617",
    "created_at": "2026-11-12T08:26:30Z",
-   "updated_at": "2026-11-12T09:13:51Z",
+   "updated_at": "2026-11-12T09:49:40Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -157,10 +264,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-12T09:02:53Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T09:49:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43182953617/job/131079554032"
     }
    ]
@@ -2108,51 +2215,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42397264066",
    "created_at": "2026-11-07T17:37:56Z",
    "updated_at": "2026-11-07T17:37:56Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42394877198,
-   "pr": null,
-   "commit": "1464a60d395d5058fc400fc86ecb6dc629a33875",
-   "branch": "ext-hadamard-fwht",
-   "event": "pull_request",
-   "title": "[Feature][DSL] Add Fast Walsh-Hadamard Transform (fx.hadamard)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42394877198",
-   "created_at": "2026-11-07T17:09:12Z",
-   "updated_at": "2026-11-07T17:09:12Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42394475870,
-   "pr": null,
-   "commit": "17b2a6a6155cac23c2644ac5ac2384240367c269",
-   "branch": "ext-quant-codecs",
-   "event": "pull_request",
-   "title": "[Feature][DSL] Add quantization codecs extension (fx.quant)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42394475870",
-   "created_at": "2026-11-07T17:04:34Z",
-   "updated_at": "2026-11-07T17:04:34Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42393938357,
-   "pr": null,
-   "commit": "ef2518340adaefd0d2881347e30a5886c3ef56cf",
-   "branch": "ext-coop-ballot-rdna-argmax",
-   "event": "pull_request",
-   "title": "[Feature][DSL] Add warp vote collectives, RDNA DPP, and warp argmax/argmin",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42393938357",
-   "created_at": "2026-11-07T16:58:17Z",
-   "updated_at": "2026-11-07T16:58:17Z",
    "actor": "dimitri91209",
    "jobs": []
   }
