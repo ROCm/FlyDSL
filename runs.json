@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-12T13:40:04Z",
+ "updated": "2026-11-12T13:43:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43229359175,
+   "pr": 1216,
+   "commit": "702218336b7746f6ada0d8573691e27426dc6003",
+   "branch": "kernel/gfx1100-flash-attn",
+   "event": "pull_request",
+   "title": "[Kernel] Add dense Flash Attention for gfx1100",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175",
+   "created_at": "2026-11-12T13:39:23Z",
+   "updated_at": "2026-11-12T13:40:30Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 43228800235,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline (#1402)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235",
    "created_at": "2026-11-12T13:35:43Z",
-   "updated_at": "2026-11-12T13:36:15Z",
+   "updated_at": "2026-11-12T13:38:05Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -35,16 +50,16 @@
   },
   {
    "run_id": 43221550793,
-   "pr": 1216,
+   "pr": null,
    "commit": "cf005a62ef54b62eca8d1670625453a139b81f16",
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43221550793",
    "created_at": "2026-11-12T12:50:07Z",
-   "updated_at": "2026-11-12T13:11:19Z",
+   "updated_at": "2026-11-12T13:39:47Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -71,10 +86,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-12T13:34:03Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T13:39:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43221550793/job/131205437959"
     }
    ]
@@ -410,9 +425,7 @@
      "started_at": "2026-11-12T09:23:40Z",
      "completed_at": "2026-11-12T09:47:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184919524/job/131082650896",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1015,11 +1028,11 @@
    "branch": "fix-split-symlink-install",
    "event": "pull_request",
    "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
    "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-11T22:20:29Z",
+   "updated_at": "2026-11-12T13:40:17Z",
    "actor": "cp2923",
    "jobs": []
   },
@@ -2304,21 +2317,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 42474847018,
-   "pr": null,
-   "commit": "3b50ba9153cfbc00a6a9a5157011b3559532b9f1",
-   "branch": "jli/strict-pin-agpr",
-   "event": "pull_request",
-   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42474847018",
-   "created_at": "2026-11-08T11:14:15Z",
-   "updated_at": "2026-11-08T11:14:17Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
