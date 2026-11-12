@@ -3,12 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""gfx1100 dense flash-attention correctness and regression tests.
-
-These tests focus on catching the regressions called out in
-https://github.com/ROCm/FlyDSL/pull/1216 during the 2026-10-28 review.
-They purposely run only on gfx1100-class GPUs (W7900/W7900D).
-"""
+"""gfx1100 dense flash-attention tests; they run only on gfx110* GPUs."""
 
 from __future__ import annotations
 
@@ -58,14 +53,10 @@ if not _ARCH.startswith("gfx110"):
 
 
 def _as_dtype(value: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Cast ``value`` to ``dtype`` on the same device, keeping the original layout."""
-
     return value.to(dtype=dtype, copy=True)
 
 
 def _bottom_right_causal_mask(seq_q: int, seq_kv: int, device: torch.device) -> torch.Tensor:
-    """Return a [seq_q, seq_kv] boolean mask implementing bottom-right causal alignment."""
-
     offset = seq_kv - seq_q
     q_idx = torch.arange(seq_q, device=device).unsqueeze(1)
     k_idx = torch.arange(seq_kv, device=device).unsqueeze(0)
@@ -81,9 +72,7 @@ def _softmax_u64(scores: torch.Tensor, causal_mask: torch.Tensor | None) -> torc
 
 
 def _ref_attn_fp64(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool) -> torch.Tensor:
-    """Compute the flash-attention reference in float64 with bottom-right alignment."""
-
-    # Shapes: [B, Sq, H, D] and [B, Skv, H, D].
+    """float64 reference for BSHD inputs, causal mask aligned bottom-right."""
     q_64 = q.to(torch.float64)
     k_64 = k.to(torch.float64)
     v_64 = v.to(torch.float64)
@@ -107,8 +96,7 @@ def _ref_attn_fp64(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bo
 
 
 def _ulp_err(out: torch.Tensor, ref: torch.Tensor, dtype: torch.dtype) -> float:
-    """Return the maximum per-row difference (in ulp of ``dtype`` at |ref| max)."""
-
+    """Max per-row error in ulp of ``dtype``, scaled by that row's max |ref|."""
     if out.shape != ref.shape:
         raise ValueError(f"shape mismatch: out={tuple(out.shape)}, ref={tuple(ref.shape)}")
 
@@ -291,7 +279,6 @@ def _case_decode_matrix() -> dict[str, float]:
 
 
 def _case_v_equals_one(dtype: torch.dtype) -> dict[str, object]:
-    """With V = 1 every output must be exactly 1.0: prefill, decode and cross."""
     device = torch.device("cuda")
     shapes = [(1, 2, seq, seq) for seq in (512, 1000)]
     shapes += [(2, 4, seq_q, seq_kv) for seq_q in (1, 16) for seq_kv in (64, 4097)]
@@ -335,7 +322,7 @@ def _case_guard_buffer() -> dict[str, object]:
     head_dim = 128
     inputs = _make_inputs(batch, num_heads, seq_q, seq_kv, head_dim, dtype, device=device)
 
-    # The kernel expects to write ``seq_q`` rows, but we deliberately expose only half of them.
+    # ``out`` covers only half of the ``seq_q`` rows the kernel would write.
     expected_elems = batch * seq_q * num_heads * head_dim
     exposed_seq_q = seq_q // 2
     exposed_elems = batch * exposed_seq_q * num_heads * head_dim
@@ -834,7 +821,7 @@ def test_select_tile_autotunes_when_enabled(monkeypatch):
 
     def fake_bench(fn, warmup, rep):
         fn()
-        # Return a monotonically decreasing value so later candidates win.
+        # Later candidates are faster, so the last one must win.
         return 1.0 / float(len(launch_records))
 
     monkeypatch.setattr(autotune, "do_bench", fake_bench)
@@ -873,16 +860,14 @@ _D64_DECODE = (1, 1, 64, 8, True)
 _D256_DECODE = (4, 1, 32, 8, False)
 _D256_PREFILL = (8, 1, 32, 8, False)
 _D64_PREFILL = (4, 2, 64, 4, True)
-_D64_DECODE_SPILL = "the single-wave D64 decode kernel already spilled 1-6 VGPRs before the f16 RNE change"
-_D256_TAIL_SPILL = "unchanged since the head_dim 256 decode kernel was added"
+_D64_DECODE_SPILL = "single-wave D64 decode tile"
+_D256_TAIL_SPILL = "D256 decode tile with an unaligned KV tail"
 _D256_HOIST = "hoisting Q is faster than spill-free re-reads on this shape class (see hoist_q)"
 _D64_PREFILL_SPILL = "spills from seq 512 up; re-reading Q is spill-free but up to 5.6% slower"
 
 # Kernels allowed to spill: (max vgpr_spill_count, max private_segment_fixed_size)
-# as measured on W7900D, and why. Every other variant must be spill-free.
-# The counts depend on the LLVM in the FlyDSL build: where they differ, the
-# limit is the larger of LLVM e2a39f50 and 941a04e6 (D64 prefill 2 vs 30,
-# D64 decode 3 vs 6, D256 prefill 71 vs 72 VGPRs).
+# on W7900D. Every other variant must be spill-free. The counts vary with the
+# LLVM build; each limit is the larger of LLVM e2a39f50 and 941a04e6.
 _SPILL_EXCEPTIONS: dict[_TileKey, tuple[int, int, str]] = {
     _TileKey(64, _D64_PREFILL, True, False, False, False, False, False, True, True): (30, 124, _D64_PREFILL_SPILL),
     _TileKey(64, _D64_DECODE, True, False, True, False, False, False, True, True): (6, 28, _D64_DECODE_SPILL),
@@ -898,7 +883,6 @@ _SPILL_EXCEPTIONS: dict[_TileKey, tuple[int, int, str]] = {
 
 
 def _gfx1100_tile_samples() -> dict[_TileKey, tuple[int, int, int]]:
-    """One (seq_q, seq_kv, bh) sample per distinct compiled kernel variant."""
     prefill_seqs = [32, 63, 64, 96, 128, 256, 512, 1024, 4096, 8192, 16384, 24576, 32768]
     decode_seq_kv = [64, 4096, 4097, 8192, 8193, 32768]
     bh_base = [1, 4, 16, 32]
@@ -1075,7 +1059,6 @@ def test_use_vector_store_switch_is_bit_exact():
 @pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
 @pytest.mark.parametrize("batch,num_heads,seq", [(1, 1, 1000), (2, 8, 1024)])
 def test_small_grid_prefill_matches_reference(dtype, head_dim, causal, batch, num_heads, seq):
-    """Few-workgroup prefill tiles (K in LDS, reversed causal order, prefetch)."""
     device = torch.device("cuda")
     bh = batch * num_heads
     num_cu = 2 * flash_attn_interface._dense_light_cu(device)

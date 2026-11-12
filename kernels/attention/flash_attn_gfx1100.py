@@ -3,10 +3,8 @@
 
 """Dense multi-head Flash Attention for gfx1100 (RDNA3).
 
-Supports f16/bf16, head_dim 64/128/256, dense prefill, and dense decode
-(``seq_q <= 16``). Cross-attention reuses the decode path and is therefore
-limited to ``seq_q <= 16`` (including the single-token case). It intentionally
-does not cover GQA/MQA, varlen, paged KV, or general cross-attention.
+f16/bf16, head_dim 64/128/256, prefill (``seq_q == seq_kv``) and decode or
+cross-attention with ``seq_q <= 16``.
 """
 
 import flydsl.compiler as flyc
@@ -61,12 +59,9 @@ def _strides(layout: str, n_heads: int, seq: int, head_dim: int):
 
 
 def hoist_q(head_dim, seq_q, seq_kv, bh):
-    """Whether the kernel keeps the Q fragments in VGPRs across the KV loop.
+    """Whether Q stays in VGPRs across the KV loop.
 
-    For head_dim 256 the hoisted Q costs 74-75 spilled VGPRs (~300 B scratch)
-    on W7900D, which only pays off on long KV loops: decode with
-    ``seq_kv >= 8192`` and prefill with ``seq_kv >= 16384`` and ``bh >= 4``.
-    Everywhere else re-reading Q per KV block is faster and spill-free.
+    At head_dim 256 that spills ~75 VGPRs and only pays off on long KV loops.
     """
     if head_dim <= 128:
         return True
@@ -78,14 +73,8 @@ def hoist_q(head_dim, seq_q, seq_kv, bh):
 def kernel_schedule(head_dim, seq_q, seq_kv, causal, bh, num_cu):
     """Return ``(prefetch, keep_q, reverse_q, static_bounds)`` for one kernel.
 
-    ``prefetch`` loads the next KV block into VGPRs while the current one is
-    consumed. Decode only gains from it at D=128 with ``bh <= 128``; prefill
-    only for the few-workgroup causal shapes picked in ``prefill_schedule``.
-    ``reverse_q`` launches the last (longest) causal Q blocks first.
-    ``static_bounds`` gives causal decode compile-time KV-loop bounds. At
-    D=128 runtime bounds serialize the LDS reads of the main loop (+27-49%
-    when static, +1-3% at D=64); at D=256 the static loop spills more and is
-    2-19% slower.
+    ``static_bounds`` makes causal decode KV-loop bounds compile-time; at
+    D=256 the static loop spills more, so it stays off there.
     """
     keep_q = hoist_q(head_dim, seq_q, seq_kv, bh)
     if seq_q <= WMMA_M:
@@ -114,12 +103,10 @@ def build_flash_attn_func_module_primary(
     _override_flags=None,
     _fixed_tile=None,
 ):
-    """Build a dense f16/bf16 flash-attention launcher for gfx1100.
+    """Build a dense gfx1100 flash-attention launcher.
 
-    ``batch``, ``seq_q`` and ``seq_kv`` are compile-time constants: they choose
-    the tile and the KV loop. The tile comes from ``pick_tile``. Q/K/V/O are
-    BSHD under ``layout='bshd'``. This is multi-head attention; K/V use the same
-    head count as Q. Prefill is ``seq_q == seq_kv``; decode is ``seq_q <= 16``.
+    ``batch``, ``seq_q`` and ``seq_kv`` are compile-time constants; K/V have as
+    many heads as Q.
     """
     if out_dtype is None:
         out_dtype = dtype_str
@@ -177,7 +164,6 @@ def build_flash_attn_func_module_primary(
     prefetch, keep_q, reverse_q, static_bounds = kernel_schedule(
         head_dim, seq_q, seq_kv, causal, batch * num_heads, int(num_cu)
     )
-    # ``_override_flags`` and ``_fixed_tile`` are private knobs exercised only by tests.
     override_flags = _override_flags or {}
     if "prefetch" in override_flags:
         prefetch = bool(override_flags["prefetch"])
@@ -204,9 +190,7 @@ def build_flash_attn_func_module_primary(
     elem_cls = _ELEM_CLS[in_dtype]
     out_cls = _OUT_CLS[out_dtype]
     use_perm_p = seq_q > WMMA_M and not causal and seq_q < 65536
-    # Lane permutation is a performance-only tweak; it preserves the math exactly.
     use_vector_store = head_dim <= 64 and seq_q > WMMA_M and not causal and seq_q < 65536
-    # Selecting the vectorized store path only changes how results are written, not their values.
     if "use_perm_p" in override_flags:
         use_perm_p = bool(override_flags["use_perm_p"])
     if "use_vector_store" in override_flags:
@@ -420,8 +404,8 @@ def build_flash_attn_func_module_primary(
                     ],
                     fx.Int32,
                 ).bitcast(elem_cls)
-            # Convert each element with the default round-to-nearest-even
-            # lowering and pack them into a v8f16 vector.
+            # Must round to nearest even; cvt.pkrtz rounds toward zero and
+            # biases the output low.
             return Vec.from_elements(
                 [fx.Float16(p_vec[i]) for i in range_constexpr(8)],
                 elem_cls,

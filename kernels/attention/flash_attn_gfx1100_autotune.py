@@ -3,13 +3,8 @@
 
 """Tile selection for gfx1100 dense Flash Attention.
 
-``flash_attn_gfx1100`` builds whatever tile it is handed. This module picks one:
-
-  * ``pick_tile`` — compile-time heuristic from measured shapes. No GPU run.
-  * ``feasible_tiles`` — tiles that divide the problem and fit in LDS. A search
-    should stay inside this list; anything else fails to build.
-  * ``select_tile`` — drop-in replacement that benchmarks ``feasible_tiles``
-    when ``FLYDSL_AUTOTUNE`` is enabled and a builder callback is provided.
+``pick_tile`` is a compile-time heuristic; with ``FLYDSL_AUTOTUNE`` set,
+``select_tile`` benchmarks ``feasible_tiles`` instead.
 """
 
 import os
@@ -90,14 +85,9 @@ def _few_q_blocks(seq_q, bh, num_cu):
 def prefill_schedule(head_dim, seq_q, causal, bh, *, num_cu):
     """Return ``(prefetch, reverse_q)`` for a ``seq_q > 16`` prefill kernel.
 
-    Causal Q blocks get longer KV loops towards the end of the sequence, so
-    launching them first shortens the tail (+0.5% to +17% on W7900D across
-    D 64/128/256). At D 64/128 with ``seq_q > 8192`` and ``bh > 16`` the
-    reversed order turned slow or bimodal from run to run instead (D128 H32
-    S16384 +60%, D128 H56 S16384 and D64 H32 S16384 +11-23% in some runs),
-    so those shapes keep the forward order. Prefetching the next KV block
-    only pays off when few workgroups leave each SIMD with a couple of waves
-    to hide its latency.
+    ``reverse_q`` launches the longest causal Q blocks first. At D 64/128 with
+    ``seq_q > 8192`` and ``bh > 16`` that order is unstable from run to run, so
+    those shapes keep the forward order.
     """
     if not causal:
         return False, False
@@ -113,8 +103,7 @@ def pick_tile(head_dim, seq_q, causal, bh, *, num_cu, dtype_str=None):
             if bh >= 4 * num_cu:
                 return 1, 1, 32, 8, True
             if bh == 1 and not causal and dtype_str == "f16":
-                # The only variant where the single-wave kernel stays fast
-                # (2-5% ahead); everywhere else it spills and runs 1.1-5x slower.
+                # Elsewhere the single-wave decode kernel spills and is slower.
                 return 1, 1, 64, 8, True
             return 4, 1, 64, 8, False
         return 4, 1, 32, 8, False
@@ -123,8 +112,6 @@ def pick_tile(head_dim, seq_q, causal, bh, *, num_cu, dtype_str=None):
         return 8, 1, 32, 8, False
     if not _long_prefill(seq_q, bh, num_cu):
         if _few_q_blocks(seq_q, bh, num_cu):
-            # Too few workgroups to fill the GPU, so every wave is bound by its
-            # own KV loop: one 16-row tile per wave, K staged through LDS.
             return (4, 1, 32, 8, False) if head_dim == 128 else (4, 1, 64, 8, False)
         if head_dim == 64:
             return (4, 1, 64, 8, False) if causal else (4, 2, 64, 4, True)
