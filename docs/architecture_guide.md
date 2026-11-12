@@ -279,10 +279,14 @@ depend on where the container installs ROCm either.
 2. the bitcode bundled with the package (when in-process LLD is available)
 3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
 4. on Windows, a TheRock / HIP SDK root staged by `_rocm_toolkit_root()`
+5. MLIR's baked-in ROCm path (`_mlirDialectsFlyROCDL.rocm_path()`)
+6. `/opt/rocm`
 
 Each install prefix is accepted in either the canonical ROCDL layout
 (`<prefix>/amdgcn/bitcode` + `<prefix>/llvm/bin/ld.lld`) or TheRock's nested
 layout (`<prefix>/lib/llvm/amdgcn/bitcode` + `<prefix>/lib/llvm/bin/ld.lld`).
+The last two fallbacks keep the JIT cache fingerprint off `none` for
+source/dev builds that did not bundle bitcode and left `ROCM_*` unset.
 
 External codegen (`FLYDSL_COMPILE_LLVM_DIR`) uses the same bitcode-only toolkit
 resolution when in-process LLD is available: external `mlir-opt` emits

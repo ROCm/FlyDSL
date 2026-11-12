@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from flydsl.compiler.backends import rocm as rocm_backend
 from flydsl.compiler.backends.rocm import (
     BUNDLED_ROCM_PATH,
     FLY_GPU_BINARY_PASS,
@@ -185,3 +186,48 @@ def test_therock_lib_llvm_layout_is_accepted(monkeypatch, tmp_path):
     else:
         # Upstream needs llvm/bin/ld.lld, so TheRock trees are staged.
         assert (toolkit / "llvm" / "bin" / ("ld.lld.exe" if os.name == "nt" else "ld.lld")).is_file()
+
+
+def test_mlir_or_opt_rocm_fallback_avoids_none_fingerprint(monkeypatch, tmp_path):
+    """Dev builds without bundled bitcode still fingerprint a real ROCm tree."""
+    for var in _ROCM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("FLYDSL_COMPILE_ROCM_PATH", raising=False)
+    monkeypatch.setattr(rocm_backend, "BUNDLED_ROCM_PATH", tmp_path / "no_bundle")
+    fallback = _embedded_override_root(tmp_path / "mlir_rocm")
+    monkeypatch.setattr(rocm_backend, "_mlir_baked_rocm_path", lambda: fallback)
+
+    assert Path(rocm_toolkit_path()) == fallback
+    fingerprint = RocmBackend(RocmBackend.make_target("gfx942")).toolkit_fingerprint()
+    assert fingerprint != "rocm-bitcode:none"
+    assert fingerprint.startswith("rocm-bitcode:")
+
+
+def test_readonly_home_skips_therock_staging(monkeypatch, tmp_path):
+    """A read-only HOME must not crash; staging failure skips that candidate."""
+    for var in _ROCM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("FLYDSL_COMPILE_ROCM_PATH", raising=False)
+    monkeypatch.setattr(rocm_backend, "HAS_INPROCESS_LLD", False)
+    monkeypatch.setattr(rocm_backend, "BUNDLED_ROCM_PATH", tmp_path / "no_bundle")
+    monkeypatch.setattr(rocm_backend, "_mlir_baked_rocm_path", lambda: None)
+
+    prefix = tmp_path / "rocm_sdk"
+    llvm = prefix / "lib" / "llvm"
+    (llvm / "amdgcn" / "bitcode").mkdir(parents=True)
+    (llvm / "amdgcn" / "bitcode" / "ocml.bc").write_bytes(b"")
+    (llvm / "bin").mkdir(parents=True)
+    (llvm / "bin" / ("ld.lld.exe" if os.name == "nt" else "ld.lld")).write_bytes(b"")
+    monkeypatch.setenv("ROCM_PATH", str(prefix))
+
+    readonly_home = tmp_path / "ro_home"
+    readonly_home.mkdir()
+    readonly_home.chmod(0o555)
+    monkeypatch.setenv("HOME", str(readonly_home))
+    if os.name == "nt":
+        monkeypatch.setenv("USERPROFILE", str(readonly_home))
+
+    # Staging cannot write under HOME; fall through to /opt/rocm or empty.
+    # The important part is that resolution does not raise PermissionError.
+    toolkit = rocm_toolkit_path()
+    assert toolkit == "" or Path(toolkit).exists()

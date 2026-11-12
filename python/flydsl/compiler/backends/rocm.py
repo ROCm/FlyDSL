@@ -79,7 +79,10 @@ def _validate_toolkit_option_path(path: str) -> str:
 
 
 def _stage_lib_llvm_as_canonical(llvm: Path) -> Path:
-    """Stage TheRock ``lib/llvm`` into the ``llvm/bin`` + ``amdgcn/bitcode`` layout ROCDL expects."""
+    """Stage TheRock ``lib/llvm`` into the ``llvm/bin`` + ``amdgcn/bitcode`` layout ROCDL expects.
+
+    Raises ``OSError`` (including ``PermissionError``) when ``~/.flydsl`` is not writable.
+    """
     import shutil
 
     key = hashlib.sha256(os.path.normcase(os.path.abspath(llvm)).encode()).hexdigest()[:16]
@@ -119,7 +122,8 @@ def _normalize_toolkit_root(root: Path, *, require_lld: bool) -> Path | None:
     TheRock's ``<root>/lib/llvm/{amdgcn/bitcode, bin/ld.lld}`` layout.  When
     in-process LLD is used only bitcode matters, so ``lib/llvm`` can be returned
     directly; when upstream must spawn ``ld.lld``, TheRock trees are staged into
-    the canonical layout under ``~/.flydsl/rocm-toolkit/``.
+    the canonical layout under ``~/.flydsl/rocm-toolkit/``.  A read-only home
+    directory skips staging and returns None so later candidates can still win.
     """
     root = root.expanduser()
     if _has_device_bitcode(root) and (not require_lld or _has_toolkit_lld(root)):
@@ -134,8 +138,22 @@ def _normalize_toolkit_root(root: Path, *, require_lld: bool) -> Path | None:
         if _has_toolkit_lld(llvm):
             return llvm
         if (llvm / "bin" / _lld_basename()).is_file():
-            return _stage_lib_llvm_as_canonical(llvm)
+            try:
+                return _stage_lib_llvm_as_canonical(llvm)
+            except OSError:
+                continue
     return None
+
+
+def _mlir_baked_rocm_path() -> Path | None:
+    """ROCm root baked into the MLIR/ROCDL build, if the bindings expose one."""
+    try:
+        from ..._mlir._mlir_libs import _mlirDialectsFlyROCDL
+
+        path = _mlirDialectsFlyROCDL.rocm_path()
+    except Exception:
+        return None
+    return Path(path) if path else None
 
 
 def _windows_therock_toolkit_root() -> Path | None:
@@ -169,7 +187,9 @@ def rocm_toolkit_path(*, for_external: bool = False) -> str:
 
     Install prefixes may use either the canonical ROCDL layout or TheRock's
     ``lib/llvm`` layout; both are accepted.  On Windows, a TheRock / HIP SDK
-    install is also staged through ``_rocm_toolkit_root()``.
+    install is also staged through ``_rocm_toolkit_root()``.  When no env or
+    bundled root works, fall back to MLIR's baked-in ROCm path and ``/opt/rocm``
+    so the JIT cache fingerprint is not stuck at ``none``.
 
     Returns an empty string when nothing is found, which leaves the upstream
     ``ROCM_PATH`` lookup in place rather than forcing a bad path on it.
@@ -193,6 +213,11 @@ def rocm_toolkit_path(*, for_external: bool = False) -> str:
     therock = _windows_therock_toolkit_root()
     if therock is not None:
         candidates.append(("Windows TheRock/HIP SDK", therock))
+
+    mlir_rocm = _mlir_baked_rocm_path()
+    if mlir_rocm is not None:
+        candidates.append(("MLIR baked-in ROCM_PATH", mlir_rocm))
+    candidates.append(("/opt/rocm", Path("/opt/rocm")))
 
     for label, root in candidates:
         normalized = _normalize_toolkit_root(root, require_lld=require_lld)
