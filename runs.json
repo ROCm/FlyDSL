@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T13:31:11Z",
+ "updated": "2026-11-12T13:36:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -145,11 +145,11 @@
    "branch": "pr/enh-int-divisibility",
    "event": "pull_request",
    "title": "[Feat] Honor divisibility info in the Int32/64 type",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680",
    "created_at": "2026-11-12T09:49:22Z",
-   "updated_at": "2026-11-12T12:40:53Z",
+   "updated_at": "2026-11-12T13:33:36Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
