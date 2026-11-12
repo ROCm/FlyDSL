@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T12:30:46Z",
+ "updated": "2026-11-12T12:42:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -344,11 +344,11 @@
    "branch": "pr/layernorm-bwd",
    "event": "pull_request",
    "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43184916750",
    "created_at": "2026-11-12T08:40:42Z",
-   "updated_at": "2026-11-12T11:29:49Z",
+   "updated_at": "2026-11-12T12:40:23Z",
    "actor": "Arist12",
    "jobs": [
     {
