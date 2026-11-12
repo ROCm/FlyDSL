@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T03:09:39Z",
+ "updated": "2026-11-12T03:25:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "fix/windows-test-portability",
    "event": "pull_request",
    "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753",
    "created_at": "2026-11-12T02:36:30Z",
-   "updated_at": "2026-11-12T03:06:36Z",
+   "updated_at": "2026-11-12T03:19:00Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T03:06:48Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T03:18:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753/job/130943652431"
     }
    ]
