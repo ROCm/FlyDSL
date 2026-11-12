@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T00:11:53Z",
+ "updated": "2026-11-12T00:13:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "pr/fp8-rowscale-8wave",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add a small-M kernel to the FP8 8-wave GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149",
    "created_at": "2026-11-11T22:40:45Z",
-   "updated_at": "2026-11-11T23:47:38Z",
+   "updated_at": "2026-11-12T00:10:13Z",
    "actor": "Arist12",
    "jobs": [
     {
