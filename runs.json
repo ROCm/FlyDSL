@@ -1,22 +1,65 @@
 {
  "schema": 1,
- "updated": "2026-11-12T14:23:40Z",
+ "updated": "2026-11-12T14:39:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 43230388957,
+   "run_id": 43239023881,
    "pr": 1404,
-   "commit": "441e04f8c0aa74826d84a6fb51d5c808fa570d0d",
+   "commit": "9c296bb4d7def28257658bfe61a8492ea8ae9fa7",
    "branch": "moe/k5p-pr",
    "event": "pull_request",
    "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957",
-   "created_at": "2026-11-12T13:45:44Z",
-   "updated_at": "2026-11-12T14:03:17Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881",
+   "created_at": "2026-11-12T14:36:55Z",
+   "updated_at": "2026-11-12T14:37:10Z",
    "actor": "vlluvia",
    "jobs": []
+  },
+  {
+   "run_id": 43230388957,
+   "pr": null,
+   "commit": "441e04f8c0aa74826d84a6fb51d5c808fa570d0d",
+   "branch": "moe/k5p-pr",
+   "event": "pull_request",
+   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957",
+   "created_at": "2026-11-12T13:45:44Z",
+   "updated_at": "2026-11-12T14:36:57Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-12T14:34:42Z",
+     "completed_at": "2026-11-12T14:36:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691040"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-12T14:34:42Z",
+     "completed_at": "2026-11-12T14:36:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691064"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-12T14:34:42Z",
+     "completed_at": "2026-11-12T14:36:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691104"
+    }
+   ]
   },
   {
    "run_id": 43229359175,
@@ -29,9 +72,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175",
    "created_at": "2026-11-12T13:39:23Z",
-   "updated_at": "2026-11-12T13:56:22Z",
+   "updated_at": "2026-11-12T14:34:42Z",
    "actor": "vlluvia",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:21:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175/job/131244326473"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:34:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175/job/131244326630"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-12T14:21:29Z",
+     "completed_at": "2026-11-12T14:31:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175/job/131244326789"
+    }
+   ]
   },
   {
    "run_id": 43228800235,
@@ -40,13 +111,41 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline (#1402)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235",
    "created_at": "2026-11-12T13:35:43Z",
-   "updated_at": "2026-11-12T13:54:45Z",
+   "updated_at": "2026-11-12T14:28:51Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:28:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058677"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:28:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058721"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:31:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058884"
+    }
+   ]
   },
   {
    "run_id": 43228678355,
@@ -1045,13 +1144,41 @@
    "branch": "fix-split-symlink-install",
    "event": "pull_request",
    "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
    "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-12T13:55:46Z",
+   "updated_at": "2026-11-12T14:25:53Z",
    "actor": "cp2923",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:26:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247381"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:25:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247475"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:26:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247571"
+    }
+   ]
   },
   {
    "run_id": 42980160061,
@@ -2242,52 +2369,6 @@
    "updated_at": "2026-11-09T00:38:01Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 42539218477,
-   "pr": 1380,
-   "commit": "3423ca2321673b7f78ff7ae5a9bccbf0197d489e",
-   "branch": "feat/windows-ci",
-   "event": "pull_request",
-   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477",
-   "created_at": "2026-11-09T00:15:42Z",
-   "updated_at": "2026-11-09T04:03:48Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T02:36:27Z",
-     "completed_at": "2026-11-09T03:23:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943004776"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T00:39:00Z",
-     "completed_at": "2026-11-09T01:09:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943006139"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T00:38:54Z",
-     "completed_at": "2026-11-09T01:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42539218477/job/128943006689",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
