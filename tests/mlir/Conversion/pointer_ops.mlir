@@ -58,6 +58,17 @@ func.func @test_add_offset_dynamic(%ptr: !fly.ptr<f32, global>, %off: i32) {
   return
 }
 
+// A fast-divmod offset, such as a layout stride shared with a divisor, advances by its divisor.
+// CHECK-LABEL: @test_add_offset_fast_divmod
+// CHECK-SAME: (%[[PTR:.*]]: !llvm.ptr<1>, %[[FDM:.*]]: !llvm.struct<(i32, i32, i32)>)
+func.func @test_add_offset_fast_divmod(%ptr: !fly.ptr<f32, global>, %d: !fly.fast_divmod<i32>) {
+  %offset = fly.make_int_tuple(%d) : (!fly.fast_divmod<i32>) -> !fly.int_tuple<?{fdm}>
+  // CHECK: %[[DIVISOR:.*]] = llvm.extractvalue %[[FDM]][0] : !llvm.struct<(i32, i32, i32)>
+  // CHECK: llvm.getelementptr %[[PTR]][%[[DIVISOR]]] : (!llvm.ptr<1>, i32) -> !llvm.ptr<1>, f32
+  %result = fly.add_offset(%ptr, %offset) : (!fly.ptr<f32, global>, !fly.int_tuple<?{fdm}>) -> !fly.ptr<f32, global>
+  return
+}
+
 // -----
 
 // === GetDynShared ===

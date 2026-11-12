@@ -10,6 +10,7 @@ def FlyROCDLExpandOpsPass : Pass<"fly-rocdl-expand-ops"> {
   let summary = "Expand fly_rocdl target specific ops into the ops";
   let dependentDialects = [
     "arith::ArithDialect",
+    "scf::SCFDialect",
     "mlir::fly::FlyDialect"
   ];
 }

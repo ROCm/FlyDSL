@@ -20,13 +20,6 @@ namespace mlir::fly_rocdl {
 
 bool CopyOpCDNA4LdsReadTransposeType::isStatic() const { return true; }
 
-Value CopyOpCDNA4LdsReadTransposeType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                          Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
-}
-
 Attribute CopyOpCDNA4LdsReadTransposeType::getThrLayout() const {
   return FxLayout(FxC(16), FxC(1));
 }
@@ -329,13 +322,6 @@ CopyOpCDNA4GlobalLoadAsyncLDSType::verify(function_ref<InFlightDiagnostic()> emi
 }
 
 bool CopyOpCDNA4GlobalLoadAsyncLDSType::isStatic() const { return true; }
-
-Value CopyOpCDNA4GlobalLoadAsyncLDSType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                            Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
-}
 
 Attribute CopyOpCDNA4GlobalLoadAsyncLDSType::getThrLayout() const {
   return FxLayout(FxC(1), FxC(1));

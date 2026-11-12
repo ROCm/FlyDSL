@@ -7,11 +7,9 @@
 #include "mlir/IR/Value.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include "BindingUtils.h"
 #include "DLTensorAdaptor.h"
-#include "TiledOpTraits.h"
 
 #include "HostObject/host_object.h"
 #include "LlvmConfig/llvm.h"
@@ -57,6 +55,31 @@ struct PyBasis {
   std::vector<int32_t> modes;
 };
 
+bool isPythonRatio(nb::handle value) {
+  return nb::isinstance(value, nb::module_::import_("fractions").attr("Fraction"));
+}
+
+LeafAttr staticIntFromPython(MLIRContext *ctx, nb::handle value) {
+  if (!isPythonRatio(value))
+    return LeafAttr::getStatic(ctx, nb::cast<int64_t>(value));
+  // A Fraction is already reduced with a positive denominator, so the int32
+  // range of its parts is the only representability condition.
+  int32_t numerator, denominator;
+  if (!nb::try_cast(value.attr("numerator"), numerator) ||
+      !nb::try_cast(value.attr("denominator"), denominator))
+    throw std::invalid_argument("ratio is outside the representable range");
+  return LeafAttr::get(ctx, core::Leaf<core::Trait>::getRatio(numerator, denominator));
+}
+
+nb::object staticIntToPython(LeafAttr value) {
+  if (value.isNone())
+    return nb::none();
+  if (value.isRatio())
+    return nb::module_::import_("fractions")
+        .attr("Fraction")(value.getNumerator(), value.getDenominator());
+  return nb::cast(value.getValue());
+}
+
 struct IntTupleAttrBuilder {
   MLIRContext *ctx;
   std::vector<nb::handle> dyncElems{};
@@ -65,8 +88,10 @@ struct IntTupleAttrBuilder {
 
   void clear() { dyncElems.clear(); }
 
-  IntAttr dynamicIntFromValue(nb::handle handle, const char *what) {
-    auto typeName = [&] { return std::string(nb::str(nb::type_name(handle)).c_str()); };
+  /// The leaf a dynamic value binds: an i32 or i64, or, where `fastDivMod`
+  /// allows, the handle of a fast-divmod divisor.
+  LeafAttr dynamicIntFromValue(nb::handle handle, const char *what, bool fastDivMod = false) {
+    auto typeName = [&] { return std::string(nb::str(nb::type_name(handle.type())).c_str()); };
     if (!nb::hasattr(handle, MLIR_PYTHON_CAPI_PTR_ATTR))
       throw std::invalid_argument(std::string(what) +
                                   " must be an i32/i64 MLIR Value, got: " + typeName());
@@ -74,48 +99,64 @@ struct IntTupleAttrBuilder {
     MlirValue mlirVal = mlirPythonCapsuleToValue(capsule.ptr());
     if (mlirValueIsNull(mlirVal))
       throw std::invalid_argument(std::string(what) + " must be an MLIR Value, got: " + typeName());
+    if (auto divisor = dyn_cast<FastDivModType>(unwrap(mlirVal).getType()); divisor && fastDivMod) {
+      dyncElems.push_back(handle);
+      auto leaf = LeafAttr::getDynamic(ctx, divisor.getDivisorType().getWidth());
+      return LeafAttr::get(ctx, leaf.getRef().withFastDivMod());
+    }
     auto intTy = dyn_cast<IntegerType>(unwrap(mlirVal).getType());
-    if (!intTy || (intTy.getWidth() != 32 && intTy.getWidth() != 64))
+    if (!intTy || !intTy.isSignless() || (intTy.getWidth() != 32 && intTy.getWidth() != 64))
       throw std::invalid_argument(std::string(what) +
                                   " must be an i32 or i64 value, got: " + typeName());
     dyncElems.push_back(handle);
-    return IntAttr::getDynamic(ctx, intTy.getWidth());
+    return LeafAttr::getDynamic(ctx, intTy.getWidth());
   }
 
-  IntTupleAttr buildBasisLeaf(const PyBasis &basis) {
+  using Tuple = core::IntTuple<core::Trait>;
+
+  Tuple buildBasisLeaf(const PyBasis &basis) {
+    if (basis.modes.size() > core::kMaxBasisModes)
+      throw std::invalid_argument("Basis exceeds the maximum mode depth");
     if (basis.modes.empty())
       throw std::invalid_argument("Basis must have at least one mode");
     SmallVector<int32_t> modes(basis.modes.begin(), basis.modes.end());
     for (int32_t m : modes) {
-      if (m < 0)
+      if (m < 0 || m > UINT8_MAX)
         throw std::invalid_argument("Basis mode must be non-negative, got " + std::to_string(m));
     }
     // A static coefficient is a python int; a dynamic one is an i32/i64 MLIR Value.
     nb::handle value = basis.value;
-    if (PyLong_Check(value.ptr()))
-      return IntTupleAttr::get(
-          BasisAttr::get(IntAttr::getStatic(ctx, PyLong_AsLong(value.ptr())), modes));
-    return IntTupleAttr::get(
-        BasisAttr::get(dynamicIntFromValue(value, "Basis coefficient"), modes));
+    LeafAttr scale = PyLong_Check(value.ptr()) || isPythonRatio(value)
+                         ? staticIntFromPython(ctx, value)
+                         : dynamicIntFromValue(value, "Basis coefficient");
+    auto leaf = LeafAttr::get(scale, modes);
+    if (!leaf)
+      throw std::invalid_argument("invalid Basis coefficient or modes");
+    return Tuple::fromLeaf(leaf.getRef());
+  }
+
+  Tuple build(nb::handle args) {
+    if (PyTuple_Check(args.ptr())) {
+      SmallVector<Tuple> elements;
+      for (auto item : args)
+        elements.push_back(build(item));
+      return core::make_tuple(elements);
+    }
+    if (PyLong_Check(args.ptr()) || isPythonRatio(args))
+      return Tuple::fromLeaf(staticIntFromPython(ctx, args).getRef());
+    if (args.is_none())
+      return Tuple::fromLeaf(core::Leaf<core::Trait>::getNone());
+    if (nb::isinstance<PyBasis>(args))
+      return buildBasisLeaf(nb::cast<const PyBasis &>(args));
+    return Tuple::fromLeaf(
+        dynamicIntFromValue(args, "Dynamic int_tuple leaf", /*fastDivMod=*/true).getRef());
   }
 
   IntTupleAttr operator()(nb::handle args) {
-    if (PyTuple_Check(args.ptr())) {
-      SmallVector<Attribute> elements;
-      for (auto item : args) {
-        elements.push_back((*this)(item));
-      }
-      return IntTupleAttr::get(ArrayAttr::get(ctx, elements));
-    } else if (PyLong_Check(args.ptr())) {
-      int32_t cInt = PyLong_AsLong(args.ptr());
-      return IntTupleAttr::get(IntAttr::getStatic(ctx, cInt));
-    } else if (args.is_none()) {
-      return IntTupleAttr::getLeafNone(ctx);
-    } else if (nb::isinstance<PyBasis>(args)) {
-      return buildBasisLeaf(nb::cast<const PyBasis &>(args));
-    } else {
-      return IntTupleAttr::get(dynamicIntFromValue(args, "Dynamic int_tuple leaf"));
-    }
+    auto attr = IntTupleAttr::get(ctx, build(args));
+    if (!attr)
+      throw std::invalid_argument("int_tuple exceeds the tree capacity");
+    return attr;
   }
 };
 
@@ -162,7 +203,7 @@ bool has_none(MlirValue int_or_tuple) {
   ::mlir::Value val = unwrap(int_or_tuple);
   ::mlir::Type ty = val.getType();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::IntTupleType>(ty))
-    return ::mlir::fly::intTupleHasNone(t.getAttr());
+    return llvm::any_of(t.getRef().leaves(), [](auto leaf) { return leaf.isNone(); });
   throw std::invalid_argument("has_none() expected IntTupleType");
 }
 
@@ -171,7 +212,7 @@ bool isProfileCongruent(MlirValue lhs, MlirValue rhs) {
   Type rhsTy = unwrap(rhs).getType();
   auto lhsProfile = detail::getProfileAttrFromType(lhsTy);
   auto rhsProfile = detail::getProfileAttrFromType(rhsTy);
-  return intTupleIsCongruent(lhsProfile, rhsProfile);
+  return core::congruent(lhsProfile.getRef(), rhsProfile.getRef());
 }
 
 bool isProfileWeaklyCongruent(MlirValue lhs, MlirValue rhs) {
@@ -179,7 +220,7 @@ bool isProfileWeaklyCongruent(MlirValue lhs, MlirValue rhs) {
   Type rhsTy = unwrap(rhs).getType();
   auto lhsProfile = detail::getProfileAttrFromType(lhsTy);
   auto rhsProfile = detail::getProfileAttrFromType(rhsTy);
-  return intTupleIsWeaklyCongruent(lhsProfile, rhsProfile);
+  return core::weakly_congruent(lhsProfile.getRef(), rhsProfile.getRef());
 }
 
 // Setter accepts either an int (interpreted as a Fly_AddressSpace enum case)
@@ -244,19 +285,36 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
     c.def_prop_ro("is_static", [](PyIntTupleType &self) { return self.toCppType().isStatic(); });
     c.def_prop_ro("get_static_leaf_int", [](PyIntTupleType &self) {
       auto ty = self.toCppType();
-      assert(ty.isLeaf() && ty.isStatic());
-      return ty.getAttr().getLeafAsInt().getValue();
+      if (!ty.isLeaf() || !ty.isStatic() || !ty.getAttr().isLeafInt() ||
+          ty.getAttr().getLeaf().isRatio())
+        throw std::invalid_argument("expected a static integer leaf");
+      return ty.getAttr().getLeaf().getValue();
+    });
+    c.def_prop_ro("is_ratio", [](PyIntTupleType &self) {
+      auto attr = self.toCppType().getAttr();
+      return attr.isLeafInt() && attr.getLeaf().isRatio();
+    });
+    c.def_prop_ro("static_value", [](PyIntTupleType &self) {
+      auto attr = self.toCppType().getAttr();
+      if (!attr.isLeafInt() || !attr.isStatic())
+        throw std::invalid_argument("expected a static scalar leaf");
+      return staticIntToPython(attr.getLeaf());
     });
     c.def_prop_ro("is_leaf_int",
                   [](PyIntTupleType &self) { return self.toCppType().getAttr().isLeafInt(); });
     c.def_prop_ro("is_leaf_basis",
                   [](PyIntTupleType &self) { return self.toCppType().getAttr().isLeafBasis(); });
     c.def_prop_ro("get_leaf_as_basis", [](PyIntTupleType &self) -> MlirType {
-      assert(self.toCppType().getAttr().isLeafBasis());
-      return wrap(BasisType::get(self.toCppType().getAttr().getLeafAsBasis()));
+      if (!self.toCppType().getAttr().isLeafBasis())
+        throw std::invalid_argument("expected a basis leaf");
+      return wrap(BasisType::get(self.toCppType().getAttr().getLeaf()));
     });
     c.def("at", [](PyIntTupleType &self, int32_t idx) -> MlirType {
-      return wrap(self.toCppType().at(idx));
+      IntTupleType ty = self.toCppType();
+      int32_t rank = ty.getAttr().isLeaf() ? 1 : ty.rank();
+      if (idx < 0 || idx >= rank)
+        throw std::invalid_argument("IntTupleType.at: index out of range");
+      return wrap(ty.at(idx));
     });
   }
 };
@@ -272,12 +330,14 @@ struct PyBasisType : PyConcreteType<PyBasisType> {
                   [](PyBasisType &self) { return self.toCppType().getAttr().isStatic(); });
     c.def_prop_ro("value", [](PyBasisType &self) {
       auto basis = self.toCppType().getAttr();
-      assert(basis.isStatic() && "basis coefficient is dynamic; no static value");
-      return cast<IntAttr>(basis.getValue()).getValue();
+      if (!basis.isStatic())
+        throw std::invalid_argument("basis coefficient is dynamic; no static value");
+      return staticIntToPython(basis.getScale());
     });
     c.def_prop_ro("modes", [](PyBasisType &self) {
       auto basis = self.toCppType().getAttr();
-      return std::vector<int32_t>(basis.getModes().begin(), basis.getModes().end());
+      auto modes = basis.getModes();
+      return std::vector<int32_t>(modes.begin(), modes.end());
     });
   }
 };
@@ -288,20 +348,22 @@ struct PyBasisType : PyConcreteType<PyBasisType> {
 struct PyTileType : PyConcreteType<PyTileType> {
   FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::TileType, "TileType");
 
-  static Attribute extractTileModeAttr(nb::handle mode, MLIRContext *ctx) {
+  using Tile = core::Tile<core::Trait>;
+
+  static Tile extractTileMode(nb::handle mode, MLIRContext *ctx) {
     if (mode.is_none())
-      return IntAttr::getNone(ctx);
+      return Tile::getNone();
     if (PyLong_Check(mode.ptr()))
-      return IntAttr::getStatic(ctx, nb::cast<int32_t>(mode));
+      return Tile(staticIntFromPython(ctx, mode).getRef());
     if (PyTuple_Check(mode.ptr())) {
-      SmallVector<Attribute> nested;
+      SmallVector<Tile> nested;
       for (auto item : mode)
-        nested.push_back(extractTileModeAttr(nb::handle(item), ctx));
-      return TileAttr::get(ArrayAttr::get(ctx, nested));
+        nested.push_back(extractTileMode(nb::handle(item), ctx));
+      return Tile::getTuple(nested);
     }
     if (nb::hasattr(mode, MLIR_PYTHON_CAPI_PTR_ATTR)) {
       auto layoutTy = FLYDSL_EXTRACT_TYPE_FROM_NB_HANDLE(::mlir::fly::LayoutType, mode);
-      return layoutTy.getAttr();
+      return Tile(layoutTy.getRef());
     }
     throw std::invalid_argument("TileType.get: expected int, None, tuple, or LayoutType");
   }
@@ -311,17 +373,19 @@ struct PyTileType : PyConcreteType<PyTileType> {
         "get",
         [](nb::object modeOrModes, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
+          Tile tile;
           if (nb::isinstance<nb::list>(modeOrModes)) {
-            SmallVector<Attribute> attrs;
+            SmallVector<Tile> modes;
             for (auto mode : nb::cast<nb::list>(modeOrModes))
-              attrs.push_back(extractTileModeAttr(nb::handle(mode), ctx));
-            auto tileAttr = TileAttr::get(ArrayAttr::get(ctx, attrs));
-            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+              modes.push_back(extractTileMode(nb::handle(mode), ctx));
+            tile = Tile::getTuple(modes);
           } else {
-            auto attr = extractTileModeAttr(modeOrModes, ctx);
-            auto tileAttr = TileAttr::get(attr);
-            return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
+            tile = extractTileMode(modeOrModes, ctx);
           }
+          auto tileAttr = TileAttr::get(ctx, std::move(tile));
+          if (!tileAttr)
+            throw std::invalid_argument("TileType.get: invalid tile");
+          return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
         },
         "modes"_a.none(), nb::kw_only(), "context"_a = nb::none(),
         "Create a TileType from a list of modes or a single mode (leaf tile)");
@@ -332,13 +396,17 @@ struct PyTileType : PyConcreteType<PyTileType> {
       TileType ty = self.toCppType();
       if (idx < 0 || idx >= ty.rank())
         throw std::invalid_argument("TileType.at: index out of range");
-      TileAttr attr = ty.getAttr();
-      Attribute mode = attr.isLeaf() ? attr.getValue() : attr.at(idx);
-      if (auto layoutAttr = dyn_cast<LayoutAttr>(mode))
-        return wrap(LayoutType::get(layoutAttr));
-      if (auto tileAttr = dyn_cast<TileAttr>(mode))
-        return wrap(TileType::get(tileAttr));
-      return wrap(IntTupleType::get(IntTupleAttr::get(mode)));
+      MLIRContext *ctx = ty.getContext();
+      auto &tile = ty.getRef();
+      Tile mode = tile.isLeaf() ? tile : tile.at(idx);
+      if (mode.isLayout())
+        return wrap(LayoutType::get(ctx, mode.getLayout()));
+      if (mode.isNone())
+        return wrap(IntTupleType::get(IntTupleAttr::getLeafNone(ctx)));
+      if (mode.isScalar())
+        return wrap(
+            IntTupleType::get(ctx, core::IntTuple<core::Trait>::fromLeaf(mode.getScalar())));
+      return wrap(TileType::get(ctx, mode));
     });
   }
 };
@@ -359,6 +427,8 @@ struct PyLayoutType : PyConcreteType<PyLayoutType> {
           auto shapeAttr = getIntTupleAttrFromHandle(shape, builder);
           auto strideAttr = getIntTupleAttrFromHandle(stride, builder);
           auto layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
+          if (!layoutAttr)
+            throw std::invalid_argument("LayoutType.get: shape and stride must be congruent");
           return PyLayoutType(context->getRef(), wrap(LayoutType::get(layoutAttr)));
         },
         "shape"_a, "stride"_a, nb::kw_only(), "context"_a = nb::none(),
@@ -473,6 +543,8 @@ struct PySwizzleType : PyConcreteType<PySwizzleType> {
         [](int32_t mask, int32_t base, int32_t shift, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           auto attr = SwizzleAttr::get(ctx, mask, base, shift);
+          if (!attr)
+            throw std::invalid_argument("invalid Swizzle parameters");
           return PySwizzleType(context->getRef(), wrap(SwizzleType::get(attr)));
         },
         "mask"_a, "base"_a, "shift"_a, nb::kw_only(), "context"_a = nb::none(),
@@ -498,6 +570,8 @@ struct PyCoordSwizzleType : PyConcreteType<PyCoordSwizzleType> {
            std::vector<int32_t> modeCol, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           auto attr = CoordSwizzleAttr::get(ctx, mask, baseRow, modeRow, baseCol, modeCol);
+          if (!attr)
+            throw std::invalid_argument("invalid CoordSwizzle parameters");
           return PyCoordSwizzleType(context->getRef(), wrap(CoordSwizzleType::get(attr)));
         },
         "mask"_a, "base_row"_a, "mode_row"_a, "base_col"_a, "mode_col"_a, nb::kw_only(),
@@ -508,14 +582,14 @@ struct PyCoordSwizzleType : PyConcreteType<PyCoordSwizzleType> {
     c.def_prop_ro("base_row",
                   [](PyCoordSwizzleType &self) { return self.toCppType().getAttr().getBaseRow(); });
     c.def_prop_ro("mode_row", [](PyCoordSwizzleType &self) {
-      return std::vector<int32_t>(self.toCppType().getAttr().getModeRow().begin(),
-                                  self.toCppType().getAttr().getModeRow().end());
+      auto modes = self.toCppType().getAttr().getModeRow();
+      return std::vector<int32_t>(modes.begin(), modes.end());
     });
     c.def_prop_ro("base_col",
                   [](PyCoordSwizzleType &self) { return self.toCppType().getAttr().getBaseCol(); });
     c.def_prop_ro("mode_col", [](PyCoordSwizzleType &self) {
-      return std::vector<int32_t>(self.toCppType().getAttr().getModeCol().begin(),
-                                  self.toCppType().getAttr().getModeCol().end());
+      auto modes = self.toCppType().getAttr().getModeCol();
+      return std::vector<int32_t>(modes.begin(), modes.end());
     });
   }
 };
@@ -560,6 +634,9 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
     c.def_prop_ro("address_space", [](PyPointerType &self) -> nb::typed<nb::object, PyAttribute> {
       return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
           .maybeDownCast();
+    });
+    c.def_prop_ro("bit_alignment", [](PyPointerType &self) -> int64_t {
+      return self.toCppType().getAlignment().getBitAlignment();
     });
     c.def_prop_ro("alignment", [](PyPointerType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();
@@ -625,21 +702,22 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           MLIRContext *ctx = unwrap(context.get()->get());
           Type elemType = unwrap(elemTyObj);
           int n = static_cast<int>(shapeEnc.size());
-          auto leaf = [&](int64_t v, bool i32) -> Attribute {
-            if (v < 0)
-              return IntTupleAttr::getLeafDynamic(ctx, i32 ? 32 : 64, static_cast<int32_t>(-v));
-            return IntTupleAttr::getLeafStatic(ctx, v);
+          using Tuple = core::IntTuple<core::Trait>;
+          auto leaf = [&](int64_t v, bool i32) -> Tuple {
+            if (v >= 0)
+              return Tuple::getSInt(v);
+            return Tuple::fromLeaf(core::Leaf<core::Trait>::getDInt(
+                i32 ? core::LogWidth::I32 : core::LogWidth::I64, static_cast<int32_t>(-v)));
           };
-          SmallVector<Attribute> sh(n), st(n);
+          SmallVector<Tuple> sh, st;
           for (int i = 0; i < n; ++i) {
-            sh[i] = leaf(shapeEnc[i], /*i32=*/true);
-            st[i] = leaf(strideEnc[i], use32BitStride);
+            sh.push_back(leaf(shapeEnc[i], /*i32=*/true));
+            st.push_back(leaf(strideEnc[i], use32BitStride));
           }
-          IntTupleAttr shapeAttr =
-              n == 1 ? cast<IntTupleAttr>(sh[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, sh));
-          IntTupleAttr strideAttr =
-              n == 1 ? cast<IntTupleAttr>(st[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, st));
-          LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
+          auto shape = n == 1 ? sh.front() : core::make_tuple(sh);
+          auto stride = n == 1 ? st.front() : core::make_tuple(st);
+          LayoutAttr layoutAttr =
+              LayoutAttr::get(ctx, core::Layout<core::Trait>(std::move(shape), std::move(stride)));
           AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
           AlignAttr alignAttr = AlignAttr::get(ctx, alignment);
           return PyMemRefType(
@@ -664,6 +742,9 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
     c.def_prop_ro("address_space", [](PyMemRefType &self) -> nb::typed<nb::object, PyAttribute> {
       return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
           .maybeDownCast();
+    });
+    c.def_prop_ro("bit_alignment", [](PyMemRefType &self) -> int64_t {
+      return self.toCppType().getAlignment().getBitAlignment();
     });
     c.def_prop_ro("alignment", [](PyMemRefType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();
@@ -847,17 +928,15 @@ struct PyTiledCopyType : PyConcreteType<PyTiledCopyType> {
     });
     c.def_prop_ro("tiled_tv_layout_src", [](PyTiledCopyType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto copyAtom = cast<CopyAtomType>(ty.getCopyAtom());
-      auto result = tiledCopyGetTiledThrValLayoutSrc(copyAtom, ty.getLayoutThrVal().getAttr(),
-                                                     ty.getTileMN().getAttr());
-      return wrap(LayoutType::get(result));
+      if (!ty.isValidRef())
+        throw std::invalid_argument("invalid tiled copy");
+      return wrap(LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_layoutS_TV())));
     });
     c.def_prop_ro("tiled_tv_layout_dst", [](PyTiledCopyType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto copyAtom = cast<CopyAtomType>(ty.getCopyAtom());
-      auto result = tiledCopyGetTiledThrValLayoutDst(copyAtom, ty.getLayoutThrVal().getAttr(),
-                                                     ty.getTileMN().getAttr());
-      return wrap(LayoutType::get(result));
+      if (!ty.isValidRef())
+        throw std::invalid_argument("invalid tiled copy");
+      return wrap(LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_layoutD_TV())));
     });
   }
 };
@@ -879,38 +958,27 @@ struct PyTiledMmaType : PyConcreteType<PyTiledMmaType> {
       return wrap(self.toCppType().getPermutation());
     });
     c.def_prop_ro("tile_size_mnk", [](PyTiledMmaType &self) -> MlirType {
-      auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
-      auto result = tiledMmaGetTileSizeMNK(mmaAtom, ty.getAtomLayout().getAttr(),
-                                           ty.getPermutation().getAttr());
-      return wrap(IntTupleType::get(result));
+      auto tiled = self.toCppType().getRef();
+      auto size =
+          core::make_tuple(tiled.tile_size_mnk(0), tiled.tile_size_mnk(1), tiled.tile_size_mnk(2));
+      return wrap(IntTupleType::get(IntTupleAttr::get(self.toCppType().getContext(), size)));
     });
     c.def_prop_ro("thr_layout_vmnk", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
-      auto result = tiledMmaGetThrLayoutVMNK(mmaAtom, ty.getAtomLayout().getAttr());
-      return wrap(LayoutType::get(result));
+      return wrap(
+          LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_thr_layout_vmnk())));
     });
     c.def_prop_ro("tiled_tv_layout_a", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
-      auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
-                                                 ty.getPermutation().getAttr(), MmaOperand::A);
-      return wrap(LayoutType::get(result));
+      return wrap(LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_layoutA_TV())));
     });
     c.def_prop_ro("tiled_tv_layout_b", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
-      auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
-                                                 ty.getPermutation().getAttr(), MmaOperand::B);
-      return wrap(LayoutType::get(result));
+      return wrap(LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_layoutB_TV())));
     });
     c.def_prop_ro("tiled_tv_layout_c", [](PyTiledMmaType &self) -> MlirType {
       auto ty = self.toCppType();
-      auto mmaAtom = cast<MmaAtomType>(ty.getMmaAtom());
-      auto result = tiledMmaGetTiledThrValLayout(mmaAtom, ty.getAtomLayout().getAttr(),
-                                                 ty.getPermutation().getAttr(), MmaOperand::C);
-      return wrap(LayoutType::get(result));
+      return wrap(LayoutType::get(LayoutAttr::get(ty.getContext(), ty.getRef().get_layoutC_TV())));
     });
   }
 };
@@ -955,6 +1023,32 @@ struct PyCopyOpUniversalAtomicType : PyConcreteType<PyCopyOpUniversalAtomicType>
         "atomic_op"_a, "val_type"_a, "syncscope"_a = std::string(), nb::kw_only(),
         "context"_a = nb::none(),
         "Create a CopyOpUniversalAtomicType with atomic op, value type and sync scope");
+  }
+};
+
+// ---------------------------------------------------------------------------
+// FastDivModType
+// ---------------------------------------------------------------------------
+struct PyFastDivModType : PyConcreteType<PyFastDivModType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::FastDivModType, "FastDivModType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](PyType &divisorTypeObj, DefaultingPyMlirContext context) {
+          auto divisorType = dyn_cast<IntegerType>(unwrap(divisorTypeObj));
+          if (!divisorType || !divisorType.isSignless() ||
+              (divisorType.getWidth() != 32 && divisorType.getWidth() != 64))
+            throw std::invalid_argument("FastDivModType needs an i32 or i64 divisor type");
+          return PyFastDivModType(context->getRef(),
+                                  wrap(FastDivModType::get(divisorType.getContext(), divisorType)));
+        },
+        "divisor_type"_a, nb::kw_only(), "context"_a = nb::none(),
+        "Create the FastDivModType of an i32 or i64 divisor");
+
+    c.def_prop_ro("divisor_type", [](PyFastDivModType &self) -> MlirType {
+      return wrap(self.toCppType().getDivisorType());
+    });
   }
 };
 
@@ -1079,6 +1173,7 @@ NB_MODULE(_mlirDialectsFly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaOpUniversalFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyFastDivModType::bind(m);
 
   m.def(
       "set_llvm_option_bool",
