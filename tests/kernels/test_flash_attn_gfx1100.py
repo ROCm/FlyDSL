@@ -771,6 +771,26 @@ def test_gfx1100_rejects_split_k():
         flydsl_flash_attn_func(inputs.q, inputs.k, inputs.v, causal=False, num_kv_splits=2)
 
 
+def test_gfx1100_rejects_varlen():
+    device = torch.device("cuda")
+    _seed_all(20261029)
+    seqlens = (32, 48)
+    total = sum(seqlens)
+    q, k, v = (torch.randn(total, 4, 64, dtype=torch.float16, device=device) for _ in range(3))
+    cu_seqlens = torch.tensor([0, seqlens[0], total], dtype=torch.int32, device=device)
+    with pytest.raises(NotImplementedError, match="varlen"):
+        flydsl_flash_attn_func(
+            q,
+            k,
+            v,
+            causal=False,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=max(seqlens),
+            cross_seqlen=False,
+        )
+
+
 def test_pick_tile_respects_device_cu_count():
     tile_96 = pick_tile(64, 16, True, 360, num_cu=96)
     tile_84 = pick_tile(64, 16, True, 360, num_cu=84)
@@ -1058,7 +1078,7 @@ def test_small_grid_prefill_matches_reference(dtype, head_dim, causal, batch, nu
     """Few-workgroup prefill tiles (K in LDS, reversed causal order, prefetch)."""
     device = torch.device("cuda")
     bh = batch * num_heads
-    num_cu = flash_attn_interface._device_cu_count(device)
+    num_cu = 2 * flash_attn_interface._dense_light_cu(device)
     tile = pick_tile(head_dim, seq, causal, bh, num_cu=num_cu, dtype_str="bf16" if dtype == torch.bfloat16 else "f16")
     prefetch, _, reverse_q, _ = kernel_schedule(head_dim, seq, seq, causal, bh, num_cu)
     if bh == 1 or causal:
