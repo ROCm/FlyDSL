@@ -1397,7 +1397,7 @@ public:
     patterns.add<RecastIterOpLowering>(typeConverter, context);
     for (auto name : {ApplySwizzleOp::getOperationName(), MakeTiledCopyOp::getOperationName(),
                       MakeTiledMmaOp::getOperationName(), GetCopyAtomOp::getOperationName(),
-                      GetMmaAtomOp::getOperationName()})
+                      GetMmaAtomOp::getOperationName(), AssumeOp::getOperationName()})
       patterns.add<ForwardOperandLowering>(name, typeConverter, context);
     patterns.add<MakeFastDivModOpLowering, FastDivModOpLowering, FastDivModGetDivisorOpLowering>(
         typeConverter, context);

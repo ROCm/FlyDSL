@@ -19,6 +19,8 @@
 #include "flydsl/Dialect/Fly/IR/FlyOps.cpp.inc"
 
 #include <algorithm>
+#include <limits>
+#include <numeric>
 #include <tuple>
 
 using namespace mlir;
@@ -1284,6 +1286,33 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
 
   inferredReturnTypes.push_back(VectorType::get({size.getLeaf().getValue()}, memrefTy.getElemTy()));
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Utility operations
+//===----------------------------------------------------------------------===//
+
+FLY_INFER_RETURN_TYPES(AssumeOp) {
+  auto srcTy = dyn_cast<IntTupleType>(operands[0].getType());
+  if (!srcTy || !srcTy.isLeaf())
+    return emitOptionalError(location, "AssumeOp: expected an int_tuple leaf, got ",
+                             operands[0].getType());
+  core::Leaf<core::Trait> leaf = srcTy.getAttr().getLeaf().getRef();
+  if (!leaf.isDInt() || leaf.hasFastDivMod())
+    return emitOptionalError(location, "AssumeOp: expected a dynamic integer leaf, got ", srcTy);
+  IntegerAttr divbyAttr = properties ? properties.as<Properties *>()->divby : IntegerAttr();
+  int64_t divby = divbyAttr ? divbyAttr.getInt() : 0;
+  if (divby <= 0)
+    return emitOptionalError(location, "AssumeOp: divby must be positive, got ", divby);
+  // A divisibility beyond i32 keeps the assumed one, as the DSL integers do.
+  int64_t div = std::lcm<int64_t>(leaf.divisibility(), divby);
+  if (div > std::numeric_limits<int32_t>::max())
+    div = divby;
+  auto assumed = core::Leaf<core::Trait>::getDInt(leaf.logWidth(), static_cast<int32_t>(div));
+  if (leaf.hasRange())
+    assumed = assumed.withRange(leaf.rangeMin(), leaf.rangeMax());
+  return inferResultType<IntTupleType>(location, context, inferredReturnTypes,
+                                       core::IntTuple<core::Trait>::fromLeaf(assumed));
 }
 
 #undef FLY_INFER_RETURN_TYPES

@@ -585,9 +585,12 @@ def Fly_PrintOp : Fly_Op<"print"> {
   let arguments = (ins StrAttr:$format, Variadic<AnyType>:$values);
 }
 
-def Fly_AssumeOp : Fly_Op<"assume", [Pure]> {
-  let arguments = (ins AnyType:$dst, AnyType:$src);
-  let results = (outs AnyType:$result);
+// `src`, a dynamic integer leaf, known also to be a multiple of `divby`: the
+// result's divisibility is the lcm of both. It emits no code; a false claim is
+// undefined behavior.
+def Fly_AssumeOp : Fly_Op<"assume", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_IntTuple:$src, I32Attr:$divby);
+  let results = (outs Fly_IntTuple:$result);
 }
 
 //===----------------------------------------------------------------------===//

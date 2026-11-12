@@ -349,6 +349,19 @@ func.func @test_int_tuple_mul() -> !fly.int_tuple<(6, 24)> {
   return %result : !fly.int_tuple<(6, 24)>
 }
 
+// An assumed leaf is its source's scalar with the assumed divisibility, which
+// makes the division exact.
+// CHECK-LABEL: @test_int_tuple_div_assumed
+// CHECK-SAME: (%[[I:.*]]: i32)
+func.func @test_int_tuple_div_assumed(%i: i32) -> !fly.int_tuple<?> {
+  %t = fly.make_int_tuple(%i) : (i32) -> !fly.int_tuple<?>
+  %a = fly.assume(%t) {divby = 8 : i32} : (!fly.int_tuple<?>) -> !fly.int_tuple<?{div=8}>
+  %c = fly.static : !fly.int_tuple<8>
+  // CHECK: arith.divsi %[[I]], %{{.*}} exact : i32
+  %q = fly.int_tuple_div(%a, %c) : (!fly.int_tuple<?{div=8}>, !fly.int_tuple<8>) -> !fly.int_tuple<?>
+  return %q : !fly.int_tuple<?>
+}
+
 // -----
 
 // === Layout Algebra: logical_divide ===

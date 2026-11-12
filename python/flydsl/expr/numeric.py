@@ -2,13 +2,14 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import math
 import operator
 from typing import Type
 
 import numpy as np
 
 from .._mlir import ir
-from .._mlir.dialects import arith
+from .._mlir.dialects import arith, fly
 from .._mlir.extras import types as T
 from .meta import dsl_loc_tracing
 from .utils.arith import (
@@ -208,6 +209,60 @@ def _extract_arith(val, signed):
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
 
 
+_DIVISIBILITY_OPS = {
+    operator.add: "add",
+    operator.sub: "sub",
+    operator.mul: "mul",
+    operator.floordiv: "div",
+    operator.mod: "mod",
+    operator.and_: "and",
+    operator.or_: "or",
+    operator.xor: "xor",
+    operator.lshift: "shl",
+    operator.rshift: "shr",
+}
+
+
+def _is_dynamic_int(value):
+    return isinstance(value, Integer) and isinstance(value.value, ir.Value)
+
+
+def _set_divisibility(value, divisibility):
+    if _is_dynamic_int(value) and divisibility > 1:
+        value._divisibility = divisibility
+    return value
+
+
+def _carry_divisibility(params, args):
+    if isinstance(params, Integer) and isinstance(args, Integer):
+        _set_divisibility(params, args.__dict__.get("_divisibility", 1))
+    elif isinstance(params, (list, tuple)) and isinstance(args, (list, tuple)) and len(params) == len(args):
+        for param, arg in zip(params, args):
+            _carry_divisibility(param, arg)
+
+
+def _merge_divisibility(merged, *sources):
+    """A value merged from *sources* (the yields of a dynamic if) is a multiple of their gcd; with one
+    source, *merged* is that value rebuilt and gets its divisibility."""
+    if isinstance(merged, Integer):
+        if sources and all(isinstance(s, Integer) for s in sources):
+            _set_divisibility(merged, math.gcd(*(s.divisibility for s in sources)))
+    elif isinstance(merged, (list, tuple)):
+        for i, item in enumerate(merged):
+            if all(isinstance(s, (list, tuple)) and len(s) == len(merged) for s in sources):
+                _merge_divisibility(item, *(s[i] for s in sources))
+
+
+def _propagate_divisibility(result, op, a, b):
+    name = _DIVISIBILITY_OPS.get(op)
+    if name is None or not _is_dynamic_int(result) or type(result).width not in (32, 64):
+        return result
+    if name == "shr" and not result.signed:
+        name = "lshr"
+    a, b = (fly._DivInt(None, x.divisibility) if _is_dynamic_int(x) else x.value for x in (a, b))
+    return _set_divisibility(result, fly.leaf_divisibility(name, a, b, type(result).width))
+
+
 def _make_binop(op, swap=False):
     """Create a binary-operator closure for Numeric subclasses."""
 
@@ -222,7 +277,8 @@ def _make_binop(op, swap=False):
         lv, rv = _extract_arith(lhs, lhs.signed), _extract_arith(rhs, rhs.signed)
         if swap:
             lv, rv = rv, lv
-        return out_type(op(lv, rv))
+            lhs, rhs = rhs, lhs
+        return _propagate_divisibility(out_type(op(lv, rv)), op, lhs, rhs)
 
     return _apply
 
@@ -390,7 +446,9 @@ class Numeric(metaclass=NumericMeta):
         else:
             exemplar = true_value
         result = ArithValue(cond).select(true_value, false_value)
-        return as_dsl_value(result, exemplar)
+        result = as_dsl_value(result, exemplar)
+        _merge_divisibility(result, true_value, false_value)
+        return result
 
     @classmethod
     def __coerce__(cls, value):
@@ -453,12 +511,14 @@ class Numeric(metaclass=NumericMeta):
         return [type(self).ir_type]
 
     def __cache_signature__(self):
-        return (type(self),)
+        divisibility = self.__dict__.get("_divisibility", 1)
+        return (type(self),) if divisibility == 1 else (type(self), divisibility)
 
     def __neg__(self):
         if isinstance(self.value, (bool, int, float)):
             return type(self)(-self.value)
-        return type(self)(-self.value)
+        result = type(self)(-self.value)
+        return _set_divisibility(result, self.divisibility) if _is_dynamic_int(self) else result
 
     def __pos__(self):
         return self
@@ -677,7 +737,7 @@ def as_numeric(obj):
 
 
 class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i32):
-    def __init__(self, x):
+    def __init__(self, x, *, divisibility=None):
         ty = type(self)
 
         if isinstance(x, (bool, int, float)):
@@ -713,12 +773,33 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
                 # it to *ty*'s width sign-extends or truncates as a C cast would.
                 x_val = _wrap_int(x.value, ty)
         elif isinstance(x, Float):
-            Integer.__init__(self, x.value)
+            Integer.__init__(self, x.value, divisibility=divisibility)
             return
         else:
             raise ValueError(f"{x} to integer conversion is not supported")
 
         super().__init__(x_val)
+        known = x.__dict__.get("_divisibility", 1) if isinstance(x, Integer) else 1
+        if divisibility is not None:
+            if isinstance(divisibility, bool) or not isinstance(divisibility, int) or not 0 < divisibility < 2**31:
+                raise ValueError(f"divisibility must be a positive int32, got {divisibility!r}")
+            if not isinstance(x_val, ir.Value) and x_val % divisibility:
+                raise ValueError(f"{x_val} is not a multiple of {divisibility}")
+            known = math.lcm(known, divisibility)
+            known = known if known < 2**31 else divisibility
+        if known > 1:
+            self._divisibility = known
+
+    @property
+    def divisibility(self) -> int:
+        if not isinstance(self.value, ir.Value):
+            return abs(int(self.value))
+        return self.__dict__.get("_divisibility", 1)
+
+    def __str__(self) -> str:
+        if isinstance(self.value, ir.Value) and self.divisibility > 1:
+            return f"?{{div={self.divisibility}}}"
+        return super().__str__()
 
     def __invert__(self):
         res_type = type(self)

@@ -21,6 +21,7 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
+from ..expr.numeric import _carry_divisibility
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from ..utils.file import atomic_write
@@ -1092,6 +1093,7 @@ class JitFunction:
                         comp_ctx.stream_arg = ir_args[-2] if has_ktrace_buf else ir_args[-1]
                     user_jit_args = jit_args[: len(param_names)]
                     dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
+                    _carry_divisibility(dsl_args, user_jit_args)
                     log().info(f"dsl_args={dsl_args}")
                     named_args = dict(zip(param_names, dsl_args))
                     named_args.update(constexpr_values)

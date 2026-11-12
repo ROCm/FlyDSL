@@ -121,6 +121,30 @@ Python expects one — `int(x)`, `bool(x)`, indexing, a Python `if` — so a DSL
 constant can still drive host-side control flow. A run-time `Numeric` raises if
 forced to a Python value.
 
+### Divisibility of run-time integers
+
+An integer knows a divisor its value always has: `x.divisibility`. For a
+compile-time integer it is the magnitude of the value; for a run-time integer it
+is what tracing could establish, and `1` when nothing is known. `str(x)` shows a
+known divisor of a run-time integer.
+
+```python
+row = fx.thread_idx.x              # row.divisibility == 1
+n = fx.Int32(n, divisibility=16)   # declares n a multiple of 16
+off = row * 256 + (row & 7) * 16   # off.divisibility == 16
+str(off)                           # '?{div=16}'
+```
+
+Run-time integers get their divisibility from:
+
+- arithmetic: `+ - * // %`, `& | ^` and `<< >>` derive it from the operands by
+  the same rules as int_tuple arithmetic, and like int_tuple arithmetic they
+  assume the result does not overflow;
+- integer casts and negation, which keep it, and `select`, a dynamic `if` and a
+  conditional expression, which give the gcd of the alternatives;
+- int_tuple leaves read back as integers (`fx.get_scalar`, `to_py_value()`),
+  which carry the divisibility of the leaf.
+
 ## Type interoperability
 
 A binary operation between two DSL numeric values determines the type that its

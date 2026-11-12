@@ -18,6 +18,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
+from ..expr.numeric import _merge_divisibility
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -792,6 +793,7 @@ class ReplaceIfWithDispatch(Transformer):
         def _emit_branch(fn, block, label):
             with ir.InsertionPoint(block):
                 branch_inputs = _pack_states(state_raw, exemplar)
+                _merge_divisibility(branch_inputs, exemplar)  # the same SSA values as before the if
                 branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, branch_inputs)
                 branch_map = dict(zip(result_names, branch_inputs))
                 branch_values = ReplaceIfWithDispatch._normalize_branch_result(
@@ -801,13 +803,15 @@ class ReplaceIfWithDispatch(Transformer):
                     _unpack_branch_outputs(result_names, branch_values, exemplar, label),
                     loc=capture_user_location(),
                 )
+                return branch_values
 
-        _emit_branch(then_fn, if_op.regions[0].blocks[0], "then-branch")
+        then_values = _emit_branch(then_fn, if_op.regions[0].blocks[0], "then-branch")
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
-        _emit_branch(else_fn, if_op.regions[1].blocks[0], "else-branch")
+        else_values = _emit_branch(else_fn, if_op.regions[1].blocks[0], "else-branch")
 
         final_values = _pack_states(if_op.results, exemplar)
+        _merge_divisibility(final_values, then_values, else_values)
         return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
@@ -1000,15 +1004,19 @@ class ReplaceIfWithDispatch(Transformer):
 
         op = scf.IfOp(cond_i1, yield_types, has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            then_raw = _unpack_branch_outputs(NAME, (then_fn(),), exemplar, "dynamic ifexp then-branch")
+            then_value = then_fn()
+            then_raw = _unpack_branch_outputs(NAME, (then_value,), exemplar, "dynamic ifexp then-branch")
             scf.YieldOp(then_raw, loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            else_raw = _unpack_branch_outputs(NAME, (else_fn(),), exemplar, "dynamic ifexp else-branch")
+            else_value = else_fn()
+            else_raw = _unpack_branch_outputs(NAME, (else_value,), exemplar, "dynamic ifexp else-branch")
             scf.YieldOp(else_raw, loc=capture_user_location())
 
-        return _pack_states(op.results, exemplar)[0]
+        result = _pack_states(op.results, exemplar)[0]
+        _merge_divisibility(result, then_value, else_value)
+        return result
 
 
 @ASTRewriter.register

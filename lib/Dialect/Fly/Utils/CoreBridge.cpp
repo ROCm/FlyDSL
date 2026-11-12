@@ -114,6 +114,16 @@ ValueImporter::ValueImporter(core::EmitContext &ctx) : ctx(ctx) {
 FailureOr<core::IntTuple<EmitOp>> ValueImporter::operator()(TypedValue<IntTupleType> value) {
   const auto &ref = value.getType().getRef();
   Operation *producer = value.getDefiningOp();
+  // An assumed leaf binds the scalar of its source, with the divisibility of its own type.
+  if (auto assume = dyn_cast_if_present<AssumeOp>(producer)) {
+    auto src = (*this)(assume.getSrc());
+    if (failed(src))
+      return failure();
+    auto bindings = core::get_bindings(*src, ctx);
+    if (failed(bindings))
+      return failure();
+    return core::bind(ref, *bindings, ctx);
+  }
   if (ref.isStatic() ||
       !(producer && isa<MakeIntTupleOp, MakeShapeOp, MakeStrideOp, MakeCoordOp>(producer)))
     return bindExtracted(ref, value, ctx);

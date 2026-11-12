@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
-from ..expr.numeric import Index, Integer
+from ..expr.numeric import Index, Integer, _carry_divisibility
 from ..expr.typing import Constexpr, as_ir_value
 from .ast_rewriter import ASTRewriter
 from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
@@ -574,6 +574,7 @@ class KernelFunction:
                         dsl_args[param_name] = construct_from_ir_values(
                             type(value), value, list(block_args[idx : idx + n])
                         )
+                        _carry_divisibility(dsl_args[param_name], value)
                         idx += n
 
                     dsl_args.update(constexpr_values)
