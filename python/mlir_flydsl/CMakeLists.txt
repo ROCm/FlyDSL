@@ -134,14 +134,14 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 # ---------------------------------------------------------------------------
 # Windows: FlyPythonCAPI.dll must also be the single home of the C++ code the
 # Fly extensions call besides the C API (BindingUtils.h: getTypeID, isa/cast):
-# MLIR IR and Support, and the Fly dialects. On Linux the version script below
-# exports it from the archives linked in. A DLL exports only what
+# MLIR IR and Support, the Fly dialects and FlyCore. On Linux the version script
+# below exports it from the archives linked in. A DLL exports only what
 # WINDOWS_EXPORT_ALL_SYMBOLS finds in the target's own objects, never archive
 # members, so those objects become sources. Ninja puts them ahead of the
 # archives on the link line, so the archive copies are never pulled in.
 # ---------------------------------------------------------------------------
 if(WIN32)
-  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect)
+  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect FlyCore)
   if(FLYDSL_HAS_ROCDL)
     list(APPEND _fly_dialect_libs MLIRFlyROCDLDialect)
   endif()
