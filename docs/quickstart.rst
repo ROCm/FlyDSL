@@ -120,7 +120,7 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
            ▼  MlirCompiler.compile()
       ┌──────────────────────────────────────────────────────────┐
       │ A. pre_binary_fragments  (Fly → ROCDL)                   │
-      │    fly-rewrite-func-signature → fly-canonicalize →       │
+      │    fly-canonicalize → fly-rocdl-expand-ops →             │
       │    fly-layout-lowering → fly-int-swizzle-simplify →      │
       │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
       │    fly-promote-regmem-to-vectorssa →                     │
