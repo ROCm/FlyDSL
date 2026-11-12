@@ -57,7 +57,8 @@ def _to_elem_scalar(dtype_str: str, elem_dtype, y):
 
 def _to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
     if const_expr(dtype_str == "bf16"):
-        if const_expr(use_hw_cvt_bf16):
+        # The software path packs bf16 pairs into 32-bit words; a lone element has no pair.
+        if const_expr(use_hw_cvt_bf16 or y.numel == 1):
             return y.to(elem_dtype)
         u = y.bitcast(fx.Uint32)
         upper = u >> 16
@@ -65,8 +66,8 @@ def _to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
         bias = lsb + 0x7FFF
         u_round = y.bitcast(fx.Uint32) + bias
         bf16_bits = u_round >> 16
-        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
-        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
+        even = bf16_bits.shuffle(bf16_bits, list(range(0, y.numel, 2)))
+        odd = bf16_bits.shuffle(bf16_bits, list(range(1, y.numel, 2)))
         odd_sh = odd << 16
         packed = even | odd_sh
         return packed.bitcast(elem_dtype)
