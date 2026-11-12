@@ -889,9 +889,14 @@ def _build_call_spec(sig, args_tuple):
     return tuple(slot_specs)
 
 
-def _call_state_from_spec(call_spec, artifact):
+def _call_params(sig):
+    """``(name, default)`` per launcher parameter, in the ``arg_idx`` order of the call spec."""
+    return tuple((name, param.default) for name, param in sig.parameters.items())
+
+
+def _call_state_from_spec(call_spec, artifact, params=()):
     if not artifact._ktrace_traced:
-        return CallState(call_spec, artifact._get_func_exe())
+        return CallState(call_spec, artifact._get_func_exe(), params=params)
 
     from ..expr import ktrace as _ktrace
 
@@ -900,12 +905,14 @@ def _call_state_from_spec(call_spec, artifact):
     trace_backend = get_ktrace_backend()
     slot_specs = (*call_spec, (-1, ctypes.c_void_p, None))
     presets = {len(call_spec): trace_backend.ensure_buffer().device_ptr}
-    return CallState(slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer)
+    return CallState(
+        slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer, params=params
+    )
 
 
 def _build_call_state(sig, args_tuple, artifact):
     """Build a :class:`CallState` for fast repeated dispatch."""
-    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact)
+    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact, _call_params(sig))
 
 
 def _has_live_device_argument(value) -> bool:
@@ -1281,6 +1288,7 @@ class JitFunction:
         compiled = CompiledFunction(call_state, artifact)
         if call_state is None:
             compiled._call_spec = _build_call_spec(self._sig, tuple(bound.arguments.values()))
+            compiled._call_params = _call_params(self._sig)
         compiled._backend = self._backend_target.backend
         compiled._aot_spec, compiled._aot_error = _prepare_aot_signature(self, bound, artifact)
         return compiled
@@ -1372,6 +1380,7 @@ class CompiledFunction:
     __slots__ = (
         "_call_state",
         "_call_spec",
+        "_call_params",
         "_call_lock",
         "_runtime_ready",
         "_backend",
@@ -1384,6 +1393,7 @@ class CompiledFunction:
     def __init__(self, call_state, keepalive):
         self._call_state = call_state
         self._call_spec = None
+        self._call_params = ()
         self._call_lock = threading.Lock()
         self._runtime_ready = call_state is not None
         self._backend = None
@@ -1402,7 +1412,7 @@ class CompiledFunction:
                     ensure_compile_runtime_pairing_from_env(self._backend)
                     state = self._call_state
                     if state is None:
-                        state = _call_state_from_spec(self._call_spec, self._keepalive)
+                        state = _call_state_from_spec(self._call_spec, self._keepalive, self._call_params)
                         self._call_state = state
                     self._runtime_ready = True
         state = self._call_state
