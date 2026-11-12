@@ -5,12 +5,16 @@
 
 from ..._dispatch import Dispatcher
 from .bitonic_sort import *
+from .bitonic_sort import WarpBitonicSort as _WarpBitonicSort
 from .exchange import *
+from .exchange import WarpExchange as _WarpExchange
 from .load import *
 from .merge_sort import *
+from .merge_sort import WarpMergeSort as _WarpMergeSort
 from .reduce import *
 from .reduce import WarpReduce as _WarpReduce
 from .reduce_batched import *
+from .reduce_batched import WarpReduceBatched as _WarpReduceBatched
 from .scan import *
 from .scan import WarpScan as _WarpScan
 from .store import *
@@ -71,3 +75,28 @@ class WarpScan(_WarpScan):
     __doc__ = _WarpScan.__doc__
 
     _dispatcher = _dispatch
+
+
+class WarpReduceBatched(_WarpReduceBatched):
+    __doc__ = _WarpReduceBatched.__doc__
+
+    _dispatcher = _dispatch
+
+
+class WarpBitonicSort(_WarpBitonicSort):
+    __doc__ = _WarpBitonicSort.__doc__
+
+    _dispatcher = _dispatch
+
+
+class WarpMergeSort(_WarpMergeSort):
+    __doc__ = _WarpMergeSort.__doc__
+
+    _dispatcher = _dispatch
+
+
+class WarpExchange(_WarpExchange):
+    __doc__ = _WarpExchange.__doc__
+
+    _dispatcher = _dispatch
+    _dispatch_class = True

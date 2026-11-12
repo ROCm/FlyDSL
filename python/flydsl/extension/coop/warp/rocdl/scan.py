@@ -1,66 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""ROCDL overrides for the warp-scope collectives.
+"""gfx9 warp scans and logical-warp broadcast."""
 
-Everything here is gfx9-only. ``row_bcast`` and ``wave_shr`` are CDNA DPP
-controls that RDNA dropped in favour of ``row_share`` / ``permlanex16``, which
-is a different sequence rather than a different constant -- and one with much
-less to gain, since LLVM's own rewrite already reaches pure DPP there.
-"""
-
-from ....compiler.backends import current_target
-from ....expr.gpu import lane_id
-from ....expr.numeric import Int32, Integer, Numeric
-from ....expr.rocdl import ds_swizzle, readlane, update_dpp
-from ....expr.typing import ReductionOp
-from .._common import (
+from ....._mlir import ir
+from ....._mlir.dialects import arith, llvm
+from .....expr.gpu import lane_id, num_warp_threads
+from .....expr.numeric import Int32, Integer, Numeric, Uint64
+from .....expr.primitive import inttoptr, ptrtoint
+from .....expr.rocdl import ds_swizzle, readlane
+from .....expr.typing import Pointer, ReductionOp, Vector
+from ..._common import (
     _combine,
     _identity,
+    _normalize_columns,
     _resolve_warp_width,
     _seed,
-    _thread_partial,
+    _shuffle_value,
 )
-from .._values import _as_items
-from . import scan as _universal_scan
-from .reduce import warp_reduce as _portable_warp_reduce
+from ..._values import _flatten_record, _item_dtype, _rebuild_record
+from .. import scan as _universal_scan
+from ._common import (
+    _ALL_ROWS,
+    _ROW_BCAST15,
+    _ROW_BCAST31,
+    _ROW_NEWBCAST,
+    _ROW_SHR,
+    _WAVE_SHR1,
+    _XOR_DPP,
+    _dpp,
+    _dpp_applies,
+    _has_row_newbcast,
+    _swizzle,
+)
 
 __all__ = [
-    "warp_reduce",
-    "warp_sum",
-    "warp_max",
-    "warp_min",
     "warp_inclusive_scan",
     "warp_exclusive_scan",
     "warp_inclusive_sum",
     "warp_exclusive_sum",
     "warp_scan",
     "warp_scan_with_aggregate",
+    "warp_broadcast",
 ]
-
-
-# DPP controls, spelled as the ISA encodes them.
-_ROW_SHR = {1: 0x111, 2: 0x112, 4: 0x114, 8: 0x118}
-_WAVE_SHR1 = 0x138
-_ROW_BCAST15 = 0x142
-_ROW_BCAST31 = 0x143
-_ALL_ROWS = 0xF
-_ALL_BANKS = 0xF
-
-# What a butterfly step of each distance costs. Only the first two and the
-# last are the XOR they stand for: ``quad_perm[1,0,3,2]`` and
-# ``quad_perm[2,3,0,1]`` are XOR by 1 and 2 outright, and rotating a 16-lane
-# row by 8 is XOR by 8 outright. ``row_half_mirror`` (lane ``i`` reads ``7 - i``
-# within each group of 8) is not XOR by 4 -- but by the time a butterfly takes
-# that step every quad already holds one value, so reading *any* lane of the
-# neighbouring quad reads the right one, and the mirror does that.
-_BUTTERFLY_DPP = {1: 0xB1, 2: 0x4E, 4: 0x141, 8: 0x128}
-
-# XOR by 16 crosses the 16-lane rows DPP is built around, and gfx9 has no
-# control that does. ``ds_swizzle_b32`` in its 32-lane mode does: a lane reads
-# ``((lane & and_mask) | or_mask) ^ xor_mask``, and the offset packs the three
-# as ``xor_mask << 10 | or_mask << 5 | and_mask``.
-_SWIZZLE_XOR16 = (16 << 10) | 0x1F
 
 
 def _swizzle_broadcast(width):
@@ -72,203 +54,103 @@ def _swizzle_broadcast(width):
     return ((width - 1) << 5) | (0x1F & ~(width - 1))
 
 
-def _dpp(value, ctrl, row_mask, old):
-    """One DPP move of *value*, with *old* wherever the move reaches nothing.
+# -- moving a lane's value to a whole group ----------------------------------
+#
+# A broadcast moves bits and never combines them, so every value -- whatever its
+# dtype, a Vector, a pointer or a record -- goes through the same sequences one
+# word at a time (32 bits, or 64 where ``v_mov_b64_dpp`` can take the move).
 
-    ``bound_ctrl`` is off, which is what puts *old* there: the hardware's own
-    out-of-range fill writes zero, and zero is the identity of ``ADD`` alone.
-    Every caller passes the identity of the *op* it is folding with, so the
-    lanes a move does not reach drop out of that fold whatever the op is. Turning
-    ``bound_ctrl`` on to save the operand would silently break ``MUL``, ``MAX``
-    and ``MIN``.
+
+def _from_lane(word, k, width):
+    """Every lane of each *width*-lane group (``width >= 2``) reads the group's lane *k*.
+
+    The result goes back to the caller, so the move that produces it must not
+    be one ``GCNDPPCombine`` can fold into whatever consumes it: folded into an
+    integer subtraction it becomes ``v_subrev_u32_dpp``, which gfx942 computes
+    wrongly (``tests/extension/coop/test_warp_rocdl.py`` pins this). Every lane
+    reads inside its own row, so *old* is never read; passing the source as
+    *old* with ``bound_ctrl`` off is what keeps the move a plain
+    ``v_mov_b32_dpp``. The moves that only feed the next move may fold freely.
     """
-    dtype = value.dtype
-    moved = update_dpp(
-        dtype.ir_type,
-        old.ir_value(),
-        value.ir_value(),
-        ctrl,
-        row_mask,
-        _ALL_BANKS,
-        False,
-    )
-    return dtype(moved)
+    if width <= 4:
+        # quad_perm reads within each quad; a pair is half a quad.
+        first = (k, k, k, k) if width == 4 else (k, k, 2 + k, 2 + k)
+        return _dpp(word, sum(lane << (2 * i) for i, lane in enumerate(first)), old=word)
+    if width == 16:
+        return _dpp(word, _ROW_NEWBCAST + k, old=word)
+    if width == 8:
+        # A row holds two groups: broadcast the first group's lane to the whole
+        # row, then the second group's lane over banks 2 and 3 (lanes 8..15).
+        low = _dpp(word, _ROW_NEWBCAST + k, bound_ctrl=True)
+        return _dpp(word, _ROW_NEWBCAST + 8 + k, old=low, bank_mask=0b1100)
+    if k < 16:
+        # Width 32, source in the group's first row: broadcast it inside that
+        # row, then ``row_bcast:15`` carries it up into rows 1 and 3.
+        row = _dpp(word, _ROW_NEWBCAST + k, bound_ctrl=True)
+        return _dpp(row, _ROW_BCAST15, 0b1010, row)
+    # Width 32, source in the group's second row: DPP only carries values up
+    # the wave, so reaching down a row takes three moves. ``ds_swizzle``'s
+    # 32-lane bitmask mode names the lane in one (and_mask 0, or_mask k).
+    return ds_swizzle(word.type, word, Int32(k << 5).ir_value())
 
 
-def _swizzle(value, offset):
-    """One ``ds_swizzle_b32``, which speaks 32-bit integers and nothing else."""
-    dtype = value.dtype
-    raw = value if dtype is Int32 else value.bitcast(Int32)
-    moved = Int32(ds_swizzle(Int32.ir_type, raw.ir_value(), Int32(offset).ir_value()))
-    return moved if dtype is Int32 else moved.bitcast(dtype)
+def _int(bits):
+    return ir.IntegerType.get_signless(bits)
 
 
-def _dpp_applies(value):
-    """Whether the sequences below cover this call, or the portable ones have to.
+def _words(raw, bits, size):
+    """Split *raw* (*bits* wide) into *size*-bit words, padding the last one.
 
-    - **gfx9.** Every control used here -- ``row_bcast``, ``wave_shr``,
-      ``row_ror`` -- is CDNA-only.
-    - **A 32-bit scalar.** ``update_dpp`` and ``ds_swizzle`` both move one
-      32-bit lane value; a narrower type would have to be packed and a wider
-      one split.
+    A value narrower than a word is zero-extended into one. Padding an 8- or
+    16-bit value with poison instead would save the ``v_and``, but bitcasting a
+    vector with a poison lane makes the whole word poison, and ``update.dpp``
+    takes neither a narrow integer nor a packed vector.
     """
-    if not current_target().arch.startswith("gfx9"):
-        return False
-    return isinstance(value, Numeric) and value.dtype.width == 32
+    exact = _int(bits)
+    as_int = raw if raw.type == exact else llvm.bitcast(exact, raw)
+    count = -(-bits // size)
+    if bits != size * count:
+        as_int = arith.extui(_int(size * count), as_int)
+    if count == 1:
+        return [as_int]
+    words = llvm.bitcast(ir.VectorType.get([count], _int(size)), as_int)
+    return [llvm.extractelement(words, Int32(i).ir_value()) for i in range(count)]
 
 
-# -- reduce -----------------------------------------------------------------
+def _join(words, ty, bits):
+    """Inverse of ``_words``: reassemble a value of IR type *ty*."""
+    if len(words) == 1:
+        as_int = words[0]
+    else:
+        size = ir.IntegerType(words[0].type).width
+        packed = llvm.mlir_poison(ir.VectorType.get([len(words)], _int(size)))
+        for i, word in enumerate(words):
+            packed = llvm.insertelement(packed, word, Int32(i).ir_value())
+        as_int = llvm.bitcast(_int(size * len(words)), packed)
+    if as_int.type != _int(bits):
+        as_int = arith.trunci(_int(bits), as_int)
+    return as_int if ty == _int(bits) else llvm.bitcast(ty, as_int)
 
 
-def _wave64_reduce(value, op):
-    """Fold a full 64-lane wave with DPP, then broadcast out of an SGPR.
+def _move(value, move, size):
+    """Apply *move* to every *size*-bit word of *value*, leaf by leaf.
 
-    Requires a commutative *op*, and in a different way from the portable
-    butterfly: ``row_shr`` brings in the value from *below*, and it is folded
-    in as ``_combine(op, acc, moved)`` -- the accumulator on the left. So the
-    total lane 63 accumulates, and that ``readlane`` then broadcasts, is the
-    wave folded in reverse lane order. Every lane agrees on it, unlike the
-    butterfly below; it is simply the mirror image of the lane order a caller
-    would expect. Writing ``_combine(op, moved, acc)`` instead would put it back
-    in order at no cost -- the scan further down uses the same DPP sequence
-    that way -- but the two are indistinguishable for the commutative ops this
-    library accepts, so the flip is left for whoever needs it.
+    Values up to 32 bits always travel as one 32-bit word.
     """
-    neutral = _identity(op, value.dtype)
-
-    acc = value
-    for shift in (1, 2, 4, 8):
-        acc = _combine(op, acc, _dpp(acc, _ROW_SHR[shift], _ALL_ROWS, neutral))
-    # Each 16-lane row now holds its own running fold, so its last lane -- 15,
-    # 31, 47, 63 -- holds that row's total. ``row_bcast15`` hands each of those
-    # to the row above (rows 1 and 3, hence row_mask 0xa) and ``row_bcast31``
-    # hands lane 31 to the upper half (rows 2 and 3, row_mask 0xc), which
-    # leaves lane 63 holding all four rows.
-    acc = _combine(op, acc, _dpp(acc, _ROW_BCAST15, 0xA, neutral))
-    acc = _combine(op, acc, _dpp(acc, _ROW_BCAST31, 0xC, neutral))
-
-    return value.dtype(readlane(value.dtype.ir_type, acc, 63))
-
-
-def _butterfly_reduce(value, op, width):
-    """Fold a group narrower than the wave by XOR distance.
-
-    The butterfly is what a narrow group needs anyway -- there is no lane the
-    whole group can read a total out of the way lane 63 serves a full wave --
-    and every one of its steps stays inside the group, so no step leaves a lane
-    without a source and the identity ``_dpp`` takes is never read. It is
-    passed for the other reason ``_dpp`` gives: it is what lets each move fold
-    into the ``_combine`` that consumes it.
-
-    Requires a commutative *op*, and needs it harder than the portable
-    butterfly does. There, lane 0 at least folds the group in lane order; here
-    the substitutes noted at ``_BUTTERFLY_DPP`` -- ``row_half_mirror`` for
-    XOR 4, ``row_ror:8`` for XOR 8 -- read *a* lane of the neighbouring group
-    rather than the matching one. Those lanes hold the same values as the
-    matching lane but in a different order, which is exactly the thing
-    commutativity makes invisible, so from width 8 up not even lane 0 folds in
-    lane order. Restoring that would mean a different sequence, not a different
-    operand order.
-    """
-    neutral = _identity(op, value.dtype)
-    acc = value
-    offset = 1
-    while offset < width:
-        if offset in _BUTTERFLY_DPP:
-            partner = _dpp(acc, _BUTTERFLY_DPP[offset], _ALL_ROWS, neutral)
-        else:
-            partner = _swizzle(acc, _SWIZZLE_XOR16)
-        acc = _combine(op, acc, partner)
-        offset <<= 1
-    return acc
-
-
-def warp_reduce(
-    value,
-    op,
-    *,
-    width: int | None = None,
-    valid_items: int | Integer | None = None,
-    _dtype=None,
-):
-    """Reduce lane-local values and return the aggregate to every lane.
-
-    All lanes of each logical warp must participate. A final partially populated
-    warp is supported when valid_items gives its active lane count. Invalid lanes
-    skip the binary operator. Empty groups have unspecified results.
-
-    Args:
-        value: This lane's input value. Local items must be nonempty. Reduction folds local items first, then
-            combines lanes in blocked order. Use warp_reduce_batched for independent
-            reductions of register columns.
-        op: ReductionOp or associative binary callable. Operand order follows ascending
-            lanes; reassociation is allowed.
-        width: Compile-time power-of-two logical width, at most the native warp width. None
-            uses the native width.
-        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Only single-item inputs accept this argument; omit it for
-            an item range. Runtime counts must stay in range.
-
-    Returns:
-        The aggregate in every lane of the logical warp, including lanes outside
-        valid_items. Empty groups have unspecified results.
-
-    Examples:
-        # Each group of four lanes reduces independently; every lane gets its aggregate.
-
-        y = fx.coop.warp_reduce(x, fx.ReductionOp.ADD, width=4)
-
-        # Group |      group 0      ||      group 1
-        # Data  | L0 | L1 | L2 | L3 || L4 | L5 | L6 | L7
-        # ------+----+----+----+----++----+----+----+---
-        # x in  | 1  | 2  | 3  | 4  || 5  | 6  | 7  | 8
-        # y out | 10 | 10 | 10 | 10 || 26 | 26 | 26 | 26
-
-        # Array inputs fold all items across participating lanes into one value.
-
-        # Include the first two lanes of each group: L0/L1 and L4/L5. All eight lanes call.
-        partial = fx.coop.warp_reduce(
-            x, fx.ReductionOp.ADD, width=4, valid_items=2
-        )
-        # L0..L3 receive 3; L4..L7 receive 11. valid_items counts contributing lanes in each group.
-
-        # items in L0..L7 are {[1,10], [2,20], [3,30], [4,40],
-        #                        [5,50], [6,60], [7,70], [8,80]}.
-        total = fx.coop.warp_reduce(items, fx.ReductionOp.ADD, width=4)
-        # L0..L3 receive 110; L4..L7 receive 286.
-        # A guarded item range first folds its local items explicitly.
-        local_total = items[0] + items[1]
-        partial_tile = fx.coop.warp_reduce(
-            local_total, fx.ReductionOp.ADD, width=4, valid_items=2
-        )
-        # L0..L3 receive 33; L4..L7 receive 121.
-    """
-    width = _resolve_warp_width(width, "warp_reduce width")
-    if valid_items is not None:
-        return _portable_warp_reduce(value, op, width=width, valid_items=valid_items, _dtype=_dtype)
-    # Dispatch before folding: a partial may itself be an item range, which
-    # the portable entry point would otherwise interpret and reduce again.
-    if not isinstance(op, ReductionOp) or not _dpp_applies(_as_items(value, _dtype)[0]):
-        return _portable_warp_reduce(value, op, width=width, _dtype=_dtype)
-    value = _thread_partial(value, op, _dtype)
-    if width == 64:
-        return _wave64_reduce(value, op)
-    return _butterfly_reduce(value, op, width)
-
-
-def warp_sum(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
-    """``warp_reduce`` with ``ReductionOp.ADD``."""
-    return warp_reduce(value, ReductionOp.ADD, width=width, valid_items=valid_items, _dtype=_dtype)
-
-
-def warp_max(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
-    """``warp_reduce`` with ``ReductionOp.MAX``."""
-    return warp_reduce(value, ReductionOp.MAX, width=width, valid_items=valid_items, _dtype=_dtype)
-
-
-def warp_min(value, *, width: int | None = None, valid_items: int | Integer | None = None, _dtype=None):
-    """``warp_reduce`` with ``ReductionOp.MIN``."""
-    return warp_reduce(value, ReductionOp.MIN, width=width, valid_items=valid_items, _dtype=_dtype)
+    if isinstance(value, Pointer):
+        return type(value)(inttoptr(value.type, _move(ptrtoint(value).to(Uint64), move, size)))
+    if isinstance(value, (tuple, list)):
+        return type(value)(_move(item, move, size) for item in value)
+    if not isinstance(value, (Numeric, Vector)):
+        leaves = [_move(leaf, move, size) for leaf in _flatten_record(value)]
+        return _rebuild_record(_item_dtype(value), leaves, value)
+    raw = value.ir_value()
+    bits = value.dtype.width * (value.numel if isinstance(value, Vector) else 1)
+    words = _words(raw, bits, size if bits > 32 else 32)
+    moved = _join([move(word) for word in words], raw.type, bits)
+    if isinstance(value, Vector):
+        return Vector(moved, shape=value.shape, dtype=value.dtype)
+    return value.dtype(moved)
 
 
 # -- scan -------------------------------------------------------------------
@@ -308,29 +190,34 @@ def _shift_up(inclusive, op, width):
     """Turn an inclusive scan into the exclusive one by moving it up a lane.
 
     ``row_shr:1`` covers a group inside a row and ``wave_shr:1`` one spanning
-    rows; either way the lane that shifted in from nowhere reads nothing, so
-    ``_dpp`` gives it the identity. That lane is the group's first only when the
-    group starts where the row (or the wave) does, so the two widths that sit
-    inside a larger unit -- under 16 lanes, or 32 -- name their own first lane.
+    rows. Each group's first lane takes the identity through a select, never
+    through the move's *old*: the result goes back to the caller, and a move
+    whose *old* is the identity is one ``GCNDPPCombine`` folds into the
+    caller's instruction -- into an integer subtraction as
+    ``v_subrev_u32_dpp``, which gfx942 computes wrongly. The select consumes
+    the move, so nothing downstream can fold it.
     """
     neutral = _identity(op, inclusive.dtype)
     ctrl = _ROW_SHR[1] if width <= 16 else _WAVE_SHR1
-    shifted = _dpp(inclusive, ctrl, _ALL_ROWS, neutral)
-    if width < 16 or width == 32:
-        at_group_start = (lane_id() % width) == 0
-        shifted = at_group_start.select(neutral, shifted)
-    return shifted
+    shifted = _dpp(inclusive, ctrl, _ALL_ROWS, inclusive)
+    at_group_start = (lane_id() % width) == 0
+    return at_group_start.select(neutral, shifted)
 
 
 def _aggregate(inclusive, width):
     """Hand every lane of the group what its last lane holds.
 
     A full wave reads lane 63, which is uniform, so it lifts into an SGPR. A
-    narrower group's last lane differs per group, which is what ``ds_swizzle``
-    in its 32-lane mode names without any address arithmetic.
+    narrower group's last lane differs per group. A pair, a quad and a row
+    (gfx90a+) name it with one DPP control that folds into its consumer;
+    otherwise ``ds_swizzle`` in its 32-lane mode names it without any address
+    arithmetic. Eight lanes would take two DPP moves, which halves the latency
+    of the swizzle but costs more VALU throughput than it saves.
     """
     if width == 64:
         return inclusive.dtype(readlane(inclusive.dtype.ir_type, inclusive, 63))
+    if 2 <= width <= 4 or (width == 16 and _has_row_newbcast()):
+        return inclusive.dtype(_from_lane(inclusive.ir_value(), width - 1, width))
     return _swizzle(inclusive, _swizzle_broadcast(width))
 
 
@@ -539,3 +426,45 @@ def warp_scan_with_aggregate(
     inclusive = _seed(raw, op, init)
     exclusive = _seed(_shift_up(raw, op, width), op, init)
     return inclusive, exclusive, _aggregate(raw, width)
+
+
+def warp_broadcast(
+    value,
+    source_lane: int | Integer,
+    *,
+    width: int | None = None,
+    _dtype=None,
+):
+    width = _resolve_warp_width(width, "warp_broadcast width")
+    # A full wave is left to the portable form, which LLVM already turns into
+    # ``v_readlane_b32`` for a constant lane; a single lane has nothing to move.
+    if width in (1, num_warp_threads()) or not _has_row_newbcast():
+        return _universal_scan.warp_broadcast(value, source_lane, width=width, _dtype=_dtype)
+    value = _normalize_columns(value)
+    if isinstance(source_lane, int):
+        if not 0 <= source_lane < width:
+            raise ValueError("source_lane must be inside the logical warp")
+        # A constant source has a fixed DPP control that names it (or one
+        # ``ds_swizzle`` offset where DPP would need three moves). 64-bit DPP
+        # (``v_mov_b64_dpp``) takes row_newbcast, so wide values move in 64-bit
+        # words; ds_swizzle only speaks 32 bits.
+        size = 32 if width == 32 and source_lane >= 16 else 64
+        return _move(value, lambda word: _from_lane(word, source_lane, width), size)
+    lane = lane_id()
+    source_lane = Int32(source_lane)
+    if width == 2:
+        # Two candidates only: this lane, or its neighbour by quad_perm.
+        own = ((source_lane ^ lane) & 1) == 0
+        return _move(
+            value,
+            lambda word: arith.select(own.ir_value(), word, _dpp(word, _XOR_DPP[1], bound_ctrl=True)),
+            64,
+        )
+    # Each lane may name its own source, so a runtime one keeps
+    # ``ds_bpermute_b32``. A source inside the group needs no bounds check, so
+    # the group base is applied here and the shuffle spans the whole wave.
+    source = (lane & ~(width - 1)) | (source_lane & (width - 1))
+    return _shuffle_value(value, source, num_warp_threads())
+
+
+warp_broadcast.__doc__ = _universal_scan.warp_broadcast.__doc__
