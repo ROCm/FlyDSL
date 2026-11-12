@@ -73,6 +73,16 @@ FailureOr<tdm::Geometry> deriveTdmAtom(AdaptorT adaptor, tdm::Request &request, 
       return emitError() << "index_bits must be 0, 16 or 32, got " << indexBits;
     if (geometry->rank() != tdm::kIndexedRank)
       return emitError() << "an indexed TDM descriptor must be 2D, got rank " << geometry->rank();
+    // The row list is read as coordinates of the global tensor, so the dim it addresses
+    // has to be one the caller can name. `dims` is innermost-first, so the addressed dim
+    // trails; if deriving the descriptor folded several global modes into it, a row index
+    // is no longer any one mode's coordinate and the caller would have to know how the
+    // fold went to write the list correctly.
+    const tdm::Dim &indexedDim = geometry->dims.back();
+    if (indexedDim.modes.size() != 1)
+      return emitError() << "an indexed TDM descriptor addresses rows by global coordinate, so "
+                            "its outer dim must come from a single global mode, but "
+                         << indexedDim.modes.size() << " modes were merged into it";
     // `descriptorShape` is outermost-first, so the row count leads and the row width,
     // which stays the contiguous run, trails.
     int32_t rows = geometry->descriptorShape.front();

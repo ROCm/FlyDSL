@@ -523,6 +523,14 @@ def _partition_index(index, n_warps, warp_id):
     coordinate address a tile and its row list together: ``tAg[None, k]`` and
     ``tAi[None, k]`` step in lockstep.
     """
+    # A tuple already holds exactly one issue's rows, with the values in its type, so
+    # there is nothing to cut: it passes through and the call site writes the same
+    # `tAi[crd]` either way. Keeping the two forms shaped alike is the point -- a
+    # kernel switches between a list it computes and one it knows by swapping the
+    # argument, not by rewriting the copy.
+    if is_index_tuple(index):
+        return index
+
     layout = index.layout
     if layout.rank < 1:
         raise ValueError("tdm_partition: the row list must be tiled before partitioning")
