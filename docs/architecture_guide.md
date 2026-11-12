@@ -184,12 +184,9 @@ Python Function (@flyc.kernel / @flyc.jit)
    ├────────────────────────────────────────────────────────┤
    │ Stage B — binary_prep_fragments  (→ LLVM)              │
    │   rocdl-attach-target{chip=gfxNNN ...}                 │
-   │   convert-scf-to-cf                                    │
-   │   convert-cf-to-llvm                                   │
-   │   gpu-to-llvm{use-bare-pointers-...=true}              │
+   │   func.func(convert-scf-to-cf)                         │
    │   convert-vector-to-llvm                               │
-   │   convert-arith-to-llvm                                │
-   │   convert-func-to-llvm                                 │
+   │   gpu-to-llvm{use-bare-pointers-...=true}              │
    │   reconcile-unrealized-casts                           │
    │   ensure-debug-info-scope-on-llvm-func  (optional)     │
    ├────────────────────────────────────────────────────────┤
@@ -242,13 +239,10 @@ definition for this checkout:
 | # | Pass | Description |
 |---|---|---|
 | 11 | `rocdl-attach-target{chip=gfxNNN ...}` | Attaches `#rocdl.target<chip=gfxNNN>` (plus `fast`/`unsafe-math`/`wave64` options) to the GPU module for codegen. |
-| 12 | `convert-scf-to-cf` | Host-side SCF → ControlFlow. |
-| 13 | `convert-cf-to-llvm` | ControlFlow → LLVM dialect. |
-| 14 | `gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}` | GPU types and host launcher → LLVM. |
-| 15 | `convert-vector-to-llvm` | Vector → LLVM. |
-| 16 | `convert-arith-to-llvm` | Arith → LLVM. |
-| 17 | `convert-func-to-llvm` | Func → LLVM. |
-| 18 | `reconcile-unrealized-casts` | Final cast cleanup. |
+| 12 | `func.func(convert-scf-to-cf)` | Host-side SCF → ControlFlow (GPU module bodies were already converted in #10). |
+| 13 | `convert-vector-to-llvm` | Vector rewrites (e.g. n-D `shape_cast` into insert chains seeded with `ub.poison`) and Vector → LLVM. |
+| 14 | `gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}` | Host launcher → LLVM, plus every loaded dialect's `ConvertToLLVMPatternInterface` patterns (arith, cf, func, ub, ...) for whatever is left, including the ops #13 creates. |
+| 15 | `reconcile-unrealized-casts` | Final cast cleanup. |
 
 When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 `ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` after
@@ -258,7 +252,7 @@ When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 
 | # | Pass | Description |
 |---|---|---|
-| 19 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+| 16 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
 
 `gpu-kernel-outlining` is no longer a pass in the runtime pipeline. Kernel
 outlining happens during Python tracing, when `@flyc.kernel` emits

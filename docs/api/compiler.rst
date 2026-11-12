@@ -65,12 +65,9 @@ On first call, ``@flyc.jit`` runs the following pipeline:
    B. ``binary_prep_fragments`` (→ LLVM):
 
       - ``rocdl-attach-target{chip=gfxNNN ...}``
-      - ``convert-scf-to-cf``
-      - ``convert-cf-to-llvm``
-      - ``gpu-to-llvm{use-bare-pointers-...=true}``
+      - ``func.func(convert-scf-to-cf)``
       - ``convert-vector-to-llvm``
-      - ``convert-arith-to-llvm``
-      - ``convert-func-to-llvm``
+      - ``gpu-to-llvm{use-bare-pointers-...=true}``
       - ``reconcile-unrealized-casts``
       - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
 
