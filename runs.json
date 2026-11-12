@@ -1,8 +1,97 @@
 {
  "schema": 1,
- "updated": "2026-11-12T00:43:21Z",
+ "updated": "2026-11-12T03:09:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43142595753,
+   "pr": 1399,
+   "commit": "0909fcc2738f7a08a16b910e687d21dfc2511267",
+   "branch": "fix/windows-test-portability",
+   "event": "pull_request",
+   "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753",
+   "created_at": "2026-11-12T02:36:30Z",
+   "updated_at": "2026-11-12T03:06:36Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T03:06:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753/job/130943652372"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T03:06:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753/job/130943652373"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T03:06:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43142595753/job/130943652431"
+    }
+   ]
+  },
+  {
+   "run_id": 43137622789,
+   "pr": 1398,
+   "commit": "4a504a7d92935520cf00701d5d80d8a54e0f7267",
+   "branch": "fix/windows-flycore-export",
+   "event": "pull_request",
+   "title": "[Windows] Fix the Fly extension link after the Core rewrite",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43137622789",
+   "created_at": "2026-11-12T01:53:49Z",
+   "updated_at": "2026-11-12T03:07:14Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T02:15:52Z",
+     "completed_at": "2026-11-12T02:38:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43137622789/job/130924473159"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T02:14:53Z",
+     "completed_at": "2026-11-12T02:28:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43137622789/job/130924473175"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T02:15:04Z",
+     "completed_at": "2026-11-12T02:41:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43137622789/job/130924473341",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 43113770129,
    "pr": 1397,
@@ -1917,36 +2006,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 42324769202,
-   "pr": null,
-   "commit": "e3a3e9db2263853021f0bc4dcd47d4657395f3e8",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Pull the published manylinux image tag from ghcr (#1382)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42324769202",
-   "created_at": "2026-11-07T01:34:13Z",
-   "updated_at": "2026-11-07T01:48:39Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 42273897654,
-   "pr": 1251,
-   "commit": "850d25da64af21fe8f48763d10b973750f250347",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr7-interface",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Route flydsl_flash_attn_func to the new gfx950 bf16/f16 kernels (7/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42273897654",
-   "created_at": "2026-11-06T18:47:38Z",
-   "updated_at": "2026-11-06T18:48:19Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
