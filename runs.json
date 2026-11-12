@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-12T14:39:53Z",
+ "updated": "2026-11-12T15:58:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "moe/k5p-pr",
    "event": "pull_request",
    "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881",
    "created_at": "2026-11-12T14:36:55Z",
-   "updated_at": "2026-11-12T14:37:10Z",
+   "updated_at": "2026-11-12T14:56:25Z",
    "actor": "vlluvia",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T15:41:27Z",
+     "completed_at": "2026-11-12T15:50:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094506"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-12T14:56:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094582"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T14:56:53Z",
+     "completed_at": "2026-11-12T15:20:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094764",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 43230388957,
@@ -68,29 +99,29 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175",
    "created_at": "2026-11-12T13:39:23Z",
-   "updated_at": "2026-11-12T14:34:42Z",
+   "updated_at": "2026-11-12T15:55:48Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T14:21:34Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T15:55:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175/job/131244326473"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T14:34:42Z",
-     "completed_at": null,
+     "completed_at": "2026-11-12T14:50:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43229359175/job/131244326630"
     },
     {
@@ -111,39 +142,42 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Drop redundant LLVM lowering passes from the ROCm pipeline (#1402)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235",
    "created_at": "2026-11-12T13:35:43Z",
-   "updated_at": "2026-11-12T14:28:51Z",
+   "updated_at": "2026-11-12T15:22:28Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-12T14:28:51Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T15:11:14Z",
+     "completed_at": "2026-11-12T15:18:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058677"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-12T14:28:51Z",
+     "started_at": "2026-11-12T14:49:34Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058721"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T14:31:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058884"
+     "completed_at": "2026-11-12T15:18:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43228800235/job/131249058884",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1144,29 +1178,32 @@
    "branch": "fix-split-symlink-install",
    "event": "pull_request",
    "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
    "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-12T14:25:53Z",
+   "updated_at": "2026-11-12T15:00:15Z",
    "actor": "cp2923",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-12T14:26:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247381"
+     "completed_at": "2026-11-12T14:50:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247381",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-12T14:25:53Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-12T14:51:03Z",
+     "completed_at": "2026-11-12T15:00:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131247247475"
     },
     {
