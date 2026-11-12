@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-12T06:33:40Z",
+ "updated": "2026-11-12T08:25:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43173331662,
+   "pr": null,
+   "commit": "9b70d465c80b2d0b6b66430154904a3b5c37782f",
+   "branch": "main",
+   "event": "push",
+   "title": "[Windows] Fix the Fly extension link after the Core rewrite (#1398)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662",
+   "created_at": "2026-11-12T07:10:39Z",
+   "updated_at": "2026-11-12T08:01:09Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-12T07:47:45Z",
+     "completed_at": "2026-11-12T07:54:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243451"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-12T07:37:39Z",
+     "completed_at": "2026-11-12T07:42:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243464"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-12T08:00:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243475"
+    }
+   ]
+  },
   {
    "run_id": 43159506062,
    "pr": 1399,
@@ -2085,21 +2128,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42374889390",
    "created_at": "2026-11-07T12:59:39Z",
    "updated_at": "2026-11-07T12:59:39Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 42374394872,
-   "pr": null,
-   "commit": "3469de7cfb7362fed34671df285947ae33580167",
-   "branch": "ext-hadamard-fwht",
-   "event": "pull_request",
-   "title": "[Feature][DSL] Add Fast Walsh-Hadamard Transform (fx.hadamard)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42374394872",
-   "created_at": "2026-11-07T12:52:33Z",
-   "updated_at": "2026-11-07T12:52:33Z",
    "actor": "dimitri91209",
    "jobs": []
   }
