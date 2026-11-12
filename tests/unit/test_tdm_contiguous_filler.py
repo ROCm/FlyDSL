@@ -15,6 +15,12 @@ scale tensor, so every tile_k = 128 config lands here. Its K extent is a kernel
 argument, which reaches the filler's guards as a dynamic `modeExtent` rather
 than through their static arm.
 
+`n_blocks` covers both halves of that tile shape. At 2 the run still has an
+axis to lead with; at 1 the tile is a single element, every mode of it is
+extent one, and coalescing folds the run away entirely, so the filler has to
+rebuild the whole descriptor. That degenerate half is every tile_n <= 128
+config -- ROCm/aiter#7833, where it was rejected outright before #1313.
+
 The same extent-one axis 0 is how TDM transposes: whenever the LDS run does not
 start on the contiguous mode, the box stops before that mode and the mode's
 traversal stays in ITER, one column per issue.
@@ -34,15 +40,15 @@ N_BLOCKS = 2
 KT_ALL = 64
 
 
-def _compile_static():
-    @flyc.kernel(name="tdm_contiguous_filler_static", known_block_size=[32, 1, 1])
+def _compile_static(n_blocks):
+    @flyc.kernel(name=f"tdm_contiguous_filler_static_{n_blocks}", known_block_size=[32, 1, 1])
     def load_scales(arg: fx.Pointer):
-        g = fx.Tensor(fx.make_view(arg, fx.make_layout((N_BLOCKS, KT_ALL), (KT_ALL, 1))))
+        g = fx.Tensor(fx.make_view(arg, fx.make_layout((n_blocks, KT_ALL), (KT_ALL, 1))))
         return fx.rocdl.cdna5.make_tiled_tdm_atom(
             fx.rocdl.TensorLoad(),
             g,
-            fx.make_layout((N_BLOCKS, 1), (1, 1)),
-            (N_BLOCKS, 1),
+            fx.make_layout((n_blocks, 1), (1, 1)),
+            (n_blocks, 1),
             num_warps=1,
         )
 
@@ -53,16 +59,16 @@ def _compile_static():
     flyc.compile(run, flyc.from_c_void_p(fx.Uint8, 0))
 
 
-def _compile_dynamic():
-    @flyc.kernel(name="tdm_contiguous_filler_dynamic", known_block_size=[32, 1, 1])
+def _compile_dynamic(n_blocks):
+    @flyc.kernel(name=f"tdm_contiguous_filler_dynamic_{n_blocks}", known_block_size=[32, 1, 1])
     def load_scales(arg: fx.Pointer, i32_kt: fx.Int32):
         kt = fx.Int64(i32_kt)
-        g = fx.Tensor(fx.make_view(arg, fx.make_layout((N_BLOCKS, kt), (kt, 1))))
+        g = fx.Tensor(fx.make_view(arg, fx.make_layout((n_blocks, kt), (kt, 1))))
         return fx.rocdl.cdna5.make_tiled_tdm_atom(
             fx.rocdl.TensorLoad(),
             g,
-            fx.make_layout((N_BLOCKS, 1), (1, 1)),
-            (N_BLOCKS, 1),
+            fx.make_layout((n_blocks, 1), (1, 1)),
+            (n_blocks, 1),
             num_warps=1,
         )
 
@@ -73,10 +79,11 @@ def _compile_dynamic():
     flyc.compile(run, flyc.from_c_void_p(fx.Uint8, 0), KT_ALL)
 
 
+@pytest.mark.parametrize("n_blocks", [1, 2], ids=["single_element", "two_blocks"])
 @pytest.mark.parametrize("extent", ["static", "dynamic"])
-def test_tile_one_wide_along_contiguous_mode(monkeypatch, extent):
+def test_tile_one_wide_along_contiguous_mode(monkeypatch, extent, n_blocks):
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
-    (_compile_static if extent == "static" else _compile_dynamic)()
+    (_compile_static if extent == "static" else _compile_dynamic)(n_blocks)
 
 
 def _compile_degenerate_mode():
