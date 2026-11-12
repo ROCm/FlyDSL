@@ -612,9 +612,9 @@ def Fly_RegisterPlaceOp : Fly_Op<"register_place"> {
   let arguments = (ins AnyType:$storage, Fly_RegisterClassAttr:$registerClass, I32Attr:$startIdx);
 }
 
-// Internal SSA carrier, not a public scalar register allocation API.
+// Created by register_value for an SSA value, and when placed register memory is promoted to SSA slices.
 def Fly_RegisterValueOp : Fly_Op<"register_value", [SameOperandsAndResultType]> {
-  let summary = "Carry register-memory placement on a promoted SSA slice";
+  let summary = "Place an SSA value at members of an LLVM register class";
   let arguments = (ins AnyType:$value, Fly_RegisterClassAttr:$registerClass, I32Attr:$startIdx,
                        I32Attr:$bitOffset);
   let results = (outs AnyType:$result);

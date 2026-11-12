@@ -4,6 +4,7 @@
 """Implementation of :mod:`flydsl.experimental.register_allocation`."""
 
 from dataclasses import dataclass
+from math import prod
 
 from ...expr.meta import dsl_loc_tracing
 from ...expr.struct import Arena, Storage
@@ -12,6 +13,7 @@ __all__ = [
     "RegisterClass",
     "RegisterAllocator",
     "register_place",
+    "register_value",
 ]
 
 
@@ -49,6 +51,43 @@ class RegisterClass:
         from ..._mlir import ir
 
         return ir.Attribute.parse(f'#fly.register_class<"{self.target}", "{self.name}", {self.register_bits}>')
+
+    def __getitem__(self, registers):
+        """Selects registers of the class for ``register_value``.
+
+        ``cls[a:b](value)`` is ``register_value(value, cls, start_idx=a)`` for
+        a value that fits in registers ``a`` to ``b - 1``; ``cls[n]`` is
+        ``cls[n:n + 1]``::
+
+            bias = reg.rocdl.SGPR32[40](bias)  # s40, at most 32 bits
+            acc = reg.rocdl.VGPR32[64:68](acc)  # v64-v67, at most 128 bits
+
+        Args:
+            registers: A register, or a range of registers with a start and a
+                stop and no step.
+
+        Returns:
+            A function that places its value argument and returns the placed
+            value.
+        """
+        if not isinstance(registers, slice):
+            registers = slice(registers, registers + 1)
+        if registers.start is None or registers.stop is None or registers.step is not None:
+            raise ValueError("a register range takes a start and a stop, and no step")
+        start, stop = registers.start, registers.stop
+
+        def place(value):
+            from ..._mlir import ir
+            from ...expr.typing import as_ir_value
+
+            ty = as_ir_value(value).type
+            bits = ty.element_type.width * prod(ty.shape) if isinstance(ty, ir.VectorType) else ty.width
+            capacity = (stop - start) * self.register_bits
+            if bits > capacity:
+                raise ValueError(f"{self.name}[{start}:{stop}] holds {capacity} bits, but the value has {bits}")
+            return register_value(value, self, start_idx=start)
+
+        return place
 
 
 class RegisterAllocator(Arena):
@@ -187,3 +226,40 @@ def register_place(
     ):
         raise ValueError("register_place requires a register-memory pointer or tensor")
     fly.register_place(value, register_class=register_class.ir_attr(), start_idx=start_idx)
+
+
+@dsl_loc_tracing
+def register_value(
+    value,
+    register_class: RegisterClass,
+    *,
+    start_idx: int,
+):
+    """Places an SSA value at fixed numbers of a register class.
+
+    The value counterpart of ``register_place``: it takes a value, such as a
+    ``Numeric`` or a ``Vector``, instead of register memory, and returns the
+    value with the placement. Only the returned value is placed; keep using it
+    instead of ``value``. The value occupies ``start_idx`` and the registers
+    after it. Target support is checked during lowering.
+
+    Args:
+        value: The value to place.
+        register_class: Register class of the placement.
+        start_idx: Class member index of the first register.
+
+    Returns:
+        The placed value, of the type of ``value``.
+    """
+    from ..._mlir import ir
+    from ..._mlir.dialects import fly
+    from ...expr.typing import as_dsl_value, as_ir_value
+
+    if isinstance(start_idx, bool) or not isinstance(start_idx, int) or not 0 <= start_idx < 2**31:
+        raise ValueError("start_idx must be a nonnegative int32 register class index")
+
+    ir_value = as_ir_value(value)
+    if hasattr(ir_value.type, "address_space"):
+        raise ValueError("register_value requires an SSA value; place register memory with register_place")
+    result = fly.register_value(ir_value, register_class=register_class.ir_attr(), start_idx=start_idx, bit_offset=0)
+    return result if isinstance(value, ir.Value) else as_dsl_value(result, value)
