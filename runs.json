@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-13T12:15:46Z",
+ "updated": "2026-11-13T12:26:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43424742833,
+   "pr": null,
+   "commit": "04f8347bdbf8132a9214476ce0371bfa23100089",
+   "branch": "main",
+   "event": "push",
+   "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH (#1386)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43424742833",
+   "created_at": "2026-11-13T12:23:29Z",
+   "updated_at": "2026-11-13T12:23:43Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 43424387072,
+   "pr": null,
+   "commit": "0a876161f40e2abc971380aabddb3c05f06dc16f",
+   "branch": "main",
+   "event": "push",
+   "title": "[Coop] Cross 16-lane rows with gfx950 permlane swaps in the warp over\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43424387072",
+   "created_at": "2026-11-13T12:20:55Z",
+   "updated_at": "2026-11-13T12:23:30Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 43407531843,
    "pr": 1408,
@@ -2407,67 +2437,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42590913862/job/129177706209"
     }
    ]
-  },
-  {
-   "run_id": 42582084523,
-   "pr": 1386,
-   "commit": "362dd7c9d0e9e3a5b15f28073dd1dbfa895bdb3b",
-   "branch": "drop-arch-env",
-   "event": "pull_request",
-   "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523",
-   "created_at": "2026-11-09T07:52:46Z",
-   "updated_at": "2026-11-09T09:44:42Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T08:50:55Z",
-     "completed_at": "2026-11-09T09:17:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065103770",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T08:50:32Z",
-     "completed_at": "2026-11-09T09:15:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065103891"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T09:17:17Z",
-     "completed_at": "2026-11-09T09:30:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42582084523/job/129065104623"
-    }
-   ]
-  },
-  {
-   "run_id": 42581801474,
-   "pr": null,
-   "commit": "affc0d40881586f1905f3df95b2e3534f062560c",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Label kernel-only pull requests automatically (#1388)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42581801474",
-   "created_at": "2026-11-09T07:50:03Z",
-   "updated_at": "2026-11-09T07:51:24Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
