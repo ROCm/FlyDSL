@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-11-13T06:33:49Z",
+ "updated": "2026-11-13T08:22:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43390001148,
+   "pr": 1399,
+   "commit": "605a977f02853b5d69287ec86afde3923e962491",
+   "branch": "fix/windows-test-portability",
+   "event": "pull_request",
+   "title": "[Tests][Windows] Make the location, perftest and arch-detection tests pass on Windows",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43390001148",
+   "created_at": "2026-11-13T08:01:37Z",
+   "updated_at": "2026-11-13T08:03:37Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 43389992487,
+   "pr": 1380,
+   "commit": "078db31e9a476ff6da0523cecacea176518b7b33",
+   "branch": "feat/windows-ci",
+   "event": "pull_request",
+   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487",
+   "created_at": "2026-11-13T08:01:33Z",
+   "updated_at": "2026-11-13T08:19:29Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 43387962573,
+   "pr": 1406,
+   "commit": "21925efab96d34e8a561003864995c18ec872021",
+   "branch": "pr/enh-coop-warp-permlane-swap",
+   "event": "pull_request",
+   "title": "[Coop] Cross 16-lane rows with gfx950 permlane swaps in the warp over\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573",
+   "created_at": "2026-11-13T07:44:57Z",
+   "updated_at": "2026-11-13T08:12:03Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-13T08:12:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790307"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-13T08:12:53Z",
+     "completed_at": "2026-11-13T08:19:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790358"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-13T08:13:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790398"
+    }
+   ]
+  },
   {
    "run_id": 43363073193,
    "pr": 987,
@@ -2328,113 +2401,6 @@
      "machine": "smci350-rck-g03-f19-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42556429320,
-   "pr": 1313,
-   "commit": "2c902f38db87c4abff46fa816b7cc69de2bd3775",
-   "branch": "pr/feat-core-layout-replacement",
-   "event": "pull_request",
-   "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320",
-   "created_at": "2026-11-09T03:26:37Z",
-   "updated_at": "2026-11-09T06:34:54Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T04:54:47Z",
-     "completed_at": "2026-11-09T05:15:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880657"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T03:40:36Z",
-     "completed_at": "2026-11-09T04:26:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880680",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T03:40:28Z",
-     "completed_at": "2026-11-09T04:04:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42556429320/job/128966880690"
-    }
-   ]
-  },
-  {
-   "run_id": 42555911754,
-   "pr": null,
-   "commit": "392f7de19fcb861b553cf8d7cddf294785579880",
-   "branch": "pr/ci-kernels-labeler",
-   "event": "pull_request",
-   "title": "[CI] Label kernel-only pull requests automatically",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42555911754",
-   "created_at": "2026-11-09T03:21:01Z",
-   "updated_at": "2026-11-09T03:32:01Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42549883558,
-   "pr": null,
-   "commit": "19a53cff1a1b4461d426e33103f93e6bac07fe25",
-   "branch": "pr/feat-core-layout-replacement",
-   "event": "pull_request",
-   "title": "[Core] Replace the Fly layout implementation with the Core library",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558",
-   "created_at": "2026-11-09T02:15:09Z",
-   "updated_at": "2026-11-09T03:26:39Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-09T02:31:21Z",
-     "completed_at": "2026-11-09T03:26:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582031"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T02:33:03Z",
-     "completed_at": "2026-11-09T03:17:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582045",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T02:33:13Z",
-     "completed_at": "2026-11-09T03:11:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42549883558/job/128947582163"
     }
    ]
   }
