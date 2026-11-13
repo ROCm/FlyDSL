@@ -8,6 +8,7 @@ from ._fly_enum_gen import *
 
 from .. import ir as _ir
 from .._mlir_libs._mlirDialectsFly import *
+from .._mlir_libs._mlirDialectsFly import _Basis as _Basis, _DivInt as _DivInt
 
 
 def mma_atom_call_ssa(results_, mma_atom, a, b, c, *, d=None, loc=None, ip=None):
