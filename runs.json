@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-13T13:12:01Z",
+ "updated": "2026-11-13T14:11:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Attach the gpu.module target at creation (#1408)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43427704119",
    "created_at": "2026-11-13T12:44:18Z",
-   "updated_at": "2026-11-13T12:59:28Z",
+   "updated_at": "2026-11-13T14:08:02Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T13:13:29Z",
+     "completed_at": "2026-11-13T13:36:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43427704119/job/131906711655",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T13:24:31Z",
+     "completed_at": "2026-11-13T13:33:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43427704119/job/131906711803"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T13:14:16Z",
+     "completed_at": "2026-11-13T14:08:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43427704119/job/131906711804"
+    }
+   ]
   },
   {
    "run_id": 43426304146,
