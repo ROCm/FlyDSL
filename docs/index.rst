@@ -38,6 +38,7 @@ to GPU/ROCDL.
 
    .. grid-item-card:: Extension
 
+      * :doc:`Quantization codecs <extension/quant>`
       * :doc:`Random number generation <extension/rand>`
 
    .. grid-item-card:: Guides
