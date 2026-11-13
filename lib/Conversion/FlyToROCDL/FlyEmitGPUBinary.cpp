@@ -4,12 +4,14 @@
 #include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
 #ifdef FLYDSL_HAS_LLD_LIBRARY
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
@@ -31,10 +33,7 @@ namespace mlir {
 
 using namespace mlir;
 
-namespace {
-
 #ifdef FLYDSL_HAS_LLD_LIBRARY
-
 // lldMain mutates process-wide driver state; serialize concurrent JIT links
 // (autotune / multi-threaded host compilers in the same process).
 static std::mutex lldMutex;
@@ -50,7 +49,8 @@ static std::mutex lldMutex;
 // `canRunAgain` reports whether LLD's global state survived the call.  A JIT
 // links thousands of times per process, so a false here must abort rather than
 // let the next link run on corrupted state.
-std::optional<std::string> runLLD(StringRef objectPath, StringRef hsacoPath) {
+std::optional<std::string> mlir::fly::linkHsacoInProcess(StringRef objectPath,
+                                                         StringRef hsacoPath) {
   std::lock_guard<std::mutex> lock(lldMutex);
 
   std::string objectPathStr = objectPath.str();
@@ -74,6 +74,12 @@ std::optional<std::string> runLLD(StringRef objectPath, StringRef hsacoPath) {
   return std::nullopt;
 }
 
+#endif // FLYDSL_HAS_LLD_LIBRARY
+
+namespace {
+
+#ifdef FLYDSL_HAS_LLD_LIBRARY
+
 // Link a relocatable AMDGPU ELF into an HSA code object.  The LLD driver API
 // only accepts file paths, so the object round-trips through temporary files
 // exactly as the upstream implementation does; what is saved is the fork/exec
@@ -96,7 +102,7 @@ FailureOr<SmallVector<char, 0>> linkObjectCode(ArrayRef<char> objectCode,
     return emitError() << "failed to create a temporary file for the HSA code object";
   llvm::FileRemover hsacoRemover(hsacoPath);
 
-  if (std::optional<std::string> error = runLLD(objectPath, hsacoPath))
+  if (std::optional<std::string> error = fly::linkHsacoInProcess(objectPath, hsacoPath))
     return emitError() << "in-process lld failed to link the HSA code object: " << *error;
 
   auto hsacoFile = llvm::MemoryBuffer::getFile(hsacoPath, /*IsText=*/false);
@@ -107,12 +113,45 @@ FailureOr<SmallVector<char, 0>> linkObjectCode(ArrayRef<char> objectCode,
   return SmallVector<char, 0>(buffer.begin(), buffer.end());
 }
 
+// Kernel entries of each gpu.module, keyed by module name, recorded before
+// `gpu-module-to-binary` erases the modules.  Upstream builds the
+// `#gpu.kernel_table` only for format=bin/fatbin; at format=isa there is no
+// table, so it is rebuilt here from these entries and the linked ELF.
+using KernelEntries = llvm::StringMap<SmallVector<gpu::KernelMetadataAttr>>;
+
+KernelEntries collectKernelEntries(Operation *op) {
+  KernelEntries entries;
+  op->walk([&](gpu::GPUModuleOp module) {
+    auto &kernels = entries[module.getName()];
+    for (auto funcOp : module.getBody()->getOps<LLVM::LLVMFuncOp>())
+      if (funcOp->getDiscardableAttr("rocdl.kernel"))
+        kernels.push_back(gpu::KernelMetadataAttr::get(funcOp));
+  });
+  return entries;
+}
+
+// Same table ROCDL::getKernelMetadata() attaches for format=fatbin, built from
+// the recorded entries because the gpu.module no longer exists.
+gpu::KernelTableAttr getKernelTable(MLIRContext *context, ArrayRef<gpu::KernelMetadataAttr> entries,
+                                    ArrayRef<char> elfData) {
+  Builder builder(context);
+  std::optional<DenseMap<StringAttr, NamedAttrList>> mdMapOrNull =
+      ROCDL::getAMDHSAKernelsELFMetadata(builder, elfData);
+  SmallVector<gpu::KernelMetadataAttr> kernels;
+  for (gpu::KernelMetadataAttr kernel : entries)
+    kernels.push_back(kernel.appendMetadata(mdMapOrNull
+                                                ? mdMapOrNull->lookup(kernel.getName()).getAttrs()
+                                                : ArrayRef<NamedAttribute>()));
+  return gpu::KernelTableAttr::get(context, kernels);
+}
+
 // Replace every ROCDL assembly object of `binary` with the linked fatbin.
 //
 // Called both after an in-process `gpu-module-to-binary{format=isa}` and after
 // an external mlir-opt that produced Assembly objects: the latter never ran
 // SerializeGPUModuleBase::init() in this process, so initialize AMDGPU MC here.
-LogicalResult compileAssemblyObjects(gpu::BinaryOp binary) {
+// `kernelEntries` is empty in the external case, which leaves no kernel table.
+LogicalResult compileAssemblyObjects(gpu::BinaryOp binary, const KernelEntries &kernelEntries) {
   ROCDL::SerializeGPUModuleBase::init();
 
   ArrayRef<Attribute> objects = binary.getObjectsAttr().getValue();
@@ -140,10 +179,15 @@ LogicalResult compileAssemblyObjects(gpu::BinaryOp binary) {
     if (failed(hsaco))
       return failure();
 
+    gpu::KernelTableAttr kernels = object.getKernels();
+    auto entries = kernelEntries.find(binary.getName());
+    if (entries != kernelEntries.end())
+      kernels = getKernelTable(binary.getContext(), entries->second, *hsaco);
+
     compiled.push_back(gpu::ObjectAttr::get(
         object.getTarget(), gpu::CompilationTarget::Fatbin,
         StringAttr::get(binary.getContext(), StringRef(hsaco->data(), hsaco->size())),
-        object.getProperties(), object.getKernels()));
+        object.getProperties(), kernels));
     changed = true;
   }
 
@@ -173,6 +217,10 @@ public:
     binaryOptions.compilationTarget = "fatbin";
 #endif
 
+#ifdef FLYDSL_HAS_LLD_LIBRARY
+    KernelEntries kernelEntries = collectKernelEntries(op);
+#endif
+
     OpPassManager pm(op->getName());
     pm.addPass(createGpuModuleToBinaryPass(binaryOptions));
     if (failed(runPipeline(pm, op))) {
@@ -182,8 +230,8 @@ public:
 
 #ifdef FLYDSL_HAS_LLD_LIBRARY
     WalkResult walked = op->walk([&](gpu::BinaryOp binary) {
-      return failed(compileAssemblyObjects(binary)) ? WalkResult::interrupt()
-                                                    : WalkResult::advance();
+      return failed(compileAssemblyObjects(binary, kernelEntries)) ? WalkResult::interrupt()
+                                                                   : WalkResult::advance();
     });
     if (walked.wasInterrupted())
       signalPassFailure();

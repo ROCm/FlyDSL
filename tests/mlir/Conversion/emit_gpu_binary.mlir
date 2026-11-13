@@ -10,6 +10,7 @@
 
 // CHECK: gpu.binary @kernels
 // CHECK-SAME: #rocdl.target<chip = "gfx942">
+// CHECK-SAME: kernels = <[#gpu.kernel_metadata<"empty_kernel", !llvm.func<void ()>, metadata = {{.*}}private_segment_fixed_size = 0
 // CHECK-SAME: "\7FELF
 // CHECK-NOT: gpu.module @kernels
 module attributes {gpu.container_module} {

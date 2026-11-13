@@ -11,6 +11,8 @@
 #include "mlir/CAPI/Support.h"
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 
+#include <cstdio>
+
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
 
 void mlirRegisterConvertROCDLFastMathOpsPass(void) { mlir::registerConvertROCDLFastMathOpsPass(); }
@@ -26,6 +28,20 @@ bool flydsl_has_inprocess_lld(void) {
 #else
   return false;
 #endif
+}
+
+bool flydsl_link_hsaco(const char *objectPath, const char *hsacoPath, char *error,
+                       size_t errorSize) {
+#ifdef FLYDSL_HAS_LLD_LIBRARY
+  std::optional<std::string> diag = mlir::fly::linkHsacoInProcess(objectPath, hsacoPath);
+  if (!diag)
+    return true;
+#else
+  std::optional<std::string> diag = "FlyDSL was built without in-process LLD";
+#endif
+  if (error && errorSize)
+    snprintf(error, errorSize, "%s", diag->c_str());
+  return false;
 }
 
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {

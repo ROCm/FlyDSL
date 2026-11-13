@@ -28,7 +28,8 @@ wrong one would leave the run executing the compiler's code with nothing to show
 for it.
 
 The ``.s`` is assembled with the ROCm clang unless ``--clang`` names another,
-and linked with the ROCm ``ld.lld`` as the compiler does.  FlyDSL itself
+and linked with the same linker as the compiler: the in-process LLD FlyDSL
+was built with when it has one, otherwise the ROCm ``ld.lld``.  FlyDSL itself
 assembles with the LLVM it was built with, which is usually newer.  On gfx942
 and gfx950 the ROCm clang still reproduces the compiler's code object byte for
 byte, and ``prepare`` checks that; a dump for gfx11 or later uses directives it
@@ -75,23 +76,44 @@ def _rocm_path() -> Path:
 
 
 def _toolchain(clang: Path = None) -> tuple:
-    """The clang that assembles and the toolkit ``ld.lld`` that links; exits if either is missing."""
+    """The clang that assembles and the toolkit ``ld.lld`` that links; exits if either is missing.
+
+    The linker is None when FlyDSL links in process: the toolkit ``ld.lld`` is
+    then a different LLD and need not exist.
+    """
+    from flydsl.compiler.backends.rocm import HAS_INPROCESS_LLD
+
     rocm = _rocm_path()
     # Resolved: Path("./clang") prints as "clang", which subprocess would look up on PATH.
     clang = clang.expanduser().resolve() if clang else rocm / "llvm" / "bin" / "clang"
-    lld = rocm / "llvm" / "bin" / "ld.lld"
+    lld = None if HAS_INPROCESS_LLD else rocm / "llvm" / "bin" / "ld.lld"
     for tool in (clang, lld):
-        if not tool.is_file():
+        if tool is not None and not tool.is_file():
             sys.exit(f"inject_asm: {tool} is missing")
     return clang, lld
+
+
+def _link_in_process(obj: Path, out: Path) -> None:
+    """Link ``obj`` with the in-process LLD ``fly-emit-gpu-binary`` uses."""
+    import ctypes
+
+    from flydsl.compiler.backends.rocm import BUNDLED_ROCM_PATH, _mlir_capi_lib_name
+
+    lib = ctypes.CDLL(str(BUNDLED_ROCM_PATH.parent / "_mlir_libs" / _mlir_capi_lib_name()))
+    lib.flydsl_link_hsaco.restype = ctypes.c_bool
+    lib.flydsl_link_hsaco.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+    error = ctypes.create_string_buffer(4096)
+    if not lib.flydsl_link_hsaco(os.fsencode(obj), os.fsencode(out), error, len(error)):
+        sys.exit(f"inject_asm: linking {obj} failed:\n{error.value.decode(errors='replace').strip()}")
 
 
 def assemble(asm_path: Path, arch: str, clang: Path = None) -> bytes:
     """Assemble a GCN ``.s`` into a linked HSA code object the way the compiler does.
 
-    gpu-module-to-binary assembles in process and links with ``ld.lld -shared``
-    from the ROCm toolkit.  Here ``clang`` (the ROCm one by default) only
-    assembles and that same ``ld.lld`` links: a clang that links by itself uses
+    The compiler assembles in process and links with its in-process LLD, or
+    with ``ld.lld -shared`` from the ROCm toolkit when it was built without one.
+    Here ``clang`` (the ROCm one by default) only assembles and that same linker
+    links: a clang that links by itself uses
     the lld beside it, which can lay the object out differently even when the code
     is identical.  The triple spells the ``unknown`` environment so it matches the
     ``.amdgcn_target`` MLIR writes into the dump; a ``.s`` dumped for another arch
@@ -101,14 +123,15 @@ def assemble(asm_path: Path, arch: str, clang: Path = None) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         obj, out = Path(tmp) / "patched.o", Path(tmp) / "patched.hsaco"
         asm_only = [clang, "-x", "assembler", "-target", "amdgcn-amd-amdhsa-unknown", f"-mcpu={arch}", "-c"]
-        steps = [
-            ("assembling", [*asm_only, "-o", obj, asm_path]),
-            ("linking", [lld, "-shared", obj, "-o", out]),
-        ]
+        steps = [("assembling", [*asm_only, "-o", obj, asm_path])]
+        if lld is not None:
+            steps.append(("linking", [lld, "-shared", obj, "-o", out]))
         for what, cmd in steps:
             proc = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
             if proc.returncode != 0:
                 sys.exit(f"inject_asm: {what} {asm_path} failed:\n{proc.stderr.strip()}")
+        if lld is None:
+            _link_in_process(obj, out)
         return out.read_bytes()
 
 
