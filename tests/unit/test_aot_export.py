@@ -99,6 +99,17 @@ def axpy(X: fx.Pointer, Y: fx.Pointer, n: fx.Int32, alpha: fx.Float32, stream: f
     _axpy_kernel(X, Y, n, alpha).launch(grid=((n + 255) // 256, 1, 1), block=(256, 1, 1), stream=stream)
 
 
+@flyc.jit
+def axpy_defaults(
+    X: fx.Pointer,
+    Y: fx.Pointer,
+    n: fx.Int32 = fx.Int32(8),
+    alpha: fx.Float32 = 2.5,
+    stream: fx.Stream = fx.Stream(None),
+):
+    _axpy_kernel(X, Y, n, alpha).launch(grid=((n + 255) // 256, 1, 1), block=(256, 1, 1), stream=stream)
+
+
 @flyc.kernel
 def _add_one_kernel(X: fx.Pointer, n: fx.Int32):
     idx = fx.block_idx.x * fx.block_dim.x + fx.thread_idx.x
@@ -620,6 +631,25 @@ class TestExportCompile:
         # A non-null pointer cannot make a CPU tensor safe to execute, even
         # when another test has changed PyTorch's default device to CUDA.
         _aot_view(tensor_add_one_optional, torch.empty(1, device="cpu"), _ptr(1), fx.Stream(None))
+
+    def test_compiled_call_fills_omitted_defaults(self, monkeypatch):
+        from flydsl.compiler import jit_executor
+
+        seen = []
+        slots = ((2, ctypes.c_int32), (3, ctypes.c_float), (4, ctypes.c_void_p))
+
+        def func_exe(packed):
+            seen.append(tuple(ctype.from_address(packed[i]).value for i, ctype in slots))
+
+        monkeypatch.setattr(jit_executor.CompiledArtifact, "_get_func_exe", lambda self: func_exe)
+        # Null pointers defer the dispatch state; live ones build it while compiling.
+        lazy = flyc.compile(axpy_defaults, _ptr(), _ptr(), 4, 0.5)
+        eager = flyc.compile(axpy_defaults, _ptr(1), _ptr(2), 4, 0.5)
+        for compiled in (lazy, eager):
+            compiled(_ptr(1), _ptr(2), 4, 0.5, 5)
+            compiled(_ptr(1), _ptr(2))
+        explicit, omitted = (4, 0.5, 5), (8, 2.5, None)
+        assert seen == [(4, 0.5, None), explicit, omitted, explicit, omitted]
 
     def test_placeholder_detection_does_not_duck_type_user_arguments(self):
         from flydsl.compiler.jit_function import _is_compile_placeholder
