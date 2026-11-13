@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-13T11:07:05Z",
+ "updated": "2026-11-13T11:45:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43407531843",
    "created_at": "2026-11-13T10:13:32Z",
-   "updated_at": "2026-11-13T10:44:34Z",
+   "updated_at": "2026-11-13T11:41:30Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-13T11:37:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43407531843/job/131848389312"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T11:06:58Z",
+     "completed_at": "2026-11-13T11:33:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43407531843/job/131848389392",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T11:06:50Z",
+     "completed_at": "2026-11-13T11:17:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43407531843/job/131848389506"
+    }
+   ]
   },
   {
    "run_id": 43393895459,
@@ -25,11 +56,11 @@
    "branch": "phil/mma-fragment-tile-divisibility",
    "event": "pull_request",
    "title": "[Bugfix] Refuse a tiled-MMA fragment whose view does not tile evenly",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43393895459",
    "created_at": "2026-11-13T08:31:35Z",
-   "updated_at": "2026-11-13T09:18:23Z",
+   "updated_at": "2026-11-13T11:42:36Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -44,10 +75,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-13T09:14:12Z",
-     "completed_at": null,
+     "completed_at": "2026-11-13T11:42:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43393895459/job/131790991518"
     },
     {
@@ -117,11 +148,11 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487",
    "created_at": "2026-11-13T08:01:33Z",
-   "updated_at": "2026-11-13T09:03:55Z",
+   "updated_at": "2026-11-13T11:42:44Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -148,10 +179,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-13T09:03:55Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T11:04:34Z",
+     "completed_at": "2026-11-13T11:37:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196920"
     }
    ]
