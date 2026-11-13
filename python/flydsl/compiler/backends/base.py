@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Sequence, Tuple
 
 if TYPE_CHECKING:
     from .ktrace import KtraceBackend
@@ -113,8 +113,13 @@ class BaseBackend(metaclass=ABCMeta):
         raise NotImplementedError(f"{type(self).__name__} does not support external LLVM codegen")
 
     @abstractmethod
-    def gpu_module_targets(self) -> List[str]:
-        """MLIR target attributes for ``create_gpu_module(..., targets=...)``."""
+    def gpu_module_targets(self, *, compile_hints: dict, link_libs: Sequence[str] = ()) -> List[str]:
+        """Target attributes attached to the ``gpu.module`` when it is created.
+
+        They are the only place the target and its compile options are recorded:
+        passes read the target from the module, and the pipeline attaches none.
+        ``link_libs`` are external bitcode files to link into the device module.
+        """
         ...
 
     # -- cache / fingerprint ---------------------------------------------

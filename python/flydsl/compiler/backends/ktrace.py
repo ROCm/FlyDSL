@@ -36,7 +36,6 @@ class KtraceBackend(Protocol):
         self,
         module: Any,
         *,
-        target_arch: str,
         known_names: dict[str, int],
         blocks: str,
     ) -> None: ...

@@ -88,7 +88,7 @@ def test_target_provider_owns_trace_config_buffer_and_records(monkeypatch):
         def pipeline_fragments(self, *, compile_hints):
             return []
 
-        def gpu_module_targets(self):
+        def gpu_module_targets(self, *, compile_hints, link_libs=()):
             return []
 
         def jit_runtime_lib_basenames(self):
@@ -110,8 +110,7 @@ def test_target_provider_owns_trace_config_buffer_and_records(monkeypatch):
         with ir.Context() as context, ir.Location.unknown(context):
             module = ir.Module.create()
             jit_function._attach_ktrace_config(module, True)
-        assert provider.config["target_arch"] == "sim"
-        assert "capacity_slots" not in provider.config
+        assert set(provider.config) == {"known_names", "blocks"}
         assert provider.buffer_config() == ("sim-buffer", 31)
 
         artifact = type("Artifact", (), {"_ktrace_traced": True, "_ktrace_buffer_config": ("sim-buffer", 31)})()

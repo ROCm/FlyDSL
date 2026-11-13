@@ -58,7 +58,7 @@ def test_registering_extra_backend_does_not_change_default(monkeypatch):
         def pipeline_fragments(self, *, compile_hints):
             return []
 
-        def gpu_module_targets(self):
+        def gpu_module_targets(self, *, compile_hints, link_libs=()):
             return []
 
         def jit_runtime_lib_basenames(self):

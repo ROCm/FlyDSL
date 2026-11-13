@@ -102,12 +102,12 @@ def test_rocm_lower_wpe_rejects_invalid_values(value, error):
     ],
 )
 def test_pipeline_strips_chipset_suffix_but_keeps_llvm_chip(arch, expect_chipset, expect_chip):
-    """convert-gpu-to-rocdl needs bare gfxNNNN; LLVM attach-target keeps full arch."""
+    """convert-gpu-to-rocdl needs bare gfxNNNN; the gpu.module target keeps full arch."""
     backend = RocmBackend(RocmBackend.make_target(arch))
     fragments = backend.pipeline_fragments(compile_hints={})
     joined = ",".join(fragments)
     assert f"convert-gpu-to-rocdl{{chipset={expect_chipset} " in joined
-    assert f"chip={expect_chip}" in joined
+    assert f'chip = "{expect_chip}"' in backend.gpu_module_targets(compile_hints={})[0]
     # Suffix must not leak into the MLIR chipset option.
     assert "chipset=gfx1250-strict" not in joined
 

@@ -178,7 +178,7 @@ class TestCompileHintsPropagation:
     """Test that compile_hints flow through to the compilation pipeline."""
 
     def test_fp_math_reaches_pipeline(self, monkeypatch):
-        """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
+        """Verify fast_fp_math/unsafe_fp_math reach the backend pipeline."""
         from flydsl.compiler.backends import rocm
 
         captured = {}
