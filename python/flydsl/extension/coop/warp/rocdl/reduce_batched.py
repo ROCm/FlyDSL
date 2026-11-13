@@ -39,7 +39,9 @@ tree for these ops.
 
 ``s`` = 16 and 32 cross the rows DPP is confined to; both kinds of node keep one
 LDS move there -- ``ds_swizzle_b32`` xor 16 and the ``ds_bpermute_b32`` LLVM
-emits for xor 32 -- but around fewer selects.
+emits for xor 32 -- but around fewer selects. gfx950 makes either node one
+``v_permlane16_swap`` / ``v_permlane32_swap`` and one combine: the swap hands
+every lane both operands of its node in lane order, so no select is left.
 
 A node whose right subtree holds no batch at all (fewer batches than the tree
 has leaves) only needs its left lanes: one ``row_shl`` move and one combine.
@@ -65,6 +67,8 @@ from ._common import (
     _XOR_DPP,
     _dpp,
     _dpp_applies,
+    _has_permlane_swap,
+    _permlane_swap,
     _swizzle,
 )
 
@@ -113,7 +117,24 @@ def _xor(value, stride, shuffle_width):
     return _shuffle_value(value, stride, shuffle_width, mode="xor")
 
 
+def _crosses_by_swap(stride):
+    """gfx950 crosses rows (16) and halves (32) with ``v_permlane*_swap``, not the LDS pipe."""
+    return stride >= 16 and _has_permlane_swap()
+
+
+def _merge_swapped(op, left, right, stride):
+    """One swap hands every lane both operands of its node, lower lane first.
+
+    A left lane keeps its ``left`` and gains its partner's, a right lane keeps
+    its ``right`` and gains its partner's -- exactly the pairs the node folds,
+    already in lane order, so there is nothing to select before or after.
+    """
+    return _combine(op, *_permlane_swap(left, right, stride))
+
+
 def _merge_directional(op, left, right, stride, is_left, shuffle_width):
+    if _crosses_by_swap(stride):
+        return _merge_swapped(op, left, right, stride)
     if stride <= 8:
         lower = _combine(op, left, _from_above(left, stride))
         upper = _combine(op, _from_below(right, stride), right)
@@ -125,12 +146,16 @@ def _merge_directional(op, left, right, stride, is_left, shuffle_width):
 
 
 def _merge_commutative(op, left, right, stride, is_left, shuffle_width):
+    if _crosses_by_swap(stride):
+        return _merge_swapped(op, left, right, stride)
     kept = _select_value(is_left, left, right)
     return _combine(op, kept, _xor(_select_value(is_left, right, left), stride, shuffle_width))
 
 
 def _merge_left(op, left, stride, shuffle_width):
     """A node with no right batches: only its left lanes own anything."""
+    if _crosses_by_swap(stride):
+        return _merge_swapped(op, left, left, stride)
     if stride <= 8:
         return _combine(op, left, _from_above(left, stride))
     return _combine(op, left, _xor(left, stride, shuffle_width))

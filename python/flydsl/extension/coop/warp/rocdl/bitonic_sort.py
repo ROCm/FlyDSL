@@ -15,7 +15,9 @@ computed:
   single DPP moves (``quad_perm[1,0,3,2]``, ``quad_perm[2,3,0,1]``,
   ``row_ror:8``) and xor 4 is two (``row_half_mirror`` is xor 7 and
   ``quad_perm[3,2,1,0]`` xor 3). Only xor 16 (``ds_swizzle``) and xor 32
-  (``ds_bpermute``) still cross a 16-lane row and stay on the LDS pipe.
+  (``ds_bpermute``) still cross a 16-lane row and stay on the LDS pipe --
+  except on gfx950, where they are a ``v_permlane16_swap`` /
+  ``v_permlane32_swap`` and one select.
 - **No validity when there is none.** With ``valid_items=None`` and a
   power-of-two item count every slot is valid, and the portable validity word
   -- shuffled and compared at every step -- is dropped altogether.
@@ -41,7 +43,17 @@ from ..._common import _resolve_warp_width, _validate_valid_items
 from ..._sorting import _before, _pack, _prepare, _unpack
 from ..._values import _is_items
 from ..bitonic_sort import warp_bitonic_sort as _portable_warp_bitonic_sort
-from ._common import _QUAD_REVERSE, _ROW_HALF_MIRROR, _SWIZZLE_XOR16, _XOR_DPP, _dpp, _is_gfx9, _swizzle
+from ._common import (
+    _QUAD_REVERSE,
+    _ROW_HALF_MIRROR,
+    _SWIZZLE_XOR16,
+    _XOR_DPP,
+    _dpp,
+    _has_permlane_swap,
+    _is_gfx9,
+    _permlane_swap,
+    _swizzle,
+)
 
 __all__ = ["warp_bitonic_sort"]
 
@@ -62,6 +74,11 @@ def _xor(value, distance):
         return _move(value, _XOR_DPP[distance])
     if distance == 4:
         return _move(_move(value, _ROW_HALF_MIRROR), _QUAD_REVERSE)
+    if distance >= 16 and _has_permlane_swap():
+        # gfx950 crosses rows and halves in the VALU: the swap hands every lane
+        # both values of its pair, and the lane keeps the one that is not its own.
+        from_lower, from_upper = _permlane_swap(value, value, distance)
+        return ((lane_id() & distance) == 0).select(from_upper, from_lower)
     if distance == 16:
         return _swizzle(value, _SWIZZLE_XOR16)
     return value.dtype(shuffle_xor(value, distance, 64))

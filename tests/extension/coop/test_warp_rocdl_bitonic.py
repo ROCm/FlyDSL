@@ -396,6 +396,14 @@ def _lds(isa):
     return sum(line.count(needle) for line in isa.splitlines() for needle in CROSS_ROW_MOVES)
 
 
+def _swaps(isa):
+    return sum(line.count(needle) for line in isa.splitlines() for needle in PERMLANE_SWAPS)
+
+
+# gfx950 crosses 16-lane rows with these instead of the LDS pipe.
+PERMLANE_SWAPS = ("v_permlane16_swap_b32", "v_permlane32_swap_b32")
+
+
 def _sorter(ns, width):
     return lambda ks, ps: ns.warp_bitonic_sort(ks, ps, width=width)
 
@@ -407,9 +415,9 @@ def _sorter(ns, width):
 @pytest.mark.parametrize(
     "width,count,pairs,expected",
     [
-        # Per moved value: xor 16 -> ds_swizzle, xor 32 -> ds_bpermute (gfx950:
-        # v_permlane32_swap); the rest is DPP. Per item of a full wave: d16 at
-        # spans 32/64/128, d32 at 64/128.
+        # Per moved value: xor 16 -> ds_swizzle, xor 32 -> ds_bpermute (both a
+        # v_permlane*_swap on gfx950); the rest is DPP. Per item of a full
+        # wave: d16 at spans 32/64/128, d32 at 64/128.
         (64, 2, False, 10),
         # Inside a row, payloads move by DPP too.
         (16, 2, True, 0),
@@ -418,6 +426,8 @@ def _sorter(ns, width):
 def test_moves_leave_the_lds_pipe(width, count, pairs, expected, tmp_path):
     fast = _isa(_sorter(fx.coop, width), count, pairs=pairs, tmp_path=tmp_path)
     assert _lds(fast) == expected, "the DPP network did not take"
+    if current_target().arch.startswith("gfx950"):
+        assert _swaps(fast) == expected, "a cross-row move reached LDS"
     assert "v_min_i32_dpp" in fast and "v_max_i32_dpp" in fast, "the move did not fold into min/max"
 
 

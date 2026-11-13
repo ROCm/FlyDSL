@@ -202,6 +202,8 @@ def _cross_lane(isa):
     lines = [line for line in lines if line and not line.startswith((";", "."))]
     count = {op: sum(line.startswith(op + " ") for line in lines) for op in ("ds_swizzle_b32", "ds_bpermute_b32")}
     count["ds_permute_b32"] = sum(line.startswith("ds_permute_b32 ") for line in lines)
+    for op in ("v_permlane16_swap_b32", "v_permlane32_swap_b32"):
+        count[op] = sum(line.startswith(op) for line in lines)
     count["dpp"] = sum(bool(_DPP.search(line)) for line in lines)
     count["lds"] = count["ds_swizzle_b32"] + count["ds_bpermute_b32"] + count["ds_permute_b32"]
     return count
@@ -215,12 +217,17 @@ def test_exchange_is_the_butterfly(tmp_path):
     """``width * min(log2 width, 4)`` DPP moves, and ``width / 2`` LDS-pipe moves per cross-row stage.
 
     Stages 1..8 stay inside a 16-lane row; 16 is ``ds_swizzle`` SWAP16 and 32
-    the one ``ds_bpermute`` stage. A full wave takes every one of them.
+    the one ``ds_bpermute`` stage (on gfx950 one ``v_permlane16_swap`` /
+    ``v_permlane32_swap`` per pair). A full wave takes every one of them.
     """
     width = 64
     P = fx.coop.WarpExchange[fx.Int32, width, width, SHUFFLE]
     count = _cross_lane(_isa(lambda v: P.blocked_to_striped(fx.Vector.from_elements(v)), width, tmp_path=tmp_path))
     assert count["dpp"] == width * 4
+    if current_target().arch.startswith("gfx950"):
+        assert count["lds"] == 0
+        assert count["v_permlane16_swap_b32"] == count["v_permlane32_swap_b32"] == width // 2
+        return
     assert count["ds_swizzle_b32"] == width // 2
     assert count["ds_bpermute_b32"] == width // 2
     assert count["ds_permute_b32"] == 0

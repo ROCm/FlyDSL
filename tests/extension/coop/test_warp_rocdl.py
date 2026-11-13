@@ -57,6 +57,14 @@ portable = fx.coop.universal
 CROSS_LANE_LDS = ("ds_swizzle_b32", "ds_bpermute_b32", "ds_permute_b32")
 
 
+def _swaps_cross_rows():
+    """gfx950 crosses 16-lane rows with ``v_permlane16_swap`` / ``v_permlane32_swap``, in the VALU."""
+    return current_target().arch.startswith("gfx950")
+
+
+PERMLANE_SWAPS = ("v_permlane16_swap_b32", "v_permlane32_swap_b32")
+
+
 def _is_gfx9():
     return current_target().arch.startswith("gfx9")
 
@@ -311,7 +319,8 @@ def test_the_fold_stays_out_of_lds(width, tmp_path):
 
     The one exception is a 32-lane reduce. Its last butterfly step is XOR by 16,
     which crosses the 16-lane rows DPP is built around, and gfx9 has no control
-    for that — ``ds_swizzle_b32`` is the cheapest instruction that does it. The
+    for that — ``ds_swizzle_b32`` is the cheapest instruction that does it, and
+    on gfx950 ``v_permlane16_swap_b32`` keeps even that step in the VALU. The
     scans reach across the same boundary with ``row_bcast:15`` instead, because
     they only ever carry a value upwards.
     """
@@ -323,8 +332,10 @@ def test_the_fold_stays_out_of_lds(width, tmp_path):
 
     isa = _isa(call, torch.float32, tmp_path=tmp_path)
 
-    expected_lds = 1 if width == 32 else 0
+    cross_row = 1 if width == 32 else 0
+    expected_lds, expected_swaps = (0, cross_row) if _swaps_cross_rows() else (cross_row, 0)
     assert _count(isa, *CROSS_LANE_LDS) == expected_lds, "the DPP sequence did not take"
+    assert _count(isa, *PERMLANE_SWAPS) == expected_swaps
 
 
 @pytest.mark.l2_device

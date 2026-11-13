@@ -6,7 +6,7 @@
 from ....._mlir.dialects import llvm
 from .....compiler.backends import current_target
 from .....expr.numeric import Int32, Numeric
-from .....expr.rocdl import ds_swizzle, update_dpp
+from .....expr.rocdl import ds_swizzle, permlane16_swap, permlane32_swap, update_dpp
 
 # DPP controls, spelled as the ISA encodes them.
 #
@@ -84,6 +84,36 @@ def _swizzle(value, offset):
     raw = value if dtype is Int32 else value.bitcast(Int32)
     moved = Int32(ds_swizzle(Int32.ir_type, raw.ir_value(), Int32(offset).ir_value()))
     return moved if dtype is Int32 else moved.bitcast(dtype)
+
+
+def _has_permlane_swap():
+    """``v_permlane16_swap_b32`` / ``v_permlane32_swap_b32``: gfx950's VALU moves across rows."""
+    return current_target().arch.startswith("gfx950")
+
+
+_PERMLANE_SWAP = {16: permlane16_swap, 32: permlane32_swap}
+
+
+def _permlane_swap(lower, upper, half):
+    """One ``v_permlane{half}_swap_b32``: ``(from_lower, from_upper)`` of two 32-bit ``Numeric`` values.
+
+    Each ``2 * half``-lane group is a lower and an upper half, and the swap
+    trades lane ``i`` of one half with lane ``i`` of the other: the lower
+    half's lanes see *lower*'s pair, the upper half's lanes *upper*'s. So in
+    every lane ``from_lower`` is that value at the lane's position in the lower
+    half and ``from_upper`` at its position in the upper half -- a lower lane
+    keeps its own *lower* and gains its partner's, an upper lane keeps its own
+    *upper* and gains its partner's. It is one VALU instruction with no LDS
+    round trip, and it moves both directions at once.
+    """
+    dtype = lower.dtype
+    words = [v if dtype is Int32 else v.bitcast(Int32) for v in (lower, upper)]
+    i32 = Int32.ir_type
+    pair = _PERMLANE_SWAP[half](
+        llvm.StructType.get_literal([i32, i32]), words[0].ir_value(), words[1].ir_value(), False, False
+    )
+    moved = [Int32(llvm.extractvalue(i32, pair, [i])) for i in (0, 1)]
+    return tuple(m if dtype is Int32 else m.bitcast(dtype) for m in moved)
 
 
 def _dpp_applies(value):
