@@ -130,7 +130,6 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │
-      │    rocdl-attach-target{chip=gfxNNN} →                    │
       │    func.func(convert-scf-to-cf) →                        │
       │    convert-vector-to-llvm → gpu-to-llvm →                │
       │    reconcile-unrealized-casts                            │

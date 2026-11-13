@@ -52,7 +52,6 @@ from .kernel_function import (
     get_gpu_module_body,
     merge_compile_hints,
 )
-from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
     JitArgument,
     c_abi_spec,
@@ -576,11 +575,6 @@ class MlirCompiler:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
-        if link_libs:
-            link_opt = _format_link_lib_options(link_libs)
-            cfg.fragments, found = _append_link_lib_options_to_attach_targets(cfg.fragments, link_opt)
-            if not found:
-                raise RuntimeError("link_libs specified but no attach-target fragment found in pipeline")
         return asm, cfg
 
     @classmethod
@@ -1074,7 +1068,8 @@ class JitFunction:
 
         with ir.InsertionPoint(module.body), loc:
             backend = get_backend()
-            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+            compile_hints = CompilationContext.get_compile_hints()
+            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets(compile_hints=compile_hints))
 
             func_op = func.FuncOp(self.func.__name__, (ir_types, []))
             func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1113,10 +1108,11 @@ class JitFunction:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
+        targets = backend.gpu_module_targets(compile_hints=compile_hints, link_libs=link_libs) if link_libs else []
+        if targets:
+            gpu_module.operation.attributes["targets"] = ir.ArrayAttr.get([ir.Attribute.parse(t) for t in targets])
         if extern_linked:
             gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-            if "targets" in gpu_module.operation.attributes:
-                del gpu_module.operation.attributes["targets"]
 
         return _TraceResult(
             module=module,
@@ -1305,7 +1301,6 @@ def _attach_ktrace_config(module, traced: bool, known_names=None) -> None:
     blocks = (hints.get("ktrace_blocks", env.ktrace.blocks) or "").strip()
     get_ktrace_backend().configure_module(
         module,
-        target_arch=get_backend().target.arch,
         known_names=known_names,
         blocks=blocks,
     )

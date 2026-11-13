@@ -64,7 +64,6 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    B. ``binary_prep_fragments`` (→ LLVM):
 
-      - ``rocdl-attach-target{chip=gfxNNN ...}``
       - ``func.func(convert-scf-to-cf)``
       - ``convert-vector-to-llvm``
       - ``gpu-to-llvm{use-bare-pointers-...=true}``
