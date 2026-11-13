@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-13T09:25:49Z",
+ "updated": "2026-11-13T10:46:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43407531843,
+   "pr": 1408,
+   "commit": "7c5b35b08a45dd886a1e5fea7e9044676633c9b9",
+   "branch": "pr/refactor-target-at-creation",
+   "event": "pull_request",
+   "title": "[JIT] Attach the gpu.module target at creation",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43407531843",
+   "created_at": "2026-11-13T10:13:32Z",
+   "updated_at": "2026-11-13T10:14:59Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 43393895459,
    "pr": 1407,
@@ -20,10 +35,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-13T09:16:24Z",
-     "completed_at": null,
+     "completed_at": "2026-11-13T09:29:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43393895459/job/131790991499"
     },
     {
@@ -38,11 +53,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-13T08:57:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43393895459/job/131790991670"
+     "completed_at": "2026-11-13T09:24:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43393895459/job/131790991670",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -109,19 +127,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-13T09:10:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196892"
+     "completed_at": "2026-11-13T09:34:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196892",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-13T09:03:55Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T09:29:45Z",
+     "completed_at": "2026-11-13T09:38:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196904"
     },
     {
@@ -143,12 +164,24 @@
    "event": "pull_request",
    "title": "[Coop] Cross 16-lane rows with gfx950 permlane swaps in the warp over\u2026",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573",
    "created_at": "2026-11-13T07:44:57Z",
-   "updated_at": "2026-11-13T09:17:55Z",
+   "updated_at": "2026-11-13T10:42:46Z",
    "actor": "sjfeng1999",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T10:14:11Z",
+     "completed_at": "2026-11-13T10:40:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825537610",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
@@ -156,16 +189,7 @@
      "conclusion": "success",
      "started_at": "2026-11-13T08:23:52Z",
      "completed_at": "2026-11-13T08:33:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790307"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-13T08:12:53Z",
-     "completed_at": "2026-11-13T08:19:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790358"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825539501"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -174,7 +198,7 @@
      "conclusion": "success",
      "started_at": "2026-11-13T08:13:53Z",
      "completed_at": "2026-11-13T09:17:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131771790398"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825600665"
     }
    ]
   },
@@ -2413,52 +2437,6 @@
    "updated_at": "2026-11-09T07:51:24Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 42574978076,
-   "pr": 1350,
-   "commit": "8bd64c51cffed6046f28b22ac2f062445c6ef236",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076",
-   "created_at": "2026-11-09T06:45:09Z",
-   "updated_at": "2026-11-09T08:04:28Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T07:01:39Z",
-     "completed_at": "2026-11-09T07:21:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076/job/129025674802",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T07:01:22Z",
-     "completed_at": "2026-11-09T07:17:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076/job/129025674818"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T07:01:33Z",
-     "completed_at": "2026-11-09T08:04:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42574978076/job/129025674826"
-    }
-   ]
   }
  ]
 }
