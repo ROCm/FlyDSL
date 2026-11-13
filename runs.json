@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-13T12:39:30Z",
+ "updated": "2026-11-13T12:46:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43427704119,
+   "pr": null,
+   "commit": "e022aa97211eb47fdfb4c509d44817f3ce42cf31",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Attach the gpu.module target at creation (#1408)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43427704119",
+   "created_at": "2026-11-13T12:44:18Z",
+   "updated_at": "2026-11-13T12:44:32Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 43426304146,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Refuse a tiled-MMA fragment whose view does not tile evenly \u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43426304146",
    "created_at": "2026-11-13T12:34:23Z",
-   "updated_at": "2026-11-13T12:36:08Z",
+   "updated_at": "2026-11-13T12:44:20Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2329,52 +2344,6 @@
    "updated_at": "2026-11-09T11:40:40Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 42604957088,
-   "pr": 1350,
-   "commit": "a80ad858fdf79d8f7edbd87eb4fd012af5eded2e",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42604957088",
-   "created_at": "2026-11-09T10:56:28Z",
-   "updated_at": "2026-11-09T14:25:38Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T12:48:46Z",
-     "completed_at": "2026-11-09T13:14:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42604957088/job/129169587728",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T12:49:13Z",
-     "completed_at": "2026-11-09T14:25:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42604957088/job/129169587780"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T14:01:36Z",
-     "completed_at": "2026-11-09T14:22:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42604957088/job/129169587857"
-    }
-   ]
   }
  ]
 }
