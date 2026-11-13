@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-13T00:44:16Z",
+ "updated": "2026-11-13T03:27:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43350674897,
+   "pr": 1404,
+   "commit": "394da65d931a8df5074485443eded6170e551599",
+   "branch": "moe/k5p-pr",
+   "event": "pull_request",
+   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897",
+   "created_at": "2026-11-13T02:14:00Z",
+   "updated_at": "2026-11-13T02:46:05Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-13T02:30:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647079992"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T02:30:36Z",
+     "completed_at": "2026-11-13T02:45:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647080020"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-13T02:30:46Z",
+     "completed_at": "2026-11-13T02:58:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647080090",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 43267581390,
    "pr": 1405,
@@ -51,7 +97,7 @@
   },
   {
    "run_id": 43239023881,
-   "pr": 1404,
+   "pr": null,
    "commit": "9c296bb4d7def28257658bfe61a8492ea8ae9fa7",
    "branch": "moe/k5p-pr",
    "event": "pull_request",
@@ -2387,52 +2433,6 @@
      "completed_at": "2026-11-09T01:36:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541783953/job/129044332825",
      "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42541213607,
-   "pr": null,
-   "commit": "80f6e1f0c55916ccb1f6a2c912526c9c64bc44ef",
-   "branch": "jli/strict-pin-agpr",
-   "event": "pull_request",
-   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607",
-   "created_at": "2026-11-09T00:37:40Z",
-   "updated_at": "2026-11-09T04:54:41Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T04:32:24Z",
-     "completed_at": "2026-11-09T04:54:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972627133"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T01:07:33Z",
-     "completed_at": "2026-11-09T01:36:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972628416"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T01:07:30Z",
-     "completed_at": "2026-11-09T01:42:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42541213607/job/128972659402",
-     "machine": "smci350-rck-g03-b20-03",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
     }
