@@ -198,3 +198,31 @@ class TestSchedAGPR:
 
             ir_text = _build_module(build)
             assert f"rocdl.sched.agpr %arg0, {regnum}" in ir_text
+
+
+# ── regnum=None: any register of the file ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "kind, available",
+    [("vgpr", _has_sched_vgpr), ("sgpr", _has_sched_sgpr), ("agpr", _has_sched_agpr)],
+)
+class TestSchedAnyReg:
+    def test_omitted_regnum(self, kind, available):
+        """Without regnum the op is printed without a register number."""
+        if not available:
+            pytest.skip(f"rocdl.sched.{kind} op not available (needs custom LLVM)")
+        from flydsl.expr.rocdl import experimental
+
+        fn = getattr(experimental, f"sched_{kind}")
+        ir_text = _build_module(lambda x: fn(x))
+        assert f"rocdl.sched.{kind} %arg0 : f32" in ir_text
+
+    def test_negative_regnum_rejected(self, kind, available):
+        if not available:
+            pytest.skip(f"rocdl.sched.{kind} op not available (needs custom LLVM)")
+        from flydsl.expr.rocdl import experimental
+
+        fn = getattr(experimental, f"sched_{kind}")
+        with pytest.raises(ValueError, match="regnum"):
+            _build_module(lambda x: fn(x, regnum=-1))

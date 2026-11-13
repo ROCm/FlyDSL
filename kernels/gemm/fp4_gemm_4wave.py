@@ -33,6 +33,7 @@ from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import rocdl as _rocdl
+from flydsl.expr.rocdl.experimental import sched_agpr
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops as _buffer_ops
@@ -374,6 +375,7 @@ class Mfma16x16x128Fp4:
         assert N_TILES_A % _FP4_PACK == 0 and N_TILES_B % _FP4_PACK == 0
         self.accum_type = Vec.make_type(4, fx.Float32)
         self.res_ty = Vec.make_type(4, fx.Float32)
+        self.zero_value = fx.full(4, 0.0, fx.Float32)
 
     def idx(self, i, j):
         return i * N_TILES_B + j
@@ -391,16 +393,14 @@ class Mfma16x16x128Fp4:
         """``sa`` / ``sb`` are lists (len n_groups) of packed-E8M0 i32 scales
         (4 sub-fields each, one full K=256 step for a 32-row pack-group).
 
-        The accumulator is PINNED IN AGPR via inline asm (constraint ``=a,...,0``),
-        mirroring fp8's Mfma16x16x128AGPR. The plain ssa-lowered mfma_scale let the
-        compiler spill accumulators to arch VGPR and shuffle them with
-        v_accvgpr_mov/read (ISA: 1679 such ops, arch VGPR -> 256, scale spilled).
+        The accumulator is PINNED IN AGPR with strict ``sched_agpr`` (the compiler
+        picks the AGPRs), mirroring fp8's Mfma16x16x128AGPR. The plain ssa-lowered
+        mfma_scale let the compiler spill accumulators to arch VGPR and shuffle them
+        with v_accvgpr_mov/read (ISA: 1679 such ops, arch VGPR -> 256, scale spilled).
         Pinning keeps the f32x4 acc in-place in AGPR -> arch VGPR drops, no spill.
 
-        opsel is a COMPILE-TIME byte-select baked into the asm string:
-          opsel_a = ksub*2 + (i%2), opsel_b = ksub*2 + (j%2).
-        AMD encoding: low bit -> op_sel[lane], high bit (=ksub) -> op_sel_hi[lane].
-        So op_sel=[i%2, j%2, 0], op_sel_hi=[ksub, ksub, 0]."""
+        opsel is a COMPILE-TIME byte-select:
+          opsel_a = ksub*2 + (i%2), opsel_b = ksub*2 + (j%2)."""
         # a[i] / b[j] are [i32x4_ksub0, i32x4_ksub1] from S2RLoaderFp4.
         # ``interleave`` is an optional list of zero-arg thunks (ds_read / buffer_load
         # for the NEXT quad); one is issued after each MFMA so the load co-issues in
@@ -429,6 +429,9 @@ class Mfma16x16x128Fp4:
                 if nth[0] < len(thunks) and mth[0] in slots:
                     thunks[nth[0]]()
                     nth[0] += 1
+                # The MFMA intrinsic has no side effects, so without this the scheduler
+                # reorders MFMAs and the interleaved loads across each other.
+                _rocdl.sched_barrier(0)
                 mth[0] += 1
         while nth[0] < len(thunks):
             thunks[nth[0]]()
@@ -436,27 +439,16 @@ class Mfma16x16x128Fp4:
         return c
 
     def _mfma_agpr(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
-        # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
-        #
         # feeds (B, A) instead of (A, B). Since C^T = B^T A^T,
         a_op, b_op = b_op, a_op
         sa_v, sb_v = sb_v, sa_v
         ia, jb = jb, ia
-        opsel = f"op_sel:[{ia},{jb},0]"
-        opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        src2 = "$0" if acc is not None else "0"
-        asm = f"v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, {src2}, $3, $4 {opsel} {opsel_hi} cbsz:4 blgp:4"
-        ops = [
-            fx.as_ir_value(a_op),
-            fx.as_ir_value(b_op),
-            fx.as_ir_value(sa_v),
-            fx.as_ir_value(sb_v),
-        ]
-        cons = "=a,v,v,v,v"
-        if acc is not None:
-            ops.append(fx.as_ir_value(acc))
-            cons += ",0"
-        return _llvm.inline_asm(self.res_ty, ops, asm, cons, has_side_effects=True)
+        acc = self.zero_value if acc is None else acc
+        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+            self.res_ty,
+            [a_op, b_op, acc, _FP4_CBSZ, _FP4_BLGP, ia + 2 * ksub, sa_v, jb + 2 * ksub, sb_v],
+        )
+        return sched_agpr(result)
 
 
 _SCALE_QUARTER_BYTES = 1024  # one gather = 4 blocks = one wave's share of one operand
@@ -469,7 +461,6 @@ _SCALE_B_REGION = _SCALE_REGION_BYTES
 
 
 class ScaleGatherLDS:
-
     def __init__(self, a_scale, b_scale, K, lane_id, wave_id, lds_base_ptr, a_rows, b_rows, scopes=None):
         self.row_i32 = (K // 256) * 64
         self.wave_id = wave_id
@@ -528,7 +519,6 @@ class ScaleGatherLDS:
 
 
 class ScaleLoaderLDS:
-
     def __init__(self, n_tiles, lane_id, quarter, lds_base_ptr, region_off, scopes=None, slot_id=None):
         assert n_tiles % _FP4_PACK == 0
         self.n_groups = n_tiles // _FP4_PACK
