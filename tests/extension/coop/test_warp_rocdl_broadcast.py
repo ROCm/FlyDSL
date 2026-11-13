@@ -9,8 +9,10 @@
 broadcast on gfx90a+ (``row_newbcast`` is the control most of it rests on):
 
 - a constant source lane is one DPP move (``quad_perm`` for 2 and 4 lanes,
-  ``row_newbcast`` for 16), two (8 lanes; 32 lanes reading their first row) or
-  one ``ds_swizzle_b32`` (32 lanes reading their second row);
+  ``row_newbcast`` for 16), two (8 lanes; 32 lanes reading their first row;
+  on gfx950 32 lanes reading their second row, ``row_newbcast`` and
+  ``v_permlane16_swap_b32``) or one ``ds_swizzle_b32`` (32 lanes reading their
+  second row elsewhere);
 - a runtime source lane picks between itself and its neighbour by DPP for a
   pair, and otherwise keeps ``ds_bpermute_b32`` without the bounds check;
 - a full wave stays portable, which LLVM already turns into ``v_readlane_b32``.
@@ -24,10 +26,11 @@ and ``fx.coop.universal`` in one kernel and checks them against each other and
 against a host gather, on four waves so a move that leaked across a group or a
 wave would show; the ISA checks show the sequences are the code that runs.
 ``warp_scan_with_aggregate`` reuses the single-move broadcasts for its
-aggregate at 2, 4 and 16 lanes and keeps ``ds_swizzle_b32`` at 8 and 32; its
-values, and that no returned move folds into the caller's subtraction, are
-checked in ``test_warp_rocdl.py``. A full wave is the portable form and is
-only checked to stay that way.
+aggregate at 2, 4 and 16 lanes, and on gfx950 the ``row_newbcast`` plus
+``v_permlane16_swap_b32`` pair at 32; it keeps ``ds_swizzle_b32`` at 8 lanes,
+and at 32 elsewhere. Its values, and that no returned move folds into the
+caller's subtraction, are checked in ``test_warp_rocdl.py``. A full wave is
+the portable form and is only checked to stay that way.
 """
 
 from __future__ import annotations
@@ -79,6 +82,9 @@ pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU"),
 ]
 requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP sequence is gfx9-only")
+requires_permlane_swap = pytest.mark.skipif(
+    not current_target().arch.startswith("gfx950"), reason="v_permlane16_swap is gfx950-only"
+)
 requires_newbcast = pytest.mark.skipif(not _has_row_newbcast(), reason="row_newbcast is gfx90a+")
 
 
@@ -360,6 +366,9 @@ CONSTANT_ISA = {
     (32, 3): (["row_newbcast:3", "row_bcast:15"], 0),
     (32, 31): (["swizzle(BROADCAST,32,31)"], 1),
 }
+# gfx950 reads the second row of a 32-lane group without LDS.
+if current_target().arch.startswith("gfx950"):
+    CONSTANT_ISA[(32, 31)] = (["row_newbcast:15", "v_permlane16_swap_b32"], 0)
 
 
 @requires_newbcast
@@ -378,9 +387,10 @@ def test_wide_and_narrow_values(tmp_path):
     """64-bit values take one ``v_mov_b64_dpp``; a 16-bit one rides one zero-extended 32-bit move."""
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 3, width=16), torch.int64, tmp_path / "i64")
     assert _count(isa, "v_mov_b64_dpp") == 1 and _count(isa, *CROSS_LANE_LDS) == 0
-    # ds_swizzle is 32-bit only, so the same value splits in two there.
+    # ds_swizzle (gfx950: v_permlane16_swap) is 32-bit only, so the same value splits in two there.
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 20, width=32), torch.int64, tmp_path / "swizzle")
-    assert _count(isa, "ds_swizzle_b32") == 2 and "ds_bpermute_b32" not in isa
+    mover = "v_permlane16_swap_b32" if current_target().arch.startswith("gfx950") else "ds_swizzle_b32"
+    assert _count(isa, mover) == 2 and "ds_bpermute_b32" not in isa
     isa = _isa(lambda v, s: fx.coop.warp_broadcast(v, 3, width=16) + v, torch.float16, tmp_path / "f16")
     assert _count(isa, "row_newbcast:3") == 1 and _count(isa, *CROSS_LANE_LDS) == 0
 
@@ -414,11 +424,13 @@ def test_the_warp_scan_member_reaches_the_override(tmp_path):
 
 # width: the instruction that names the group's last lane, and the LDS
 # cross-lane instructions the whole scan may then use (the scan itself has none).
-# One width per route: quad_perm (2 and 4), row_newbcast (16), ds_swizzle (8 and 32).
+# One width per route: quad_perm (2 and 4), row_newbcast (16), ds_swizzle (8 and 32;
+# gfx950 takes 32 with row_newbcast and v_permlane16_swap).
 AGGREGATE_ISA = (
     pytest.param(2, "quad_perm:[1,1,3,3]", 0, marks=requires_dpp, id="w2"),
     pytest.param(8, "swizzle(BROADCAST,8,7)", 1, marks=requires_dpp, id="w8"),
     pytest.param(16, "row_newbcast:15", 0, marks=requires_newbcast, id="w16"),
+    pytest.param(32, "v_permlane16_swap_b32", 0, marks=requires_permlane_swap, id="w32"),
 )
 
 

@@ -30,7 +30,9 @@ from ._common import (
     _XOR_DPP,
     _dpp,
     _dpp_applies,
+    _has_permlane_swap,
     _has_row_newbcast,
+    _permlane_swap,
     _swizzle,
 )
 
@@ -88,6 +90,14 @@ def _from_lane(word, k, width):
         # row, then ``row_bcast:15`` carries it up into rows 1 and 3.
         row = _dpp(word, _ROW_NEWBCAST + k, bound_ctrl=True)
         return _dpp(row, _ROW_BCAST15, 0b1010, row)
+    if _has_permlane_swap():
+        # Width 32, source in the group's second row, on gfx950: broadcast it
+        # inside that row, then ``v_permlane16_swap`` hands the row down to the
+        # first one -- two VALU moves, no LDS round trip.
+        row = _dpp(word, _ROW_NEWBCAST + k - 16, bound_ctrl=True)
+        row = Int32(row if row.type == Int32.ir_type else llvm.bitcast(Int32.ir_type, row))
+        moved = _permlane_swap(row, row, 16)[1].ir_value()
+        return moved if word.type == moved.type else llvm.bitcast(word.type, moved)
     # Width 32, source in the group's second row: DPP only carries values up
     # the wave, so reaching down a row takes three moves. ``ds_swizzle``'s
     # 32-lane bitmask mode names the lane in one (and_mask 0, or_mask k).
@@ -209,14 +219,16 @@ def _aggregate(inclusive, width):
 
     A full wave reads lane 63, which is uniform, so it lifts into an SGPR. A
     narrower group's last lane differs per group. A pair, a quad and a row
-    (gfx90a+) name it with one DPP control that folds into its consumer;
-    otherwise ``ds_swizzle`` in its 32-lane mode names it without any address
-    arithmetic. Eight lanes would take two DPP moves, which halves the latency
-    of the swizzle but costs more VALU throughput than it saves.
+    (gfx90a+) name it with one DPP control that folds into its consumer, and
+    gfx950 reaches a 32-lane group's last lane with ``row_newbcast`` and
+    ``v_permlane16_swap``; otherwise ``ds_swizzle`` in its 32-lane mode names
+    it without any address arithmetic. Eight lanes would take two DPP moves,
+    which halves the latency of the swizzle but costs more VALU throughput
+    than it saves.
     """
     if width == 64:
         return inclusive.dtype(readlane(inclusive.dtype.ir_type, inclusive, 63))
-    if 2 <= width <= 4 or (width == 16 and _has_row_newbcast()):
+    if 2 <= width <= 4 or (width == 16 and _has_row_newbcast()) or (width == 32 and _has_permlane_swap()):
         return inclusive.dtype(_from_lane(inclusive.ir_value(), width - 1, width))
     return _swizzle(inclusive, _swizzle_broadcast(width))
 

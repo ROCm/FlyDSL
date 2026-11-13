@@ -68,6 +68,11 @@ requires_gpu = pytest.mark.skipif(torch is None or not torch.cuda.is_available()
 requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP tree is gfx9-only")
 
 
+def _swaps_cross_rows():
+    """gfx950 crosses 16-lane rows with ``v_permlane16_swap`` / ``v_permlane32_swap``, in the VALU."""
+    return current_target().arch.startswith("gfx950")
+
+
 def affine(lhs, rhs):
     """Composition over F_251, packed as (a << 16) | b; associative, noncommutative."""
     a, b = (lhs >> 16 & 65535, lhs & 65535)
@@ -321,6 +326,8 @@ def test_the_fold_keeps_lds_to_the_cross_row_strides(width, dtype, tmp_path):
         assert _count(fast, *CROSS_ROW_MOVES) == width - 1, "a full-wave commutative tree should stay portable"
         return
     assert _count(fast, *CROSS_ROW_MOVES) == KEPT_LDS[width], "the DPP tree did not take"
+    if _swaps_cross_rows():
+        assert _count(fast, *CROSS_LANE_LDS) == 0, "a cross-row node reached LDS"
     if dtype == "int32":
         # Directional nodes: row_shl/row_shr moves folded into v_add_u32_dpp.
         # (At 64 lanes, with 64 live columns, GCNDPPCombine leaves about a sixth
@@ -357,9 +364,7 @@ def test_an_empty_right_half_folds_without_selects(tmp_path):
     """One batch over 64 lanes: one move and one add per stride, two cross-row moves."""
     isa = _isa(_reduce_add(fx.coop, 64), torch.int32, 1, tmp_path=tmp_path)
     assert _count(isa, *CROSS_ROW_MOVES) == 2
-    # No select but the one each gfx950 permlane swap lowers with (it picks the
-    # swapped half by comparing it with the input).
-    assert _count(isa, "v_cndmask_b32") == _count(isa, "v_permlane16_swap_b32", "v_permlane32_swap_b32")
+    assert _count(isa, "v_cndmask_b32") == 0
 
 
 @pytest.mark.l2_device

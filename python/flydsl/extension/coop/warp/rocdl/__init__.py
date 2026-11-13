@@ -8,7 +8,10 @@ controls that RDNA dropped in favour of ``row_share`` / ``permlanex16``, which
 is a different sequence rather than a different constant -- and one with much
 less to gain, since LLVM's own rewrite already reaches pure DPP there. A few
 sequences also need ``row_newbcast``, which gfx90a introduced; older gfx9 keeps
-the portable form for those.
+the portable form for those. gfx950 adds ``v_permlane16_swap`` /
+``v_permlane32_swap``, VALU moves across 16-lane rows and 32-lane halves, and
+takes them where the other gfx9 targets cross rows on the LDS pipe
+(``ds_swizzle`` / ``ds_bpermute``).
 
 Each override covers the calls its sequence can take -- typically a
 ``ReductionOp`` or the default comparator over 32-bit scalars -- and hands

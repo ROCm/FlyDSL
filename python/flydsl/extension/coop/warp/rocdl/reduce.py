@@ -35,7 +35,9 @@ from ._common import (
     _XOR_DPP,
     _dpp,
     _dpp_applies,
+    _has_permlane_swap,
     _has_row_newbcast,
+    _permlane_swap,
     _swizzle,
 )
 
@@ -119,10 +121,13 @@ def _butterfly_reduce(value, op, width):
     offset = 1
     while offset < width:
         if offset in _BUTTERFLY_DPP:
-            partner = _dpp(acc, _BUTTERFLY_DPP[offset], _ALL_ROWS, neutral)
+            acc = _combine(op, acc, _dpp(acc, _BUTTERFLY_DPP[offset], _ALL_ROWS, neutral))
+        elif _has_permlane_swap():
+            # gfx950 crosses the row in the VALU: both rows of a pair end up
+            # with both totals, and fold them lower row first.
+            acc = _combine(op, *_permlane_swap(acc, acc, offset))
         else:
-            partner = _swizzle(acc, _SWIZZLE_XOR16)
-        acc = _combine(op, acc, partner)
+            acc = _combine(op, acc, _swizzle(acc, _SWIZZLE_XOR16))
         offset <<= 1
     return acc
 

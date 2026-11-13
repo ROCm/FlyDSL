@@ -13,7 +13,9 @@ register bit ``k``, i.e. the registers whose bit ``k`` differs from the lane's
 move to lane ``l ^ (1 << k)`` and register ``r ^ (1 << k)``. Which register is
 which is decided at trace time; only the lane bit is a runtime value.
 ``log2(width)`` stages of ``width / 2`` pairs replace the ``width**2`` gathers,
-and the stages inside a 16-lane row are DPP.
+and the stages inside a 16-lane row are DPP. On gfx950 a stage across rows
+(16) or halves (32) is one ``v_permlane16_swap`` / ``v_permlane32_swap`` per
+pair, which is exactly the exchange the stage makes.
 """
 
 from ....._mlir.dialects import llvm as _llvm
@@ -31,7 +33,9 @@ from ._common import (
     _ROW_SHR,
     _SWIZZLE_XOR16,
     _dpp,
+    _has_permlane_swap,
     _is_gfx9,
+    _permlane_swap,
     _swizzle,
 )
 
@@ -145,6 +149,24 @@ def _lds_stage(r0, r1, move, lower, upper):
     return _record_select(lower, r0, sent), _record_select(upper, r1, sent)
 
 
+def _swap_stage(r0, r1, d):
+    """d = 16, 32 on gfx950: one ``v_permlane{d}_swap`` per word is the whole stage.
+
+    The swap trades the lower lanes' ``r1`` slot for the upper lanes' ``r0``
+    slot -- exactly the pair a stage exchanges -- so no select is needed on
+    either side.
+    """
+    swapped = []
+
+    def lower(a, b):
+        swapped.append(_permlane_swap(a, b, d))
+        return swapped[-1][0]
+
+    new_r0 = _map_words(lower, r0, r1)
+    upper = iter([pair[1] for pair in swapped])
+    return new_r0, _map_words(lambda a, b: next(upper), r0, r1)
+
+
 def _transpose(items, width):
     """Transpose the ``width x width`` (lane, register) tile of each logical warp."""
     regs = list(items)
@@ -162,7 +184,9 @@ def _transpose(items, width):
             if r0 & d:
                 continue
             r1 = r0 | d
-            if d in _BANKS_BIT_CLEAR:
+            if d >= 16 and _has_permlane_swap():
+                regs[r0], regs[r1] = _swap_stage(regs[r0], regs[r1], d)
+            elif d in _BANKS_BIT_CLEAR:
                 regs[r0], regs[r1] = _bank_stage(regs[r0], regs[r1], d)
             elif d < 16:
                 regs[r0], regs[r1] = _quad_stage(regs[r0], regs[r1], d, lower, upper)
