@@ -47,9 +47,8 @@ class RocmBackend(BaseBackend):
 
     @staticmethod
     def detect_target() -> GPUTarget:
-        arch = env.compile.arch or get_rocm_arch()
+        arch = get_rocm_arch()
         if not arch:
-            # ARCH alone would not do: most callers read get_rocm_arch() directly.
             raise RuntimeError("No ROCm GPU architecture detected; set FLYDSL_GPU_ARCH (e.g. gfx1201)")
         return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 

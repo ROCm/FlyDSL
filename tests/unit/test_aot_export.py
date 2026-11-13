@@ -437,13 +437,12 @@ assert (out / "cpu_only.h").stat().st_size > 0
     child_env = os.environ.copy()
     child_env.update(
         {
-            "ARCH": "gfx950",
+            "FLYDSL_GPU_ARCH": "gfx950",
             "FLYDSL_RUNTIME_ENABLE_CACHE": "0",
         }
     )
     child_env.pop("HIP_VISIBLE_DEVICES", None)
     child_env.pop("ROCR_VISIBLE_DEVICES", None)
-    child_env.pop("FLYDSL_GPU_ARCH", None)
     child_env.pop("HSA_OVERRIDE_GFX_VERSION", None)
     subprocess.run([sys.executable, "-c", script, str(tmp_path)], env=child_env, check=True)
 

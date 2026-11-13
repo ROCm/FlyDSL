@@ -433,7 +433,6 @@ Transforms Python control flow to MLIR ops at the AST level:
 |---|---|---|
 | `FLYDSL_COMPILE_OPT_LEVEL` | `2` | Optimization level (0–3) |
 | `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
-| `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
 
 ### 5.2 Debug options (`FLYDSL_DEBUG_*`)
 
@@ -461,14 +460,16 @@ Transforms Python control flow to MLIR ops at the AST level:
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `ARCH` env var (the compile-time target, also set by `pytest --flydsl-compile-arch`)
-4. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
-5. `rocminfo` system tool
+3. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
+4. `rocminfo` system tool
+
+The result is both the compile target and the arch kernels branch on;
+`pytest --flydsl-compile-arch` sets `FLYDSL_GPU_ARCH`.
 
 If neither tool identifies a GPU and no explicit override is set, detection
 raises `RuntimeError` instead of assuming `gfx942`. On hosts without accessible
-ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` (or `ARCH`) to the
-intended target (for example, `ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
+ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` to the
+intended target (for example, `FLYDSL_GPU_ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
 Failed detection is cached to avoid repeated slow probes.
 
 Device counting uses the default `rocm_agent_enumerator` output instead:

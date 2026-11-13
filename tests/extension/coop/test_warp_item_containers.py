@@ -191,7 +191,7 @@ def test_warp_arrays_preserve_noncommutative_order(universal, default_device, co
     matrix_cases(["gfx942", "gfx1100"], [False, True], [4, None]),
 )
 def test_warp_arrays_compile(monkeypatch, arch, universal, width):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     values = torch.empty(64 * 3, dtype=torch.int32, device="cpu")
     run_kernel(_ordered_arrays(universal, 3, width, None), values, 64 * 9, 64, compile_only=True)

@@ -201,7 +201,7 @@ Passing live device arguments to ``flyc.compile`` preserves its normal initial
 launch, including when other pointer arguments are null to disable optional
 inputs. For an offline or CPU-only build host, use null pointer wrappers created
 with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
-set the target architecture explicitly, for example with ``ARCH=gfx950``.
+set the target architecture explicitly, for example with ``FLYDSL_GPU_ARCH=gfx950``.
 Null pointers suppress the initial launch only when no live device buffers are
 present. Non-device tensor placeholders still suppress execution even alongside
 device buffers. ``COMPILE_ONLY=1`` explicitly disables execution for all argument

@@ -164,7 +164,7 @@ def storage_target(request, monkeypatch):
     if on_device and not torch.cuda.is_available():
         pytest.skip("requires GPU")
     if not on_device:
-        monkeypatch.setenv("ARCH", request.param)
+        monkeypatch.setenv("FLYDSL_GPU_ARCH", request.param)
     monkeypatch.setenv("COMPILE_ONLY", "0" if on_device else "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     # Kernel tests can leave CUDA as the process default. Exercise both defaults
@@ -451,7 +451,7 @@ class TestVectorStorage:
         torch = pytest.importorskip("torch")
         monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
         monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
-        monkeypatch.setenv("ARCH", "gfx942")
+        monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
         monkeypatch.setenv("COMPILE_ONLY", "1")
         monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
         monkeypatch.setenv("FLYDSL_DUMP_IR", "1")

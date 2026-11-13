@@ -3,7 +3,6 @@
 
 from ..._mlir import ir
 from ...runtime.device import get_rocm_arch
-from ...utils import env
 from ..numeric import Numeric
 
 
@@ -16,9 +15,9 @@ def require_lds_dma_support(what):
     how to expand this operator's operand!", so reject it while a Python
     traceback still points at the kernel line that asked for it.
     """
-    # `ARCH` picks the compile target in RocmBackend.detect_target(), so gate on the arch actually
-    # being compiled for rather than on the installed device.
-    arch = env.compile.arch or get_rocm_arch()
+    # get_rocm_arch() is the compile target (FLYDSL_GPU_ARCH when set), not necessarily the
+    # installed device.
+    arch = get_rocm_arch()
     if not arch or not arch.startswith("gfx11"):
         return
     raise ValueError(

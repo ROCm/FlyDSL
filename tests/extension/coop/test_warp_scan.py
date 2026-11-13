@@ -476,7 +476,7 @@ def test_warp_scan_skips_invalid_operators(universal, form, prefix, entry, valid
     ],
 )
 def test_warp_scan_valid_compile(monkeypatch, arch, form, prefix):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     apply = _counted_scan(False, form, prefix, "warp_scan_with_aggregate", "runtime")
 
