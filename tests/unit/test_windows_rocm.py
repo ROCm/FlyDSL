@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -130,7 +129,7 @@ class _FakeHip:
 @pytest.mark.parametrize("hip, expected", [(_FakeHip(2), 2), (_FakeHip(0, status=100), 0), (None, 0)])
 def test_windows_device_count_comes_from_hip(monkeypatch, hip, expected):
     # Windows has no rocm_agent_enumerator; status 100 is hipErrorNoDevice, None is no HIP at all.
-    monkeypatch.setattr(device, "os", SimpleNamespace(name="nt", environ=os.environ))
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(rw, "_HIP_LIB", hip)
     monkeypatch.setattr(rw, "_HIP_LIB_TRIED", True)
     device.get_rocm_device_count.cache_clear()
