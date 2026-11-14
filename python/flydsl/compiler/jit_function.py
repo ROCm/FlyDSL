@@ -530,7 +530,7 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, link_libs=Non
         "env": _cache_invalidating_env_values(target),
     }
     if link_libs:
-        # The pipeline names the bitcode files; their contents are linked into the binary.
+        # The gpu.module target names the bitcode files; their contents are linked into the binary.
         config["link_libs"] = [_file_sha256(lib) for lib in link_libs]
     if post_load_processors:
         # An artifact owns the initialized module, not just the binary. Callbacks

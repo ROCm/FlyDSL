@@ -127,7 +127,7 @@ def _swap_vector_rows(src: fx.Pointer, dst: fx.Pointer):
 def test_pipeline_lowers_vector_row_indexing(monkeypatch, tmp_path):
     """Row indexing goes through an n-D vector.shape_cast, which convert-vector-to-llvm expands into
     an insert chain seeded with ub.poison; the pipeline must still lower that ub.poison."""
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
     null = flyc.from_c_void_p(fx.Float32, 0)
     flyc.compile(_swap_vector_rows, null, null, compile_only=True)
