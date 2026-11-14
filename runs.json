@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-14T06:31:06Z",
+ "updated": "2026-11-14T06:34:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -145,11 +145,11 @@
    "branch": "fix/main-ci-arch-env-and-dispatch",
    "event": "pull_request",
    "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regression",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890",
    "created_at": "2026-11-14T04:48:54Z",
-   "updated_at": "2026-11-14T05:39:38Z",
+   "updated_at": "2026-11-14T06:31:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
