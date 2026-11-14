@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-14T06:37:00Z",
+ "updated": "2026-11-14T07:39:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,39 +10,42 @@
    "branch": "main",
    "event": "push",
    "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regre\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247",
    "created_at": "2026-11-14T05:44:37Z",
-   "updated_at": "2026-11-14T06:06:39Z",
+   "updated_at": "2026-11-14T07:37:11Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-14T06:06:39Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T07:09:34Z",
+     "completed_at": "2026-11-14T07:17:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892433"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-14T06:06:39Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T06:38:59Z",
+     "completed_at": "2026-11-14T07:37:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892462"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-14T06:19:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892470"
+     "completed_at": "2026-11-14T06:42:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892470",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -53,19 +56,19 @@
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
    "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562873412",
    "created_at": "2026-11-14T05:43:09Z",
-   "updated_at": "2026-11-14T05:58:58Z",
+   "updated_at": "2026-11-14T07:17:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-14T05:58:58Z",
+     "started_at": "2026-11-14T06:39:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562873412/job/132353989914"
     },
@@ -84,10 +87,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-14T05:58:58Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T07:17:30Z",
+     "completed_at": "2026-11-14T07:37:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562873412/job/132353989965"
     }
    ]
