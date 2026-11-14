@@ -10,8 +10,16 @@ def ConvertROCDLFastMathOpsPass : Pass<"convert-rocdl-fastmath-ops", "gpu::GPUMo
     flag to their native ROCDL counterparts. This pass runs immediately before
     `convert-gpu-to-rocdl`, which would otherwise route those operations
     through device-library calls.
+
+    It also expands `math.log1p` and `math.expm1`, whatever their fast-math
+    flags, which `convert-gpu-to-rocdl` lowers to `log(1 + x)` and
+    `exp(x) - 1`, both 0 for tiny `x`: `log1p` becomes a compensated
+    `log(1 + x)` on the native `log`, and `expm1` a call to OCML's
+    `__ocml_expm1_*`.
   }];
   let dependentDialects = [
+    "arith::ArithDialect",
+    "LLVM::LLVMDialect",
     "ROCDL::ROCDLDialect",
     "vector::VectorDialect"
   ];

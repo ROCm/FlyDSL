@@ -699,6 +699,58 @@ class TestMathOpsGPU:
         ), f"trig chain GPU mismatch: max_diff={(_torch.abs(c_dev - c_ref)).max().item():.6e}"
 
 
+@_gpu_skip
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("name", ["log1p", "expm1"])
+def test_log1p_expm1_accurate_gpu(name):
+    """log1p and expm1 within a few f32 ulps of torch (float64) from 1e-30 to 10 in magnitude, and exact at the
+    edges. ``log(1 + x)`` / ``exp(x) - 1`` return 0 for |x| below 6e-8."""
+    import math
+
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+
+    VEC, BLOCK = 4, 64
+    fn = getattr(fly_math, name)
+
+    @flyc.kernel
+    def kernel(A: fx.Tensor, C: fx.Tensor):
+        tid = fx.thread_idx.x
+        tA = fx.logical_divide(A, fx.make_layout(VEC, 1))
+        tC = fx.logical_divide(C, fx.make_layout(VEC, 1))
+        atom = fx.make_copy_atom(fx.UniversalCopy(VEC * 32), fx.Float32)
+        rA = fx.make_rmem_tensor(VEC, fx.Float32)
+        rC = fx.make_rmem_tensor(VEC, fx.Float32)
+        fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
+        fx.memref_store_vec(fn(fx.memref_load_vec(rA)), rC)
+        fx.copy_atom_call(atom, rC, fx.slice(tC, (None, tid)))
+
+    @flyc.jit
+    def launch(A: fx.Tensor, C, stream: fx.Stream = fx.Stream(None)):
+        kernel(A, C).launch(grid=(1, 1, 1), block=(BLOCK, 1, 1), stream=stream)
+
+    n = VEC * BLOCK
+    edges = [math.inf, -math.inf, math.nan, 0.0, -0.0, -1.0, -2.0, 100.0, -100.0, 3e38]
+    tiny = n // 2 - len(edges)
+    x = _torch.cat(
+        [
+            _torch.logspace(-30, 1, tiny, dtype=_torch.float64),
+            -_torch.logspace(-30, -0.01, n // 2, dtype=_torch.float64),
+            _torch.tensor(edges, dtype=_torch.float64),
+        ]
+    ).float()
+    c = _torch.empty_like(x, device="cuda")
+    launch(x.cuda(), c)
+    _torch.cuda.synchronize()
+
+    got, want = c.cpu().double(), getattr(_torch, name)(x.double()).float().double()
+    finite = slice(0, n - len(edges))
+    rel = ((got[finite] - want[finite]) / want[finite]).abs()
+    assert rel.max().item() <= 1e-6, f"{name}: max rel err {rel.max().item():.3e} at x={x[finite][rel.argmax()].item()}"
+    _torch.testing.assert_close(got[finite.stop :], want[finite.stop :], rtol=1e-6, atol=0, equal_nan=True)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
