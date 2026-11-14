@@ -1254,11 +1254,19 @@ def test_layernorm_backward():
     print("=" * 80)
 
     configs = [
-        (64, 256, "f32"),  # generic path, f32 aligned
-        (16, 512, "bf16"),  # generic path, bf16
-        (4096, 4096, "bf16"),  # generic path, large
-        (64, 2000, "f32"),  # generic path, unaligned
-        (128, 4096, "f16"),  # generic path, f16
+        (64, 256, "f32"),  # row kernel, f32 aligned
+        (16, 512, "bf16"),  # row kernel, bf16
+        (4096, 4096, "bf16"),  # split kernels, large
+        (64, 2000, "f32"),  # row kernel, unaligned
+        (128, 4096, "f16"),  # split kernels, f16
+        (1024, 2000, "f32"),  # split kernels, f32 with a partial column tile
+        (1, 8192, "bf16"),  # split kernels, a single row
+        (33, 4099, "bf16"),  # split kernels, odd N: scalar accesses
+        (64, 4098, "f16"),  # split kernels, N % 8 == 2: 32-bit accesses
+        (64, 4098, "bf16"),  # same in bf16: 2-element bf16 stores
+        (64, 4100, "bf16"),  # split kernels, N % 8 == 4: 4-element bf16 stores
+        (2048, 8192, "bf16"),  # split kernels, wide rows: half-height dgamma/dbias blocks
+        (8, 65536, "bf16"),  # split kernels, long rows: dx re-reads the row instead of caching it
     ]
 
     failures = 0
