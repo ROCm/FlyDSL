@@ -6,7 +6,7 @@
 This module provides access to ROCm-specific GPU operations including:
 - Thread/block/grid identifiers and dimensions
 - Synchronization primitives (barriers, wait operations)
-- Matrix multiplication acceleration (MFMA, WMMA, SMFMAC)
+- Matrix multiplication acceleration (MFMA, WMMA, SWMMAC, SMFMAC)
 - Data movement and shuffle operations
 - Atomic operations
 - Type conversion operations
@@ -64,6 +64,7 @@ __all__ = [
     "BufferAtomicPkAdd",
     "MFMA",
     "WMMA",
+    "SWMMAC",
     "make_buffer_ptr",
     "make_buffer_tensor",
     "get_buffer_rsrc",
