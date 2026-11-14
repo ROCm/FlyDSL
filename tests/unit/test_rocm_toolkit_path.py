@@ -231,3 +231,20 @@ def test_readonly_home_skips_therock_staging(monkeypatch, tmp_path):
     # The important part is that resolution does not raise PermissionError.
     toolkit = rocm_toolkit_path()
     assert toolkit == "" or Path(toolkit).exists()
+
+
+def test_capi_library_resolves_the_versioned_name(monkeypatch, tmp_path):
+    """Wheels ship only ``libFlyPythonCAPI.so.<ver>``; the in-process LLD probe must still find it."""
+    libs = tmp_path / "_mlir_libs"
+    libs.mkdir()
+    versioned = libs / f"{rocm_backend._mlir_capi_lib_name()}.24.0git"
+    versioned.write_bytes(b"")
+    monkeypatch.setattr(rocm_backend, "BUNDLED_ROCM_PATH", tmp_path / "_rocm")
+    loaded = []
+    monkeypatch.setattr("ctypes.CDLL", lambda path: loaded.append(path) or object())
+    rocm_backend.load_capi_library.cache_clear()
+    try:
+        rocm_backend.load_capi_library()
+    finally:
+        rocm_backend.load_capi_library.cache_clear()
+    assert loaded == [str(versioned)]

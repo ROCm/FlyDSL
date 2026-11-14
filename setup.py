@@ -433,6 +433,7 @@ setup(
             # AMDGCN device bitcode bundled by CMake; lets the compiler resolve
             # ocml/ockl without depending on where the container installs ROCm.
             "_rocm/amdgcn/bitcode/*.bc",
+            "_rocm/amdgcn/bitcode/LICENSE.TXT",
             "*.pyi",
         ],
     },

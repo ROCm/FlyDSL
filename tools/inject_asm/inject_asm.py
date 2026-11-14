@@ -97,9 +97,9 @@ def _link_in_process(obj: Path, out: Path) -> None:
     """Link ``obj`` with the in-process LLD ``fly-emit-gpu-binary`` uses."""
     import ctypes
 
-    from flydsl.compiler.backends.rocm import BUNDLED_ROCM_PATH, _mlir_capi_lib_name
+    from flydsl.compiler.backends.rocm import load_capi_library
 
-    lib = ctypes.CDLL(str(BUNDLED_ROCM_PATH.parent / "_mlir_libs" / _mlir_capi_lib_name()))
+    lib = load_capi_library()
     lib.flydsl_link_hsaco.restype = ctypes.c_bool
     lib.flydsl_link_hsaco.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
     error = ctypes.create_string_buffer(4096)

@@ -33,12 +33,29 @@ def _mlir_capi_lib_name() -> str:
 
 
 @lru_cache(maxsize=1)
+def load_capi_library():
+    """ctypes handle to the FlyPythonCAPI library the Python bindings link against.
+
+    Wheels ship only the versioned ``libFlyPythonCAPI.so.<ver>`` (setup.py drops
+    the unversioned copy), so either spelling is accepted.
+    """
+    import ctypes
+
+    libs_dir = BUNDLED_ROCM_PATH.parent / "_mlir_libs"
+    name = _mlir_capi_lib_name()
+    for path in (libs_dir / name, *sorted(libs_dir.glob(f"{name}.*"))):
+        if path.is_file():
+            return ctypes.CDLL(str(path))
+    raise OSError(f"{name} not found in {libs_dir}")
+
+
+@lru_cache(maxsize=1)
 def _has_inprocess_lld() -> bool:
     """Query the C library for in-process LLD support (``FLYDSL_HAS_LLD_LIBRARY``)."""
     try:
         import ctypes
 
-        lib = ctypes.CDLL(str(BUNDLED_ROCM_PATH.parent / "_mlir_libs" / _mlir_capi_lib_name()))
+        lib = load_capi_library()
         lib.flydsl_has_inprocess_lld.restype = ctypes.c_bool
         return lib.flydsl_has_inprocess_lld()
     except Exception:

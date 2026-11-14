@@ -12,7 +12,7 @@
 #ifdef FLYDSL_HAS_LLD_LIBRARY
 #include "mlir/Target/LLVM/ROCDL/Utils.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -46,12 +46,19 @@ static std::mutex lldMutex;
 // pool has no live workers, so `~TaskGroup()` blocks forever.  A single kernel
 // object links in microseconds either way.
 //
-// `canRunAgain` reports whether LLD's global state survived the call.  A JIT
-// links thousands of times per process, so a false here must abort rather than
-// let the next link run on corrupted state.
+// An LLD fatal error ends in exitLld(), which `_exit`s the whole process unless
+// lldMain runs under an enabled CrashRecoveryContext; with one, it unwinds back
+// here and reports `canRunAgain = false`.  LLD's global state is then not safe
+// to reuse, so the error is returned and every later link is refused rather than
+// run on corrupted state.
 std::optional<std::string> mlir::fly::linkHsacoInProcess(StringRef objectPath,
                                                          StringRef hsacoPath) {
   std::lock_guard<std::mutex> lock(lldMutex);
+
+  static std::optional<std::string> unusableReason;
+  if (unusableReason)
+    return "in-process lld is unusable after an earlier fatal error: " + *unusableReason;
+  llvm::CrashRecoveryContext::Enable();
 
   std::string objectPathStr = objectPath.str();
   std::string hsacoPathStr = hsacoPath.str();
@@ -62,15 +69,13 @@ std::optional<std::string> mlir::fly::linkHsacoInProcess(StringRef objectPath,
   llvm::raw_string_ostream errStream(errString);
   lld::Result result = lld::lldMain(args, llvm::outs(), errStream, {{lld::Gnu, &lld::elf::link}});
   errStream.flush();
+  std::string diag = errString.empty() ? std::string("unknown lld failure") : errString;
   if (!result.canRunAgain) {
-    // Do not return: subsequent links would run on corrupted global state.
-    llvm::report_fatal_error(Twine("in-process lld left global state unusable (retCode=") +
-                                 Twine(result.retCode) +
-                                 "): " + (errString.empty() ? "unknown lld failure" : errString),
-                             /*gen_crash_diag=*/false);
+    unusableReason = diag;
+    return diag;
   }
   if (result.retCode != 0)
-    return errString.empty() ? std::string("unknown lld failure") : errString;
+    return diag;
   return std::nullopt;
 }
 

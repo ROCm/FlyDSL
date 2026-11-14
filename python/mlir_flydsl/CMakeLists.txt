@@ -349,6 +349,12 @@ if(FLYDSL_ROCM_BITCODE_DIR)
       message(WARNING "Device bitcode ${_bc}.bc missing from ${FLYDSL_ROCM_BITCODE_DIR}")
     endif()
   endforeach()
+  if(FLYDSL_ROCM_BITCODE_LICENSE)
+    list(APPEND _FLY_COPY_DEVICE_BITCODE
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${FLYDSL_ROCM_BITCODE_LICENSE}"
+        "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/LICENSE.TXT")
+  endif()
 endif()
 
 add_custom_target(CopyFlyPythonSources ALL
