@@ -145,6 +145,148 @@ class TiledMmaDriver:
         return [c_frags[idx].load().ir_value() for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
 
 
+# Decode-shaped problems (M <= SMALL_M_MAX) get their own kernel: the 8-wave kernel spends a
+# 128-row tile on them and, for large N, launches too few workgroups to fill the device.
+SMALL_M_MAX = 32
+SMALL_BLOCK_M = 16
+SMALL_BLOCK_N = 32
+SMALL_N_STAGES = 4
+# Up to this N, keeping three K-steps of loads in flight is faster; above it two are (MI355X).
+SMALL_DEEP_PREFETCH_N_MAX = 16384
+
+
+def _compile_fp8_gemm_small_m(*, K: int, prefetch: int):
+    """FP8 row-scale GEMM for ``M <= SMALL_M_MAX``.
+
+    One 16x32 output tile per workgroup: a single 16-row MFMA tile, N split across two waves,
+    and a four-stage LDS ring that keeps ``prefetch`` K-steps of global loads in flight.
+    """
+    BLOCK_K = 128
+    assert K % BLOCK_K == 0
+    assert prefetch in (2, 3)
+
+    K_ITERS = K // BLOCK_K
+    N_WAVES = SMALL_BLOCK_N // 16
+    N_LDS_STEPS_A = 1
+    N_LDS_STEPS_B = SMALL_BLOCK_N // (N_WAVES * 8)
+    GROUP_LOADS = N_LDS_STEPS_A + N_LDS_STEPS_B
+
+    a_lds_size = SMALL_BLOCK_M * BLOCK_K
+    b_lds_size = SMALL_BLOCK_N * BLOCK_K
+
+    @fx.struct
+    class SharedStorage:
+        A_lds_0: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_1: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_2: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        A_lds_3: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
+        B_lds_0: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_1: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_2: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+        B_lds_3: fx.Array[fx.Float8E4M3FN, b_lds_size, 16]
+
+    @flyc.kernel(known_block_size=[N_WAVES * 64, 1, 1])
+    def kernel_small_m(
+        A: fx.Tensor,
+        B_T: fx.Tensor,
+        C: fx.Tensor,
+        A_scale: fx.Tensor,
+        B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
+    ):
+        F8_IR_t = fx.Float8E4M3FN.ir_type
+        tiled_mma = fx.make_tiled_mma(
+            fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
+            fx.make_layout((1, 1, 1), (0, 0, 0)),
+        )
+
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_bufs = [lds.A_lds_0, lds.A_lds_1, lds.A_lds_2, lds.A_lds_3]
+        b_bufs = [lds.B_lds_0, lds.B_lds_1, lds.B_lds_2, lds.B_lds_3]
+
+        lane_id = fx.thread_idx.x % 64
+        wave_id = fx.thread_idx.x // 64
+        block_m = fx.block_idx.y
+        block_n = fx.block_idx.x
+
+        a_div = fx.logical_divide(make_fp8_buffer_tensor(A, F8_IR_t), fx.make_layout(1, 1))
+        b_div = fx.logical_divide(make_fp8_buffer_tensor(B_T, F8_IR_t), fx.make_layout(1, 1))
+        a_g2s = G2SLoader(
+            a_div,
+            _layout_global_swizzle(lane_id, wave_id, K, N_LDS_STEPS_A, N_WAVES * 64),
+            N_LDS_STEPS_A,
+            F8_IR_t,
+            wave_id,
+        )
+        b_g2s = G2SLoader(
+            b_div,
+            _layout_global_swizzle(lane_id, wave_id, K, N_LDS_STEPS_B, N_WAVES * 64),
+            N_LDS_STEPS_B,
+            F8_IR_t,
+            wave_id,
+        )
+
+        mfma = TiledMmaDriver(tiled_mma, 1, 1)
+        a_s2r = LayoutS2R(0, 1)
+        b_s2r = LayoutS2R(wave_id, 1)
+        store_c = StoreC(A_scale, B_scale, C, c_m, c_n, mfma.idx, 1, 1)
+
+        a_gl_offset = block_m * SMALL_BLOCK_M * K
+        b_gl_offset = block_n * SMALL_BLOCK_N * K
+
+        def load_stage(k):
+            b_g2s.load(b_bufs[k % SMALL_N_STAGES], b_gl_offset + k * BLOCK_K)
+            a_g2s.load(a_bufs[k % SMALL_N_STAGES], a_gl_offset + k * BLOCK_K)
+
+        for k in range_constexpr(min(prefetch, K_ITERS)):
+            load_stage(k)
+
+        c_frag = [mfma.zero_value]
+        for k in range_constexpr(K_ITERS):
+            # Stage k must have landed; the load groups issued after it may stay in flight.
+            wait_barrier(min(prefetch - 1, K_ITERS - 1 - k) * GROUP_LOADS)
+            a_frag = a_s2r.load(a_bufs[k % SMALL_N_STAGES])
+            b_frag = b_s2r.load(b_bufs[k % SMALL_N_STAGES])
+            rocdl.s_barrier()
+            if const_expr(k + prefetch < K_ITERS):
+                load_stage(k + prefetch)
+            c_frag = mfma.call(a_frag, b_frag, c_frag, set_prio=False)
+
+        store_c.store(c_frag, block_m * SMALL_BLOCK_M, block_n * SMALL_BLOCK_N + wave_id * 16)
+
+    @flyc.jit
+    def launch_small_m(
+        A: fx.Tensor,
+        B_T: fx.Tensor,
+        C: fx.Tensor,
+        A_scale: fx.Tensor,
+        B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
+        stream: fx.Stream,
+    ):
+        kernel_small_m(
+            A,
+            B_T,
+            C,
+            A_scale,
+            B_scale,
+            c_m,
+            c_n,
+            value_attrs={
+                "rocdl.waves_per_eu": 3,
+                "rocdl.flat_work_group_size": f"{N_WAVES * 64},{N_WAVES * 64}",
+            },
+        ).launch(
+            grid=(ceildiv(c_n, SMALL_BLOCK_N), ceildiv(c_m, SMALL_BLOCK_M), 1),
+            block=(N_WAVES * 64, 1, 1),
+            stream=stream,
+        )
+
+    return launch_small_m
+
+
 def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_preshuffled: bool = False):
     BLOCK_K = 128
 
@@ -384,4 +526,43 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
             value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
         ).launch(grid=(grid_x, 1, 1), block=(512, 1, 1), stream=stream)
 
-    return launch_gemm
+    # The small-M kernel reads B_T in its plain row-major layout.
+    if b_preshuffled:
+        return launch_gemm
+
+    launch_small_m_deep = _compile_fp8_gemm_small_m(K=K, prefetch=3)
+    launch_small_m_wide = _compile_fp8_gemm_small_m(K=K, prefetch=2)
+
+    @flyc.jit
+    def launch_gemm_any_m(
+        A: fx.Tensor,
+        B_T: fx.Tensor,
+        C: fx.Tensor,
+        A_scale: fx.Tensor,
+        B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
+        stream: fx.Stream,
+    ):
+        def launch_deep():
+            launch_small_m_deep(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+        def launch_wide():
+            launch_small_m_wide(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+        def launch_regular():
+            launch_gemm(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+        @flyc.jit
+        def dispatch():
+            if c_m <= fx.Int32(SMALL_M_MAX):
+                if c_n <= fx.Int32(SMALL_DEEP_PREFETCH_N_MAX):
+                    launch_deep()
+                else:
+                    launch_wide()
+            else:
+                launch_regular()
+
+        dispatch()
+
+    return launch_gemm_any_m
