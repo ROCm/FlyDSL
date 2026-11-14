@@ -1,0 +1,209 @@
+name: Windows test
+
+# Build FlyDSL natively on Windows, install the wheel and run the tests on a gfx1201
+# GPU. The runners are the ROCm org's shared, self-hosted Windows pool, so the job
+# runs only for changes that Windows depends on, keeps its files in its own
+# directories and fails, rather than skips, when it cannot see the GPU.
+#
+# Triggers: PRs touching Windows-relevant paths (see `select`), PRs labelled
+# ci:windows, pushes to main, and manual dispatch.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  # A label other than ci:windows gets a group of its own, so adding one never
+  # cancels a running job. A PR push cancels the run it supersedes. On main a
+  # started run finishes, so each result belongs to one merge and fills this
+  # runner's MLIR cache; during a burst only the newest waiting run is kept.
+  group: >-
+    ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'labeled'
+    && github.event.label.name != 'ci:windows' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  select:
+    if: github.event.action != 'labeled' || github.event.label.name == 'ci:windows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - name: Match Windows-relevant paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            windows:
+              - '.github/workflows/windows.yaml'
+              - '.github/scripts/windows_*'
+              - 'scripts/windows/**'
+              - 'thirdparty/llvm-windows/**'
+              - 'thirdparty/llvm-build-info.json'
+              - 'thirdparty/llvm-extensions/**'
+              - 'CMakeLists.txt'
+              - 'setup.py'
+              - 'lib/Runtime/**'
+              - 'python/mlir_flydsl/**'
+              - 'python/flydsl/compiler/**'
+              - 'python/flydsl/runtime/**'
+              - 'tests/conftest.py'
+              - 'kernels/**/*rdna*'
+              - 'kernels/**/*gfx120*'
+              - 'tests/kernels/**/*rdna*'
+              - 'tests/kernels/**/*gfx120*'
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'ci:windows') }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          PATHS: ${{ steps.filter.outputs.windows }}
+        run: |
+          run=false
+          if [ "$EVENT" != pull_request ] || [ "$LABELLED" = true ]; then
+            run=true
+          elif [ "$DRAFT" != true ] && [ "$PATHS" = true ]; then
+            run=true
+          fi
+          echo "run=$run" | tee -a "$GITHUB_OUTPUT"
+
+  check-signal:
+    needs: select
+    if: needs.select.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for Checks workflow
+        run: ./.github/scripts/check_signal.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          MAX_RETRIES: 5
+          RETRY_INTERVAL_SECONDS: 30
+
+  windows-gfx1201:
+    name: win64 gfx1201
+    needs: [select, check-signal]
+    if: ${{ !cancelled() && needs.select.outputs.run == 'true' && needs.check-signal.result == 'success' }}
+    runs-on: windows-gfx1201-gpu-rocm
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    env:
+      GPU_ARCH: gfx1201
+      ROCM_INDEX: https://stable.repo.amd.com/rocm/whl-next/
+      ROCM_VERSION: 10.1.0
+      TORCH_VERSION: 2.14.0+rocm10.1.0
+      # Git for Windows defaults to autocrlf, which would break the LLVM patches.
+      # Set here rather than with `git config --global`, which would change the
+      # shared SYSTEM profile.
+      GIT_CONFIG_COUNT: 2
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'false'
+      GIT_CONFIG_KEY_1: core.longpaths
+      GIT_CONFIG_VALUE_1: 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Before anything is installed, so that a runner slot without a working
+      # gfx1201 fails within a minute: the display driver's HIP runtime reports
+      # what the slot can see. The control repeats the check with every GPU hidden.
+      # If that runtime does not load or crashes (exit 5) the check cannot tell; it
+      # warns and the GPU gate after the install decides.
+      - name: GPU check (display driver)
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          python .github\scripts\windows_gpu_gate.py --arch $env:GPU_ARCH --driver-runtime
+          if ($LASTEXITCODE -eq 5) {
+            Write-Host "::warning::GPU check inconclusive: driver HIP did not load or crashed; the GPU gate decides"
+            exit 0
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'Check control, GPU hidden (a FAIL line is expected):'
+          $env:HIP_VISIBLE_DEVICES = '-1'
+          python .github\scripts\windows_gpu_gate.py --arch $env:GPU_ARCH --driver-runtime
+          if ($LASTEXITCODE -ne 3) { Write-Host "::error::Check control: expected exit 3, got $LASTEXITCODE"; exit 1 }
+          exit 0
+
+      - name: Job directories
+        run: |
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $id = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($env:RUNNER_NAME)) | Select-Object -First 4 |
+              ForEach-Object { $_.ToString('x2') }) -join '')
+          $short = "C:\fci\$id"
+          if (Test-Path $short) { Remove-Item -Recurse -Force $short }
+          New-Item -ItemType Directory -Force $short, "$env:RUNNER_TEMP\fci" | Out-Null
+          $vars = "FCI_WORK=$env:RUNNER_TEMP\fci`nFCI_SHORT=$short`n" +
+              "FCI_MLIR_CACHE=$(Split-Path -Parent $env:GITHUB_WORKSPACE)\windows-mlir`n"
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $vars)
+          Write-Host "runner $env:RUNNER_NAME on $env:COMPUTERNAME`n$vars"
+
+      - name: Install TheRock ROCm and torch
+        timeout-minutes: 20
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github\scripts\windows_ci.ps1 -Step venv
+
+      - name: MLIR install (built once per key on this runner)
+        timeout-minutes: 60
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github\scripts\windows_ci.ps1 -Step mlir
+
+      - name: Build FlyDSL and install the wheel
+        timeout-minutes: 20
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github\scripts\windows_ci.ps1 -Step build
+
+      - name: GPU gate
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $py = "$env:FCI_WORK\venv\Scripts\python.exe"
+          & $py .github\scripts\windows_gpu_gate.py --arch $env:GPU_ARCH --github-env
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Control: with every GPU hidden the gate must report "no device" (3),
+          # or a pass above would prove nothing.
+          Write-Host 'Gate control, GPU hidden (a FAIL line is expected):'
+          $env:HIP_VISIBLE_DEVICES = '-1'
+          & $py .github\scripts\windows_gpu_gate.py --arch $env:GPU_ARCH
+          if ($LASTEXITCODE -ne 3) { Write-Host "::error::Gate control: expected exit 3, got $LASTEXITCODE"; exit 1 }
+          Write-Host 'Gate control passed: the gate fails when no GPU is visible.'
+          exit 0
+
+      - name: Tests
+        timeout-minutes: 45
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github\scripts\windows_ci.ps1 -Step test
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gfx1201-pytest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\fci\logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always() && env.FCI_WORK != ''
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .github\scripts\windows_ci.ps1 -Step cleanup
