@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-14T13:36:44Z",
+ "updated": "2026-11-14T15:24:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273",
    "created_at": "2026-11-14T13:32:56Z",
-   "updated_at": "2026-11-14T13:33:29Z",
+   "updated_at": "2026-11-14T13:53:20Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T14:07:56Z",
+     "completed_at": "2026-11-14T14:47:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562889"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-14T14:25:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562906"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T13:54:22Z",
+     "completed_at": "2026-11-14T14:21:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562922",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 43600249517,
@@ -25,13 +56,44 @@
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
    "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517",
    "created_at": "2026-11-14T13:32:11Z",
-   "updated_at": "2026-11-14T13:32:33Z",
+   "updated_at": "2026-11-14T13:45:39Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T13:46:46Z",
+     "completed_at": "2026-11-14T14:11:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630656",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T13:46:38Z",
+     "completed_at": "2026-11-14T14:07:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630672"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-14T13:45:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630684"
+    }
+   ]
   },
   {
    "run_id": 43600024737,
@@ -40,13 +102,44 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Find native libraries when the package is split across symli\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737",
    "created_at": "2026-11-14T13:29:42Z",
-   "updated_at": "2026-11-14T13:31:57Z",
+   "updated_at": "2026-11-14T13:46:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T13:46:54Z",
+     "completed_at": "2026-11-14T14:07:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845540"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T13:47:04Z",
+     "completed_at": "2026-11-14T14:11:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845545",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-14T13:46:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845579"
+    }
+   ]
   },
   {
    "run_id": 43599742650,
