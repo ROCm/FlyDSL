@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-14T00:41:36Z",
+ "updated": "2026-11-14T02:37:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43537407985,
+   "pr": 987,
+   "commit": "1472cde6082bfe833ba8870f2f948ba192ffa316",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985",
+   "created_at": "2026-11-14T00:56:04Z",
+   "updated_at": "2026-11-14T02:34:32Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T01:15:38Z",
+     "completed_at": "2026-11-14T01:38:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256393",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T01:16:24Z",
+     "completed_at": "2026-11-14T02:34:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256424"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T01:24:16Z",
+     "completed_at": "2026-11-14T01:34:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256554"
+    }
+   ]
+  },
   {
    "run_id": 43427704119,
    "pr": null,
@@ -2358,21 +2404,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/42610918296",
    "created_at": "2026-11-09T11:40:38Z",
    "updated_at": "2026-11-09T11:57:54Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 42608598588,
-   "pr": null,
-   "commit": "176f5786c5382539cf73ac4ea32219cdffe28f47",
-   "branch": "pr/enh-coop-warp-rocdl",
-   "event": "pull_request",
-   "title": "[Coop] Optimize warp-level prims on the rocdl",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42608598588",
-   "created_at": "2026-11-09T11:22:59Z",
-   "updated_at": "2026-11-09T11:40:40Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
