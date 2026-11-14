@@ -99,7 +99,12 @@ FailureOr<SmallVector<char, 0>> linkObjectCode(ArrayRef<char> objectCode,
   {
     llvm::raw_fd_ostream objectOs(objectFd, /*shouldClose=*/true);
     objectOs << StringRef(objectCode.data(), objectCode.size());
-    objectOs.flush();
+    objectOs.close();
+    if (objectOs.has_error()) {
+      // Cleared so the destructor does not report_fatal_error() the process.
+      objectOs.clear_error();
+      return emitError() << "failed to write the ISA binary to " << objectPath;
+    }
   }
 
   SmallString<128> hsacoPath;

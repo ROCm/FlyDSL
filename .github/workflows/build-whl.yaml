@@ -141,6 +141,17 @@ jobs:
           echo "Copying fly-opt from ${FLY_OPT_SRC}"
           docker cp "flydsl_build:${FLY_OPT_SRC}" ./dist/fly-opt
 
+      - name: Verify bundled device bitcode
+        run: |
+          # CMake only warns when it cannot find these; a wheel without them
+          # cannot compile __ocml_* kernels where ROCm ships no amdgcn/bitcode.
+          for whl in dist/*.whl; do
+            for f in ocml.bc ockl.bc LICENSE.TXT; do
+              python3 -m zipfile -l "$whl" | grep -q "flydsl/_mlir/_rocm/amdgcn/bitcode/$f" \
+                || { echo "::error::$(basename "$whl") is missing _rocm/amdgcn/bitcode/$f"; exit 1; }
+            done
+          done
+
       - name: Collect wheel names
         id: collect-wheels
         run: |

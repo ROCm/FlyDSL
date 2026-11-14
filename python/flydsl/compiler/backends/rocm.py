@@ -58,7 +58,9 @@ def _has_inprocess_lld() -> bool:
         lib = load_capi_library()
         lib.flydsl_has_inprocess_lld.restype = ctypes.c_bool
         return lib.flydsl_has_inprocess_lld()
-    except Exception:
+    except Exception as exc:
+        # Not silent: falling back means every link spawns the toolkit ld.lld.
+        warnings.warn(f"cannot query in-process LLD support ({exc}); GPU binaries link with the ROCm ld.lld")
         return False
 
 
