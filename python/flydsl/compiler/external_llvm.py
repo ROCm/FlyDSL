@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from .._mlir import ir
+from .._mlir.passmanager import PassManager
 from ..utils import env
 
 
@@ -205,6 +206,28 @@ def run_external_binary_codegen(
             external_output_path.read_text(encoding="utf-8"), context=module.context
         )
         _replace_gpu_module_with_binary_op(module, external_binary_module)
+
+        # External ROCDL serialization stops at format=isa so it never spawns
+        # ld.lld. Finish assemble+link with the in-process LLD path.
+        from .backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD, rocm_toolkit_path
+
+        if HAS_INPROCESS_LLD and "format=isa" in binary_fragment:
+            toolkit = rocm_toolkit_path()
+            link_opts = 'opts=""'
+            if toolkit:
+                link_opts = f'toolkit="{toolkit}" {link_opts}'
+            link_pipeline = f"builtin.module({FLY_GPU_BINARY_PASS}{{{link_opts}}})"
+            try:
+                pm = PassManager.parse(link_pipeline, context=module.context)
+                pm.enable_verifier(True)
+                pm.run(module.operation)
+            except Exception as exc:
+                raise ExternalLLVMError(
+                    "In-process LLD failed to link the external LLVM Assembly into a fatbin.\n"
+                    f"pipeline: {link_pipeline}\n"
+                    f"error: {exc}"
+                ) from exc
+
         output_path.write_text(
             module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8"
         )
