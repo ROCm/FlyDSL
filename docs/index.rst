@@ -38,6 +38,7 @@ to GPU/ROCDL.
 
    .. grid-item-card:: Extension
 
+      * :doc:`Fast Walsh-Hadamard transform <extension/hadamard>`
       * :doc:`Random number generation <extension/rand>`
 
    .. grid-item-card:: Guides
