@@ -22,7 +22,7 @@ TM, TN = 128, 64
 
 @pytest.fixture
 def trace_only_gfx1250(monkeypatch):
-    monkeypatch.setenv("ARCH", "gfx1250")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function.MlirCompiler, "compile", classmethod(lambda cls, module, **_kwargs: module))

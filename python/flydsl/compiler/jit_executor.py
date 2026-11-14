@@ -190,13 +190,15 @@ def _build_dispatch_factory(slot_specs, params=()):
         lines = [*calls, "return func_exe(packed)"]
     code = compile(_dispatch_source(lines), "<flydsl-dispatch>", "exec")
     short_codes = {}
+    # Constexpr / type parameters own no slot: their values are baked into the artifact.
+    slotted = {arg_idx for _, arg_idx, _ in filled}
 
     def short_code(given):
         """Dispatch code for a call passing only the first ``given`` arguments."""
         cached = short_codes.get(given)
         if cached is None:
-            for name, default in params[given:]:
-                if default is _EMPTY:
+            for k, (name, default) in enumerate(params[given:], given):
+                if k in slotted and default is _EMPTY:
                     raise TypeError(f"missing a required argument: {name!r}")
             lines = [
                 f"f{i}(a[{arg_idx}], s{i})" if arg_idx < given else f"f{i}(d{arg_idx}, s{i})"

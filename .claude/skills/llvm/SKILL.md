@@ -91,7 +91,7 @@ A flag appearing in a shipped kernel is **not** evidence that it exists — see 
 ```bash
 export FLYDSL_DUMP_DIR=$(mktemp -d)
 FLYDSL_DUMP_IR=1 FLYDSL_RUNTIME_ENABLE_CACHE=0 python your_kernel.py
-ls $FLYDSL_DUMP_DIR/*/            # expect ~22 files, 00_origin.mlir .. 21_final_isa.s
+ls $FLYDSL_DUMP_DIR/*/            # expect ~18 files, 00_origin.mlir .. 17_final_isa.s
 ```
 
 ⚠ Traps that manufacture false negatives, all confirmed in this repo:
@@ -102,7 +102,7 @@ ls $FLYDSL_DUMP_DIR/*/            # expect ~22 files, 00_origin.mlir .. 21_final
   sets the variable, so a cache hit yields no dumps under a banner claiming
   otherwise. Set it yourself.
 - **Stage numbers are positional and unstable.** `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`
-  inserts a stage at 19 and shifts `llvm_ir`/`final_isa` to 21/22. **Always match
+  inserts a stage at 15 and shifts `llvm_ir`/`final_isa` to 17/18. **Always match
   by suffix** (`*_llvm_ir.ll`, `*_final_isa.s`), never by index.
 - **Dump dirs are keyed by kernel name only.** Different JIT specialisations
   overwrite each other. Use a fresh dir per run and compare whole trees.
