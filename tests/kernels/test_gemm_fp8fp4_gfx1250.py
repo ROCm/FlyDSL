@@ -744,6 +744,14 @@ def test_a8w8_row_major_rejects_small_k():
         _execute(cfg, shape, tile, b_preshuffle=False)
 
 
+@pytest.mark.parametrize("tile", ((128, 128, 64, 2, 2, 2), (128, 128, 128, 16, 1, 2)))
+@pytest.mark.parametrize("mode", ("ptpc_a8w8", "blockscale_a8w8", "mxscale_a8w8", "mxscale_a8w4"))
+def test_gemm_rejects_tiles_off_the_wmma_shape(mode, tile):
+    """tile_k below the 128-deep WMMA, or 8 rows per warp, used to compile to a kernel that stores zeros."""
+    with pytest.raises(ValueError, match="not WMMA-aligned"):
+        _execute(_MODES[mode], (128, 256, 512), tile)
+
+
 def test_a4w4_k_is_runtime_in_jit_cache(monkeypatch):
     """Short prologues, drain remainders and long K share a compiled launcher."""
     from flydsl.compiler import jit_function
