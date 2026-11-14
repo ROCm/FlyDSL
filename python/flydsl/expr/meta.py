@@ -116,6 +116,9 @@ def tracing_context(func=None, **options):
     owns_cache = func is not None and getattr(_tls, "source_position_cache", None) is None
     if owns_cache:
         _tls.source_position_cache = {}
+        # Read once per trace: capture_user_location runs for every op.
+        _tls.max_loc_depth = env.debug.max_loc_depth
+        _tls.frame_location_cache = {}
     boundary = getattr(func, "__code__", None)
     if boundary is None and stack:
         boundary = stack[-1][0]
@@ -128,6 +131,8 @@ def tracing_context(func=None, **options):
             stack.pop()
         if owns_cache:
             _tls.source_position_cache = None
+            _tls.max_loc_depth = None
+            _tls.frame_location_cache = None
 
 
 def tracing_option(key, default=None):
@@ -138,6 +143,16 @@ def tracing_option(key, default=None):
             if key in options:
                 return options[key]
     return default
+
+
+# Runtime helpers that evaluate rewriter-made thunks (lambdas standing in for operands of a user expression).
+_THUNK_RUNNERS = set()
+
+
+def thunk_runner(fn):
+    """Mark *fn* as calling operand thunks, so their frames are not reported as extra call sites."""
+    _THUNK_RUNNERS.add(fn.__code__)
+    return fn
 
 
 def file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
@@ -156,11 +171,16 @@ def capture_user_location() -> ir.Location:
     """
     stack = getattr(_tls, "stack", None)
     boundary = stack[-1][0] if stack else None
-    max_depth = env.debug.max_loc_depth
+    max_depth = getattr(_tls, "max_loc_depth", None)
+    if max_depth is None:
+        max_depth = env.debug.max_loc_depth
     ctx = ir.Context.current
+    frame_locs = getattr(_tls, "frame_location_cache", None)
     locs = []
     boundary_loc = None
     dropped = 0
+    # Innermost operand thunk seen: its position stands in for the frame that created it.
+    thunk = None
 
     frame = inspect.currentframe().f_back
     try:
@@ -168,10 +188,27 @@ def capture_user_location() -> ir.Location:
             code = frame.f_code
             is_boundary = boundary is not None and code is boundary
             if not _is_framework_file(code.co_filename):
+                caller = frame.f_back
+                if caller is not None and caller.f_code in _THUNK_RUNNERS:
+                    if thunk is None:
+                        thunk = frame
+                    frame = caller
+                    continue
+                pos_frame = frame if thunk is None else thunk
+                thunk = None
                 keep = len(locs) < max_depth
                 if keep or is_boundary:
-                    path, line, col = _frame_position(frame)
-                    floc = ir.Location.file(path, line, col, context=ctx)
+                    # Ops share call sites, so reuse each frame's location within a trace.
+                    key = (id(pos_frame.f_code), pos_frame.f_lasti)
+                    entry = frame_locs.get(key) if frame_locs is not None else None
+                    if entry is None:
+                        path, line, col = _frame_position(pos_frame)
+                        floc = ir.Location.file(path, line, col, context=ctx)
+                        if frame_locs is not None:
+                            # code is part of the value to keep it alive
+                            frame_locs[key] = (pos_frame.f_code, floc)
+                    else:
+                        floc = entry[1]
                     if keep:
                         locs.append(floc)
                     else:
@@ -183,7 +220,7 @@ def capture_user_location() -> ir.Location:
                 break
             frame = frame.f_back
     finally:
-        del frame
+        del frame, thunk
 
     # The kernel boundary frame is always kept as the outermost call-site
     if boundary_loc is not None:

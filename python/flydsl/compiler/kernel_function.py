@@ -122,13 +122,22 @@ def _attach_attrs(op, unit_attrs: Optional[List[str]], value_attrs: Optional[Dic
 # =============================================================================
 
 
+# Keyed by id, since code objects from different files can compare equal; the value keeps the code alive.
+_DEF_LINES: Dict[int, Tuple[Any, int]] = {}
+
+
 def func_def_location(func: Callable, context=None) -> ir.Location:
     """File location of *func*'s ``def`` line (the kernel/jit definition)."""
-    try:
-        line = inspect.getsourcelines(func)[1]
-    except (OSError, TypeError):
-        line = 0
-    return file_location(inspect.getfile(func), line, 0, context)
+    # getsourcelines tokenizes the whole function, and every call traces: look each code object up once.
+    code = inspect.unwrap(func).__code__
+    entry = _DEF_LINES.get(id(code))
+    if entry is None:
+        try:
+            line = inspect.getsourcelines(func)[1]
+        except (OSError, TypeError):
+            line = 0
+        entry = _DEF_LINES[id(code)] = (code, line)
+    return file_location(inspect.getfile(func), entry[1], 0, context)
 
 
 # =============================================================================
