@@ -521,7 +521,7 @@ def test_wide_payload_falls_back(portable_calls):
 @pytest.mark.parametrize("arch", ["gfx950", "gfx1201"])
 def test_targets_compile(monkeypatch, portable_calls, arch):
     """gfx9 targets compile the override; every other target hands the call back."""
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     count, width = 2, 8

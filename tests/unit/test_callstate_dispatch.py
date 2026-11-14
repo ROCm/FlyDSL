@@ -124,6 +124,24 @@ def test_callstate_fills_omitted_trailing_defaults():
         cs(())
 
 
+def test_callstate_omitted_slotless_param_needs_no_default():
+    """A trailing parameter without an ABI slot (e.g. a keyword-only Constexpr) is
+    baked into the artifact, so omitting it alongside a defaulted runtime
+    parameter must not be rejected as missing."""
+    ((ctype, fill),) = Int32(0).__c_abi_spec__()
+    slot_specs = [(0, ctype, fill), (1, ctype, fill), (-1, ctypes.c_void_p, None)]
+    params = (("n", inspect.Parameter.empty), ("m", 7), ("BLOCK", inspect.Parameter.empty))
+    captured = []
+
+    def func_exe(packed):
+        captured.append([ctype.from_address(packed[i]).value for i in range(2)])
+
+    cs = CallState(slot_specs, func_exe, params=params)
+    cs((1, 2))
+    cs((3,))
+    assert captured == [[1, 2], [3, 7]]
+
+
 def test_dlpack_dynamic_layout_fill_does_not_retain_tensor():
     """The layout-dynamic ``DLTensorJitArg`` fills hand one DLPack adaptor from the
     pointer fill to the layout fill. It must not outlive the launch: the fills live

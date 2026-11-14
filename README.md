@@ -305,8 +305,8 @@ Python Function (@flyc.kernel / @flyc.jit)
    │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
    ├──────────────────────────────────────────────────────────┤
    │ B. binary_prep_fragments  (→ LLVM)                       │
-   │    convert-scf-to-cf → convert-cf-to-llvm →              │
-   │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
+   │    func.func(convert-scf-to-cf) →                        │
+   │    convert-vector-to-llvm → gpu-to-llvm →                │
    │    reconcile-unrealized-casts                            │
    ├──────────────────────────────────────────────────────────┤
    │ C. binary_fragment                                       │
