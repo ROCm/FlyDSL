@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-11-14T03:39:34Z",
+ "updated": "2026-11-14T04:52:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43558486890,
+   "pr": 1410,
+   "commit": "91590f8e8ca8b33fdf7800c16c35c3f28cc4b7b0",
+   "branch": "fix/main-ci-arch-env-and-dispatch",
+   "event": "pull_request",
+   "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regression",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890",
+   "created_at": "2026-11-14T04:48:54Z",
+   "updated_at": "2026-11-14T04:49:27Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 43557140270,
+   "pr": 1410,
+   "commit": "4aa1247d2c02280d93c0a4332e719fa0aaf4b258",
+   "branch": "fix/main-ci-arch-env-and-dispatch",
+   "event": "pull_request",
+   "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regression",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270",
+   "created_at": "2026-11-14T04:32:16Z",
+   "updated_at": "2026-11-14T04:49:16Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-14T04:47:26Z",
+     "completed_at": "2026-11-14T04:49:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151616"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-14T04:46:56Z",
+     "completed_at": "2026-11-14T04:48:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151627"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-14T04:47:10Z",
+     "completed_at": "2026-11-14T04:49:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151646"
+    }
+   ]
+  },
+  {
+   "run_id": 43555708013,
+   "pr": 1377,
+   "commit": "36ac4c62e2f57d2dfbebb9defbc513e8ef402629",
+   "branch": "pr2-gfx120x-swmmac",
+   "event": "pull_request",
+   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43555708013",
+   "created_at": "2026-11-14T04:15:16Z",
+   "updated_at": "2026-11-14T04:15:16Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 43547226750,
    "pr": 987,
@@ -2328,113 +2401,6 @@
      "started_at": "2026-11-09T15:36:04Z",
      "completed_at": "2026-11-09T15:56:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/42621344417/job/129180091300"
-    }
-   ]
-  },
-  {
-   "run_id": 42615941014,
-   "pr": 1392,
-   "commit": "dcda0ab47c8430d88a3a65cee9814e7d920c7285",
-   "branch": "pr/enh-compile-only",
-   "event": "pull_request",
-   "title": "[JIT] Add compile_only to flyc.compile",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014",
-   "created_at": "2026-11-09T12:18:41Z",
-   "updated_at": "2026-11-09T16:50:33Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T13:56:07Z",
-     "completed_at": "2026-11-09T14:33:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014/job/129180604578",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T15:29:05Z",
-     "completed_at": "2026-11-09T16:50:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014/job/129180604649"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T16:20:51Z",
-     "completed_at": "2026-11-09T16:34:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42615941014/job/129180604836"
-    }
-   ]
-  },
-  {
-   "run_id": 42614089800,
-   "pr": null,
-   "commit": "e19839429c15f12e137e5d45ae375d7af92c54ab",
-   "branch": "fix-log1p-expm1",
-   "event": "pull_request",
-   "title": "Fix log1p and expm1 returning 0 for tiny arguments",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42614089800",
-   "created_at": "2026-11-09T12:05:18Z",
-   "updated_at": "2026-11-09T12:58:09Z",
-   "actor": "amd-songpiao",
-   "jobs": []
-  },
-  {
-   "run_id": 42613118876,
-   "pr": null,
-   "commit": "7720e8ac405d64b0d20332897d791ab4b3efe353",
-   "branch": "pr/enh-coop-warp-rocdl",
-   "event": "pull_request",
-   "title": "[Coop] Optimize warp-level prims on the rocdl",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876",
-   "created_at": "2026-11-09T11:57:52Z",
-   "updated_at": "2026-11-09T15:28:45Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T13:39:58Z",
-     "completed_at": "2026-11-09T14:01:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876/job/129176529713"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T13:42:53Z",
-     "completed_at": "2026-11-09T14:15:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876/job/129176529767",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-09T14:24:18Z",
-     "completed_at": "2026-11-09T15:28:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42613118876/job/129176529854"
     }
    ]
   }
