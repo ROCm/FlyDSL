@@ -13,6 +13,7 @@ implementation, so they hold regardless of loop-vs-codegen internals.
 
 import ctypes
 import gc
+import inspect
 import struct
 import weakref
 
@@ -101,6 +102,26 @@ def test_callstate_dispatch_packs_changing_args_and_auto_stream():
         assert layout == _expected_layout_bytes(t)
         assert scalar == ival
         assert auto_stream in (None, 0)  # auto-stream slot stays NULL (default stream)
+
+
+def test_callstate_fills_omitted_trailing_defaults():
+    """Like a direct call, a dispatch may omit trailing defaulted parameters: each
+    call fills them from their defaults (an earlier explicit value must not
+    linger), and a missing required parameter is rejected by name."""
+    ((ctype, fill),) = Int32(0).__c_abi_spec__()
+    slot_specs = [(0, ctype, fill), (1, ctype, fill), (-1, ctypes.c_void_p, None)]
+    params = (("n", inspect.Parameter.empty), ("m", 7))
+    captured = []
+
+    def func_exe(packed):
+        captured.append([ctype.from_address(packed[i]).value for i in range(2)])
+
+    cs = CallState(slot_specs, func_exe, params=params)
+    cs((1, 2))
+    cs((3,))
+    assert captured == [[1, 2], [3, 7]]
+    with pytest.raises(TypeError, match="'n'"):
+        cs(())
 
 
 def test_dlpack_dynamic_layout_fill_does_not_retain_tensor():

@@ -51,8 +51,8 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    A. ``pre_binary_fragments`` (Fly → ROCDL):
 
-      - ``fly-rewrite-func-signature``
       - ``fly-canonicalize``
+      - ``fly-rocdl-expand-ops``
       - ``fly-layout-lowering``
       - ``fly-int-swizzle-simplify``
       - ``canonicalize``
@@ -64,13 +64,9 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    B. ``binary_prep_fragments`` (→ LLVM):
 
-      - ``rocdl-attach-target{chip=gfxNNN ...}``
-      - ``convert-scf-to-cf``
-      - ``convert-cf-to-llvm``
-      - ``gpu-to-llvm{use-bare-pointers-...=true}``
+      - ``func.func(convert-scf-to-cf)``
       - ``convert-vector-to-llvm``
-      - ``convert-arith-to-llvm``
-      - ``convert-func-to-llvm``
+      - ``gpu-to-llvm{use-bare-pointers-...=true}``
       - ``reconcile-unrealized-casts``
       - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
 
@@ -193,11 +189,18 @@ The lowered IR is parsed and its export ABI validated on the first
 ``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
 
+``flyc.compile(launcher, *args, compile_only=True)`` compiles without executing
+the launcher for any arguments, including live device arguments, and always
+returns a ``CompiledFunction``, also under ``COMPILE_ONLY=1``. Call the returned
+function to execute it. ``compile_only`` is reserved by ``flyc.compile`` and is
+not forwarded to the launcher. Without it, ``flyc.compile`` behaves as described
+below.
+
 Passing live device arguments to ``flyc.compile`` preserves its normal initial
 launch, including when other pointer arguments are null to disable optional
 inputs. For an offline or CPU-only build host, use null pointer wrappers created
 with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
-set the target architecture explicitly, for example with ``ARCH=gfx950``.
+set the target architecture explicitly, for example with ``FLYDSL_GPU_ARCH=gfx950``.
 Null pointers suppress the initial launch only when no live device buffers are
 present. Non-device tensor placeholders still suppress execution even alongside
 device buffers. ``COMPILE_ONLY=1`` explicitly disables execution for all argument

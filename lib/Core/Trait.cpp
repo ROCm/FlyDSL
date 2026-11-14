@@ -408,9 +408,13 @@ Leaf<Trait> mod(Leaf<Trait> a, Leaf<Trait> b) {
         range = {true, 0, static_cast<int32_t>(av)};
       else if (av < 0 && isInInt32Range(av))
         range = {true, static_cast<int32_t>(av), 0};
-      return dynamic(logWidth, 1, range);
+      // a % b = a - q * b keeps every common factor of a and b.
+      auto magnitude = av < 0 ? uint64_t{0} - static_cast<uint64_t>(av) : static_cast<uint64_t>(av);
+      return dynamic(logWidth,
+                     static_cast<int32_t>(std::gcd(magnitude, static_cast<uint64_t>(b.div_))),
+                     range);
     }
-    return dynamic(logWidth, 1);
+    return dynamic(logWidth, std::gcd(a.div_, b.div_));
   }
   if (b.isZero())
     return Leaf<Trait>::getError(ErrorCode::DivisionByZero);

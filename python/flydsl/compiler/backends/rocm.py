@@ -6,7 +6,7 @@ import os
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
@@ -47,9 +47,8 @@ class RocmBackend(BaseBackend):
 
     @staticmethod
     def detect_target() -> GPUTarget:
-        arch = env.compile.arch or get_rocm_arch()
+        arch = get_rocm_arch()
         if not arch:
-            # ARCH alone would not do: most callers read get_rocm_arch() directly.
             raise RuntimeError("No ROCm GPU architecture detected; set FLYDSL_GPU_ARCH (e.g. gfx1201)")
         return GPUTarget(backend="rocm", arch=arch, warp_size=get_warp_size(arch))
 
@@ -75,42 +74,20 @@ class RocmBackend(BaseBackend):
 
     # -- compile pipeline ------------------------------------------------
 
-    @staticmethod
-    def _format_pass_opts(opts: dict) -> str:
-        """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
-        return " ".join(f"{k}={v}" for k, v in opts.items())
-
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        chip = self.target.arch
-        # MLIR Chipset::parse only accepts bare gfxNNNN. Keep the full arch
-        # (e.g. gfx1250-strict) for rocdl-attach-target so LLVM codegen sees it.
-        chipset = chip.split("-", 1)[0]
+        # MLIR Chipset::parse only accepts bare gfxNNNN. The gpu.module target keeps
+        # the full arch (e.g. gfx1250-strict) so LLVM codegen sees it.
+        chipset = self.target.arch.split("-", 1)[0]
 
         # ROCDL never reads gpu-module-to-binary's opts=, so nothing may be
         # routed through it.
         bin_cli_opts = []
-
-        rocdl_opts = {
-            "O": 2,
-            "abi": 600,
-            "chip": chip,
-            "correct-sqrt": "true",
-            "daz": "false",
-            "fast": "true" if compile_hints.get("fast_fp_math") else "false",
-            "features": "",
-            "finite-only": "false",
-            "module": "",
-            "triple": "amdgcn-amd-amdhsa",
-            "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "true" if get_warp_size(chip) == 64 else "false",
-        }
 
         ktrace_fragments = []
         if _ktrace_tracing_enabled(compile_hints):
             ktrace_fragments = ["convert-fly-ktrace-to-rocdl"]
 
         pre_binary_fragments = [
-            "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-rocdl-expand-ops",
             "fly-layout-lowering",
@@ -127,13 +104,11 @@ class RocmBackend(BaseBackend):
             f"fly-rocdl-cluster-attr)",
         ]
         binary_prep_fragments = [
-            f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            # gpu.module bodies already went through convert-scf-to-cf above; only host functions remain.
+            "func.func(convert-scf-to-cf)",
+            # gpu-to-llvm applies every loaded dialect's ConvertToLLVM patterns.
             "convert-vector-to-llvm",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
+            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "reconcile-unrealized-casts",
             *(
                 ["ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"]
@@ -185,16 +160,25 @@ class RocmBackend(BaseBackend):
             for func_op in _iter_gpu_kernel_funcs(module):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
-    def gpu_module_targets(self) -> List[str]:
-        # Intentionally empty: the ROCm pipeline attaches the authoritative
-        # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
-        # which carries the compile options (O, abi, fast/unsafe-math,
-        # wave64, link_libs). Attaching a bare target here as well made
-        # gpu-module-to-binary serialize one object per target and select the
-        # *bare* one (first object, no offloading handler) — doubling backend
-        # work and silently discarding compile options and link_libs
-        # (ROCm/FlyDSL#1054).
-        return []
+    def gpu_module_targets(self, *, compile_hints: dict, link_libs: Sequence[str] = ()) -> List[str]:
+        # The one #rocdl.target, carrying every compile option
+        from ..._mlir import ir
+
+        flags = [
+            flag
+            for flag, enabled in (
+                ("no_wave64", get_warp_size(self.target.arch) != 64),
+                ("fast", compile_hints.get("fast_fp_math")),
+                ("unsafe_math", compile_hints.get("unsafe_fp_math")),
+            )
+            if enabled
+        ]
+        params = f'O = 2, triple = "amdgcn-amd-amdhsa", chip = "{self.target.arch}", abi = "600"'
+        if flags:
+            params += f", flags = {{{', '.join(flags)}}}"
+        if link_libs:
+            params += f", link = {ir.ArrayAttr.get([ir.StringAttr.get(os.fspath(lib)) for lib in link_libs])}"
+        return [f"#rocdl.target<{params}>"]
 
     # -- cache / fingerprint ---------------------------------------------
 

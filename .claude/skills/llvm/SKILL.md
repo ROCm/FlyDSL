@@ -139,8 +139,8 @@ the `rocdl.waves_per_eu` MLIR attribute. `maxnreg` had no such second path — s
 |---|---|---|---|
 | `waves_per_eu` | `rocdl.waves_per_eu` → `"amdgpu-waves-per-eu"="N"` | bool/int/range | grep `*_llvm_ir.ll` |
 | ~~`maxnreg`~~ | **removed** — now raises; see §8 | raises | n/a |
-| `fast_fp_math` | `rocdl-attach-target{fast=true}` **+** ambient tracing fastmath | truthiness | `fadd fast float` in IR |
-| `unsafe_fp_math` | `rocdl-attach-target{unsafe-math=true}` only | truthiness | ⚠ pipeline string only — **no** op flags |
+| `fast_fp_math` | `fast` flag of the `gpu.module`'s `#rocdl.target` **+** ambient tracing fastmath | truthiness | `fadd fast float` in IR |
+| `unsafe_fp_math` | `unsafe_math` flag of the `#rocdl.target` only | truthiness | ⚠ target flag only — **no** op flags |
 | `fastmath` | explicit fastmath flags on traced ops | normalised | `fadd fast float` in IR |
 | `llvm_options` | arbitrary LLVM `cl::opt`s | type dispatch | ISA diff |
 
@@ -200,7 +200,7 @@ changed the runtime.
 | `waves_per_eu` | `*_llvm_ir.ll` | `"amdgpu-waves-per-eu"="N"` |
 | `flat_work_group_size` | `*_final_isa.s` | `.max_flat_workgroup_size: N` |
 | `fast_fp_math`, `fastmath` | `*_llvm_ir.ll` | `fast` / `nnan` etc. on the op, e.g. `fadd fast float` |
-| `unsafe_fp_math` | pipeline string | `unsafe-math=true` on `rocdl-attach-target`; it adds **no** op flags |
+| `unsafe_fp_math` | `00_origin.mlir` | `unsafe_math` in the `gpu.module`'s `#rocdl.target` flags; it adds **no** op flags |
 | denormal mode | `*_final_isa.s` | `.amdhsa_float_denorm_mode_32` — ⚠ never the IR attribute |
 | an `llvm_options` cl::opt | two `*_final_isa.s` | instruction order differs |
 | any ROCDL intrinsic | `*_final_isa.s` | the **mnemonic** is present |
@@ -260,7 +260,7 @@ Each was verified by running `llc` against the pinned LLVM. Do not reach for the
 | `FLYDSL_LLVM_ENABLE_POST_MISChed` | **Casing typo**, one occurrence tree-wide; the natural `..._MISCHED` spelling did nothing. Benign by accident: the default matched intent. | spelling fixed |
 
 Also note `FLYDSL_COMPILE_OPT_LEVEL` is validated and folded into the cache key
-but has **zero consumers** — `rocdl-attach-target` hard-codes `O=2`.
+but has **zero consumers** — `RocmBackend.gpu_module_targets` hard-codes `O = 2`.
 
 ## Step 9 — Failure-mode taxonomy
 

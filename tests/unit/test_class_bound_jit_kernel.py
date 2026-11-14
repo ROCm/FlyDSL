@@ -39,7 +39,7 @@ def reset_jit(jit_fn):
 def frontend_only_compile(monkeypatch):
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")

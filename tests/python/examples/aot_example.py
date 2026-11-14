@@ -20,7 +20,7 @@ Usage:
 
 Environment variables:
     FLYDSL_RUNTIME_CACHE_DIR  Cache directory (default: ~/.flydsl/cache)
-    ARCH                      Target GPU architecture (e.g. gfx942, gfx950).
+    FLYDSL_GPU_ARCH           Target GPU architecture (e.g. gfx942, gfx950).
 """
 
 import argparse
@@ -281,7 +281,7 @@ def main():
     args = parser.parse_args()
 
     cache_dir = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR", "~/.flydsl/cache")
-    arch = os.environ.get("ARCH", "(auto-detect)")
+    arch = os.environ.get("FLYDSL_GPU_ARCH", "(auto-detect)")
 
     configs = CONFIG_PRESETS[args.preset]
     dtypes = DTYPE_PRESETS.get(args.in_dtype, [args.in_dtype])

@@ -3,6 +3,7 @@
 
 import ctypes
 import importlib
+import inspect
 import os
 import pickle
 import threading
@@ -16,6 +17,7 @@ from .._mlir.execution_engine import ExecutionEngine
 
 _GPU_MODULE_INIT = "flydsl_gpu_module_init"
 _GPU_MODULE_LOAD_TO_DEVICE = "flydsl_gpu_module_load_to_device"
+_EMPTY = inspect.Parameter.empty
 
 
 def _qualname(fn: Callable) -> Optional[str]:
@@ -155,37 +157,76 @@ def build_abi_storage(ctypes_seq, presets=None):
     return storages, packed
 
 
-def _build_dispatch_factory(slot_specs):
-    """Generate a straight-line dispatch-closure factory for ``slot_specs``.
+def _dispatch_source(lines):
+    return "def dispatch(a):\n" + "".join(f"    {line}\n" for line in lines)
 
-    Returns ``make(packed, storages, func_exe) -> dispatch(args_tuple)``.  The
-    generated ``dispatch`` unrolls every slot -- no per-slot Python loop, branch,
-    or tuple-unpack -- with per-slot storages and fill fns bound as closure locals.
+
+def _build_dispatch_factory(slot_specs, params=()):
+    """Generate a straight-line dispatch factory for ``slot_specs``.
+
+    Returns ``factory(packed, storages, func_exe) -> dispatch(args_tuple)``. The
+    generated ``dispatch`` unrolls every slot -- no per-slot Python loop or
+    tuple-unpack. Per-slot storages and fill fns are globals of a per-dispatch
+    namespace rather than closure cells, which CPython copies into the frame on
+    every call.
+
+    ``params`` holds ``(name, default)`` for each launcher parameter in
+    ``arg_idx`` order. If a runtime parameter has a default, ``dispatch`` checks
+    the argument count once and, like a direct call, fills omitted trailing
+    parameters from their defaults; otherwise it is the plain slot sequence.
     """
-    setup, body, fills = [], [], []
-    for i, (arg_idx, _, fill) in enumerate(slot_specs):
-        if fill is None:
-            continue  # null slot (auto-stream): packed[i] stays NULL after alloc
-        fi = len(fills)
-        fills.append(fill)
-        setup.append(f"    s{i} = storages[{i}]")
-        setup.append(f"    f{i} = fills[{fi}]")
-        body.append(f"        f{i}(a[{arg_idx}], s{i})")
+    # Null slots (auto-stream) have no fill: packed[i] stays NULL after alloc.
+    filled = [(i, arg_idx, fill) for i, (arg_idx, _, fill) in enumerate(slot_specs) if fill is not None]
+    params = tuple(params)
+    has_defaults = bool(params) and any(params[arg_idx][1] is not _EMPTY for _, arg_idx, _ in filled)
+    fills = {f"f{i}": fill for i, _, fill in filled}
+    calls = [f"f{i}(a[{arg_idx}], s{i})" for i, arg_idx, _ in filled]
 
-    src = "def make(packed, storages, func_exe, fills):\n"
-    src += "".join(line + "\n" for line in setup)
-    src += "    def dispatch(a):\n"
-    src += "".join(line + "\n" for line in body)
-    src += "        return func_exe(packed)\n"
-    src += "    return dispatch\n"
+    if has_defaults:
+        # Extra arguments stay ignored, as on the plain path.
+        lines = [f"if len(a) >= {len(params)}:", *(f"    {c}" for c in calls), "    return func_exe(packed)"]
+        lines.append("return short(a)")
+    else:
+        lines = [*calls, "return func_exe(packed)"]
+    code = compile(_dispatch_source(lines), "<flydsl-dispatch>", "exec")
+    short_codes = {}
 
-    ns = {}
-    exec(compile(src, "<flydsl-dispatch>", "exec"), ns)
-    make = ns["make"]
-    fills = tuple(fills)
+    def short_code(given):
+        """Dispatch code for a call passing only the first ``given`` arguments."""
+        cached = short_codes.get(given)
+        if cached is None:
+            for name, default in params[given:]:
+                if default is _EMPTY:
+                    raise TypeError(f"missing a required argument: {name!r}")
+            lines = [
+                f"f{i}(a[{arg_idx}], s{i})" if arg_idx < given else f"f{i}(d{arg_idx}, s{i})"
+                for i, arg_idx, _ in filled
+            ]
+            lines.append("return func_exe(packed)")
+            cached = short_codes[given] = compile(_dispatch_source(lines), "<flydsl-dispatch>", "exec")
+        return cached
 
     def factory(packed, storages, func_exe):
-        return make(packed, storages, func_exe, fills)
+        env = {"packed": packed, "func_exe": func_exe, **fills}
+        env.update((f"s{i}", storages[i]) for i, _, _ in filled)
+        ns = env
+        if has_defaults:
+            env.update((f"d{k}", default) for k, (_, default) in enumerate(params) if default is not _EMPTY)
+            by_given = {}
+
+            def short(a):
+                fn = by_given.get(len(a))
+                if fn is None:
+                    # A namespace per arity that does not hold ``short`` keeps the
+                    # dispatch graph acyclic, so it is freed by reference counting.
+                    ns_given = dict(env)
+                    exec(short_code(len(a)), ns_given)
+                    fn = by_given[len(a)] = ns_given.pop("dispatch")
+                return fn(a)
+
+            ns = {**env, "short": short}
+        exec(code, ns)
+        return ns.pop("dispatch")
 
     return factory
 
@@ -200,19 +241,20 @@ class CallState:
 
     __slots__ = ("_func_exe", "_spec", "_tls", "_factory", "_presets", "_predispatch")
 
-    def __init__(self, slot_specs, func_exe, presets=None, predispatch=None):
+    def __init__(self, slot_specs, func_exe, presets=None, predispatch=None, params=()):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, fill)
         self._presets = presets or {}
         self._tls = threading.local()
-        self._factory = _build_dispatch_factory(slot_specs)
+        # params: (name, default) per launcher parameter; lets calls omit defaulted trailing ones.
+        self._factory = _build_dispatch_factory(slot_specs, params)
         self._predispatch = predispatch
 
     def _make_dispatch(self):
         # Allocate one typed storage per slot + the packed pointer array; the null
         # auto-stream slot uses c_void_p -> NULL (its fill is None, never written).
         storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec], self._presets)
-        # The dispatch closure keeps packed + storages alive
+        # The dispatch namespace keeps packed + storages alive
         self._tls.packed = packed
         self._tls.storages = storages
         return self._factory(packed, storages, self._func_exe)

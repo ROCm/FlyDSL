@@ -6,6 +6,8 @@ execution or the external LLVM toolchain."""
 
 import pytest
 
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.backends.rocm import RocmBackend, _normalize_waves_per_eu
 
@@ -100,11 +102,32 @@ def test_rocm_lower_wpe_rejects_invalid_values(value, error):
     ],
 )
 def test_pipeline_strips_chipset_suffix_but_keeps_llvm_chip(arch, expect_chipset, expect_chip):
-    """convert-gpu-to-rocdl needs bare gfxNNNN; LLVM attach-target keeps full arch."""
+    """convert-gpu-to-rocdl needs bare gfxNNNN; the gpu.module target keeps full arch."""
     backend = RocmBackend(RocmBackend.make_target(arch))
     fragments = backend.pipeline_fragments(compile_hints={})
     joined = ",".join(fragments)
     assert f"convert-gpu-to-rocdl{{chipset={expect_chipset} " in joined
-    assert f"chip={expect_chip}" in joined
+    assert f'chip = "{expect_chip}"' in backend.gpu_module_targets(compile_hints={})[0]
     # Suffix must not leak into the MLIR chipset option.
     assert "chipset=gfx1250-strict" not in joined
+
+
+@flyc.kernel
+def _swap_vector_rows_kernel(src: fx.Pointer, dst: fx.Pointer):
+    off = fx.thread_idx.x * 4
+    rows = fx.Vector((src + off).load(fx.Vector.make_type(4, fx.Float32)), (4,), fx.Float32).reshape((2, 2))
+    (dst + off).store(rows[1, None].shuffle(rows[0, None], [0, 1, 2, 3]))
+
+
+@flyc.jit
+def _swap_vector_rows(src: fx.Pointer, dst: fx.Pointer):
+    _swap_vector_rows_kernel(src, dst).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+
+def test_pipeline_lowers_vector_row_indexing(monkeypatch, tmp_path):
+    """Row indexing goes through an n-D vector.shape_cast, which convert-vector-to-llvm expands into
+    an insert chain seeded with ub.poison; the pipeline must still lower that ub.poison."""
+    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
+    null = flyc.from_c_void_p(fx.Float32, 0)
+    flyc.compile(_swap_vector_rows, null, null, compile_only=True)

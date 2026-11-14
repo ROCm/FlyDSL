@@ -96,7 +96,7 @@ def check_batched_reduction_dtypes_and_operations(entry, width, op):
 
 
 def check_compile_family(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     block, count = (64, 4)
@@ -222,7 +222,7 @@ def check_movement_io_policies(warp, policy, count, valid):
 
 
 def check_compile_movement_policies(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block, count = (64, 4)
 
@@ -416,7 +416,7 @@ def check_record_movement(case, policy, count):
 
 
 def check_compile_record_movement(monkeypatch, arch, case, policy):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     case.startswith("warp_") and policy not in ("SHARED_MEMORY", "WARP_TIME_SLICING")
     block, count = 64, 8 if policy == "SHUFFLE" else 3
@@ -627,7 +627,7 @@ def check_warp_reduce_array_blocked_order(universal):
 
 
 def check_reduce_scan_policies_compile(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     assert current_target().arch == arch
     block = 128 if case == "warp_batched_wspro" else 128
@@ -883,7 +883,7 @@ def plain_compose(lhs, rhs):
 
 
 def check_record_collectives_compile(monkeypatch, arch, case):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     block = 128
 

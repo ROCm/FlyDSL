@@ -22,6 +22,21 @@ def _gather(items, index, width):
     return _warp_gather(items, index, width=width)
 
 
+def _valid_at(validity, index, valid_items, width):
+    """Whether tile position *index* holds a valid entry.
+
+    Invalid entries order after every valid one, and that part of the order
+    never consults the comparator, so the local sort and every merge pass keep
+    each run's valid entries in front: the valid set stays the blocked prefix
+    ``[0, valid_items)``. With a count that is one comparison where gathering
+    the flag costs a shuffle per item. Without one every flag is the constant
+    1, and LLVM already folds its gather away.
+    """
+    if valid_items is None:
+        return _warp_gather(validity, index, width=width)
+    return Int32(index < valid_items)
+
+
 def warp_merge_sort(
     keys,
     values=None,
@@ -128,7 +143,7 @@ def warp_merge_sort(
                 ai = base + (mid < run).select(mid, Int32(run - 1))
                 bi = base + run + (other > 0).select(other - 1, Int32(0))
                 a, b = _gather(current, ai, width), _gather(current, bi, width)
-                va, vb = _warp_gather(validity, ai, width=width), _warp_gather(validity, bi, width=width)
+                va, vb = _valid_at(validity, ai, valid_items, width), _valid_at(validity, bi, valid_items, width)
                 advance = (mid < run) & (other > 0) & ~_valid_before(b, a, vb, va, descending, compare_op)
                 low = advance.select(mid + 1, low)
                 high = advance.select(high, mid)
@@ -136,7 +151,7 @@ def warp_merge_sort(
             ai = base + (low < run).select(low, Int32(run - 1))
             bi = base + run + (other < run).select(other, Int32(run - 1))
             a, b = _gather(current, ai, width), _gather(current, bi, width)
-            va, vb = _warp_gather(validity, ai, width=width), _warp_gather(validity, bi, width=width)
+            va, vb = _valid_at(validity, ai, valid_items, width), _valid_at(validity, bi, valid_items, width)
             take_a = (low < run) & ((other >= run) | ~_valid_before(b, a, vb, va, descending, compare_op))
             out.append(_record_select(take_a, a, b))
             out_valid.append(take_a.select(va, vb))

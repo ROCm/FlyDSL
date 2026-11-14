@@ -77,7 +77,7 @@ methods — the wrapper and the kernel-level ops (`fly.mma_atom_call`, `fly.copy
 
 | Interface                         | Required for... | Methods — **mandatory** / *optional* (see §1.3) |
 |-----------------------------------|-----------------|----------------------|
-| `Fly_MayStaticTypeInterface`      | Stateless atoms (CopyOp with *no* mutable state; all MmaOps today) | **`isStatic`**, **`rebuildStaticValue`** |
+| `Fly_MayStaticTypeInterface`      | Stateless atoms (CopyOp with *no* mutable state; all MmaOps today) | **`isStatic`** |
 | `Fly_CopyOpTypeInterface`         | All CopyOps    | **`getThrLayout`**, **`getThrBitLayoutSrc/Dst/Ref`**, **`emitAtomCall`** (mem + pred), *`emitAtomCallSSA`* (mem + pred — only if `fly-convert-atom-call-to-ssa-form` is in the pipeline) |
 | `Fly_MmaOpTypeInterface`          | All MmaOps     | **`getThrLayout`**, **`getShapeMNK`**, **`getValTypeA/B/C/D`**, **`getThrValLayoutA/B/C`**, **`emitAtomCall`**, *`emitAtomCallSSA`* (only if SSA-promotion pass is active) |
 | `Fly_StatefulOpTypeInterface`    | Atoms that carry mutable per-call state (e.g. `soffset`, `imm_offset`) | **`getConvertedType`**, **`getDefaultState`**, **`setAtomState`** |
@@ -190,14 +190,10 @@ Look at any existing example: `FxLayout(FxShape(FxThr(...), FxVal(...)), FxStrid
 FxVal(...)))`. The top-level shape has exactly **rank 2**: outer mode 0 is the thread axes, outer
 mode 1 is the value axes. Each of these modes may itself be a nested tuple.
 
-This is not a style convention — it's load-bearing: `TiledOpUtils.h` unconditionally does
-`shape.at(0)` / `shape.at(1)` / `stride.at(0)` / `stride.at(1)` to slice "thr" from "val". For
-CopyOps, the same shape is passed to `layoutZippedDivide(tiledLayoutThrVal, atomTile)` where
-`atomTile = (atomNumThr, atomNumVal)` is computed as the product of mode-0 and mode-1 (see
-`detail::layoutTiledCopyThrValView` in `TiledOpUtils.h`).
-
-If you nest an extra level or flatten it to rank 1, the code compiles but silently reads
-`thrShape=firstLeaf`, `valShape=secondLeaf`, and produces wrong tile divisions.
+Core's `CopyAtom` / `TiledMMA` read outer mode 0 as the threads and outer mode 1 as the values
+(`size<0>` / `size<1>` of the layout). A copy atom whose layouts are flattened to rank 1 is rejected
+when its tiled copy is made; a layout that keeps rank 2 but nests the axes one level off still
+compiles and produces wrong tile divisions.
 
 #### 1.5.2 Shape-product invariants
 
@@ -367,7 +363,7 @@ wrapper like `MFMA_CDNA5(m, n, k, elem, ...)` in `python/flydsl/expr/rocdl/unive
 **Step 8 — FileCheck test.** Clone `tests/mlir/Conversion/mma_atom.mlir` and swap the payload type:
 
 ```mlir
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize \
+// RUN: %fly-opt %s --fly-canonicalize \
 // RUN:   --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 // CHECK: rocdl.mfma.f32.16x16x32f16
 ```
@@ -460,7 +456,7 @@ tree.
 6. `lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp` — all three CopyOp patterns
 7. `lib/Dialect/Fly/IR/FlyTypeDefs.cpp` — **target-neutral** wrapper trampolines (see the
    `CopyAtomType::*` and `MmaAtomType::*` method definitions)
-8. `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp` — `MakeCopyAtomOpLowering` / `MakeMmaAtomOpLowering` /
+8. `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp` — `MakeAtomOpLowering<MakeCopyAtomOp|MakeMmaAtomOp>` /
    `AtomSetValueOpLowering` / `CopyAtomCallLowering` / `CopyAtomCallSSALowering` /
    `MmaAtomCallLowering` / `MmaAtomCallSSALowering` (callers of your interface methods)
 

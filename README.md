@@ -292,7 +292,7 @@ Python Function (@flyc.kernel / @flyc.jit)
         ▼  MlirCompiler.compile()
    ┌──────────────────────────────────────────────────────────┐
    │ A. pre_binary_fragments  (Fly → ROCDL)                   │
-   │    fly-rewrite-func-signature → fly-canonicalize →       │
+   │    fly-canonicalize → fly-rocdl-expand-ops →             │
    │    fly-layout-lowering → fly-int-swizzle-simplify →      │
    │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
    │    fly-promote-regmem-to-vectorssa →                     │
@@ -301,7 +301,6 @@ Python Function (@flyc.kernel / @flyc.jit)
    │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
    ├──────────────────────────────────────────────────────────┤
    │ B. binary_prep_fragments  (→ LLVM)                       │
-   │    rocdl-attach-target{chip=gfxNNN} →                    │
    │    convert-scf-to-cf → convert-cf-to-llvm →              │
    │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
    │    reconcile-unrealized-casts                            │

@@ -93,6 +93,17 @@ def insert_point(ctx):
         yield InsertionPoint.current
 
 
+@pytest.fixture
+def rocm_arch():
+    """Resolve the target only for tests that require ROCm hardware."""
+    from flydsl.runtime.device import get_rocm_arch
+
+    try:
+        return get_rocm_arch()
+    except RuntimeError as error:
+        pytest.skip(str(error))
+
+
 def pytest_addoption(parser):
     """Add FlyDSL test-session options that map to env variables."""
     group = parser.getgroup("flydsl")
@@ -106,7 +117,7 @@ def pytest_addoption(parser):
         "--flydsl-compile-arch",
         action="store",
         default=None,
-        help="Set ARCH for this pytest session.",
+        help="Set FLYDSL_GPU_ARCH for this pytest session.",
     )
 
 
@@ -122,7 +133,7 @@ def pytest_configure(config):
     if backend:
         os.environ["FLYDSL_COMPILE_BACKEND"] = backend
     if arch:
-        os.environ["ARCH"] = arch
+        os.environ["FLYDSL_GPU_ARCH"] = arch
 
 
 def pytest_sessionfinish(session, exitstatus):
