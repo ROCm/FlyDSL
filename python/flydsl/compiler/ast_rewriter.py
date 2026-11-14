@@ -608,6 +608,9 @@ class RewriteBoolOps(Transformer):
 
         if not isinstance(node.op, (ast.And, ast.Or)):
             return node
+        # A walrus in a later operand would bind inside its thunk, so leave such chains to plain Python.
+        if any(isinstance(sub, ast.NamedExpr) for rhs in node.values[1:] for sub in ast.walk(rhs)):
+            return node
 
         # One call per chain, later operands as thunks: keeps short-circuiting, evaluates each operand
         # once, and stays linear in the operand count.

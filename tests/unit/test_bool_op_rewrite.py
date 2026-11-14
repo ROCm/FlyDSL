@@ -47,3 +47,10 @@ def _python_or(values):
         if value:
             return value, list(range(i + 1))
     return values[-1], list(range(len(values)))
+
+
+def test_walrus_in_later_operand_binds_in_the_function():
+    def f(x):
+        return (x > 0 and (y := x + 1)), y
+
+    assert ASTRewriter.transform(f)(2) == (3, 3)

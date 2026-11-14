@@ -146,12 +146,13 @@ def tracing_option(key, default=None):
 
 
 # Runtime helpers that evaluate rewriter-made thunks (lambdas standing in for operands of a user expression).
-_THUNK_RUNNERS = set()
+# Keyed by id so the per-frame check is an identity test; the value keeps the code alive.
+_THUNK_RUNNERS = {}
 
 
 def thunk_runner(fn):
     """Mark *fn* as calling operand thunks, so their frames are not reported as extra call sites."""
-    _THUNK_RUNNERS.add(fn.__code__)
+    _THUNK_RUNNERS[id(fn.__code__)] = fn.__code__
     return fn
 
 
@@ -189,7 +190,7 @@ def capture_user_location() -> ir.Location:
             is_boundary = boundary is not None and code is boundary
             if not _is_framework_file(code.co_filename):
                 caller = frame.f_back
-                if caller is not None and caller.f_code in _THUNK_RUNNERS:
+                if caller is not None and id(caller.f_code) in _THUNK_RUNNERS:
                     if thunk is None:
                         thunk = frame
                     frame = caller
