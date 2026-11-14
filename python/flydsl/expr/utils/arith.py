@@ -416,6 +416,9 @@ class ArithValue(ir.Value):
         self.signed = signed and elem_ty.width > 1
 
     def with_signedness(self, signed):
+        # Every binary op re-tags both operands; most already carry the requested signedness.
+        if signed is self.signed:
+            return self
         return type(self)(self, signed)
 
     __neg__ = _neg_op

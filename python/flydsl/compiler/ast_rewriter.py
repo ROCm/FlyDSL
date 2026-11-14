@@ -17,7 +17,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.meta import capture_user_location, file_location
+from ..expr.meta import capture_user_location, file_location, thunk_runner
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -558,6 +558,18 @@ class RewriteBoolOps(Transformer):
         return lhs or rhs
 
     @staticmethod
+    @thunk_runner
+    def dsl_bool_op_(is_or, result, *thunks):
+        # Fold left like Python, stopping once a plain bool short-circuits. Later operands
+        # arrive as thunks so each one is evaluated at most once.
+        combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
+        for thunk in thunks:
+            if isinstance(result, bool) and result == is_or:
+                break
+            result = combine(result, thunk())
+        return result
+
+    @staticmethod
     def dsl_not_(x):
         if hasattr(x, "__dsl_not__"):
             return x.__dsl_not__()
@@ -568,6 +580,7 @@ class RewriteBoolOps(Transformer):
         return {
             "dsl_and_": cls.dsl_and_,
             "dsl_or_": cls.dsl_or_,
+            "dsl_bool_op_": cls.dsl_bool_op_,
             "dsl_not_": cls.dsl_not_,
         }
 
@@ -576,8 +589,7 @@ class RewriteBoolOps(Transformer):
         if len(node.ops) == 1:
             return node
         # Chained comparison `a < b < c` -> `(a < b) and (b < c)`, then reuse the
-        # `and` lowering. Middle operands are referenced by two comparisons, matching
-        # the existing repeated-evaluation convention in visit_BoolOp.
+        # `and` lowering. Middle operands are evaluated by both comparisons.
         operands = [node.left] + node.comparators
         comparisons = []
         for i, op in enumerate(node.ops):
@@ -594,36 +606,21 @@ class RewriteBoolOps(Transformer):
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
 
-        _BOOL_OP_MAP = {ast.And: "dsl_and_", ast.Or: "dsl_or_"}
-        handler = _BOOL_OP_MAP.get(type(node.op))
-        if handler is None:
+        if not isinstance(node.op, (ast.And, ast.Or)):
+            return node
+        # A walrus in a later operand would bind inside its thunk, so leave such chains to plain Python.
+        if any(isinstance(sub, ast.NamedExpr) for rhs in node.values[1:] for sub in ast.walk(rhs)):
             return node
 
-        def _should_skip(operand):
-            bail_val = ast.Constant(value=(type(node.op) is ast.Or))
-            return ast.BoolOp(
-                op=ast.And(),
-                values=[
-                    ast.Call(
-                        func=ast.Name(id="isinstance", ctx=ast.Load()),
-                        args=[operand, ast.Name(id="bool", ctx=ast.Load())],
-                        keywords=[],
-                    ),
-                    ast.Compare(left=operand, ops=[ast.Eq()], comparators=[bail_val]),
-                ],
-            )
-
-        result = node.values[0]
-        for rhs in node.values[1:]:
-            result = ast.IfExp(
-                test=_should_skip(result),
-                body=result,
-                orelse=ast.Call(
-                    func=ast.Name(handler, ctx=ast.Load()),
-                    args=[result, rhs],
-                    keywords=[],
-                ),
-            )
+        # One call per chain, later operands as thunks: keeps short-circuiting, evaluates each operand
+        # once, and stays linear in the operand count.
+        no_args = ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], defaults=[])
+        result = ast.Call(
+            func=ast.Name("dsl_bool_op_", ctx=ast.Load()),
+            args=[ast.Constant(isinstance(node.op, ast.Or)), node.values[0]]
+            + [ast.Lambda(args=no_args, body=rhs) for rhs in node.values[1:]],
+            keywords=[],
+        )
 
         return ast.copy_location(ast.fix_missing_locations(result), node)
 
@@ -709,13 +706,9 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _call_branch(fn, result_names, state_values):
-        sig = inspect.signature(fn)
-        params = list(sig.parameters.values())
-        pos_params = [
-            p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
-        if has_varargs or len(pos_params) >= len(state_values) + 1:
+        # Read the arity off the code object: inspect.signature costs more than most branches it dispatches.
+        code = fn.__code__
+        if code.co_flags & inspect.CO_VARARGS or code.co_argcount >= len(state_values) + 1:
             return fn(result_names, *state_values)
         return fn(*state_values)
 
