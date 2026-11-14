@@ -209,6 +209,12 @@ def _is_native_library(name: str) -> bool:
     return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
 
 
+def _is_build_alias(entry: os.DirEntry, real_dir: str) -> bool:
+    # A build tree's ``libFoo.so -> libFoo.so.1``. The links of a symlink-tree
+    # install point into other directories and are kept.
+    return entry.is_symlink() and os.path.dirname(os.path.realpath(entry.path)) == real_dir
+
+
 @lru_cache(maxsize=64)
 def _file_sha256_at(path: str, mtime_ns: int, size: int) -> str:
     # mtime_ns and size only key the memo: a rewritten file is hashed again.
@@ -234,10 +240,11 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
     wheel after the build, so contents and sizes cannot be checked. A partial
     build (``--target`` without ``FlyNativeDigest``) leaves it stale.
     """
+    real_dir = os.path.realpath(libs_dir)
     names = sorted(
         entry.name
         for entry in os.scandir(libs_dir)
-        if _is_native_library(entry.name) and entry.is_file(follow_symlinks=False)
+        if _is_native_library(entry.name) and entry.is_file() and not _is_build_alias(entry, real_dir)
     )
     try:
         from .._mlir._mlir_libs._native_digest import NATIVE_SHA256
@@ -273,7 +280,7 @@ def _flydsl_key_cached(
 
     contents = []
 
-    flydsl_root = Path(flydsl.__file__).resolve().parent
+    flydsl_root = Path(flydsl.__file__).parent
 
     # 1) Hash all Python source files in key sub-packages.
     for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
