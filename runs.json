@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-15T12:55:39Z",
+ "updated": "2026-11-15T14:00:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43719751811,
+   "pr": 987,
+   "commit": "639a5eab1413e97af17ae52a3fdfd9623a7509fe",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811",
+   "created_at": "2026-11-15T13:35:02Z",
+   "updated_at": "2026-11-15T13:40:06Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 43682163051,
    "pr": 1414,
@@ -222,12 +237,21 @@
    "event": "push",
    "title": "[Bugfix] Find native libraries when the package is split across symli\u2026",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737",
    "created_at": "2026-11-14T13:29:42Z",
-   "updated_at": "2026-11-14T16:49:51Z",
+   "updated_at": "2026-11-15T13:57:01Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-14T16:19:06Z",
+     "completed_at": "2026-11-14T16:49:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827699809"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -235,7 +259,7 @@
      "conclusion": "success",
      "started_at": "2026-11-14T13:46:54Z",
      "completed_at": "2026-11-14T14:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845540"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827699891"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -244,19 +268,10 @@
      "conclusion": "success",
      "started_at": "2026-11-14T13:47:04Z",
      "completed_at": "2026-11-14T14:11:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845545",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827700172",
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T16:19:06Z",
-     "completed_at": "2026-11-14T16:49:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132466845579"
     }
    ]
   },
@@ -2386,52 +2401,6 @@
      "machine": "smci350-rck-g03-b17-12",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42973063319,
-   "pr": null,
-   "commit": "9c032e579ae5b31462c9cf7eed5d6bbd47e299de",
-   "branch": "ci/aiter-a4w4-fmoe-csv",
-   "event": "pull_request",
-   "title": "[CI] Add kimik3 a4w4 tuned CSV to the aiter wheel-validation stage",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319",
-   "created_at": "2026-11-11T06:31:46Z",
-   "updated_at": "2026-11-11T07:33:49Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T06:56:57Z",
-     "completed_at": "2026-11-11T07:23:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881314",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T06:57:41Z",
-     "completed_at": "2026-11-11T07:25:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881346"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T07:12:07Z",
-     "completed_at": "2026-11-11T07:33:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42973063319/job/130374881375"
     }
    ]
   }
