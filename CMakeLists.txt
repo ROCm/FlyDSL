@@ -47,21 +47,10 @@ endif()
 if(FLYDSL_ROCM_BITCODE_DIR)
   message(STATUS "Found AMDGCN device bitcode: ${FLYDSL_ROCM_BITCODE_DIR}")
   # ROCm-Device-Libs is NCSA-licensed, which requires the notice to ship with
-  # binary redistributions of the bitcode.
-  if(NOT FLYDSL_ROCM_BITCODE_LICENSE)
-    find_file(FLYDSL_ROCM_BITCODE_LICENSE LICENSE.TXT
-      HINTS
-        "$ENV{ROCM_PATH}/share/doc/ROCm-Device-Libs"
-        "$ENV{ROCM_ROOT}/share/doc/ROCm-Device-Libs"
-        "$ENV{ROCM_HOME}/share/doc/ROCm-Device-Libs"
-        "/opt/rocm/share/doc/ROCm-Device-Libs"
-      NO_DEFAULT_PATH)
-  endif()
-  if(NOT FLYDSL_ROCM_BITCODE_LICENSE)
-    message(WARNING
-      "ROCm-Device-Libs LICENSE.TXT not found; the bundled device bitcode ships without "
-      "its license notice. Set -DFLYDSL_ROCM_BITCODE_LICENSE=<file>.")
-  endif()
+  # binary redistributions of the bitcode; the notice is vendored because minimal
+  # ROCm installs (e.g. the manylinux wheel image) do not ship share/doc.
+  set(FLYDSL_ROCM_BITCODE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rocm-device-libs/LICENSE.TXT"
+    CACHE FILEPATH "License notice bundled with the device bitcode")
 else()
   message(WARNING
     "AMDGCN device bitcode (ocml.bc) not found; the Python package will not bundle it. "
