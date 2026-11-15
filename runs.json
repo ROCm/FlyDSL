@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-15T14:00:11Z",
+ "updated": "2026-11-15T15:10:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811",
    "created_at": "2026-11-15T13:35:02Z",
-   "updated_at": "2026-11-15T13:40:06Z",
+   "updated_at": "2026-11-15T15:07:06Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-15T14:03:41Z",
+     "completed_at": "2026-11-15T14:50:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811/job/132836500361"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-15T14:03:44Z",
+     "completed_at": "2026-11-15T14:28:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811/job/132836500380",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-15T14:13:58Z",
+     "completed_at": "2026-11-15T14:24:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811/job/132836500483"
+    }
+   ]
   },
   {
    "run_id": 43682163051,
