@@ -22,7 +22,7 @@ FLY_GPU_BINARY_PASS = "fly-emit-gpu-binary"
 #: copied in at build time.  Lives under ``_mlir`` because that subtree is the
 #: packaged build output.  Absent when CMake could not locate a ROCm install.
 #: Never contains ``llvm/bin/ld.lld``, so it is only safe for in-process linking.
-BUNDLED_ROCM_PATH = Path(__file__).resolve().parents[2] / "_mlir" / "_rocm"
+BUNDLED_ROCM_PATH = Path(__file__).parents[2] / "_mlir" / "_rocm"
 
 #: Device libraries ``appendStandardLibs()`` can pull out of a toolkit path.
 _DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
