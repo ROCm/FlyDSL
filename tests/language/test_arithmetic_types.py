@@ -301,7 +301,7 @@ class TestTypeTower:
         # floats
         "Float16", "BFloat16", "Float32", "Float64",
         # narrow floats
-        "Float8E5M2", "Float8E4M3FN", "Float8E4M3FNUZ", "Float8E4M3B11FNUZ",
+        "Float8E5M2", "Float8E4M3FN", "Float8E4M3FNUZ", "Float8E5M2FNUZ", "Float8E4M3B11FNUZ",
         "Float8E4M3", "Float6E2M3FN", "Float6E3M2FN", "Float8E8M0FNU", "Float4E2M1FN",
         # predicate
         "Boolean",

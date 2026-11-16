@@ -123,7 +123,7 @@ Type annotations
 - **fx.Constexpr[int]** -- compile-time constant
 - **fx.Int32** -- dynamic int32 argument
 - **fx.Float32**, **fx.Float16**, **fx.BFloat16** -- scalar types
-- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2** -- FP8 scalar types
+- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2**, **fx.Float8E5M2FNUZ** -- FP8 scalar types
 - **fx.Stream** -- GPU stream argument
 - **fx.T** -- type namespace (``T.f32``, ``T.f16``, ``T.bf16``, ``T.i8``, ``T.index``, etc.)
 - **fx.Basis(value, modes)** / **fx.E(\*modes)** -- basis-stride leaves for by-mode layout construction (``E(0)`` → ``1E0``)
