@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-16T13:59:35Z",
+ "updated": "2026-11-16T14:28:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,38 +10,41 @@
    "branch": "feat/windows-ci",
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273",
    "created_at": "2026-11-16T13:34:04Z",
-   "updated_at": "2026-11-16T13:52:21Z",
+   "updated_at": "2026-11-16T14:26:37Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T13:52:31Z",
-     "completed_at": null,
+     "completed_at": "2026-11-16T14:01:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273/job/133342936269"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T13:52:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273/job/133342936333"
+     "completed_at": "2026-11-16T14:19:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273/job/133342936333",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T13:52:45Z",
-     "completed_at": null,
+     "completed_at": "2026-11-16T14:12:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273/job/133342936400"
     }
    ]
