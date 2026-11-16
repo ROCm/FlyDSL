@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-11-16T00:50:00Z",
+ "updated": "2026-11-16T02:39:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43792856611,
+   "pr": 1368,
+   "commit": "1e9aa00ecc9b564a0de11b226b4c3e9bb60cef75",
+   "branch": "jli/strict-pin-agpr",
+   "event": "pull_request",
+   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611",
+   "created_at": "2026-11-16T02:33:06Z",
+   "updated_at": "2026-11-16T02:34:40Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 43787819717,
+   "pr": null,
+   "commit": "7ac396bf7e065de0b0d419d503deeba2d4da27fa",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in p\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717",
+   "created_at": "2026-11-16T01:42:33Z",
+   "updated_at": "2026-11-16T02:36:45Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T01:59:28Z",
+     "completed_at": "2026-11-16T02:11:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225651"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T01:59:39Z",
+     "completed_at": "2026-11-16T02:35:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225666"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-16T02:00:40Z",
+     "completed_at": "2026-11-16T02:02:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225667"
+    }
+   ]
+  },
   {
    "run_id": 43719751811,
    "pr": 987,
@@ -109,7 +167,7 @@
   },
   {
    "run_id": 43660983801,
-   "pr": 987,
+   "pr": null,
    "commit": "471b3a342e60c9023baa2c37064858edfda25e62",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -155,7 +213,7 @@
   },
   {
    "run_id": 43660896176,
-   "pr": 987,
+   "pr": null,
    "commit": "4a71e0a58099c43b8b41722f5737ae1f2cdeda51",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -170,7 +228,7 @@
   },
   {
    "run_id": 43600314273,
-   "pr": 987,
+   "pr": null,
    "commit": "67d22e195f56f218ec664c3ed07bc9ca9c12a01e",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -308,7 +366,7 @@
   },
   {
    "run_id": 43599742650,
-   "pr": 987,
+   "pr": null,
    "commit": "fade60ff77a50a05118d9b69cf5e7e951fcc5558",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -323,7 +381,7 @@
   },
   {
    "run_id": 43572233066,
-   "pr": 987,
+   "pr": null,
    "commit": "831620f568f73fd8d47c525d5a9ba386fd8cade2",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -611,7 +669,7 @@
   },
   {
    "run_id": 43547226750,
-   "pr": 987,
+   "pr": null,
    "commit": "cd6261be33d8904425c95b3e43849d9adc2d8907",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -657,7 +715,7 @@
   },
   {
    "run_id": 43537407985,
-   "pr": 987,
+   "pr": null,
    "commit": "1472cde6082bfe833ba8870f2f948ba192ffa316",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -1039,7 +1097,7 @@
   },
   {
    "run_id": 43363073193,
-   "pr": 987,
+   "pr": null,
    "commit": "e84b4ac626ae31d810dffc1f60d5d0ad1d8c9a50",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -1934,7 +1992,7 @@
   },
   {
    "run_id": 43150743776,
-   "pr": 987,
+   "pr": null,
    "commit": "f32e9ff1089fd48a1fd41c4d04b81cc6651145e2",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
@@ -1980,7 +2038,7 @@
   },
   {
    "run_id": 43149062459,
-   "pr": 1368,
+   "pr": null,
    "commit": "11110717ff39ffd82e8148e42c3bb1beef022bf0",
    "branch": "jli/strict-pin-agpr",
    "event": "pull_request",
@@ -2340,98 +2398,6 @@
      "started_at": "2026-11-11T23:38:27Z",
      "completed_at": "2026-11-11T23:47:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161304"
-    }
-   ]
-  },
-  {
-   "run_id": 43110934673,
-   "pr": 1394,
-   "commit": "09452ca4607bf7dc0143fa9ca44bd1c673848b34",
-   "branch": "fix-split-symlink-install",
-   "event": "pull_request",
-   "title": "[Bugfix] Find native libraries when the package is split across symlinks",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673",
-   "created_at": "2026-11-11T22:20:29Z",
-   "updated_at": "2026-11-13T13:09:38Z",
-   "actor": "cp2923",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T14:51:03Z",
-     "completed_at": "2026-11-12T15:00:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131873113968"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T14:26:24Z",
-     "completed_at": "2026-11-12T16:07:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131873114777"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T14:26:40Z",
-     "completed_at": "2026-11-12T14:50:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43110934673/job/131873115561",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 42980160061,
-   "pr": null,
-   "commit": "bcf8a3ea68e89d1150efae011aff186da10c5ea5",
-   "branch": "main",
-   "event": "push",
-   "title": "[Core] Replace the Fly layout implementation with the Core library (#\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061",
-   "created_at": "2026-11-11T07:31:53Z",
-   "updated_at": "2026-11-11T08:30:03Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T07:54:20Z",
-     "completed_at": "2026-11-11T08:10:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132363"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T07:54:36Z",
-     "completed_at": "2026-11-11T08:30:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132528"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T07:54:29Z",
-     "completed_at": "2026-11-11T08:19:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/42980160061/job/130397132563",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
