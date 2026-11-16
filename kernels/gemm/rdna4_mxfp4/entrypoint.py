@@ -13,7 +13,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from .heuristic import _normalize_config, choose_config
+from .config_selector import _normalize_config, choose_config
 from .hybrid import build_hybrid
 from .register import build_register
 

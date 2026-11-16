@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from kernels.gemm.rdna4_mxfp4.heuristic import (
+from kernels.gemm.rdna4_mxfp4.config_selector import (
     _legal_config,
     _selected,
     choose_config,
@@ -18,7 +18,7 @@ from kernels.gemm.rdna4_mxfp4.heuristic import (
 pytestmark = pytest.mark.l0_backend_agnostic
 
 
-@pytest.mark.parametrize("first_module", ["entrypoint", "heuristic"])
+@pytest.mark.parametrize("first_module", ["entrypoint", "config_selector"])
 def test_public_gemm_is_callable_after_importing_support_modules(first_module):
     """Internal imports must not shadow the package's public GEMM function."""
     subprocess.run(
@@ -121,7 +121,7 @@ def test_unknown_policy_or_mode_rejected():
     ],
 )
 def test_unseen_shapes_respect_explicit_hardware_budgets(hardware):
-    from kernels.gemm.rdna4_mxfp4.heuristic import _geometry
+    from kernels.gemm.rdna4_mxfp4.config_selector import _geometry
 
     for shape in ((17, 291, 1376), (97, 12345, 8320), (8193, 7011, 2080)):
         config = choose_config(*shape, **hardware)

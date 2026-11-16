@@ -40,7 +40,6 @@ def build_hybrid(
     stages=2,
     operand_prefetch=2,
     cache_group_m=4,
-    fragment_lds=True,
     schedule="barrier",
     operand_schedule="none",
     epilogue_prefetch=False,
@@ -77,7 +76,7 @@ def build_hybrid(
     w_thrs_n = threads // w_thrs_k
     wcount = slots // (threads * wslots)
     table_bias = 15 if fold_mode == "e5m2" else 8
-    tile_bytes = (tile_n // 16) * nsteps * 34 * 8 if fragment_lds else tile_n * (tile_k + 8)
+    tile_bytes = (tile_n // 16) * nsteps * 34 * 8
     arena = stages * tile_bytes
     assert arena <= 65536
 
@@ -169,18 +168,13 @@ def build_hybrid(
         fx.copy(copy_ref, pRef, load_Ref)
         shared = fx.SharedAllocator().allocate(Shared).peek()
         bp = fx.recast_iter(b_dtype, shared.data.ptr)
-        if const_expr(fragment_lds):
-            # Two 16-row groups of 8 bytes per K16 fragment, each padded
-            # to 17 rows. 17*8 separates halves; 34*8 separates fragments,
-            # shifting LDS banks between groups.
-            b_layout = fx.make_layout(
-                ((16, tile_n // 16), (8, 2, nsteps)),
-                ((8, 34 * nsteps * 8), (1, 17 * 8, 34 * 8)),
-            )
-        else:
-            # Row-major B with an 8-byte pad to shift banks between rows.
-            # Used by ragged_n, partial192 and long_k selector presets.
-            b_layout = fx.make_layout((tile_n, tile_k), (tile_k + 8, 1))
+        # Two 16-row groups of 8 bytes per K16 fragment, each padded
+        # to 17 rows. 17*8 separates halves; 34*8 separates fragments,
+        # shifting LDS banks between groups.
+        b_layout = fx.make_layout(
+            ((16, tile_n // 16), (8, 2, nsteps)),
+            ((8, 34 * nsteps * 8), (1, 17 * 8, 34 * 8)),
+        )
         sB = [fx.make_view(bp + stage * tile_bytes, b_layout) for stage in range_constexpr(stages)]
         a_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Float8E4M3FN)
         b_atom = fx.make_copy_atom(fx.UniversalCopy64b(), b_dtype)

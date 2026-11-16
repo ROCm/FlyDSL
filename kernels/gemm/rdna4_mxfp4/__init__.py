@@ -5,7 +5,7 @@
 
 from importlib import import_module
 
-from .heuristic import choose_config, rank_configurations
+from .config_selector import choose_config, rank_configurations
 
 _TENSOR_API = (
     "PreparedMXFP4",

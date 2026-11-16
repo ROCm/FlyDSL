@@ -23,7 +23,7 @@ from .common import (
     tensor_load,
     tiled_wmma,
 )
-from .heuristic import REGISTER_MAX_ACCUMULATORS
+from .config_selector import REGISTER_MAX_ACCUMULATORS
 
 
 @lru_cache(maxsize=256)

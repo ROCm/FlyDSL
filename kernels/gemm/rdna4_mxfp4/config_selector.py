@@ -30,7 +30,6 @@ HYBRID_DEFAULTS = dict(
     stages=2,
     operand_prefetch=2,
     cache_group_m=4,
-    fragment_lds=True,
     schedule="barrier",
     operand_schedule="none",
     epilogue_prefetch=False,
@@ -63,7 +62,7 @@ def _geometry(config):
         rm, rn = config["repeat_m"], config["repeat_n"]
         return wm * rm * 16, wn * rn * 16, 32 * config["k_unroll"], wm, wn, rm, rn, 0
     bm, bn, bk = (config[name] for name in ("tile_m", "tile_n", "tile_k"))
-    bb = bn // 16 * (bk // 16) * 34 * 8 if config["fragment_lds"] else bn * (bk + 8)
+    bb = bn // 16 * (bk // 16) * 34 * 8
     return bm, bn, bk, wm, wn, bm // (16 * wm), bn // (16 * wn), bb * config["stages"]
 
 
@@ -470,7 +469,7 @@ def _m_tile(m, n, processors, bn, wide_tile=False, reuse_groups=2):
 
 
 # Launch configurations of the hybrid strategy, not additional algorithms.
-# M/N/K tile, M/N waves, stages, lookahead, M grouping, fragment LDS,
+# M/N/K tile, M/N waves, stages, lookahead, M grouping,
 # scheduling, operand scheduling, epilogue prefetch and nibble conversion.
 _HYBRID_PARAMETERS = (
     "tile_m",
@@ -481,28 +480,27 @@ _HYBRID_PARAMETERS = (
     "stages",
     "operand_prefetch",
     "cache_group_m",
-    "fragment_lds",
     "schedule",
     "operand_schedule",
     "epilogue_prefetch",
     "table_mode",
 )
 _HYBRID_PRESETS = {
-    "ragged_n": (32, 32, 256, 2, 2, 2, 15, 1, False, "groups", "none", False, "alu"),
-    "decode": (16, 64, 256, 1, 4, 2, 2, 1, True, "none", "none", False, "lut"),
-    "microbatch": (32, 32, 256, 2, 2, 2, 2, 1, True, "none", "none", False, "lut"),
-    "skinny": (64, 32, 256, 4, 1, 2, 2, 4, True, "groups", "none", False, "alu"),
-    "skinny_reuse": (128, 32, 256, 4, 1, 2, 2, 4, True, "groups", "none", False, "alu"),
-    "narrow_prefill": (128, 32, 256, 4, 1, 2, 6, 1, True, "groups", "none", True, "lut"),
-    "small_prefill": (64, 32, 256, 4, 1, 2, 2, 1, True, "none", "none", True, "lut"),
-    "small_wide": (64, 64, 128, 4, 1, 2, 2, 1, True, "groups", "none", False, "lut"),
-    "short_k": (64, 32, 32, 2, 2, 2, 1, 1, True, "barrier", "none", False, "alu"),
-    "partial96": (96, 64, 256, 2, 2, 1, 13, 1, True, "groups", "none", False, "alu"),
-    "pipelined_partial": (128, 64, 128, 4, 1, 2, 4, 1, True, "groups", "none", True, "lut"),
-    "medium_prefill": (128, 64, 128, 4, 1, 2, 2, 1, True, "groups", "none", False, "lut"),
-    "partial192": (192, 64, 64, 4, 1, 2, 2, 1, False, "groups", "none", True, "alu"),
-    "long_k": (256, 64, 128, 8, 1, 2, 7, 2, False, "groups", "none", True, "alu"),
-    "large_reuse": (256, 128, 128, 4, 2, 2, 2, 2, True, "barrier", "barrier", False, "lut"),
+    "ragged_n": (32, 32, 256, 2, 2, 2, 15, 1, "groups", "none", False, "alu"),
+    "decode": (16, 64, 256, 1, 4, 2, 2, 1, "none", "none", False, "lut"),
+    "microbatch": (32, 32, 256, 2, 2, 2, 2, 1, "none", "none", False, "lut"),
+    "skinny": (64, 32, 256, 4, 1, 2, 2, 4, "groups", "none", False, "alu"),
+    "skinny_reuse": (128, 32, 256, 4, 1, 2, 2, 4, "groups", "none", False, "alu"),
+    "narrow_prefill": (128, 32, 256, 4, 1, 2, 6, 1, "groups", "none", True, "lut"),
+    "small_prefill": (64, 32, 256, 4, 1, 2, 2, 1, "none", "none", True, "lut"),
+    "small_wide": (64, 64, 128, 4, 1, 2, 2, 1, "groups", "none", False, "lut"),
+    "short_k": (64, 32, 32, 2, 2, 2, 1, 1, "barrier", "none", False, "alu"),
+    "partial96": (96, 64, 256, 2, 2, 1, 13, 1, "groups", "none", False, "alu"),
+    "pipelined_partial": (128, 64, 128, 4, 1, 2, 4, 1, "groups", "none", True, "lut"),
+    "medium_prefill": (128, 64, 128, 4, 1, 2, 2, 1, "groups", "none", False, "lut"),
+    "partial192": (192, 64, 64, 4, 1, 2, 2, 1, "groups", "none", True, "alu"),
+    "long_k": (256, 64, 128, 8, 1, 2, 7, 2, "groups", "none", True, "alu"),
+    "large_reuse": (256, 128, 128, 4, 2, 2, 2, 2, "barrier", "barrier", False, "lut"),
 }
 
 
@@ -587,7 +585,6 @@ def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
             waves_m=4,
             waves_n=1,
             cache_group_m=4,
-            fragment_lds=True,
             table_mode="alu",
             schedule="barrier",
             epilogue_prefetch=False,
@@ -608,7 +605,6 @@ def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
             stages=2,
             operand_prefetch=1,
             cache_group_m=2 if n < processors * 32 else 4,
-            fragment_lds=True,
             table_mode="lut" if n < processors * 32 else "alu",
             schedule="barrier",
             operand_schedule="barrier" if n < processors * 32 else "none",

@@ -34,12 +34,12 @@ lose information. Grouped scaling uses the register strategy.
 
 ```text
 rdna4_mxfp4/
-├── __init__.py       # Lazy public exports
-├── entrypoint.py     # Preparation, device capacities, launch, compile-only warmup
-├── register.py       # Register-fed GPU algorithm
-├── hybrid.py         # A registers / B LDS GPU algorithm
-├── heuristic.py      # Pure host selector and named configuration presets
-├── common.py         # Shared device layouts, unpacking and folding
+├── __init__.py          # Lazy public exports
+├── entrypoint.py        # Preparation, device capacities, launch, compile-only warmup
+├── register.py          # Register-fed GPU algorithm
+├── hybrid.py            # A registers / B LDS GPU algorithm
+├── config_selector.py   # Pure host selector and named configuration presets
+├── common.py            # Shared device layouts, unpacking and folding
 └── README.md
 ```
 
@@ -51,10 +51,15 @@ for an explicit override.
 
 Both strategies use bounded buffer I/O for global memory and 4-bit packed
 weights. Hybrid uses LDS synchronization and alignment-based output masking.
-`fragment_lds=True` adds one 8-byte row per 16 rows to shift LDS banks between
-fragment halves. The `ragged_n`, `partial192` and `long_k` presets instead use
-`fragment_lds=False`: row-major B with an 8-byte pad per row. Both layouts are
-selected by the host rules.
+A single `fx.make_layout` groups B around K16 fragments, with one extra
+8-byte row per 16 rows to shift LDS banks between halves. Stores and operand
+loads share this padded layout; there is no LDS-layout configuration parameter.
+
+A controlled R9700 comparison of 21 shapes found no material benefit from a
+second row-major padded layout (best median latency reduction: 1.2%). Native
+K-dependent swizzling increased geometric-mean latency by 2.9% for hot weights
+and 2.2% for read-evicted weights. These measurements support using one padded
+layout for this kernel; they are specific to the tested shapes on gfx1201.
 
 ## Host selection
 
@@ -151,7 +156,7 @@ and read-evicted weights with warm activations. Eviction runs outside timing.
 ```bash
 PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
 PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 128 --configs candidates.json --output timings.json
-python -m pytest tests/unit/test_rdna4_mxfp4_heuristic.py tests/kernels/test_rdna4_mxfp4.py
+python -m pytest tests/unit/test_rdna4_mxfp4_config_selector.py tests/kernels/test_rdna4_mxfp4.py
 ```
 
 ### Selector evidence
