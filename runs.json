@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-16T02:39:26Z",
+ "updated": "2026-11-16T03:32:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43796151574,
+   "pr": 1414,
+   "commit": "50c2af9fde9589bb094bbbd397d499073e2f7d05",
+   "branch": "oidc-probe",
+   "event": "pull_request",
+   "title": "CI: add OIDC audience probe",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43796151574",
+   "created_at": "2026-11-16T03:06:40Z",
+   "updated_at": "2026-11-16T03:16:59Z",
+   "actor": "miramar-labs",
+   "jobs": []
+  },
   {
    "run_id": 43792856611,
    "pr": 1368,
@@ -14,9 +29,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611",
    "created_at": "2026-11-16T02:33:06Z",
-   "updated_at": "2026-11-16T02:34:40Z",
+   "updated_at": "2026-11-16T03:12:23Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T03:04:08Z",
+     "completed_at": "2026-11-16T03:12:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446536"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T03:04:21Z",
+     "completed_at": "2026-11-16T03:22:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446542"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T03:04:24Z",
+     "completed_at": "2026-11-16T03:29:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446553",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 43787819717,
@@ -109,7 +155,7 @@
   },
   {
    "run_id": 43682163051,
-   "pr": 1414,
+   "pr": null,
    "commit": "a6b00f8586f779792d92faa923db5166f40d7367",
    "branch": "oidc-probe",
    "event": "pull_request",
@@ -2352,52 +2398,6 @@
      "started_at": "2026-11-11T23:16:44Z",
      "completed_at": "2026-11-11T23:26:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113764149/job/130846942963"
-    }
-   ]
-  },
-  {
-   "run_id": 43113759975,
-   "pr": null,
-   "commit": "92db3d8fcbd40bafa55525df0518c94530d2ecd2",
-   "branch": "pr/layernorm-bwd",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975",
-   "created_at": "2026-11-11T22:40:43Z",
-   "updated_at": "2026-11-12T00:34:47Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T23:19:59Z",
-     "completed_at": "2026-11-11T23:41:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161240",
-     "machine": "cv350-1e707-c03-2",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T23:34:17Z",
-     "completed_at": "2026-11-12T00:34:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161269"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-11T23:38:27Z",
-     "completed_at": "2026-11-11T23:47:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43113759975/job/130847161304"
     }
    ]
   }
