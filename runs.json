@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-11-16T08:41:10Z",
+ "updated": "2026-11-16T08:44:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 43832869434,
+   "run_id": 43833129491,
    "pr": 1267,
+   "commit": "5ef277cdfe763cda2910e55d6a51cbec19ef25a0",
+   "branch": "qiangpan/sageattn2_2",
+   "event": "pull_request",
+   "title": "[Runtime] Report GPU last-level cache size from KFD",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43833129491",
+   "created_at": "2026-11-16T08:40:21Z",
+   "updated_at": "2026-11-16T08:40:21Z",
+   "actor": "qiangpan2",
+   "jobs": []
+  },
+  {
+   "run_id": 43832869434,
+   "pr": null,
    "commit": "67cf8aa7519716bd8856fc150cf26e05f8730130",
    "branch": "qiangpan/sageattn2_2",
    "event": "pull_request",
@@ -83,9 +98,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-16T08:29:14Z",
+     "started_at": "2026-11-16T08:39:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43829504227/job/133177975081"
     }
@@ -108,9 +123,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-16T08:18:11Z",
+     "started_at": "2026-11-16T08:40:43Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827428356/job/133173202203"
     },
@@ -212,10 +227,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T08:15:43Z",
-     "completed_at": null,
+     "completed_at": "2026-11-16T08:39:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941/job/133171881675"
     }
    ]
@@ -242,11 +257,11 @@
    "branch": "pr/feat-float8-e5m2fnuz",
    "event": "pull_request",
    "title": "[Feat] Add the Float8E5M2FNUZ numeric type",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812",
    "created_at": "2026-11-16T07:28:56Z",
-   "updated_at": "2026-11-16T08:17:22Z",
+   "updated_at": "2026-11-16T08:42:43Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -261,11 +276,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T08:09:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812/job/133169317330"
+     "completed_at": "2026-11-16T08:40:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812/job/133169317330",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2123,52 +2141,6 @@
      "started_at": "2026-11-12T11:37:48Z",
      "completed_at": "2026-11-12T11:48:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43196689136/job/131137604382"
-    }
-   ]
-  },
-  {
-   "run_id": 43194855680,
-   "pr": 1400,
-   "commit": "cd6cf4baa8d977eb59703b571de9e41251664a8a",
-   "branch": "pr/enh-int-divisibility",
-   "event": "pull_request",
-   "title": "[Feat] Honor divisibility info in the Int32/64 type",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680",
-   "created_at": "2026-11-12T09:49:22Z",
-   "updated_at": "2026-11-12T17:21:17Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T12:40:53Z",
-     "completed_at": "2026-11-12T13:08:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680/job/131342552004"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T11:25:47Z",
-     "completed_at": "2026-11-12T11:37:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680/job/131342553002"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T10:16:42Z",
-     "completed_at": "2026-11-12T10:49:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43194855680/job/131342553469",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
