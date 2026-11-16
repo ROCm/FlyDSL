@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-16T09:31:11Z",
+ "updated": "2026-11-16T09:34:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43840371097,
+   "pr": 1267,
+   "commit": "f838b9690cb3c799e46343e819837ea509fdee91",
+   "branch": "qiangpan/sageattn2_2",
+   "event": "pull_request",
+   "title": "[Runtime] Report GPU last-level cache size from KFD",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43840371097",
+   "created_at": "2026-11-16T09:30:32Z",
+   "updated_at": "2026-11-16T09:30:32Z",
+   "actor": "qiangpan2",
+   "jobs": []
+  },
   {
    "run_id": 43839987181,
    "pr": null,
@@ -10,17 +25,17 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Keep forked PRs off linux-flydsl-navi-2 (#1416)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43839987181",
    "created_at": "2026-11-16T09:28:02Z",
-   "updated_at": "2026-11-16T09:28:16Z",
+   "updated_at": "2026-11-16T09:29:27Z",
    "actor": "gyohuangxin",
    "jobs": []
   },
   {
    "run_id": 43838717204,
-   "pr": 1267,
+   "pr": null,
    "commit": "1595c629a373dedd945df5706d1f181b3d0870cd",
    "branch": "qiangpan/sageattn2_2",
    "event": "pull_request",
@@ -1958,49 +1973,6 @@
      "machine": "smci350-rck-g03-f12-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43230388957,
-   "pr": null,
-   "commit": "441e04f8c0aa74826d84a6fb51d5c808fa570d0d",
-   "branch": "moe/k5p-pr",
-   "event": "pull_request",
-   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957",
-   "created_at": "2026-11-12T13:45:44Z",
-   "updated_at": "2026-11-12T14:36:57Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-12T14:34:42Z",
-     "completed_at": "2026-11-12T14:36:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691040"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-12T14:34:42Z",
-     "completed_at": "2026-11-12T14:36:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691064"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-12T14:34:42Z",
-     "completed_at": "2026-11-12T14:36:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43230388957/job/131252691104"
     }
    ]
   }
