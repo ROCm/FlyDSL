@@ -156,7 +156,7 @@ and read-evicted weights with warm activations. Eviction runs outside timing.
 ```bash
 PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
 PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 128 --configs candidates.json --output timings.json
-python -m pytest tests/unit/test_rdna4_mxfp4_config_selector.py tests/kernels/test_rdna4_mxfp4.py
+python -m pytest tests/kernels/test_rdna4_mxfp4.py
 ```
 
 ### Selector evidence
