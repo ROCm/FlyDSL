@@ -560,6 +560,9 @@ jobs:
           'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
+        # linux-flydsl-navi-2 is a persistent runner, so forked PRs never run on it.
+        exclude:
+          - runners: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'linux-flydsl-navi-2' || '' }}
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -648,6 +651,9 @@ jobs:
           'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
+        # linux-flydsl-navi-2 is a persistent runner, so forked PRs never run on it.
+        exclude:
+          - runners: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'linux-flydsl-navi-2' || '' }}
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:

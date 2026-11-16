@@ -406,8 +406,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        from .backends.rocm import rocm_toolkit_path
+
+        # Same toolkit as the compile, or kernels calling __ocml_* find no bitcode.
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit="{rocm_toolkit_path()}"}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -490,7 +493,7 @@ def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineCon
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
-        binary_fragment=None,
+        binary_fragment=fragments[-1],
         llvm_opts=llvm_opts,
         external=False,
     )
@@ -630,7 +633,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag == binary_fragment:
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx

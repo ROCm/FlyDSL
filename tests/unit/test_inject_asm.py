@@ -129,9 +129,9 @@ def test_prepare_sets_up_a_workspace(tmp_path, monkeypatch, capsys, compile_env)
     # caching run would write no entry, and RUN_ONLY rejects the dump run outright.
     monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
-    # --clang must only assemble, leaving the link to the toolkit ld.lld as in the
-    # compiler: a clang that links by itself uses the lld beside it, which can lay
-    # out the same code differently.
+    # --clang must only assemble, leaving the link to the linker the compiler uses:
+    # a clang that links by itself uses the lld beside it, which can lay out the
+    # same code differently.
     marker, clang = tmp_path / "clang-was-called", tmp_path / "clang"
     clang.write_text(
         f'#!/bin/sh\ncase " $* " in *" -c "*) ;; *) echo "asked to link" >&2; exit 1;; esac\n'
