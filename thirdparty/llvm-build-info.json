@@ -47,6 +47,11 @@
         "file": "xnack-xcnt-replay-codegen.patch",
         "description": "Finish the gfx1250 xnack=any codegen override on pin 941a04e: enable XNACK on/off modes, make isXNACKEnabled follow TargetID, and emit xcnt waits plus REPLAY_MODE only when XNACK is on. Split out of xnack-any-codegen-override.patch because REPLAY_MODE is inserted later by the unclaused-vmem patch on this pin. Adapted from jli/xnack-perf (LLVM 1df311a6).",
         "upstream_status": "not yet submitted; adapted from jli/xnack-perf (LLVM 1df311a6)"
+      },
+      {
+        "file": "amdgpu-asyncmark-nocallback.patch",
+        "description": "llvm.amdgcn.asyncmark and llvm.amdgcn.wait.asyncmark only set and await a marker in the stream of async requests, so they qualify for nocallback. Without it AAAMDGPUMinAGPRAlloc reaches a pessimistic fixpoint, no amdgpu-agpr-alloc attribute is manifested, and the backend reserves half of the vector register file for AGPRs in any kernel that uses async LDS copies.",
+        "upstream_status": "merged into upstream: e282c27d4c4d1c4fd8cea8d0dcb4674ad2dff02d"
       }
     ],
     "extensions": []

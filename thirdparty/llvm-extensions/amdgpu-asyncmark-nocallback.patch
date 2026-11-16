@@ -1,0 +1,44 @@
+diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+index 037630ea86..716a3f312b 100644
+--- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
++++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
+@@ -2923,12 +2923,15 @@ def int_amdgcn_pops_exiting_wave_id :
+ 
+ // Sets a marker in the stream of async requests. Modelled as InaccessibleMem.
+ def int_amdgcn_asyncmark : ClangBuiltin<"__builtin_amdgcn_asyncmark">,
+-  Intrinsic<[], [], [IntrNoMem, IntrHasSideEffects]>;
++  Intrinsic<[], [], [IntrNoMem, IntrHasSideEffects, IntrWillReturn,
++                     IntrNoCallback, IntrNoFree]>;
+ 
+ // Waits until the Nth previous marker is completed, if it exists.
+ def int_amdgcn_wait_asyncmark :
+     ClangBuiltin<"__builtin_amdgcn_wait_asyncmark">,
+-    Intrinsic<[], [llvm_i16_ty], [ImmArg<ArgIndex<0>>, IntrNoMem, IntrHasSideEffects]>;
++    Intrinsic<[], [llvm_i16_ty],
++              [ImmArg<ArgIndex<0>>, IntrNoMem, IntrHasSideEffects,
++               IntrWillReturn, IntrNoCallback, IntrNoFree]>;
+ 
+ //===----------------------------------------------------------------------===//
+ // GFX10 Intrinsics
+diff --git a/llvm/test/CodeGen/AMDGPU/amdgpu-attributor-asyncmark-leaf.ll b/llvm/test/CodeGen/AMDGPU/amdgpu-attributor-asyncmark-leaf.ll
+new file mode 100644
+index 0000000000..2dc823f541
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/amdgpu-attributor-asyncmark-leaf.ll
+@@ -0,0 +1,16 @@
++; RUN: opt -S -mtriple=amdgpu9.50 -passes=amdgpu-attributor %s | FileCheck %s
++
++; The async marker intrinsics only set/await a marker in the stream of async
++; requests; they cannot transfer control out of the module. Make sure they do
++; not defeat the AGPR allocation inference, which conservatively gives up on
++; any call that is not nocallback.
++
++; CHECK: define amdgpu_kernel void @asyncmark_kernel({{.*}}) #[[ATTR:[0-9]+]]
++define amdgpu_kernel void @asyncmark_kernel(ptr addrspace(1) %out) {
++  call void @llvm.amdgcn.asyncmark()
++  call void @llvm.amdgcn.wait.asyncmark(i16 0)
++  store i32 0, ptr addrspace(1) %out
++  ret void
++}
++
++; CHECK: attributes #[[ATTR]] = {{{.*}}"amdgpu-agpr-alloc"="0"
