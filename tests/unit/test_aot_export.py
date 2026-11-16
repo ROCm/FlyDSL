@@ -84,6 +84,98 @@ needs_gpu = pytest.mark.skipif(not HAS_GPU, reason="requires a ROCm GPU")
 needs_cc = pytest.mark.skipif(CC is None, reason="requires a C compiler")
 
 
+def _module_root(name: str) -> Path | None:
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    return Path(spec.submodule_search_locations[0])
+
+
+def _amdhip64_candidates() -> list[Path]:
+    """Candidate ``libamdhip64.so*`` files, unversioned first when present.
+
+    TheRock / ROCm 7 PyTorch images often ship only the versioned soname under
+    ``_rocm_sdk_core``; ``_rocm_sdk_devel`` or a torch-adjacent tree may still
+    provide a linkable copy when ``/opt/rocm`` is absent.
+    """
+    roots: list[Path] = []
+    for env in ("ROCM_PATH", "ROCM_HOME"):
+        value = os.environ.get(env)
+        if value:
+            roots.append(Path(value))
+    if torch is not None:
+        roots.append(Path(torch.__file__).resolve().parent)
+    for name in ("_rocm_sdk_devel", "_rocm_sdk_core", "_rocm_sdk_libraries"):
+        loc = _module_root(name)
+        if loc is not None:
+            roots.append(loc)
+    # Import may fail for TheRock namespace packages; still probe the venv layout.
+    for pattern in (
+        "lib/python*/site-packages/_rocm_sdk_*/lib",
+        "lib64/python*/site-packages/_rocm_sdk_*/lib",
+    ):
+        roots.extend(Path(sys.prefix).glob(pattern))
+    roots.append(Path(sys.prefix))
+    roots.extend(Path(p) for p in ("/opt/rocm", "/opt/rocm-7.14.0", "/opt/rocm-7.14"))
+
+    hits: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        if not (path.is_file() or path.is_symlink()):
+            return
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        hits.append(path)
+
+    for root in roots:
+        if not root.exists():
+            continue
+        # Direct lib layouts first; avoid recursive walks through large trees
+        # like torch/ or the whole venv prefix unless the root is an SDK package.
+        lib_dirs = [root / "lib", root / "lib64", root / "lib" / "llvm" / "lib", root]
+        found_any = False
+        for base in lib_dirs:
+            for path in [base / "libamdhip64.so", *sorted(base.glob("libamdhip64.so.*"))]:
+                if path.is_file() or path.is_symlink():
+                    found_any = True
+                    _add(path)
+        if found_any:
+            continue
+        if root.name.startswith("_rocm_sdk"):
+            for path in list(root.glob("**/libamdhip64.so")) + list(root.glob("**/libamdhip64.so.*")):
+                _add(path)
+    # Prefer an unversioned link name so plain ``-lamdhip64`` works.
+    hits.sort(key=lambda p: (0 if p.name == "libamdhip64.so" else 1, len(p.name), str(p)))
+    return hits
+
+
+def _amdhip64_link_extras(tmp_path: Path) -> list[str]:
+    """``-L`` / ``-rpath`` so ``-lamdhip64`` resolves on TheRock pip-ROCm images."""
+    hits = _amdhip64_candidates()
+    if not hits:
+        pytest.skip("libamdhip64.so not available for AOT shared-library link")
+    lib = hits[0]
+    libdir = lib.parent
+    if lib.name == "libamdhip64.so":
+        search = libdir
+    else:
+        # Core wheels often lack the unversioned name ld looks up for -lamdhip64.
+        search = Path(tmp_path) / "amdhip64_lib"
+        search.mkdir(parents=True, exist_ok=True)
+        link = search / "libamdhip64.so"
+        if not link.exists():
+            link.symlink_to(lib.resolve())
+    return [f"-L{search}", f"-Wl,-rpath,{libdir}"]
+
+
 # Launchers
 
 
@@ -353,7 +445,9 @@ def _link_shared(tmp_path, objects, name, extra=()):
     if sys.platform == "win32":
         return _link_dll(out.with_suffix(".dll"), objects, extra)
     linker = HIPCC or CC
-    flags = list(_get_backend_class().aot_runtime_config().linker_flags)
+    # Keep production linker_flags (-lamdhip64 ...) unchanged; only the test
+    # driver supplies a search path when /opt/rocm is missing.
+    flags = [*_amdhip64_link_extras(tmp_path), *list(_get_backend_class().aot_runtime_config().linker_flags)]
     subprocess.run([linker, "-shared", "-o", str(out), *map(str, objects), *flags, *extra], check=True)
     return out
 
