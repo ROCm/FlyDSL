@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-16T07:29:52Z",
+ "updated": "2026-11-16T07:33:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43824269325,
+   "pr": 1416,
+   "commit": "8f05f839267f516c36d5bbe68253a7ea6e9a7d05",
+   "branch": "ci/block-fork-pr-self-hosted",
+   "event": "pull_request",
+   "title": "[CI] Keep forked PRs off self-hosted runners",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824269325",
+   "created_at": "2026-11-16T07:29:51Z",
+   "updated_at": "2026-11-16T07:31:12Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
+  {
+   "run_id": 43824160812,
+   "pr": 1415,
+   "commit": "e9607e32cbcf0990a6981e909d816977f31d91a4",
+   "branch": "pr/feat-float8-e5m2fnuz",
+   "event": "pull_request",
+   "title": "[Feat] Add the Float8E5M2FNUZ numeric type",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812",
+   "created_at": "2026-11-16T07:28:56Z",
+   "updated_at": "2026-11-16T07:30:10Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 43817849486,
    "pr": null,
@@ -20,11 +50,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T07:08:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133145695683"
+     "completed_at": "2026-11-16T07:31:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133145695683",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -38,10 +71,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T07:08:17Z",
-     "completed_at": null,
+     "completed_at": "2026-11-16T07:29:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133145695809"
     }
    ]
@@ -2182,95 +2215,6 @@
      "started_at": "2026-11-12T09:02:53Z",
      "completed_at": "2026-11-12T09:49:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43182953617/job/131079554032"
-    }
-   ]
-  },
-  {
-   "run_id": 43173331662,
-   "pr": null,
-   "commit": "9b70d465c80b2d0b6b66430154904a3b5c37782f",
-   "branch": "main",
-   "event": "push",
-   "title": "[Windows] Fix the Fly extension link after the Core rewrite (#1398)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662",
-   "created_at": "2026-11-12T07:10:39Z",
-   "updated_at": "2026-11-12T11:29:28Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-12T07:47:45Z",
-     "completed_at": "2026-11-12T07:54:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243451"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-12T07:37:39Z",
-     "completed_at": "2026-11-12T07:42:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243464"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T08:00:46Z",
-     "completed_at": "2026-11-12T11:29:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43173331662/job/131042243475"
-    }
-   ]
-  },
-  {
-   "run_id": 43159506062,
-   "pr": 1399,
-   "commit": "fecdd646431dc8da77a6024e7d1222431828310d",
-   "branch": "fix/windows-test-portability",
-   "event": "pull_request",
-   "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43159506062",
-   "created_at": "2026-11-12T05:09:48Z",
-   "updated_at": "2026-11-12T06:02:04Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T05:36:34Z",
-     "completed_at": "2026-11-12T05:43:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43159506062/job/130996704843"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T05:36:52Z",
-     "completed_at": "2026-11-12T06:00:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43159506062/job/130996704848"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T05:36:53Z",
-     "completed_at": "2026-11-12T06:00:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43159506062/job/130996704924",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
