@@ -47,6 +47,11 @@
         "file": "xnack-xcnt-replay-codegen.patch",
         "description": "Finish the gfx1250 xnack=any codegen override on pin 941a04e: enable XNACK on/off modes, make isXNACKEnabled follow TargetID, and emit xcnt waits plus REPLAY_MODE only when XNACK is on. Split out of xnack-any-codegen-override.patch because REPLAY_MODE is inserted later by the unclaused-vmem patch on this pin. Adapted from jli/xnack-perf (LLVM 1df311a6).",
         "upstream_status": "not yet submitted; adapted from jli/xnack-perf (LLVM 1df311a6)"
+      },
+      {
+        "file": "reassociate-forget-stale-uniformity.patch",
+        "description": "UniformityInfo never removes an entry when its value is erased, and Reassociate keeps one for the whole pass, so a newly created instruction can reuse a freed one's address and be spuriously classified uniform instead of the documented default of divergent. Rank-boosting then depends on heap addresses, which gives nondeterministic operand ordering in Reassociate output. Adds forgetValue() and calls it at Reassociate's two erase sites.",
+        "upstream_status": "merged into upstream: 8237c29e6b60e2bf3bab374df3f3e429999d2e53"
       }
     ],
     "extensions": []

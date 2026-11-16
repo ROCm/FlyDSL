@@ -1,0 +1,65 @@
+diff --git a/llvm/include/llvm/ADT/GenericUniformityImpl.h b/llvm/include/llvm/ADT/GenericUniformityImpl.h
+index bc8f546d7..d066e11c1 100644
+--- a/llvm/include/llvm/ADT/GenericUniformityImpl.h
++++ b/llvm/include/llvm/ADT/GenericUniformityImpl.h
+@@ -404,6 +404,10 @@ public:
+     return DivergentTermBlocks.contains(&B);
+   }
+ 
++  /// Call before erasing \p V, or a later instruction reusing its address
++  /// may be misclassified as uniform.
++  void forgetValue(ConstValueRefT V) { UniformValues.erase(V); }
++
+   void print(raw_ostream &Out) const;
+ 
+   /// Print divergent arguments and return true if any were found.
+@@ -1317,6 +1321,12 @@ bool GenericUniformityInfo<ContextT>::hasDivergentTerminator(const BlockT &B) {
+   return DA && DA->hasDivergentTerminator(B);
+ }
+ 
++template <typename ContextT>
++void GenericUniformityInfo<ContextT>::forgetValue(ConstValueRefT V) {
++  if (DA)
++    DA->forgetValue(V);
++}
++
+ /// \brief T helper function for printing.
+ template <typename ContextT>
+ void GenericUniformityInfo<ContextT>::print(raw_ostream &Out) const {
+diff --git a/llvm/include/llvm/ADT/GenericUniformityInfo.h b/llvm/include/llvm/ADT/GenericUniformityInfo.h
+index 594d6f8bd..682718b66 100644
+--- a/llvm/include/llvm/ADT/GenericUniformityInfo.h
++++ b/llvm/include/llvm/ADT/GenericUniformityInfo.h
+@@ -87,6 +87,10 @@ public:
+ 
+   bool hasDivergentTerminator(const BlockT &B);
+ 
++  /// Call before erasing \p V, or a later instruction reusing its address
++  /// may be misclassified as uniform.
++  void forgetValue(ConstValueRefT V);
++
+   void print(raw_ostream &Out) const;
+ 
+   iterator_range<TemporalDivergenceTuple *> getTemporalDivergenceList() const;
+diff --git a/llvm/lib/Transforms/Scalar/Reassociate.cpp b/llvm/lib/Transforms/Scalar/Reassociate.cpp
+index eb3d3b021..c8a27e650 100644
+--- a/llvm/lib/Transforms/Scalar/Reassociate.cpp
++++ b/llvm/lib/Transforms/Scalar/Reassociate.cpp
+@@ -2061,6 +2061,8 @@ void ReassociatePass::RecursivelyEraseDeadInsts(Instruction *I,
+   ValueRankMap.erase(I);
+   Insts.remove(I);
+   RedoInsts.remove(I);
++  if (UA)
++    UA->forgetValue(I);
+   llvm::salvageDebugInfo(*I);
+   I->eraseFromParent();
+   for (auto *Op : Ops)
+@@ -2078,6 +2080,8 @@ void ReassociatePass::EraseInst(Instruction *I) {
+   // Erase the dead instruction.
+   ValueRankMap.erase(I);
+   RedoInsts.remove(I);
++  if (UA)
++    UA->forgetValue(I);
+   llvm::salvageDebugInfo(*I);
+   I->eraseFromParent();
+   // Optimize its operands.
