@@ -50,10 +50,14 @@ def expand_nibbles(packed, t0, t1, separated_nibbles):
     packed = fx.Uint32(packed)
     even = packed & 0x0F0F0F0F
     odd = packed.shrui(fx.Uint32(4)) & 0x0F0F0F0F
+    # perm_b32 indexes the eight bytes of (t0, t1) with magnitude bits
+    # 0..2; nibble bit 3 becomes the FP8 sign bit at bit 7.
     ev = fx.Uint32(fx.rocdl.perm_b32(t1, t0, even & 0x07070707)) | ((even & 0x08080808) << 4)
     od = fx.Uint32(fx.rocdl.perm_b32(t1, t0, odd & 0x07070707)) | ((odd & 0x08080808) << 4)
     if const_expr(separated_nibbles):
         return Vec.from_elements([ev, od], fx.Uint32)
+    # Interleave ev[0], od[0], ev[1], od[1], then the remaining pairs.
+    # Each selector byte chooses a byte from the concatenated (ev, od).
     return Vec.from_elements(
         [
             fx.Uint32(fx.rocdl.perm_b32(od, ev, fx.Uint32(0x05010400))),
@@ -64,6 +68,10 @@ def expand_nibbles(packed, t0, t1, separated_nibbles):
 
 
 def magnitude_words(shift, mode, normal_only):
+    # Little-endian FP8 lookup bytes for E2M1 magnitudes
+    # [0, .5, 1, 1.5, 2, 3, 4, 6]. E4M3/E5M2 exponent increments
+    # occupy bits 3/2, hence the replicated 0x08/0x04 offsets. Explicit
+    # tables below handle shifts that cross into FP8 subnormal encodings.
     # Give code zero a temporary .5 encoding to prevent cross-byte borrow,
     # then clear byte zero after the independent exponent adjustments.
     shift = fx.Int32(shift)

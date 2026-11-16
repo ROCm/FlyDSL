@@ -6,8 +6,11 @@ stay compressed; conversion to exact FP8 operands happens inside GEMM,
 followed by native FP8 WMMA with FP32 accumulation. Hardware FP4 instructions
 are unnecessary. Performance measurements currently cover gfx1201 / R9700.
 
+Use a source checkout with the repository root on `PYTHONPATH`, as for the
+other kernels in this repository.
+
 ```python
-from flydsl.kernels.gemm.rdna4_mxfp4 import prepare_weights, gemm
+from kernels.gemm.rdna4_mxfp4 import prepare_weights, gemm
 
 # packed: uint8 [N, K/2], even K in low nibble, odd K in high nibble.
 # scales: uint8 [N, K/32], OCP E8M0 exponents.
@@ -42,20 +45,16 @@ rdna4_mxfp4/
 
 `gemm()` calls `choose_config()` directly, then launches register or hybrid.
 There is no runtime tuning cache, configuration search, profile lookup, JSON
-load or learned model. `FLYDSL_AUTOTUNE` does not affect this kernel. The
-previous `tune_gemm` API has been removed; compare explicit configurations
-with the offline benchmark and use `gemm(config=...)` for an explicit override.
+load or learned model. `FLYDSL_AUTOTUNE` does not affect this kernel. Compare
+explicit configurations with the offline benchmark and use `gemm(config=...)`
+for an explicit override.
 
 Both strategies use bounded buffer I/O for global memory and 4-bit packed
-weights. Hybrid uses LDS synchronization, an eight-byte pad for its padded
-LDS layout, and alignment-based output masking. Its fragment and padded LDS
-layouts are selected by `fragment_lds`.
-
-Saved configuration dictionaries and warmup keys can contain the retired
-defaults `buffer_io=True` for register, or `pad=8`, `b_swizzle=None`,
-`barrier_mode="lds"` and `fast_epilogue=True` for hybrid, plus `weight_bits=4`
-for either strategy. Host normalization removes these fields before forming
-the executable key or calling a factory. Alternate values raise `ValueError`.
+weights. Hybrid uses LDS synchronization and alignment-based output masking.
+`fragment_lds=True` adds one 8-byte row per 16 rows to shift LDS banks between
+fragment halves. The `ragged_n`, `partial192` and `long_k` presets instead use
+`fragment_lds=False`: row-major B with an 8-byte pad per row. Both layouts are
+selected by the host rules.
 
 ## Host selection
 
@@ -105,7 +104,7 @@ fallback. Capacity defaults in the pure selector describe R9700. Use the queried
 values when inspecting the configuration selected on another device:
 
 ```python
-from flydsl.kernels.gemm.rdna4_mxfp4 import choose_config, get_device_capabilities
+from kernels.gemm.rdna4_mxfp4 import choose_config, get_device_capabilities
 
 hardware = get_device_capabilities(weights.packed.device.index)
 config = choose_config(M, weights.n, weights.k, weights.mode, cache_policy="rotating", **hardware)
@@ -120,7 +119,7 @@ launches. Existing static decode and aligned/partial prefill specializations
 cover row counts through the configured maximum.
 
 ```python
-from flydsl.kernels.gemm.rdna4_mxfp4 import get_warmup_keys, compile_gemm
+from kernels.gemm.rdna4_mxfp4 import get_warmup_keys, compile_gemm
 
 keys = get_warmup_keys(
     weights.n,
@@ -150,7 +149,45 @@ changed-input replay, then measures paired captured GPU events for hot weights
 and read-evicted weights with warm activations. Eviction runs outside timing.
 
 ```bash
-python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
-python tests/perf/bench_rdna4_mxfp4.py --m 128 --configs candidates.json --output timings.json
+PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
+PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 128 --configs candidates.json --output timings.json
 python -m pytest tests/unit/test_rdna4_mxfp4_heuristic.py tests/kernels/test_rdna4_mxfp4.py
+```
+
+### Selector evidence
+
+The thresholds are empirical shape-class rules calibrated on R9700 (gfx1201),
+not an exhaustive optimum or a claim of equivalent performance on every GPU.
+The archived [initial analytical sweep](https://github.com/big-yellow-duck/FlyDSL/blob/ce625eb6be6d521eab3b0226703c6a03346d470d/tests/perf/data/rdna4_mxfp4_analytical.json)
+and [selector refinement data](https://github.com/big-yellow-duck/FlyDSL/blob/ce625eb6be6d521eab3b0226703c6a03346d470d/tests/perf/data/rdna4_mxfp4_refinement.json)
+include source hashes, hardware capacities, configurations, cohort provenance,
+per-shape timings and worst cases. They are historical calibration evidence;
+they do not measure this revision's compiler/runtime changes.
+
+The refinement used 4,035 development cases and 192 reserved shapes declared
+before the final rule changes. Balanced latency is the geometric mean of hot
+and read-evicted medians from paired captured-event measurements. Relative to
+the preceding selector, development and reserved latency ratios were 0.9906
+and 0.9950 (lower is better); worst ratios were 1.0394 and 1.0204. Changed
+choices were remeasured; unchanged choices reused historical paired blocks.
+Twelve targeted K-factor probes exercised the five-/seven-group unroll rules.
+Earlier pipeline probes retained two regressions above 5%, up to 5.84%.
+The data motivates row-padding, CTA-coverage and K-divisibility thresholds;
+it does not establish a physical explanation for every performance cliff.
+
+### Native FP8 baseline
+
+Use `--native-fp8` to include `torch._scaled_mm` on losslessly predecoded E4M3
+weights. Decoding and allocation occur before timing. Both methods consume the
+same FP8 activations, produce BF16, and use the same event, cache-conditioning,
+reference-check and changed-input replay protocol. Activation scales in this
+benchmark are one. This baseline stores eight bits per weight and excludes
+decoding cost, whereas the MXFP4 kernel retains compressed weights during GEMM.
+It is a native FP8 compute baseline, not an end-to-end W4A4 serving comparison
+or a native FP4 instruction benchmark. The baseline requires shapes supported
+by `torch._scaled_mm` (including its alignment constraints).
+
+```bash
+PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --native-fp8 \
+    --m 16 128 1024 --nk 4096x4096 --output native-comparison.json
 ```

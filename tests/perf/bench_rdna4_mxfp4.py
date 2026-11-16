@@ -19,7 +19,8 @@ from pathlib import Path
 
 import torch
 
-from flydsl.kernels.gemm.rdna4_mxfp4 import choose_config, gemm, get_device_capabilities, prepare_weights
+import flydsl
+from kernels.gemm.rdna4_mxfp4 import choose_config, gemm, get_device_capabilities, prepare_weights
 
 
 def capture(function, calls, stream):
@@ -47,6 +48,7 @@ def main():
     parser.add_argument("--cache-policy", choices=["auto", "hot", "rotating"], default="auto")
     parser.add_argument("--configs", type=Path, help="Offline candidate list")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--native-fp8", action="store_true", help="Compare predecoded native torch._scaled_mm FP8 GEMM")
     args = parser.parse_args()
     extras = json.loads(args.configs.read_text()) if args.configs else []
     if not isinstance(extras, list) or not all(isinstance(c, dict) for c in extras):
@@ -69,6 +71,16 @@ def main():
         codes = torch.stack((packed[cc] & 15, packed[cc] >> 4), -1).flatten(-2).long()
         lut = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], device=device)
         decoded = lut[codes] * torch.exp2(scales[cc].float() - 127).repeat_interleave(32, -1)
+        native_weights = None
+        if args.native_fp8:
+            codes = torch.stack((packed & 15, packed >> 4), -1).flatten(-2).long()
+            full = lut[codes] * torch.exp2(scales.float() - 127).repeat_interleave(32, -1)
+            native_weights = full.to(torch.float8_e4m3fn)
+            if not torch.equal(native_weights.float(), full):
+                raise ValueError("native FP8 baseline requires losslessly representable weights")
+            native_weights = native_weights.T
+            unit_scale = torch.ones((), device=device)
+            del codes, full
         for m in args.m:
             x = torch.randn(m, k, device=device, generator=generator).to(torch.float8_e4m3fn)
             xs = torch.ones(m, device=device)
@@ -76,6 +88,8 @@ def main():
             expected = ((x.float()[rr] @ decoded.T) * xs[rr, None]).to(torch.bfloat16).float()
             config = choose_config(m, n, k, weights.mode, cache_policy=args.cache_policy, **capacities)
             configs = list({json.dumps(c, sort_keys=True): c for c in [config, *extras]}.values())
+            if args.native_fp8:
+                configs.append(dict(engine="torch_fp8"))
             out = torch.empty(m, n, device=device, dtype=torch.bfloat16)
             # Conditioning reads run outside GPU events; activations stay warm.
             conditioning = torch.cuda.CUDAGraph()
@@ -85,10 +99,21 @@ def main():
                 xs.sum()
             trials = []
             for choice in configs:
-                gemm(x, weights, xs, out=out, config=choice)
+                if choice["engine"] == "torch_fp8":
+                    launch = partial(
+                        torch._scaled_mm,
+                        x,
+                        native_weights,
+                        unit_scale,
+                        unit_scale,
+                        out_dtype=torch.bfloat16,
+                        out=out,
+                    )
+                else:
+                    launch = partial(gemm, x, weights, xs, out=out, config=choice)
+                launch()
                 torch.cuda.synchronize(args.gpu)
                 check(out[rr[:, None], cc[None, :]], expected)
-                launch = partial(gemm, x, weights, xs, out=out, config=choice)
                 graphs = {
                     "hot": capture(launch, 8 if m < 128 else 2, stream),
                     "rotating": capture(launch, 1, stream),
@@ -113,7 +138,9 @@ def main():
                     samples[regime].append(events[0].elapsed_time(events[1]) * 1000 / calls)
             for choice, _, samples in trials:
                 medians = {name: statistics.median(values) for name, values in samples.items()}
-                traffic = weights.storage_bytes + m * k + 4 * m + 2 * m * n
+                weight_bytes = n * k if choice["engine"] == "torch_fp8" else weights.storage_bytes
+                scale_bytes = 8 if choice["engine"] == "torch_fp8" else 4 * m
+                traffic = weight_bytes + m * k + scale_bytes + 2 * m * n
                 row = dict(
                     shape=[m, n, k],
                     config=choice,
@@ -121,6 +148,10 @@ def main():
                     mode=weights.mode,
                     cache_policy=args.cache_policy,
                     gpu=args.gpu,
+                    gpu_name=torch.cuda.get_device_name(args.gpu),
+                    architecture=torch.cuda.get_device_properties(args.gpu).gcnArchName,
+                    torch_version=torch.__version__,
+                    flydsl_version=flydsl.__version__,
                     capacities=capacities,
                     samples_us=samples,
                     **{name + "_us": value for name, value in medians.items()},

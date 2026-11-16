@@ -207,3 +207,14 @@ def test_input_device_owns_compilation_and_execution():
             assert torch.cuda.current_device() == 0
     finally:
         torch.cuda.set_device(original)
+
+
+@pytest.mark.parametrize("shape", [(17, 17, 4096), (192, 2048, 8192), (512, 1024, 8192)])
+def test_selected_row_major_lds_presets(shape):
+    from kernels.gemm.rdna4_mxfp4 import choose_config
+
+    config = choose_config(*shape)
+    assert config["engine"] == "hybrid" and config["fragment_lds"] is False
+    x, packed, xs, scales = make_case(shape)
+    actual = gemm(x, prepare_weights(packed, scales), xs, config=config)
+    check(actual, reference(x, packed, xs, scales))

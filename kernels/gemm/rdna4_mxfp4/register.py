@@ -259,7 +259,7 @@ def build_register(
         else:
             launch_grid_m = grid_m
         mxfp4_register(A, W, S, XScale, Y, Ref, LUT).launch(
-            grid=(launch_grid_m * grid_n + 0 * device_id, 1, 1),
+            grid=(launch_grid_m * grid_n, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
         )

@@ -162,72 +162,31 @@ def test_explicit_hybrid_rejects_unsupported_copy_layout_before_compilation():
         specialization_key(33, 3840, 640, config=dict(engine="hybrid", tile_k=160))
 
 
-_LEGACY_DEFAULTS = [
-    ("register", dict(buffer_io=True, weight_bits=4)),
-    ("hybrid", dict(pad=8, b_swizzle=None, barrier_mode="lds", fast_epilogue=True, weight_bits=4)),
-]
-
-
-@pytest.mark.parametrize("engine,legacy_defaults", _LEGACY_DEFAULTS)
-@pytest.mark.parametrize("m", [1, 73, 8192])
-def test_retired_defaults_share_the_current_executable_key(engine, legacy_defaults, m):
-    from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
-    from kernels.gemm.rdna4_mxfp4.heuristic import HYBRID_DEFAULTS, REGISTER_DEFAULTS
-
-    defaults = REGISTER_DEFAULTS if engine == "register" else HYBRID_DEFAULTS
-    legacy = dict(defaults, **legacy_defaults)
-    original = dict(legacy)
-    expected = specialization_key(m, 256, 512, config=dict(engine=engine))
-    assert specialization_key(m, 256, 512, config=defaults) == expected
-    assert specialization_key(m, 256, 512, config=legacy) == expected
-    assert legacy == original
-    assert legacy_defaults.keys().isdisjoint(dict(expected[-1]))
-
-
-@pytest.mark.parametrize(
-    "engine,name,value",
-    [
-        ("register", "buffer_io", False),
-        ("register", "weight_bits", 8),
-        ("hybrid", "pad", 0),
-        ("hybrid", "b_swizzle", (2, 3, 3)),
-        ("hybrid", "barrier_mode", "gpu"),
-        ("hybrid", "fast_epilogue", False),
-        ("hybrid", "weight_bits", 8),
-    ],
-)
-def test_retired_options_reject_alternate_paths(engine, name, value):
-    from kernels.gemm.rdna4_mxfp4.entrypoint import specialization_key
-
-    with pytest.raises(ValueError, match=f"fixes {name}"):
-        specialization_key(73, 256, 512, config=dict(engine=engine, **{name: value}))
-
-
-@pytest.mark.parametrize("engine,legacy_defaults", _LEGACY_DEFAULTS)
-def test_saved_warmup_keys_accept_retired_defaults(engine, legacy_defaults, monkeypatch):
-    import torch
+@pytest.mark.parametrize("engine", ["register", "hybrid"])
+@pytest.mark.parametrize("environment", [None, "0", "1"])
+def test_compile_warmup_uses_per_call_compile_only(engine, environment, monkeypatch):
+    import os
 
     from kernels.gemm.rdna4_mxfp4 import entrypoint
 
+    if environment is None:
+        monkeypatch.delenv("COMPILE_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("COMPILE_ONLY", environment)
     key = entrypoint.specialization_key(8192, 256, 512, config=dict(engine=engine))
-    parameters = dict(key[-1], **legacy_defaults)
-    saved_key = (*key[:-1], tuple(sorted(parameters.items())))
-    captured = {}
     launcher = object()
+    calls = []
 
-    def factory(m, n, k, **options):
-        captured.update(options)
-        assert (m, n, k) == key[1:4]
-        return launcher
-
-    def compile_only(actual_launcher, *args):
+    def compile_only(actual_launcher, *args, compile_only=False):
         assert actual_launcher is launcher
+        assert compile_only is True
+        # Check during compilation, when the old implementation leaked state.
+        assert os.environ.get("COMPILE_ONLY") == environment
+        calls.append(actual_launcher)
 
-    monkeypatch.setattr(entrypoint, "build_register" if engine == "register" else "build_hybrid", factory)
+    monkeypatch.setattr(entrypoint, "build_" + engine, lambda *args, **kwargs: launcher)
     monkeypatch.setattr(entrypoint, "_arguments", lambda *args: [])
     monkeypatch.setattr(entrypoint.flyc, "compile", compile_only)
-    entrypoint.compile_gemm(saved_key)
-    assert captured == dict(key[-1])
-    if engine == "hybrid":
-        assert captured["cache_group_m"] == 4
-    assert not torch.cuda.is_initialized()
+    entrypoint.compile_gemm(key)
+    assert calls == [launcher]
+    assert os.environ.get("COMPILE_ONLY") == environment

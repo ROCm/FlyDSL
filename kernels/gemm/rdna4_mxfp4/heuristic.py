@@ -37,23 +37,14 @@ HYBRID_DEFAULTS = dict(
     table_mode="alu",
 )
 
-# Accept fixed defaults from previously saved configurations.
-_RETIRED_DEFAULTS = {
-    "register": dict(buffer_io=True, weight_bits=4),
-    "hybrid": dict(pad=8, b_swizzle=None, barrier_mode="lds", fast_epilogue=True, weight_bits=4),
-}
-
 
 def _normalize_config(config, m, k):
-    """Resolve factory defaults and accept retired options at their fixed values."""
+    """Resolve factory defaults and shape-dependent launch options."""
     engine = config.get("engine", "register")
-    if engine not in _RETIRED_DEFAULTS:
+    if engine not in ("register", "hybrid"):
         raise ValueError("engine must be register or hybrid")
     defaults = REGISTER_DEFAULTS if engine == "register" else HYBRID_DEFAULTS
     result = dict(defaults, **config)
-    for name, value in _RETIRED_DEFAULTS[engine].items():
-        if result.pop(name, value) != value:
-            raise ValueError(f"{engine} fixes {name} to {value!r}")
     if engine == "register":
         request = result["k_unroll"]
         if not isinstance(request, int) or not 1 <= request <= 16:

@@ -170,11 +170,16 @@ def build_hybrid(
         shared = fx.SharedAllocator().allocate(Shared).peek()
         bp = fx.recast_iter(b_dtype, shared.data.ptr)
         if const_expr(fragment_lds):
+            # Two 16-row groups of 8 bytes per K16 fragment, each padded
+            # to 17 rows. 17*8 separates halves; 34*8 separates fragments,
+            # shifting LDS banks between groups.
             b_layout = fx.make_layout(
                 ((16, tile_n // 16), (8, 2, nsteps)),
                 ((8, 34 * nsteps * 8), (1, 17 * 8, 34 * 8)),
             )
         else:
+            # Row-major B with an 8-byte pad to shift banks between rows.
+            # Used by ragged_n, partial192 and long_k selector presets.
             b_layout = fx.make_layout((tile_n, tile_k), (tile_k + 8, 1))
         sB = [fx.make_view(bp + stage * tile_bytes, b_layout) for stage in range_constexpr(stages)]
         a_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Float8E4M3FN)
@@ -347,7 +352,7 @@ def build_hybrid(
         else:
             launch_grid_m = static_grid_m
         mxfp4_hybrid(A, W, S, XScale, Y, Ref, LUT).launch(
-            grid=(launch_grid_m * grid_n + 0 * device_id, 1, 1),
+            grid=(launch_grid_m * grid_n, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
         )

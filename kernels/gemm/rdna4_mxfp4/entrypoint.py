@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import os
-import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -212,17 +210,19 @@ def specialization_key(
 ):
     """Return the exact executable identity used by runtime and startup warmup."""
     options = _normalize_config(
-        config
-        if config
-        else choose_config(
-            m,
-            n,
-            k,
-            mode,
-            cache_policy=cache_policy,
-            num_processors=num_processors,
-            cache_size_bytes=cache_size_bytes,
-            lds_size_bytes=lds_size_bytes,
+        (
+            config
+            if config
+            else choose_config(
+                m,
+                n,
+                k,
+                mode,
+                cache_policy=cache_policy,
+                num_processors=num_processors,
+                cache_size_bytes=cache_size_bytes,
+                lds_size_bytes=lds_size_bytes,
+            )
         ),
         m,
         k,
@@ -375,9 +375,6 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
     return out
 
 
-_compile_lock = threading.RLock()
-
-
 def get_warmup_keys(
     n,
     k,
@@ -456,13 +453,4 @@ def compile_gemm(key):
     args = _arguments(x, packed, scales, x_scale, out, refs, table, kernel_m, alignment)
     factory = build_hybrid if engine == "hybrid" else build_register
     launcher = factory(kernel_m, n, k, **options)
-    with _compile_lock:
-        previous = os.environ.get("COMPILE_ONLY")
-        os.environ["COMPILE_ONLY"] = "1"
-        try:
-            flyc.compile(launcher, *args, fx.Stream(None))
-        finally:
-            if previous is None:
-                os.environ.pop("COMPILE_ONLY", None)
-            else:
-                os.environ["COMPILE_ONLY"] = previous
+    flyc.compile(launcher, *args, fx.Stream(None), compile_only=True)

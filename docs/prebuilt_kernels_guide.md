@@ -4,7 +4,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 
 ## RDNA4 MXFP4 × FP8 dense GEMM
 
-`flydsl.kernels.gemm.rdna4_mxfp4` exposes `prepare_weights`, `gemm`,
+`kernels.gemm.rdna4_mxfp4` exposes `prepare_weights`, `gemm`,
 `choose_config`, `get_device_capabilities`, `get_warmup_keys`, and `compile_gemm`.
 Source lives under `kernels/gemm/rdna4_mxfp4/`. It targets ROCm gfx1200/gfx1201; measured performance
 currently covers gfx1201. Packed OCP MXFP4 weights remain compressed and feed
@@ -17,10 +17,10 @@ uses shape, processor count, cache capacity and LDS limits to choose launch
 configurations. Runtime and compile-only startup use the same rules and cached
 capacities. There is no runtime JSON, profile matching or configuration search.
 Explicit configurations can be compared with the offline benchmark and passed
-to `gemm(config=...)`; the former `tune_gemm` API is removed. The
+to `gemm(config=...)`. The
 `cache_policy` hint is `auto`, `hot`, or `rotating` (model-layer cycling).
 
-See [the kernel API and configuration guide](../kernels/gemm/rdna4_mxfp4/README.md)
+See [the kernel API and configuration guide](https://github.com/ROCm/FlyDSL/blob/main/kernels/gemm/rdna4_mxfp4/README.md)
 for formats, limits, usage, and validation commands.
 
 ## Quick reference
