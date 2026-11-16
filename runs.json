@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-16T07:33:34Z",
+ "updated": "2026-11-16T07:39:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[compiler][kernel] strict pin agpr feature and kernel example usage t\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486",
    "created_at": "2026-11-16T06:35:59Z",
-   "updated_at": "2026-11-16T07:19:06Z",
+   "updated_at": "2026-11-16T07:36:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -62,10 +62,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-16T07:19:05Z",
-     "completed_at": null,
+     "completed_at": "2026-11-16T07:31:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133145695706"
     },
     {
@@ -342,13 +342,22 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in p\u2026",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717",
    "created_at": "2026-11-16T01:42:33Z",
-   "updated_at": "2026-11-16T02:36:45Z",
+   "updated_at": "2026-11-16T07:36:51Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-16T07:36:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133156769004"
+    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
@@ -356,7 +365,7 @@
      "conclusion": "success",
      "started_at": "2026-11-16T01:59:28Z",
      "completed_at": "2026-11-16T02:11:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225651"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133156770457"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -365,16 +374,7 @@
      "conclusion": "success",
      "started_at": "2026-11-16T01:59:39Z",
      "completed_at": "2026-11-16T02:35:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225666"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-16T02:00:40Z",
-     "completed_at": "2026-11-16T02:02:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133044225667"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133156771161"
     }
    ]
   },
