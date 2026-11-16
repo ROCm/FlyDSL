@@ -147,8 +147,11 @@ jobs:
   # ---------------------------------------------------------------------------
   prepare-mlir:
     needs: [check-signal, detect-changes]
+    # Forked PRs never run on self-hosted runners.
     if: >-
       ${{ !cancelled()
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
           && needs.check-signal.result == 'success'
           && (needs.detect-changes.result != 'success'
               || needs.detect-changes.outputs.code_changed == 'true') }}
@@ -532,9 +535,12 @@ jobs:
     needs: [check-signal, detect-changes, prepare-mlir]
     # Run only when check-signal passed AND the change touched code. Docs-only
     # changes (code_changed == 'false') skip this job entirely, so no GPU runner
-    # is used; a detect-changes failure falls back to running.
+    # is used; a detect-changes failure falls back to running. Forked PRs never
+    # run on self-hosted runners.
     if: >-
       ${{ !cancelled()
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
           && needs.check-signal.result == 'success'
           && needs.prepare-mlir.result == 'success'
           && (needs.detect-changes.result != 'success'
@@ -622,9 +628,12 @@ jobs:
     needs: [check-signal, detect-changes, prepare-mlir]
     # Run only when check-signal passed AND the change touched code. Docs-only
     # changes (code_changed == 'false') skip this job entirely, so no GPU runner
-    # is used; a detect-changes failure falls back to running.
+    # is used; a detect-changes failure falls back to running. Forked PRs never
+    # run on self-hosted runners.
     if: >-
       ${{ !cancelled()
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
           && needs.check-signal.result == 'success'
           && needs.prepare-mlir.result == 'success'
           && (needs.detect-changes.result != 'success'
@@ -865,9 +874,12 @@ jobs:
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
     # Also gated on code_changed: docs-only changes skip this job (a
-    # detect-changes failure falls back to running).
+    # detect-changes failure falls back to running). Forked PRs never run on
+    # self-hosted runners.
     if: |
       !cancelled() &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
       needs.prepare-mlir.result == 'success' &&
       (needs.detect-changes.result != 'success' ||
        needs.detect-changes.outputs.code_changed == 'true') && (
