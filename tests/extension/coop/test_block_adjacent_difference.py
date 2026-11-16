@@ -138,7 +138,7 @@ def test_sequence_records(block, count, method, universal, compile_only=False):
 @pytest.mark.rocm_lower
 @pytest.mark.parametrize("arch,method", matrix_cases(ARCHES, ["left"]))
 def test_record_sequence_compile(monkeypatch, arch, method):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     checks.check_sequence_records(192, 3, method, True, compile_only=True)
 
@@ -296,7 +296,7 @@ def test_composite_output_dtype(record, array):
 @pytest.mark.l1a_compile_no_target_dialect
 @pytest.mark.parametrize("mismatch", ["shape", "element"])
 def test_output_dtype_rejects_element_reshape(insert_point, monkeypatch, mismatch):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     from flydsl.extension.coop.block.adjacent_difference import _apply_if
 
     value = fx.Vector[fx.Int32, 2](1)

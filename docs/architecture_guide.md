@@ -183,18 +183,14 @@ Python Function (@flyc.kernel / @flyc.jit)
    │              fly-rocdl-cluster-attr)                   │
    ├────────────────────────────────────────────────────────┤
    │ Stage B — binary_prep_fragments  (→ LLVM)              │
-   │   rocdl-attach-target{chip=gfxNNN ...}                 │
-   │   convert-scf-to-cf                                    │
-   │   convert-cf-to-llvm                                   │
-   │   gpu-to-llvm{use-bare-pointers-...=true}              │
+   │   func.func(convert-scf-to-cf)                         │
    │   convert-vector-to-llvm                               │
-   │   convert-arith-to-llvm                                │
-   │   convert-func-to-llvm                                 │
+   │   gpu-to-llvm{use-bare-pointers-...=true}              │
    │   reconcile-unrealized-casts                           │
    │   ensure-debug-info-scope-on-llvm-func  (optional)     │
    ├────────────────────────────────────────────────────────┤
    │ Stage C — binary_fragment                              │
-   │   gpu-module-to-binary{format=fatbin opts="..."}       │
+   │   fly-emit-gpu-binary{opts="..."}                      │
    └────────────────────────────────────────────────────────┘
         │
         ▼
@@ -209,7 +205,12 @@ The pipeline is built by `RocmBackend._pipeline_parts()` in
 the pipeline as a single combined pass list (`pipeline_fragments()`) or split
 it for external LLVM codegen (`external_binary_pipeline_fragments()`). External
 mode runs Stages A and B with the bundled MLIR runtime, then invokes the
-external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
+external LLVM toolchain only for Stage C. That toolchain drives an upstream
+`mlir-opt` which does not know FlyDSL passes, so external mode substitutes
+`gpu-module-to-binary{format=isa}` (codegen only). FlyDSL then finishes
+assemble+link with the same in-process LLD path as `fly-emit-gpu-binary`, so
+external mode does not need `<toolkit>/llvm/bin/ld.lld`. Builds without
+in-process LLD fall back to `format=fatbin` and still require `ld.lld`.
 
 **Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
 
@@ -241,14 +242,10 @@ definition for this checkout:
 
 | # | Pass | Description |
 |---|---|---|
-| 11 | `rocdl-attach-target{chip=gfxNNN ...}` | Attaches `#rocdl.target<chip=gfxNNN>` (plus `fast`/`unsafe-math`/`wave64` options) to the GPU module for codegen. |
-| 12 | `convert-scf-to-cf` | Host-side SCF → ControlFlow. |
-| 13 | `convert-cf-to-llvm` | ControlFlow → LLVM dialect. |
-| 14 | `gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}` | GPU types and host launcher → LLVM. |
-| 15 | `convert-vector-to-llvm` | Vector → LLVM. |
-| 16 | `convert-arith-to-llvm` | Arith → LLVM. |
-| 17 | `convert-func-to-llvm` | Func → LLVM. |
-| 18 | `reconcile-unrealized-casts` | Final cast cleanup. |
+| 11 | `func.func(convert-scf-to-cf)` | Host-side SCF → ControlFlow (GPU module bodies were already converted in #10). |
+| 12 | `convert-vector-to-llvm` | Vector rewrites (e.g. n-D `shape_cast` into insert chains seeded with `ub.poison`) and Vector → LLVM. |
+| 13 | `gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}` | Host launcher → LLVM, plus every loaded dialect's `ConvertToLLVMPatternInterface` patterns (arith, cf, func, ub, ...) for whatever is left, including the ops #12 creates. |
+| 14 | `reconcile-unrealized-casts` | Final cast cleanup. |
 
 When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 `ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` after
@@ -258,7 +255,50 @@ When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
 
 | # | Pass | Description |
 |---|---|---|
-| 19 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+| 15 | `fly-emit-gpu-binary{opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+
+Stage C wraps the upstream `gpu-module-to-binary` pass
+(`lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp`): it runs upstream only as far
+as `format=isa`, then assembles the ISA with `mlir::ROCDL::assembleIsa` and
+links the HSA code object through the LLD ELF driver linked into FlyDSL.
+Upstream would instead spawn `<toolkit>/llvm/bin/ld.lld`, resolved from
+`ROCM_PATH` or a path baked into the LLVM build, which fails on any container
+that installs ROCm elsewhere. Linking LLD as a library removes that lookup and
+pins the linker to the LLVM revision that produced the ISA. An LLVM built
+without the `lld` project falls back to the upstream behavior.
+
+Device bitcode (`ocml`/`ockl`/`hip`/`opencl`) is loaded from
+`<toolkit>/amdgcn/bitcode` when the module calls `__ocml_*` / `__ockl_*` — for
+example `fx.erfc`, which has no LLVM intrinsic. FlyDSL bundles that bitcode into
+the package at build time and points `toolkit=` at it, so this lookup does not
+depend on where the container installs ROCm either.
+`rocm_toolkit_path()` (module-level in `rocm.py`) resolves it in order:
+
+1. `FLYDSL_COMPILE_ROCM_PATH` (ignored with a warning if the path lacks bitcode,
+   or lacks `ld.lld` when the build has no in-process LLD)
+2. the bitcode bundled with the package (when in-process LLD is available)
+3. `ROCM_PATH` / `ROCM_ROOT` / `ROCM_HOME`
+4. on Windows, a TheRock / HIP SDK root staged by `_rocm_toolkit_root()`
+5. MLIR's baked-in ROCm path (`_mlirDialectsFlyROCDL.rocm_path()`)
+6. `/opt/rocm`
+
+Each install prefix is accepted in either the canonical ROCDL layout
+(`<prefix>/amdgcn/bitcode` + `<prefix>/llvm/bin/ld.lld`) or TheRock's nested
+layout (`<prefix>/lib/llvm/amdgcn/bitcode` + `<prefix>/lib/llvm/bin/ld.lld`).
+The last two fallbacks keep the JIT cache fingerprint off `none` for
+source/dev builds that did not bundle bitcode and left `ROCM_*` unset.
+
+External codegen (`FLYDSL_COMPILE_LLVM_DIR`) uses the same bitcode-only toolkit
+resolution when in-process LLD is available: external `mlir-opt` emits
+`format=isa`, then `run_external_binary_codegen` runs `fly-emit-gpu-binary` to
+assemble and link. Without in-process LLD, both paths need a toolkit that
+contains `llvm/bin/ld.lld`.
+
+If none of them contains `amdgcn/bitcode/ocml.bc`, no `toolkit=` is passed and
+upstream's own lookup applies. Configure the build with
+`-DFLYDSL_ROCM_BITCODE_DIR=<dir>` to choose which ROCm supplies the bundled
+bitcode; CMake otherwise searches `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME` and
+`/opt/rocm`.
 
 `gpu-kernel-outlining` is no longer a pass in the runtime pipeline. Kernel
 outlining happens during Python tracing, when `@flyc.kernel` emits
@@ -439,7 +479,6 @@ Transforms Python control flow to MLIR ops at the AST level:
 |---|---|---|
 | `FLYDSL_COMPILE_OPT_LEVEL` | `2` | Optimization level (0–3) |
 | `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
-| `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
 
 ### 5.2 Debug options (`FLYDSL_DEBUG_*`)
 
@@ -467,14 +506,16 @@ Transforms Python control flow to MLIR ops at the AST level:
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `ARCH` env var (the compile-time target, also set by `pytest --flydsl-compile-arch`)
-4. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
-5. `rocminfo` system tool
+3. `rocm_agent_enumerator -name` system tool, which follows HSA runtime device visibility
+4. `rocminfo` system tool
+
+The result is both the compile target and the arch kernels branch on;
+`pytest --flydsl-compile-arch` sets `FLYDSL_GPU_ARCH`.
 
 If neither tool identifies a GPU and no explicit override is set, detection
 raises `RuntimeError` instead of assuming `gfx942`. On hosts without accessible
-ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` (or `ARCH`) to the
-intended target (for example, `ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
+ROCm hardware or detection tools, set `FLYDSL_GPU_ARCH` to the
+intended target (for example, `FLYDSL_GPU_ARCH=gfx950 COMPILE_ONLY=1` for cross-compilation).
 Failed detection is cached to avoid repeated slow probes.
 
 Device counting uses the default `rocm_agent_enumerator` output instead:
@@ -520,17 +561,13 @@ dumps/my_func_name/
 ├── 09_canonicalize.mlir
 ├── 10_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
 │                                      # also runs fly-rocdl-cluster-attr
-├── 11_rocdl_attach_target.mlir
-├── 12_convert_scf_to_cf.mlir
-├── 13_convert_cf_to_llvm.mlir
-├── 14_gpu_to_llvm.mlir
-├── 15_convert_vector_to_llvm.mlir
-├── 16_convert_arith_to_llvm.mlir
-├── 17_convert_func_to_llvm.mlir
-├── 18_reconcile_unrealized_casts.mlir
-├── 19_gpu_module_to_binary.mlir
-├── 20_llvm_ir.ll
-└── 21_final_isa.s                    # AMD ISA assembly (best-effort)
+├── 11_func_func_convert_scf_to_cf.mlir
+├── 12_convert_vector_to_llvm.mlir
+├── 13_gpu_to_llvm.mlir
+├── 14_reconcile_unrealized_casts.mlir
+├── 15_gpu_module_to_binary.mlir
+├── 16_llvm_ir.ll
+└── 17_final_isa.s                    # AMD ISA assembly (best-effort)
 ```
 
 If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbered dump before `gpu_module_to_binary`.

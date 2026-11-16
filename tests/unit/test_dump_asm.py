@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 @pytest.mark.parametrize("warm_disk_cache", [False, True])
 def test_dump_asm_writes_only_the_final_isa(monkeypatch, tmp_path, warm_disk_cache):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("FLYDSL_DUMP_DIR", str(tmp_path / "dump"))

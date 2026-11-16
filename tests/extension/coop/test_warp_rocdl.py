@@ -5,9 +5,10 @@
 
 """The ROCm override for the warp collectives, and the portable form it displaces.
 
-``coop/warp/rocdl.py`` replaces the shuffles behind ``warp_reduce`` and the
-three scan entry points with a DPP sequence on gfx9. Two things have to hold
-for that to be a safe swap, and they are what this file checks:
+``coop/warp/rocdl/`` (``reduce.py``, ``scan.py``) replaces the shuffles behind
+``warp_reduce`` and the three scan entry points with a DPP sequence on gfx9.
+Two things have to hold for that to be a safe swap, and they are what this
+file checks:
 
 - **It computes the same thing.** Every case runs through both implementations
   and compares them against each other, not only against a host reference — a
@@ -56,6 +57,14 @@ portable = fx.coop.universal
 CROSS_LANE_LDS = ("ds_swizzle_b32", "ds_bpermute_b32", "ds_permute_b32")
 
 
+def _swaps_cross_rows():
+    """gfx950 crosses 16-lane rows with ``v_permlane16_swap`` / ``v_permlane32_swap``, in the VALU."""
+    return current_target().arch.startswith("gfx950")
+
+
+PERMLANE_SWAPS = ("v_permlane16_swap_b32", "v_permlane32_swap_b32")
+
+
 def _is_gfx9():
     return current_target().arch.startswith("gfx9")
 
@@ -79,9 +88,12 @@ def test_rocm_declares_its_implemented_warp_overrides():
     # families retain the portable implementation through Dispatcher.
     assert set(rocdl.__all__) <= set(warp.__all__)
     # The portable implementations are still reachable, which is what lets the
-    # override fall back to them and this file compare against them.
-    assert portable.warp_reduce is not rocdl.warp_reduce
-    assert portable.warp_inclusive_scan is not rocdl.warp_inclusive_scan
+    # override fall back to them and the rocdl tests compare against them:
+    # universal never names an override, and its classes never dispatch.
+    for name in rocdl.__all__:
+        assert getattr(portable, name) is not getattr(rocdl, name), name
+    for name in ("WarpReduce", "WarpScan", "WarpReduceBatched", "WarpBitonicSort", "WarpMergeSort"):
+        assert getattr(portable, name)._dispatcher is None, name
 
 
 # ── the override and the portable form agree ───────────────────────────────
@@ -182,6 +194,44 @@ def test_float_folds_agree_with_the_portable_form(op):
     torch.testing.assert_close(fast, expected.repeat_interleave(warp_threads), rtol=1e-5, atol=1e-5)
 
 
+# Every collective whose result can be the last DPP move of its sequence. A
+# caller subtracting such a result invites GCNDPPCombine to fold the move into
+# the subtraction; for integers that is ``v_subrev_u32_dpp``, which gfx942
+# computes wrongly (``x - row_shr(y)`` comes out as if the DPP applied to ``x``).
+SUBTRAHEND_CASES = {
+    "exclusive_sum w4": lambda m, v: m.warp_exclusive_sum(v, width=4),
+    "exclusive_sum w16": lambda m, v: m.warp_exclusive_sum(v, width=16),
+    "exclusive_sum w64": lambda m, v: m.warp_exclusive_sum(v),
+    "aggregate w2": lambda m, v: m.warp_scan_with_aggregate(v, fx.ReductionOp.ADD, width=2)[2],
+    "aggregate w4": lambda m, v: m.warp_scan_with_aggregate(v, fx.ReductionOp.ADD, width=4)[2],
+    "aggregate w16": lambda m, v: m.warp_scan_with_aggregate(v, fx.ReductionOp.ADD, width=16)[2],
+    "broadcast w2": lambda m, v: m.warp_broadcast(v, 1, width=2),
+    "broadcast w4": lambda m, v: m.warp_broadcast(v, 3, width=4),
+    "broadcast w8": lambda m, v: m.warp_broadcast(v, 5, width=8),
+    "broadcast w16": lambda m, v: m.warp_broadcast(v, 15, width=16),
+    "broadcast w32": lambda m, v: m.warp_broadcast(v, 7, width=32),
+    "broadcast runtime w2": lambda m, v: m.warp_broadcast(v, v & 1, width=2),
+    "reduce w16": lambda m, v: m.warp_reduce(v, fx.ReductionOp.ADD, width=16),
+    "inclusive_sum w16": lambda m, v: m.warp_inclusive_sum(v, width=16),
+}
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@requires_dpp
+@pytest.mark.parametrize("case", SUBTRAHEND_CASES)
+@pytest.mark.usefixtures("warp_default_device")
+def test_a_result_survives_being_subtracted(case):
+    """No collective hands the caller a DPP move that can fold into the caller's code."""
+    collective = SUBTRAHEND_CASES[case]
+    block = 2 * fx.num_warp_threads()
+    torch.manual_seed(0)
+    values = torch.randint(-(2**20), 2**20, (block,), dtype=torch.int32, device="cuda")
+    fast, ref = _run_both(values, lambda m, v: (v ^ 0x5A5A) - collective(m, v), block=block)
+    assert torch.equal(fast, ref)
+
+
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
@@ -269,7 +319,8 @@ def test_the_fold_stays_out_of_lds(width, tmp_path):
 
     The one exception is a 32-lane reduce. Its last butterfly step is XOR by 16,
     which crosses the 16-lane rows DPP is built around, and gfx9 has no control
-    for that — ``ds_swizzle_b32`` is the cheapest instruction that does it. The
+    for that — ``ds_swizzle_b32`` is the cheapest instruction that does it, and
+    on gfx950 ``v_permlane16_swap_b32`` keeps even that step in the VALU. The
     scans reach across the same boundary with ``row_bcast:15`` instead, because
     they only ever carry a value upwards.
     """
@@ -281,8 +332,10 @@ def test_the_fold_stays_out_of_lds(width, tmp_path):
 
     isa = _isa(call, torch.float32, tmp_path=tmp_path)
 
-    expected_lds = 1 if width == 32 else 0
+    cross_row = 1 if width == 32 else 0
+    expected_lds, expected_swaps = (0, cross_row) if _swaps_cross_rows() else (cross_row, 0)
     assert _count(isa, *CROSS_LANE_LDS) == expected_lds, "the DPP sequence did not take"
+    assert _count(isa, *PERMLANE_SWAPS) == expected_swaps
 
 
 @pytest.mark.l2_device

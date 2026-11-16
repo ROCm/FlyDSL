@@ -52,7 +52,6 @@ from .kernel_function import (
     get_gpu_module_body,
     merge_compile_hints,
 )
-from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
     JitArgument,
     c_abi_spec,
@@ -210,6 +209,12 @@ def _is_native_library(name: str) -> bool:
     return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
 
 
+def _is_build_alias(entry: os.DirEntry, real_dir: str) -> bool:
+    # A build tree's ``libFoo.so -> libFoo.so.1``. The links of a symlink-tree
+    # install point into other directories and are kept.
+    return entry.is_symlink() and os.path.dirname(os.path.realpath(entry.path)) == real_dir
+
+
 @lru_cache(maxsize=64)
 def _file_sha256_at(path: str, mtime_ns: int, size: int) -> str:
     # mtime_ns and size only key the memo: a rewritten file is hashed again.
@@ -235,10 +240,11 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
     wheel after the build, so contents and sizes cannot be checked. A partial
     build (``--target`` without ``FlyNativeDigest``) leaves it stale.
     """
+    real_dir = os.path.realpath(libs_dir)
     names = sorted(
         entry.name
         for entry in os.scandir(libs_dir)
-        if _is_native_library(entry.name) and entry.is_file(follow_symlinks=False)
+        if _is_native_library(entry.name) and entry.is_file() and not _is_build_alias(entry, real_dir)
     )
     try:
         from .._mlir._mlir_libs._native_digest import NATIVE_SHA256
@@ -274,7 +280,7 @@ def _flydsl_key_cached(
 
     contents = []
 
-    flydsl_root = Path(flydsl.__file__).resolve().parent
+    flydsl_root = Path(flydsl.__file__).parent
 
     # 1) Hash all Python source files in key sub-packages.
     for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
@@ -400,8 +406,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        from .backends.rocm import rocm_toolkit_path
+
+        # Same toolkit as the compile, or kernels calling __ocml_* find no bitcode.
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit="{rocm_toolkit_path()}"}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -484,7 +493,7 @@ def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineCon
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
-        binary_fragment=None,
+        binary_fragment=fragments[-1],
         llvm_opts=llvm_opts,
         external=False,
     )
@@ -531,7 +540,7 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, link_libs=Non
         "env": _cache_invalidating_env_values(target),
     }
     if link_libs:
-        # The pipeline names the bitcode files; their contents are linked into the binary.
+        # The gpu.module target names the bitcode files; their contents are linked into the binary.
         config["link_libs"] = [_file_sha256(lib) for lib in link_libs]
     if post_load_processors:
         # An artifact owns the initialized module, not just the binary. Callbacks
@@ -576,11 +585,6 @@ class MlirCompiler:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
-        if link_libs:
-            link_opt = _format_link_lib_options(link_libs)
-            cfg.fragments, found = _append_link_lib_options_to_attach_targets(cfg.fragments, link_opt)
-            if not found:
-                raise RuntimeError("link_libs specified but no attach-target fragment found in pipeline")
         return asm, cfg
 
     @classmethod
@@ -629,7 +633,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag == binary_fragment:
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx
@@ -889,9 +893,14 @@ def _build_call_spec(sig, args_tuple):
     return tuple(slot_specs)
 
 
-def _call_state_from_spec(call_spec, artifact):
+def _call_params(sig):
+    """``(name, default)`` per launcher parameter, in the ``arg_idx`` order of the call spec."""
+    return tuple((name, param.default) for name, param in sig.parameters.items())
+
+
+def _call_state_from_spec(call_spec, artifact, params=()):
     if not artifact._ktrace_traced:
-        return CallState(call_spec, artifact._get_func_exe())
+        return CallState(call_spec, artifact._get_func_exe(), params=params)
 
     from ..expr import ktrace as _ktrace
 
@@ -900,12 +909,14 @@ def _call_state_from_spec(call_spec, artifact):
     trace_backend = get_ktrace_backend()
     slot_specs = (*call_spec, (-1, ctypes.c_void_p, None))
     presets = {len(call_spec): trace_backend.ensure_buffer().device_ptr}
-    return CallState(slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer)
+    return CallState(
+        slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer, params=params
+    )
 
 
 def _build_call_state(sig, args_tuple, artifact):
     """Build a :class:`CallState` for fast repeated dispatch."""
-    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact)
+    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact, _call_params(sig))
 
 
 def _has_live_device_argument(value) -> bool:
@@ -1074,7 +1085,8 @@ class JitFunction:
 
         with ir.InsertionPoint(module.body), loc:
             backend = get_backend()
-            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+            compile_hints = CompilationContext.get_compile_hints()
+            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets(compile_hints=compile_hints))
 
             func_op = func.FuncOp(self.func.__name__, (ir_types, []))
             func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1113,10 +1125,11 @@ class JitFunction:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
+        targets = backend.gpu_module_targets(compile_hints=compile_hints, link_libs=link_libs) if link_libs else []
+        if targets:
+            gpu_module.operation.attributes["targets"] = ir.ArrayAttr.get([ir.Attribute.parse(t) for t in targets])
         if extern_linked:
             gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-            if "targets" in gpu_module.operation.attributes:
-                del gpu_module.operation.attributes["targets"]
 
         return _TraceResult(
             module=module,
@@ -1281,6 +1294,7 @@ class JitFunction:
         compiled = CompiledFunction(call_state, artifact)
         if call_state is None:
             compiled._call_spec = _build_call_spec(self._sig, tuple(bound.arguments.values()))
+            compiled._call_params = _call_params(self._sig)
         compiled._backend = self._backend_target.backend
         compiled._aot_spec, compiled._aot_error = _prepare_aot_signature(self, bound, artifact)
         return compiled
@@ -1305,7 +1319,6 @@ def _attach_ktrace_config(module, traced: bool, known_names=None) -> None:
     blocks = (hints.get("ktrace_blocks", env.ktrace.blocks) or "").strip()
     get_ktrace_backend().configure_module(
         module,
-        target_arch=get_backend().target.arch,
         known_names=known_names,
         blocks=blocks,
     )
@@ -1372,6 +1385,7 @@ class CompiledFunction:
     __slots__ = (
         "_call_state",
         "_call_spec",
+        "_call_params",
         "_call_lock",
         "_runtime_ready",
         "_backend",
@@ -1384,6 +1398,7 @@ class CompiledFunction:
     def __init__(self, call_state, keepalive):
         self._call_state = call_state
         self._call_spec = None
+        self._call_params = ()
         self._call_lock = threading.Lock()
         self._runtime_ready = call_state is not None
         self._backend = None
@@ -1402,7 +1417,7 @@ class CompiledFunction:
                     ensure_compile_runtime_pairing_from_env(self._backend)
                     state = self._call_state
                     if state is None:
-                        state = _call_state_from_spec(self._call_spec, self._keepalive)
+                        state = _call_state_from_spec(self._call_spec, self._keepalive, self._call_params)
                         self._call_state = state
                     self._runtime_ready = True
         state = self._call_state

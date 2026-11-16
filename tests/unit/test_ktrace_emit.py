@@ -34,7 +34,6 @@ def _cdna_arch(rocm_arch):
 def _frontend_only(monkeypatch, *, enable: bool, arch: str = "gfx950", **ktrace_env):
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
-    monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")

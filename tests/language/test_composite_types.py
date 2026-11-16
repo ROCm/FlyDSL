@@ -616,7 +616,7 @@ def test_warm_jit_ir_cache_does_not_lower(monkeypatch, tmp_path, entry):
     "entry", ["value", "type", "global", "closure", "jit_helper", "global_kernel", "global_helper", "class_helper"]
 )
 def test_definition_cache_keys_are_stable_across_processes(tmp_path, monkeypatch, entry):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
@@ -749,7 +749,7 @@ def _point_launch(a: fx.Tensor, out: fx.Tensor):
 @pytest.mark.parametrize("default_device", ["cpu", "cuda"])
 def test_struct_member_target_compilation(monkeypatch, tmp_path, arch, default_device):
     torch = pytest.importorskip("torch")
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
 

@@ -518,7 +518,7 @@ void expandEvent(Operation *op, const EventShape &shape, const KernelTraceState 
   op->erase();
 }
 
-LogicalResult checkTargetArch(gpu::GPUModuleOp mod, StringRef chipHint) {
+LogicalResult checkTargetArch(gpu::GPUModuleOp mod) {
   auto rejectChip = [&](StringRef chip) {
     return mod.emitError("ktrace: in-kernel timestamps are not supported on "
                          "target arch '")
@@ -529,18 +529,8 @@ LogicalResult checkTargetArch(gpu::GPUModuleOp mod, StringRef chipHint) {
   };
 
   ArrayAttr targets = mod.getTargetsAttr();
-  if (!targets || targets.empty()) {
-    if (chipHint.empty())
-      return mod.emitError("ktrace: gpu.module carries no target and no "
-                           "fly_ktrace.chip; cannot verify that in-kernel "
-                           "timestamps are supported");
-    if (chipHint.starts_with("gfx942") || chipHint.starts_with("gfx950"))
-      return success();
-    return rejectChip(chipHint);
-  }
-
   bool sawRocdl = false;
-  for (Attribute t : targets) {
+  for (Attribute t : targets ? targets.getValue() : ArrayRef<Attribute>()) {
     auto rocdlTarget = dyn_cast<ROCDL::ROCDLTargetAttr>(t);
     if (!rocdlTarget)
       continue;
@@ -654,10 +644,7 @@ struct FlyKtraceToROCDLConversionPass
         return WalkResult::advance();
 
       auto mod = kernel->getParentOfType<gpu::GPUModuleOp>();
-      StringRef chipHint;
-      if (auto attr = root->getAttrOfType<StringAttr>("fly_ktrace.chip"))
-        chipHint = attr.getValue();
-      if (!mod || failed(checkTargetArch(mod, chipHint)))
+      if (!mod || failed(checkTargetArch(mod)))
         return WalkResult::interrupt();
 
       int64_t capacitySlots = kDefaultCapacitySlots;

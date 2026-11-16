@@ -1092,7 +1092,24 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
     tensor = core::MemRef<core::Trait>(tensor.data(), std::move(staged));
   }
 
-  auto thr = tiledMmaTy.getRef().get_slice(core::IntTuple<core::Trait>::getZero());
+  // The fragment covers whole tiles of the tiled MMA. A static extent that is not a multiple of
+  // the tile would round up: the copies through the fragment would reach past the view, and a
+  // K tail would add whatever lies there to every output.
+  auto tiled = tiledMmaTy.getRef();
+  bool isA = operandId == MmaOperand::A, isB = operandId == MmaOperand::B;
+  int32_t dims[2] = {isB ? 1 : 0, isA || isB ? 2 : 1};
+  for (int32_t mode = 0; mode < std::min<int32_t>(2, tensor.rank()); ++mode) {
+    int32_t dim = dims[mode];
+    auto extent = core::size(tensor, {mode});
+    auto tile = tiled.tile_size_mnk(dim);
+    if (extent.isSInt() && tile.isSInt() && extent.staticValue() % tile.staticValue() != 0)
+      return emitOptionalError(location, "MmaMakeFragmentOp: the ", "MNK"[dim], " extent ",
+                               extent.staticValue(), " is not a multiple of the tiled MMA's ",
+                               "MNK"[dim], " tile ", tile.staticValue(),
+                               "; the fragment would reach past the view");
+  }
+
+  auto thr = tiled.get_slice(core::IntTuple<core::Trait>::getZero());
   auto fragment = std::visit([](const auto &layout) { return core::make_fragment_like(layout); },
                              partitionMma(thr, operandId, tensor).layout());
   if (fragment.isError())

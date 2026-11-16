@@ -188,7 +188,7 @@ def test_warp_reduce_skips_invalid_operators(universal, form, valid, runtime, de
     matrix_cases(["gfx942", "gfx1100"], [False, True], ["scalar", "vector", "tuple"]),
 )
 def test_warp_reduce_valid_compile(monkeypatch, arch, universal, form):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
     apply = _counted_reduce(universal, form, 3, True)
 
