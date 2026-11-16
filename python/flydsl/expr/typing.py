@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import builtins
 import ctypes
 import enum
 import operator
@@ -2116,14 +2115,6 @@ class Vector(ArithValue):
                 dynamic_position=[dyn_idx],
             ).result
             return self._dtype(res)
-        if isinstance(idx, builtins.slice):  # `slice` here is the layout primitive from .primitive
-            # Like an int index, a slice addresses the flat (row-major) element positions.
-            if not all(bound is None or isinstance(bound, int) for bound in (idx.start, idx.stop, idx.step)):
-                raise TypeError(f"vector slice bounds must be Python ints, got {idx}")
-            positions = list(range(*idx.indices(self.numel)))
-            if not positions:
-                raise IndexError(f"vector slice {idx} is empty for numel {self.numel}")
-            return self.shuffle(self, positions)
         if isinstance(idx, tuple):
             coord = self._canonical_shape(idx)
             if not any(part is None for part in self._flatten_static(coord)):
