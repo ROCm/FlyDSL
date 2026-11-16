@@ -52,7 +52,6 @@ from .kernel_function import (
     get_gpu_module_body,
     merge_compile_hints,
 )
-from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
     JitArgument,
     c_abi_spec,
@@ -200,12 +199,20 @@ def _flydsl_key() -> str:
     env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
     if env_extra:
         extra.extend(d.strip() for d in env_extra.split(":") if d.strip())
-    return _flydsl_key_cached(_use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra))
+    return _flydsl_key_cached(
+        _use_external_binary_codegen(), env.compile.llvm_dir, tuple(extra), get_backend().toolkit_fingerprint()
+    )
 
 
 def _is_native_library(name: str) -> bool:
     # Same selection as cmake/WriteNativeDigest.cmake: *.so, *.so.*, *.a, *.pyd, *.dll.
     return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
+
+
+def _is_build_alias(entry: os.DirEntry, real_dir: str) -> bool:
+    # A build tree's ``libFoo.so -> libFoo.so.1``. The links of a symlink-tree
+    # install point into other directories and are kept.
+    return entry.is_symlink() and os.path.dirname(os.path.realpath(entry.path)) == real_dir
 
 
 @lru_cache(maxsize=64)
@@ -233,10 +240,11 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
     wheel after the build, so contents and sizes cannot be checked. A partial
     build (``--target`` without ``FlyNativeDigest``) leaves it stale.
     """
+    real_dir = os.path.realpath(libs_dir)
     names = sorted(
         entry.name
         for entry in os.scandir(libs_dir)
-        if _is_native_library(entry.name) and entry.is_file(follow_symlinks=False)
+        if _is_native_library(entry.name) and entry.is_file() and not _is_build_alias(entry, real_dir)
     )
     try:
         from .._mlir._mlir_libs._native_digest import NATIVE_SHA256
@@ -253,7 +261,9 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
 
 
 @lru_cache(maxsize=4)
-def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = ()) -> str:
+def _flydsl_key_cached(
+    use_external_binary: bool, llvm_dir: str, extra_source_dirs: tuple = (), toolkit_fingerprint: str = ""
+) -> str:
     """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
     Covers:
@@ -261,6 +271,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
          flydsl.extension.*, flydsl.runtime.*, flydsl.utils.*
       2. Every native library in ``_mlir/_mlir_libs`` (build-time digests)
       3. flydsl.__version__
+      4. The backend's external toolkit (ROCm: the device bitcode)
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
@@ -269,7 +280,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     contents = []
 
-    flydsl_root = Path(flydsl.__file__).resolve().parent
+    flydsl_root = Path(flydsl.__file__).parent
 
     # 1) Hash all Python source files in key sub-packages.
     for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
@@ -300,6 +311,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
                 with open(py_file, "rb") as f:
                     contents.append(hashlib.sha256(f.read()).hexdigest())
 
+    contents.append(toolkit_fingerprint)
     contents.append(f"external_binary_codegen={use_external_binary}")
     if use_external_binary:
         from .external_llvm import external_llvm_fingerprint
@@ -394,8 +406,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        from .backends.rocm import rocm_toolkit_path
+
+        # Same toolkit as the compile, or kernels calling __ocml_* find no bitcode.
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit="{rocm_toolkit_path()}"}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -478,7 +493,7 @@ def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineCon
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
-        binary_fragment=None,
+        binary_fragment=fragments[-1],
         llvm_opts=llvm_opts,
         external=False,
     )
@@ -525,7 +540,7 @@ def _artifact_cache_key(asm: str, cfg: PipelineConfig, backend, *, link_libs=Non
         "env": _cache_invalidating_env_values(target),
     }
     if link_libs:
-        # The pipeline names the bitcode files; their contents are linked into the binary.
+        # The gpu.module target names the bitcode files; their contents are linked into the binary.
         config["link_libs"] = [_file_sha256(lib) for lib in link_libs]
     if post_load_processors:
         # An artifact owns the initialized module, not just the binary. Callbacks
@@ -570,11 +585,6 @@ class MlirCompiler:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
-        if link_libs:
-            link_opt = _format_link_lib_options(link_libs)
-            cfg.fragments, found = _append_link_lib_options_to_attach_targets(cfg.fragments, link_opt)
-            if not found:
-                raise RuntimeError("link_libs specified but no attach-target fragment found in pipeline")
         return asm, cfg
 
     @classmethod
@@ -623,7 +633,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag == binary_fragment:
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx
@@ -883,9 +893,14 @@ def _build_call_spec(sig, args_tuple):
     return tuple(slot_specs)
 
 
-def _call_state_from_spec(call_spec, artifact):
+def _call_params(sig):
+    """``(name, default)`` per launcher parameter, in the ``arg_idx`` order of the call spec."""
+    return tuple((name, param.default) for name, param in sig.parameters.items())
+
+
+def _call_state_from_spec(call_spec, artifact, params=()):
     if not artifact._ktrace_traced:
-        return CallState(call_spec, artifact._get_func_exe())
+        return CallState(call_spec, artifact._get_func_exe(), params=params)
 
     from ..expr import ktrace as _ktrace
 
@@ -894,12 +909,14 @@ def _call_state_from_spec(call_spec, artifact):
     trace_backend = get_ktrace_backend()
     slot_specs = (*call_spec, (-1, ctypes.c_void_p, None))
     presets = {len(call_spec): trace_backend.ensure_buffer().device_ptr}
-    return CallState(slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer)
+    return CallState(
+        slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer, params=params
+    )
 
 
 def _build_call_state(sig, args_tuple, artifact):
     """Build a :class:`CallState` for fast repeated dispatch."""
-    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact)
+    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact, _call_params(sig))
 
 
 def _has_live_device_argument(value) -> bool:
@@ -1068,7 +1085,8 @@ class JitFunction:
 
         with ir.InsertionPoint(module.body), loc:
             backend = get_backend()
-            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+            compile_hints = CompilationContext.get_compile_hints()
+            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets(compile_hints=compile_hints))
 
             func_op = func.FuncOp(self.func.__name__, (ir_types, []))
             func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1107,10 +1125,11 @@ class JitFunction:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
+        targets = backend.gpu_module_targets(compile_hints=compile_hints, link_libs=link_libs) if link_libs else []
+        if targets:
+            gpu_module.operation.attributes["targets"] = ir.ArrayAttr.get([ir.Attribute.parse(t) for t in targets])
         if extern_linked:
             gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-            if "targets" in gpu_module.operation.attributes:
-                del gpu_module.operation.attributes["targets"]
 
         return _TraceResult(
             module=module,
@@ -1146,7 +1165,11 @@ class JitFunction:
         self._resolve_arguments(bound.arguments)
         args_tuple = tuple(bound.arguments.values())
 
-        if return_compiled:
+        # flyc.compile(..., compile_only=True) never launches and always returns a callable.
+        compile_only = return_compiled and not execute
+        # Without compile_only=True, flyc.compile launches unless given placeholders.
+        # This is weird and some downstream depends on this, so we can't change it easily.
+        if return_compiled and execute:
             has_device_args = any(_has_live_device_argument(value) for value in args_tuple)
             execute = not any(
                 _is_compile_placeholder(value, allow_null_pointers=has_device_args) for value in args_tuple
@@ -1250,7 +1273,12 @@ class JitFunction:
             self._last_compiled = (cache_key, compiled_func)
 
         # OUTSIDE MLIR context/locks: engine initialization and kernel launch.
-        if env.compile.compile_only:
+        # TODO: Frankly, this inconsistency is ugly: COMPILE_ONLY=1 returns None, while
+        # compile_only=True returns a callable, so the env var and the keyword disagree on what
+        # "compile only" means. Returning a callable here is the obvious fix, but downstream (AITER)
+        # caches treat this None as "never launch" and would dispatch a cached callable on their
+        # next call. Until they stop relying on it, we are stuck with two meanings.
+        if env.compile.compile_only and not compile_only:
             return None
         if not execute:
             return self._make_compiled_function(cache_key, bound, None) if return_compiled else None
@@ -1266,6 +1294,7 @@ class JitFunction:
         compiled = CompiledFunction(call_state, artifact)
         if call_state is None:
             compiled._call_spec = _build_call_spec(self._sig, tuple(bound.arguments.values()))
+            compiled._call_params = _call_params(self._sig)
         compiled._backend = self._backend_target.backend
         compiled._aot_spec, compiled._aot_error = _prepare_aot_signature(self, bound, artifact)
         return compiled
@@ -1290,7 +1319,6 @@ def _attach_ktrace_config(module, traced: bool, known_names=None) -> None:
     blocks = (hints.get("ktrace_blocks", env.ktrace.blocks) or "").strip()
     get_ktrace_backend().configure_module(
         module,
-        target_arch=get_backend().target.arch,
         known_names=known_names,
         blocks=blocks,
     )
@@ -1357,6 +1385,7 @@ class CompiledFunction:
     __slots__ = (
         "_call_state",
         "_call_spec",
+        "_call_params",
         "_call_lock",
         "_runtime_ready",
         "_backend",
@@ -1369,6 +1398,7 @@ class CompiledFunction:
     def __init__(self, call_state, keepalive):
         self._call_state = call_state
         self._call_spec = None
+        self._call_params = ()
         self._call_lock = threading.Lock()
         self._runtime_ready = call_state is not None
         self._backend = None
@@ -1387,7 +1417,7 @@ class CompiledFunction:
                     ensure_compile_runtime_pairing_from_env(self._backend)
                     state = self._call_state
                     if state is None:
-                        state = _call_state_from_spec(self._call_spec, self._keepalive)
+                        state = _call_state_from_spec(self._call_spec, self._keepalive, self._call_params)
                         self._call_state = state
                     self._runtime_ready = True
         state = self._call_state
@@ -1404,11 +1434,10 @@ class CompiledFunction:
         The object embeds its backend adapter and only needs the backend's
         system runtime libraries when linked into an executable or shared
         library; it does not require FlyDSL or Python at deployment time.
-        Host export currently requires 64-bit little-endian Linux ELF tools.
+        Host export requires 64-bit little-endian Linux ELF tools, or Windows
+        x64, where it writes a COFF ``.obj`` and needs no external tools.
         Export IR and ABI validation are prepared lazily on the first export.
         """
-        if os.name == "nt":
-            raise NotImplementedError("export_to_c is not supported on Windows: it emits Linux ELF objects")
         self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):
@@ -1461,7 +1490,7 @@ def _unwrap_jit_function(func):
     return None, None
 
 
-def _compile_impl(func, *args, **kwargs) -> Optional[CompiledFunction]:
+def _compile_impl(func, *args, compile_only=False, **kwargs) -> Optional[CompiledFunction]:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -1484,6 +1513,11 @@ def _compile_impl(func, *args, **kwargs) -> Optional[CompiledFunction]:
 
     When ``COMPILE_ONLY`` is enabled, compilation and cache persistence still
     run, but no execution engine is materialized and ``None`` is returned.
+
+    With ``compile_only=True``, nothing is launched for any arguments, and a
+    :class:`CompiledFunction` is returned even when ``COMPILE_ONLY`` is enabled.
+    Calling it executes the kernel. ``compile_only`` is reserved and never
+    forwarded to ``func``.
     """
     jf, bound_self = _unwrap_jit_function(func)
     if jf is None:
@@ -1491,7 +1525,7 @@ def _compile_impl(func, *args, **kwargs) -> Optional[CompiledFunction]:
     if bound_self is not None:
         args = (bound_self, *args)
 
-    return jf._compile_or_execute(args, kwargs, execute=True, return_compiled=True)
+    return jf._compile_or_execute(args, kwargs, execute=not compile_only, return_compiled=True)
 
 
 class CompileCallable:
@@ -1502,6 +1536,7 @@ class CompileCallable:
         flyc.compile(launch, *args)                          # no hints
         flyc.compile[{"fast_fp_math": True}](launch, *args)  # with hints
         flyc.compile[hints](launch)                          # deferred
+        flyc.compile(launch, *args, compile_only=True)       # never launches
     """
 
     def __init__(self, compile_hints: Optional[dict] = None):
@@ -1513,14 +1548,14 @@ class CompileCallable:
             raise TypeError(f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}")
         return CompileCallable(compile_hints=hints)
 
-    def __call__(self, func, *args, **kwargs):
+    def __call__(self, func, *args, compile_only=False, **kwargs):
         jit_func, _bound_self = _unwrap_jit_function(func)
         if self._compile_hints and jit_func is not None:
             jit_func.compile_hints = {**jit_func.compile_hints, **self._compile_hints}
-        if not args and not kwargs:
+        if not args and not kwargs and not compile_only:
             # No args → just return the (hinted) function for deferred compilation
             return func
-        return _compile_impl(func, *args, **kwargs)
+        return _compile_impl(func, *args, compile_only=compile_only, **kwargs)
 
 
 compile = CompileCallable()

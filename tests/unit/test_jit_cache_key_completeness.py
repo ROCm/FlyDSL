@@ -27,7 +27,7 @@ pytestmark = pytest.mark.l1a_compile_no_target_dialect
 
 @pytest.fixture
 def frontend(monkeypatch, tmp_path):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "0")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
@@ -299,14 +299,14 @@ def test_lowering_inputs_outside_the_ir_split_artifacts(frontend, monkeypatch):
     keys.append(_compile(launch, 3)[0])
     monkeypatch.setattr(backend_type, "hash", lambda self: "updated-backend-toolchain")
     keys.append(_compile(launch, 3)[0])
-    monkeypatch.setenv("ARCH", "gfx1250")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1250")
     keys.append(_compile(launch, 3)[0])
     for xnack in ("0", "1"):
         monkeypatch.setenv("LLVM_GFX1250_ANY_XNACK_CODEGEN", xnack)
         keys.append(_compile(launch, 3)[0])
     assert len(set(keys)) == len(keys) == len(frontend)
     # The xnack variable only affects gfx1250 codegen.
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     assert _compile(launch, 3)[0] == keys[3]
 
     # The loaded toolchain cannot change in-process; it namespaces disk entries.
@@ -330,6 +330,47 @@ def test_memory_only_cache_never_fingerprints_the_toolchain(frontend, monkeypatc
     first, _ = _compile(launch, 3)
     assert _compile(launch, 3)[0] == first
     assert len(frontend) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows resolves the toolkit from the installed ROCm SDK")
+def test_rocm_device_bitcode_namespaces_disk_entries(monkeypatch, tmp_path):
+    from flydsl.compiler.backends import rocm
+
+    toolkit = tmp_path / "rocm"
+    ocml = toolkit / "amdgcn" / "bitcode" / "ocml.bc"
+    ocml.parent.mkdir(parents=True)
+    ocml.write_bytes(b"v1")
+    # Without in-process LLD the resolver requires llvm/bin/ld.lld; a bitcode-only
+    # tree is ignored and the fingerprint would stay on the bundled/ROCm install.
+    if not rocm.HAS_INPROCESS_LLD:
+        lld_dir = toolkit / "llvm" / "bin"
+        lld_dir.mkdir(parents=True)
+        (lld_dir / "ld.lld").write_bytes(b"")
+    # Override wins over the bundled bitcode tree that rocm_toolkit_path prefers.
+    monkeypatch.setenv("FLYDSL_COMPILE_ROCM_PATH", str(toolkit))
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
+    seen = []
+    monkeypatch.setattr(jf, "_flydsl_key_cached", lambda *args: seen.append(args[-1]) or "")
+
+    def key(*, bust_bitcode_cache: bool):
+        rocm.rocm_toolkit_path.cache_clear()
+        if bust_bitcode_cache:
+            rocm._device_bitcode_fingerprint.cache_clear()
+        jf._flydsl_key()
+        return seen[-1]
+
+    first = key(bust_bitcode_cache=True)
+    # Sanity: the override must be the toolkit that was fingerprinted.
+    assert str(toolkit) == rocm.rocm_toolkit_path()
+    ocml.write_bytes(b"v2")
+    changed = key(bust_bitcode_cache=True)
+    assert changed != first
+
+    # Fingerprint is cached per toolkit path for the process.
+    ocml.write_bytes(b"v3")
+    assert key(bust_bitcode_cache=False) == changed
+    rocm._device_bitcode_fingerprint.cache_clear()
+    rocm.rocm_toolkit_path.cache_clear()
 
 
 def test_waves_per_eu_hint_reaches_the_ir(frontend):
@@ -665,7 +706,7 @@ def test_shared_disk_cache_observes_cross_directory_nested_helper(tmp_path, gpu)
         "FLYDSL_COMPILE_LLVM_DIR": "",
     }
     if not gpu:
-        env["ARCH"] = "gfx942"  # Compile-only; a GPU run targets its own device.
+        env["FLYDSL_GPU_ARCH"] = "gfx942"  # Compile-only; a GPU run targets its own device.
     results = []
     for value in (1, 7, 7):
         child = subprocess.run(

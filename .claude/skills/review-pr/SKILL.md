@@ -122,7 +122,7 @@ line, a tier other than the table's, and a reason under 30 characters.
 
 | Tier | Files | Failure mode |
 |---|---|---|
-| **1** | `python/flydsl/compiler/jit_function.py`, `kernel_function.py`, `ast_rewriter.py`, `backends/rocm.py`; `python/flydsl/expr/__init__.py`, `typing.py`, `numeric.py`, `primitive.py`; `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp`, `lib/Dialect/Fly/Transforms/LayoutLowering.cpp`, `lib/Dialect/Fly/IR/FlyOps.cpp`, `lib/Dialect/Fly/Utils/IntTupleUtils.cpp`, `lib/Dialect/Fly/Utils/NormalForm.cpp` | every kernel: wrong codegen or mass compile failure |
+| **1** | `python/flydsl/compiler/jit_function.py`, `kernel_function.py`, `ast_rewriter.py`, `backends/rocm.py`; `python/flydsl/expr/__init__.py`, `typing.py`, `numeric.py`, `primitive.py`; `lib/Conversion/FlyToROCDL/FlyToROCDL.cpp`, `lib/Dialect/Fly/Transforms/LayoutLowering.cpp`, `lib/Dialect/Fly/IR/FlyOps.cpp`, `lib/Dialect/Fly/Utils/CoreBridge.cpp`, `lib/Core/EmitOp.cpp`, `lib/Core/Trait.cpp` | every kernel: wrong codegen or mass compile failure |
 | **1c** | `python/flydsl/compiler/jit_argument.py`, `protocol.py`, `_aot.py`; `python/flydsl/autotune.py` | a stale or missed artifact — silent by construction |
 | **2** | `python/flydsl/runtime/device.py`, `python/flydsl/expr/rocdl/`, `lib/Dialect/FlyROCDL/`, `tests/arch_compat.py`, and any `kernels/` module seven or more files import | one architecture family, or every kernel sharing the helper |
 | **3** | everything else: one kernel or one op | that kernel |

@@ -78,7 +78,8 @@ class RocmDeviceRuntime(DeviceRuntime):
     """HIP-based runtime; matches compile backend ``rocm``.
 
     ``device_count()`` delegates to ``get_rocm_device_count`` in ``device.py``
-    (``rocm_agent_enumerator``; ``hipGetDeviceCount`` on Windows);
+    (``rocm_agent_enumerator``; ``hipGetDeviceCount`` on Windows). On Linux this is
+    the *physical* agent count, which ignores runtime visibility filters;
     ``current_device_id()`` queries HIP ``hipGetDevice`` directly.
     """
 

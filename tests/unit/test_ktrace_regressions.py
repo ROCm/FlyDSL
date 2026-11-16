@@ -11,16 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from flydsl.runtime.device import get_rocm_arch
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
-pytestmark = [
-    pytest.mark.l2_device,
-    pytest.mark.rocm_lower,
-    pytest.mark.skipif(
-        not (get_rocm_arch() or "").startswith(("gfx942", "gfx950")),
-        reason="ktrace requires gfx942 or gfx950",
-    ),
-]
+
+@pytest.fixture(autouse=True)
+def _requires_cdna(rocm_arch):
+    """Skip device tests when no launch-capable CDNA target is available."""
+    if not rocm_arch.startswith(("gfx942", "gfx950")):
+        pytest.skip(f"ktrace requires gfx942 or gfx950, got {rocm_arch}")
 
 
 def _run_probe(tmp_path, source, *args):

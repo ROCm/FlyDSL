@@ -43,7 +43,7 @@ gpu.module @promote_regmem_to_ssa_recast_skip {
 
 // A dynamic offset yields no concrete slot index, so the access must stay in
 // memory form.  Promoting it would silently read slot 0, because a dynamic
-// IntAttr carries value == 0.
+// LeafAttr carries value == 0.
 // CHECK-LABEL: gpu.func @skip_register_dynamic_offset
 // CHECK: fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}}
 // CHECK: fly.add_offset

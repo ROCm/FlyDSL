@@ -5,7 +5,7 @@
 // Tests for layout construction operations:
 //   fly.static, fly.make_int_tuple, fly.make_shape, fly.make_stride,
 //   fly.make_layout, fly.make_ordered_layout, fly.make_identity_layout,
-//   fly.get_shape, fly.get_stride, fly.get_leaves
+//   fly.make_tile, fly.get_shape, fly.get_stride, fly.get_leaves
 
 // -----
 
@@ -93,6 +93,14 @@ func.func @test_make_identity_layout() -> !fly.layout<(4, 8) : (1E0, 1E1)> {
   return %layout : !fly.layout<(4, 8) : (1E0, 1E1)>
 }
 
+// Operands fill the dynamic leaves of the tile's layouts in order.
+// CHECK-LABEL: @test_dynamic_make_tile
+func.func @test_dynamic_make_tile(%m: i32, %n: i64) -> !fly.tile<[?:1|(4,?{i64}):(1,4)|*]> {
+  // CHECK: fly.make_tile(%{{.*}}, %{{.*}}) : (i32, i64) -> !fly.tile<[?:1|(4,?{i64}):(1,4)|*]>
+  %0 = fly.make_tile(%m, %n) : (i32, i64) -> !fly.tile<[?:1|(4,?{i64}):(1,4)|*]>
+  return %0 : !fly.tile<[?:1|(4,?{i64}):(1,4)|*]>
+}
+
 // CHECK-LABEL: @test_get_shape
 func.func @test_get_shape(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)> {
   // CHECK: fly.get_shape(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
@@ -107,13 +115,12 @@ func.func @test_get_stride(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(
   return %stride : !fly.int_tuple<(1, 4)>
 }
 
-// TODO: test_get_leaves (disabled until op is implemented)
-// COM: CHECK-LABEL: @test_get_leaves
-// func.func @test_get_leaves(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)> {
-//   COM: CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
-//   %leaves = fly.get_leaves(%l) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)>
-//   return %leaves : !fly.int_tuple<(4, 8)>
-// }
+// CHECK-LABEL: @test_get_leaves
+func.func @test_get_leaves(%l: !fly.layout<(4,?):(1,?{i64})>) -> (i32, i64) {
+  // CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,?):(1,?{i64})>) -> (i32, i64)
+  %leaves:2 = fly.get_leaves(%l) : (!fly.layout<(4,?):(1,?{i64})>) -> (i32, i64)
+  return %leaves#0, %leaves#1 : i32, i64
+}
 
 // CHECK-LABEL: @test_make_layout_like
 func.func @test_make_layout_like(%src: !fly.layout<(4, 8) : (1, 4)>) -> !fly.layout<(4, 8) : (1, 4)> {

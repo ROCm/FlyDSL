@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from .._mlir import ir
+from .._mlir.passmanager import PassManager
 from ..utils import env
 
 
@@ -84,7 +85,14 @@ def _file_hash(path: Path) -> str:
 def external_llvm_fingerprint(llvm_dir: Optional[str] = None) -> str:
     prefix = Path(llvm_dir).expanduser().resolve() if llvm_dir else _llvm_dir()
     mlir_opt = _tool(prefix, "mlir-opt")
-    return f"external-binary:{prefix}:{_file_hash(mlir_opt)}"
+    # A shared-library LLVM build keeps its code generator in these, not in mlir-opt.
+    libs = sorted(
+        p for p in (prefix / "lib").glob("lib*.so*") if p.name.startswith(("libLLVM", "libMLIR")) and not p.is_symlink()
+    )
+    h = hashlib.sha256(_file_hash(mlir_opt).encode())
+    for lib in libs:
+        h.update(f"{lib.name}:{_file_hash(lib)}".encode())
+    return f"external-binary:{prefix}:{h.hexdigest()}"
 
 
 def _single_top_level_op(module: ir.Module, op_name: str) -> ir.Operation:
@@ -198,6 +206,28 @@ def run_external_binary_codegen(
             external_output_path.read_text(encoding="utf-8"), context=module.context
         )
         _replace_gpu_module_with_binary_op(module, external_binary_module)
+
+        # External ROCDL serialization stops at format=isa so it never spawns
+        # ld.lld. Finish assemble+link with the in-process LLD path.
+        from .backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD, rocm_toolkit_path
+
+        if HAS_INPROCESS_LLD and "format=isa" in binary_fragment:
+            toolkit = rocm_toolkit_path()
+            link_opts = 'opts=""'
+            if toolkit:
+                link_opts = f'toolkit="{toolkit}" {link_opts}'
+            link_pipeline = f"builtin.module({FLY_GPU_BINARY_PASS}{{{link_opts}}})"
+            try:
+                pm = PassManager.parse(link_pipeline, context=module.context)
+                pm.enable_verifier(True)
+                pm.run(module.operation)
+            except Exception as exc:
+                raise ExternalLLVMError(
+                    "In-process LLD failed to link the external LLVM Assembly into a fatbin.\n"
+                    f"pipeline: {link_pipeline}\n"
+                    f"error: {exc}"
+                ) from exc
+
         output_path.write_text(
             module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8"
         )

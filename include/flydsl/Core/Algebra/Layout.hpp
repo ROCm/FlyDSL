@@ -510,7 +510,7 @@ template <class Cat> Tile<Cat>::Tile(const Layout<Cat> &layout) {
 }
 
 template <class Cat> Tile<Cat>::Tile(Leaf<Cat> scalar) {
-  FLYDSL_CORE_ASSERT(!scalar.isBasis() && !scalar.isNone());
+  FLYDSL_CORE_ASSERT(!scalar.isBasis() && !scalar.isRatio() && !scalar.isNone());
   auto storage = std::make_shared<Storage>();
   storage->nodes.push_back({1, 0});
   storage->nodes.push_back({0, 1});
@@ -2453,7 +2453,7 @@ template <class Cat> std::optional<Tile<Cat>> Tile<Cat>::fromString(llvm::String
     if (layout)
       return Tile(*layout);
     auto scalar = IntTuple<Cat>::fromString(text);
-    if (scalar && scalar->isLeaf() && !scalar->isBasis() && !scalar->isNone())
+    if (scalar && scalar->isLeaf() && !scalar->isBasis() && !scalar->isRatio() && !scalar->isNone())
       return Tile(scalar->getLeaf());
     return std::nullopt;
   }

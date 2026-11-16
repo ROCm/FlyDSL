@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // GFX120X integer WMMA. Packed widths are the RDNA4 wave32 ISel classes:
 //   IU4 16x16x16 A/B : i32            (NOT vector<1xi32>, NOT gfx11 vector<2xi32>)

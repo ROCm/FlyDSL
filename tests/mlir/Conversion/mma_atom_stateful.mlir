@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // Stateful MmaAtom lowering tests (CDNA4 MFMA_Scale).
 //   fly.make_mma_atom   -> default (0, 0) state

@@ -12,6 +12,7 @@
 #include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 #include "BindingUtils.h"
+#include "flydsl-c/FlyROCDLDialect.h"
 
 #include <stdexcept>
 #include <string>
@@ -390,4 +391,12 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
         "atom_type"_a, "stensor_type"_a, "gtensor_type"_a, "num_warps"_a,
         "Create a tdm_partition_layout with the given atom type, stensor type, gtensor type, and "
         "num warps");
+
+  m.def(
+      "rocm_path",
+      []() {
+        MlirStringRef path = mlirFlyROCDLGetROCMPath();
+        return std::string(path.data, path.length);
+      },
+      "ROCm root gpu-module-to-binary uses when its toolkit option is empty.");
 }

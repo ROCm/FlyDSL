@@ -44,9 +44,9 @@ my_pe = link_extern(
 
 The wrapper registers:
 
-* `bitcode_path` in `CompilationContext.link_libs`, which is fed to
-  `rocdl-attach-target l=<path>` so external symbols are resolvable during GPU
-  binary generation.
+* `bitcode_path` in `CompilationContext.link_libs`, which is added to the
+  `link` list of the `gpu.module`'s `#rocdl.target` so external symbols are
+  resolvable during GPU binary generation.
 * `module_init_fn` in `CompilationContext.post_load_processors`, which is
   invoked once per loaded `hipModule_t`.
 

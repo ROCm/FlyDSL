@@ -93,7 +93,9 @@ A = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
 B = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
 C = torch.zeros(M, N, dtype=torch.float32, device=torch.device("cuda"))
 
-vector_add(A, B, C, stream=torch.cuda.Stream())
+stream = torch.cuda.Stream()
+stream.wait_stream(torch.cuda.current_stream())
+vector_add(A, B, C, stream=stream)
 torch.cuda.synchronize()
 
 if torch.allclose(A + B, C):

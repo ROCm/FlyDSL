@@ -37,7 +37,7 @@ class RocmKtraceBackend:
                 "against the buffer in use."
             )
 
-    def configure_module(self, module, *, target_arch, known_names, blocks) -> None:
+    def configure_module(self, module, *, known_names, blocks) -> None:
         from ..._mlir import ir
 
         i32 = ir.IntegerType.get_signless(32)
@@ -45,7 +45,6 @@ class RocmKtraceBackend:
         capacity_slots = self.buffer_config()
         attrs["fly_ktrace.capacity_slots"] = ir.IntegerAttr.get(i32, capacity_slots)
         attrs["fly_ktrace.partitions"] = ir.IntegerAttr.get(i32, _format.layout(capacity_slots).partitions)
-        attrs["fly_ktrace.chip"] = ir.StringAttr.get(target_arch)
         if known_names:
             attrs["fly_ktrace.known_event_names"] = ir.DictAttr.get(
                 {name: ir.IntegerAttr.get(i32, ident) for name, ident in known_names.items()}

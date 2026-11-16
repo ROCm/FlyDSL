@@ -82,7 +82,9 @@ def run_block_reduce(values, name, dtype, *, block_size, algorithm, items_per_th
         kernel(A, Out).launch(grid=(1, 1, 1), block=block_size, stream=stream)
 
     out = torch.zeros(block_threads, dtype=torch_dtype(name), device="cuda")
-    launch(values, out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, stream=stream)
     torch.cuda.synchronize()
     return out.cpu()
 
@@ -326,7 +328,9 @@ def test_block_size_can_come_from_the_traced_launch():
 
     values = torch.ones(BLOCK, dtype=torch.float32, device="cuda")
     out = torch.zeros(BLOCK, dtype=torch.float32, device="cuda")
-    launch(values, out, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(values, out, stream=stream)
     torch.cuda.synchronize()
     assert torch.equal(out.cpu(), torch.full((BLOCK,), float(BLOCK), device="cpu"))
 

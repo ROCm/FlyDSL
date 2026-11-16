@@ -9,7 +9,7 @@ import pytest
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
 from flydsl._mlir.passmanager import PassManager
-from flydsl.compiler.backends.rocm import RocmBackend
+from flydsl.compiler.backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD, RocmBackend
 from flydsl.compiler.external_llvm import (
     _format_llvm_cli_options,
     external_llvm_fingerprint,
@@ -67,11 +67,20 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     full = backend.pipeline_fragments(compile_hints=hints)
     pre_binary, binary = backend.external_binary_pipeline_fragments(compile_hints=hints)
 
-    assert full == [*pre_binary, binary]
+    assert full[:-1] == pre_binary
     assert pre_binary[-1] == "reconcile-unrealized-casts"
     gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
     assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
+    # Embedded codegen links through the in-process LLD library; the external
+    # toolchain drives an upstream mlir-opt that only knows the upstream pass.
+    assert full[-1].startswith(FLY_GPU_BINARY_PASS)
     assert binary.startswith("gpu-module-to-binary")
+    # With in-process LLD, external stops at isa so ld.lld is never spawned;
+    # run_external_binary_codegen then finishes assemble+link in process.
+    if HAS_INPROCESS_LLD:
+        assert "format=isa" in binary
+    else:
+        assert "format=fatbin" in binary
     # ROCDL never reads opts=; waves_per_eu goes through the attribute instead.
     assert 'opts=""' in binary
 
@@ -138,6 +147,29 @@ def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):
     # Fingerprint should contain a hex SHA-256 hash of the mlir-opt binary.
     hash_part = fingerprint.split(":")[-1]
     assert len(hash_part) == 64 and all(c in "0123456789abcdef" for c in hash_part)
+
+
+def test_external_llvm_fingerprint_covers_shared_llvm_libraries(tmp_path, monkeypatch):
+    llvm_dir = _make_fake_llvm(tmp_path)
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(llvm_dir))
+    lib = llvm_dir / "lib" / "libLLVM.so.23"
+    lib.parent.mkdir()
+    (llvm_dir / "lib" / "libLLVM.so").symlink_to(lib.name)
+    (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"x")
+
+    def fingerprint():
+        external_llvm_fingerprint.cache_clear()
+        return external_llvm_fingerprint()
+
+    try:
+        lib.write_bytes(b"v1")
+        first = fingerprint()
+        (llvm_dir / "lib" / "libunrelated.so").write_bytes(b"y")
+        assert fingerprint() == first
+        lib.write_bytes(b"v2")
+        assert fingerprint() != first
+    finally:
+        external_llvm_fingerprint.cache_clear()
 
 
 def test_run_external_binary_codegen_embeds_external_bin(tmp_path, monkeypatch):

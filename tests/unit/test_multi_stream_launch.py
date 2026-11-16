@@ -109,6 +109,8 @@ class TestMultiStreamLaunch:
         A, B, C = [torch.randn(SIZE, device="cuda") for _ in range(3)]
         D, E, F = [torch.randn(SIZE, device="cuda") for _ in range(3)]
         s1, s2 = torch.cuda.Stream(), torch.cuda.Stream()
+        s1.wait_stream(torch.cuda.current_stream())
+        s2.wait_stream(torch.cuda.current_stream())
 
         _two_stream_launch(A, B, C, D, E, F, SIZE, BLOCK_DIM, VEC_WIDTH, stream1=s1, stream2=s2)
         torch.cuda.current_stream().wait_stream(s1)
@@ -122,6 +124,7 @@ class TestMultiStreamLaunch:
         A, B, C = [torch.randn(SIZE, device="cuda") for _ in range(3)]
         D, E, F = [torch.randn(SIZE, device="cuda") for _ in range(3)]
         s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
 
         _two_stream_launch(A, B, C, D, E, F, SIZE, BLOCK_DIM, VEC_WIDTH, stream1=s, stream2=s)
         torch.cuda.synchronize()
@@ -179,6 +182,7 @@ class TestCrossStreamDependency:
         D = torch.randn(SIZE, device="cuda")
         E = torch.empty_like(A)
         s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
 
         # C = A + B, then E = C + D (same stream → sequential)
         _add_jit(A, B, C, SIZE, BLOCK_DIM, VEC_WIDTH, stream=s)
@@ -204,6 +208,8 @@ class TestCrossStreamDependency:
         F = torch.zeros(SIZE, device="cuda")
 
         s1, s2, s3 = torch.cuda.Stream(), torch.cuda.Stream(), torch.cuda.Stream()
+        s1.wait_stream(torch.cuda.current_stream())
+        s2.wait_stream(torch.cuda.current_stream())
 
         _add_jit(A, B, C, SIZE, BLOCK_DIM, VEC_WIDTH, stream=s1)
         _add_jit(Z, D, E, SIZE, BLOCK_DIM, VEC_WIDTH, stream=s2)

@@ -16,12 +16,16 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
-_arch = get_rocm_arch() or ""
-_skip_not_gfx1250 = pytest.mark.skipif(not _arch.startswith("gfx1250"), reason=f"requires gfx1250, got {_arch}")
+
+@pytest.fixture(autouse=True)
+def _requires_gfx1250(rocm_arch):
+    """Skip device tests when the visible GPU is not gfx1250."""
+    if not rocm_arch.startswith("gfx1250"):
+        pytest.skip(f"requires gfx1250, got {rocm_arch}")
+
 
 WAVE_SIZE = 32
 M, N, K = 16, 16, 32
@@ -124,7 +128,6 @@ def _run_wmma(A, B, C_init, mod_c):
 
 
 # modC=0 (none): D = A*B + C
-@_skip_not_gfx1250
 def test_wmma_modc_none():
     torch.manual_seed(42)
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -140,7 +143,6 @@ def test_wmma_modc_none():
 
 
 # modC=1 (neg): D = A*B + (-C) = A*B - C
-@_skip_not_gfx1250
 def test_wmma_modc_neg():
     torch.manual_seed(42)
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -156,7 +158,6 @@ def test_wmma_modc_neg():
 
 
 # modC=2 (abs): D = A*B + |C|
-@_skip_not_gfx1250
 def test_wmma_modc_abs():
     torch.manual_seed(42)
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -172,7 +173,6 @@ def test_wmma_modc_abs():
 
 
 # modC=3 (neg_abs): D = A*B + (-(|C|)) = A*B - |C|
-@_skip_not_gfx1250
 def test_wmma_modc_neg_abs():
     torch.manual_seed(42)
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")

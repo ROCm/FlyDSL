@@ -113,7 +113,8 @@ build_wheel() {
 
   mkdir -p "${destination}" || return 1
   cp "${wheels[0]}" "${destination}/" || return 1
-  cp "${fly_opt}" "${destination}/fly-opt" || return 1
+  # Debug info is most of fly-opt's size, and every GPU job downloads it.
+  strip --strip-debug -o "${destination}/fly-opt" "${fly_opt}" || return 1
   (
     cd "${destination}"
     sha256sum ./*.whl fly-opt >SHA256SUMS

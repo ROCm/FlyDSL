@@ -196,7 +196,7 @@ def test_unsigned_shared_values():
     "algorithm,universal", matrix_cases([BlockRadixRankAlgorithm.BASIC, BlockRadixRankAlgorithm.MEMOIZE], [False, True])
 )
 def test_count_callbacks_require_match(insert_point, monkeypatch, algorithm, universal):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     ns = fx.coop.universal if universal else fx.coop
     p = ns.BlockRadixRank[fx.Int32, 64, 1, algorithm]
     with pytest.raises(ValueError, match="callbacks require a MATCH"):
@@ -206,7 +206,7 @@ def test_count_callbacks_require_match(insert_point, monkeypatch, algorithm, uni
 @pytest.mark.l1a_compile_no_target_dialect
 @pytest.mark.parametrize("algorithm", [BlockRadixRankAlgorithm.BASIC, BlockRadixRankAlgorithm.MATCH])
 def test_prefix_requires_one_pass(insert_point, monkeypatch, algorithm):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     p = fx.coop.BlockRadixRank[fx.Int32, 64, 1, algorithm]
     with pytest.raises(ValueError, match="with_prefix requires one digit pass"):
         p(fx.Int32(0), storage=None, end_bit=8, radix_bits=4, with_prefix=True)

@@ -49,7 +49,6 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
   ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
-    TiledOpTraits.cpp
     FlyExtension.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
@@ -135,14 +134,14 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 # ---------------------------------------------------------------------------
 # Windows: FlyPythonCAPI.dll must also be the single home of the C++ code the
 # Fly extensions call besides the C API (BindingUtils.h: getTypeID, isa/cast):
-# MLIR IR and Support, and the Fly dialects. On Linux the version script below
-# exports it from the archives linked in. A DLL exports only what
+# MLIR IR and Support, the Fly dialects and FlyCore. On Linux the version script
+# below exports it from the archives linked in. A DLL exports only what
 # WINDOWS_EXPORT_ALL_SYMBOLS finds in the target's own objects, never archive
 # members, so those objects become sources. Ninja puts them ahead of the
 # archives on the link line, so the archive copies are never pulled in.
 # ---------------------------------------------------------------------------
 if(WIN32)
-  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect)
+  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect FlyCore)
   if(FLYDSL_HAS_ROCDL)
     list(APPEND _fly_dialect_libs MLIRFlyROCDLDialect)
   endif()
@@ -330,6 +329,32 @@ if(WIN32)
   set(_FLY_PATCHELF_RUNTIME_LIBS "")
 endif()
 
+# Bundle the AMDGCN device bitcode that appendStandardLibs() can ask for, so
+# `toolkit=` can point inside the package instead of at a ROCm install whose
+# location varies per container.  addControlVariables() synthesizes the
+# oclc_* control variables in-module, so only these four files are ever read.
+#
+# It lands under `_mlir/` because that subtree is already the build-output
+# payload of the package: editable installs symlink it and wheels map it
+# through package_dir["flydsl._mlir"], so no extra packaging plumbing is needed.
+set(_FLY_COPY_DEVICE_BITCODE "")
+if(FLYDSL_ROCM_BITCODE_DIR)
+  foreach(_bc ocml ockl hip opencl)
+    if(EXISTS "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc")
+      list(APPEND _FLY_COPY_DEVICE_BITCODE
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc"
+          "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/${_bc}.bc")
+    else()
+      message(WARNING "Device bitcode ${_bc}.bc missing from ${FLYDSL_ROCM_BITCODE_DIR}")
+    endif()
+  endforeach()
+  list(APPEND _FLY_COPY_DEVICE_BITCODE
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${FLYDSL_ROCM_BITCODE_LICENSE}"
+      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/LICENSE.TXT")
+endif()
+
 add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${PROJECT_SOURCE_DIR}/python/flydsl"
@@ -345,6 +370,7 @@ add_custom_target(CopyFlyPythonSources ALL
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ktrace_ops_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_ktrace_ops_gen.py"
   ${_FLY_COPY_ROCDL_TABLEGEN}
+  ${_FLY_COPY_DEVICE_BITCODE}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
     "${_MLIR_LIBS_DIR}/${_FLY_C_RUNNER_UTILS_NAME}"
@@ -375,6 +401,28 @@ if(TARGET FlyRocmAotRuntime)
   add_dependencies(FlyPythonCAPI FlyRocmAotRuntime)
 endif()
 
+# Windows: the AOT runtime's bitcode (lib/Runtime/ROCm) becomes LLVM-dialect IR,
+# which compiler/_aot.py merges into each exported module. The same MLIR reads
+# it back, so only this build step depends on the compiler's bitcode version.
+if(WIN32 AND TARGET FlyRocmAotRuntimeBitcode)
+  find_program(FLY_LLVM_LINK llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  find_program(FLY_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  set(_fly_aot_runtime_bc "${CMAKE_CURRENT_BINARY_DIR}/fly_rocm_aot_runtime.bc")
+  set(_fly_aot_runtime_ir "${_MLIR_LIBS_DIR}/fly_rocm_aot_runtime.mlir")
+  add_custom_command(
+    OUTPUT "${_fly_aot_runtime_ir}"
+    COMMAND "${FLY_LLVM_LINK}" -o "${_fly_aot_runtime_bc}" "$<TARGET_OBJECTS:FlyRocmAotRuntimeBitcode>"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_MLIR_LIBS_DIR}"
+    COMMAND "${FLY_MLIR_TRANSLATE}" --import-llvm "${_fly_aot_runtime_bc}" -o "${_fly_aot_runtime_ir}"
+    DEPENDS FlyRocmAotRuntimeBitcode "$<TARGET_OBJECTS:FlyRocmAotRuntimeBitcode>"
+    COMMENT "Importing the ROCm AOT runtime into the LLVM dialect"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+  )
+  add_custom_target(FlyRocmAotRuntimeIR ALL DEPENDS "${_fly_aot_runtime_ir}")
+  add_dependencies(FlyPythonCAPI FlyRocmAotRuntimeIR)
+endif()
+
 ################################################################################
 # Native library digest (JIT disk-cache toolchain fingerprint)
 ################################################################################
@@ -389,7 +437,7 @@ add_custom_target(FlyNativeDigest ALL
   VERBATIM
 )
 add_dependencies(FlyNativeDigest CopyFlyPythonSources FlyPythonModules FlyPythonCAPI)
-foreach(_runtime_target IN ITEMS FlyJitRuntime FlyRocmAotRuntime)
+foreach(_runtime_target IN ITEMS FlyJitRuntime FlyRocmAotRuntime FlyRocmAotRuntimeIR)
   if(TARGET ${_runtime_target})
     add_dependencies(FlyNativeDigest ${_runtime_target})
   endif()

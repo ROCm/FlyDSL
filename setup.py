@@ -434,6 +434,11 @@ setup(
             "_mlir_libs/libfly_*_aot_runtime.a",
             "_mlir_libs/*.pyd",
             "_mlir_libs/*.dll",
+            "_mlir_libs/fly_*_aot_runtime.mlir",
+            # AMDGCN device bitcode bundled by CMake; lets the compiler resolve
+            # ocml/ockl without depending on where the container installs ROCm.
+            "_rocm/amdgcn/bitcode/*.bc",
+            "_rocm/amdgcn/bitcode/LICENSE.TXT",
             "*.pyi",
         ],
     },

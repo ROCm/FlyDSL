@@ -100,7 +100,7 @@ std::optional<std::pair<MakePtrOp, std::optional<int32_t>>> resolveRegOffset(Val
     auto base = resolveRegOffset(addOffsetOp.getPtr());
     if (!base)
       return std::nullopt;
-    IntAttr intAttr = addOffsetOp.getOffset().getType().getAttr().getLeafAsInt();
+    LeafAttr intAttr = addOffsetOp.getOffset().getType().getAttr().getLeaf();
     if (!base->second || !intAttr.isStatic())
       return std::pair<MakePtrOp, std::optional<int32_t>>{base->first, std::nullopt};
     return std::pair<MakePtrOp, std::optional<int32_t>>{base->first,
