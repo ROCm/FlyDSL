@@ -204,7 +204,7 @@ def _long_thin_register(m, n, k, cache_bytes):
     )
 
 
-def _register(m, n, k, processors, cache_bytes, policy):
+def _register(m, n, k, processors, cache_bytes):
     # Narrow outputs need small independent CTAs; a longer unroll amortizes
     # loop control when a single wave owns little packed weight data.
     if _narrow(n, k, processors):
@@ -285,13 +285,7 @@ def _register(m, n, k, processors, cache_bytes, policy):
             k_unroll=_divisor(k // 32, 4),
             table_mode="alu",
         )
-    if (
-        _row_reuse(m, n, k, processors, cache_bytes)
-        and (_divisor(k // 32, 8) > 1 or n >= processors * 256)
-        and not (
-            policy == "hot" and cache_bytes and _weight_bytes(n, k) >= cache_bytes // 2 and _divisor(k // 32, 8) == 1
-        )
-    ):
+    if _row_reuse(m, n, k, processors, cache_bytes) and (_divisor(k // 32, 8) > 1 or n >= processors * 256):
         padded = _ceil_div(m, 16) * 16
         three_group = _three_group_reuse(m, n, k, processors, cache_bytes)
         streamed = cache_bytes and _weight_bytes(n, k) >= cache_bytes // 2
@@ -504,7 +498,7 @@ _HYBRID_PRESETS = {
 }
 
 
-def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
+def _hybrid(m, n, k, processors):
     narrow_tail = n <= 32 and n % 16 and m not in (1, 2, 4, 8, 16) and m % 16
     general_rows = 128 if k % 128 == 0 and _ceil_div(m, 128) >= processors // 2 else 256
     wide_skinny = (
@@ -544,8 +538,7 @@ def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
         if bm <= 64:
             preset = "small_wide" if _ceil_div(n, 64) >= 2 * processors else "small_prefill"
         elif bm == 96:
-            hot_fit = policy == "hot" and cache_bytes and _weight_bytes(n, k) <= cache_bytes // 2
-            preset = "pipelined_partial" if k >= 8192 and k & (k - 1) == 0 and not hot_fit else "partial96"
+            preset = "pipelined_partial" if k >= 8192 and k & (k - 1) == 0 else "partial96"
         elif bm == 128:
             preset = "medium_prefill"
         elif bm == 192:
@@ -614,12 +607,10 @@ def _hybrid(m, n, k, processors, cache_bytes, policy="auto"):
 
 
 @lru_cache(maxsize=4096)
-def _selected(m, n, k, mode, policy, processors, cache_bytes, lds_bytes):
+def _selected(m, n, k, mode, processors, cache_bytes, lds_bytes):
     if min(m, n, k, processors, lds_bytes) <= 0 or k % 32:
         raise ValueError("M/N and hardware capacities must be positive; K must be a multiple of32")
-    if policy not in ("auto", "hot", "rotating"):
-        raise ValueError("unsupported cache_policy")
-    if mode not in ("e4m3", "e5m2", "grouped"):
+    if mode not in ("e5m2", "grouped"):
         raise ValueError("unsupported preparation mode")
     if cache_bytes < 0:
         raise ValueError("cache capacity must be nonnegative")
@@ -632,11 +623,7 @@ def _selected(m, n, k, mode, policy, processors, cache_bytes, lds_bytes):
             k_unroll=1,
         )
     else:
-        weight_bytes = _weight_bytes(n, k)
         skinny_groups = _ceil_div(m, 64) * _ceil_div(n, 32)
-        small_reused = m <= 64 and (
-            policy == "hot" and cache_bytes and weight_bytes < cache_bytes // 64 and m * n <= processors * 2048
-        )
         static_decode = m in (1, 2, 4, 8, 16)
         narrow_tail = (
             n <= 32 and n % 16 and m not in (1, 2, 4, 8, 16) and m % 16 and k >= 4096 and (k % 64 or k % 128 == 0)
@@ -663,11 +650,10 @@ def _selected(m, n, k, mode, policy, processors, cache_bytes, lds_bytes):
                 and k % 256 == 0
                 and skinny_groups >= processors // 2
             )
-            or small_reused
         ) and not narrow_tail:
-            cfg = _register(m, n, k, processors, cache_bytes, policy)
+            cfg = _register(m, n, k, processors, cache_bytes)
         else:
-            cfg = _hybrid(m, n, k, processors, cache_bytes, policy)
+            cfg = _hybrid(m, n, k, processors)
     cfg = _normalize_config(cfg, m, k)
     while cfg["engine"] == "hybrid" and _geometry(cfg)[-1] > lds_bytes and cfg["stages"] > 1:
         cfg["stages"] -= 1
@@ -680,9 +666,8 @@ def choose_config(
     m: int,
     n: int,
     k: int,
-    mode: str = "e4m3",
+    mode: str = "e5m2",
     *,
-    cache_policy: str = "auto",
     num_processors: int = 32,
     cache_size_bytes: int = 64 * 1024**2,
     lds_size_bytes: int = 65536,
@@ -699,7 +684,6 @@ def choose_config(
             n,
             k,
             mode,
-            cache_policy,
             num_processors,
             cache_size_bytes,
             lds_size_bytes,
@@ -707,11 +691,11 @@ def choose_config(
     )
 
 
-def rank_configurations(m, n, k, *, cache_policy="auto", limit=None, **hardware):
+def rank_configurations(m, n, k, *, limit=None, **hardware):
     """Explain the single analytical choice without device work or timing."""
     rows = [
         dict(
-            config=choose_config(m, n, k, cache_policy=cache_policy, **hardware),
+            config=choose_config(m, n, k, **hardware),
             priority=0,
         )
     ]

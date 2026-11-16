@@ -45,7 +45,6 @@ def main():
     parser.add_argument("--m", nargs="+", type=int, default=[1, 128, 8192])
     parser.add_argument("--nk", nargs="+", default=["5120x17408"])
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--cache-policy", choices=["auto", "hot", "rotating"], default="auto")
     parser.add_argument("--configs", type=Path, help="Offline candidate list")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--native-fp8", action="store_true", help="Compare predecoded native torch._scaled_mm FP8 GEMM")
@@ -86,7 +85,7 @@ def main():
             xs = torch.ones(m, device=device)
             rr = torch.linspace(0, m - 1, min(32, m), device=device).long().unique()
             expected = ((x.float()[rr] @ decoded.T) * xs[rr, None]).to(torch.bfloat16).float()
-            config = choose_config(m, n, k, weights.mode, cache_policy=args.cache_policy, **capacities)
+            config = choose_config(m, n, k, weights.mode, **capacities)
             configs = list({json.dumps(c, sort_keys=True): c for c in [config, *extras]}.values())
             if args.native_fp8:
                 configs.append(dict(engine="torch_fp8"))
@@ -146,7 +145,6 @@ def main():
                     config=choice,
                     analytical=choice == config,
                     mode=weights.mode,
-                    cache_policy=args.cache_policy,
                     gpu=args.gpu,
                     gpu_name=torch.cuda.get_device_name(args.gpu),
                     architecture=torch.cuda.get_device_properties(args.gpu).gcnArchName,

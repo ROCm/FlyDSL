@@ -43,7 +43,7 @@ def build_hybrid(
     schedule="barrier",
     operand_schedule="none",
     epilogue_prefetch=False,
-    fold_mode="e4m3",
+    fold_mode="e5m2",
     table_mode="alu",
     normal_only=False,
     separated_nibbles=False,
@@ -51,7 +51,7 @@ def build_hybrid(
     device_id=0,
     aligned_m=False,
 ):
-    assert fold_mode in ("e4m3", "e5m2")
+    assert fold_mode == "e5m2"
     assert tile_m % (waves_m * 16) == 0 and tile_n % (waves_n * 16) == 0
     assert tile_k % 32 == 0 and k % tile_k == 0, "hybrid requires complete K tiles"
     assert stages in (1, 2) and 0 <= operand_prefetch < tile_k // 16
@@ -59,7 +59,7 @@ def build_hybrid(
     assert operand_schedule in ("none", "barrier")
     assert isinstance(cache_group_m, int) and cache_group_m > 0
     out_type = fx.BFloat16 if output_dtype == "bf16" else fx.Float16
-    b_dtype = fx.Float8E5M2 if fold_mode == "e5m2" else fx.Float8E4M3FN
+    b_dtype = fx.Float8E5M2
     rm, rn = tile_m // (waves_m * 16), tile_n // (waves_n * 16)
     threads = waves_m * waves_n * 32
     npad, groups = (n + 15) // 16 * 16, k // 32
@@ -75,7 +75,6 @@ def build_hybrid(
     w_thrs_k = min(threads, nsteps * 32 // wslots)
     w_thrs_n = threads // w_thrs_k
     wcount = slots // (threads * wslots)
-    table_bias = 15 if fold_mode == "e5m2" else 8
     tile_bytes = (tile_n // 16) * nsteps * 34 * 8
     arena = stages * tile_bytes
     assert arena <= 65536
@@ -135,8 +134,8 @@ def build_hybrid(
         gLUT = global_tensor(
             LUT,
             fx.Uint32,
-            fx.make_layout((29 if fold_mode == "e5m2" else 15) * 2, 1),
-            (29 if fold_mode == "e5m2" else 15) * 8,
+            fx.make_layout(29 * 2, 1),
+            29 * 8,
         )
         tA = fx.flat_divide(gA, fx.make_tile(tile_m, tile_k))[None, None, pm, None]
         tC = fx.flat_divide(gC, fx.make_tile(tile_m, tile_n))[None, None, pm, pn]
@@ -214,9 +213,9 @@ def build_hybrid(
                 exponent = fx.Int32(fx.Uint32(fx.Uint8(load_S[q])))
                 shift = exponent - fx.Int32(load_Ref[q])
                 if const_expr(table_mode == "alu"):
-                    t0, t1 = magnitude_words(shift, fold_mode, normal_only)
+                    t0, t1 = magnitude_words(shift, normal_only)
                 else:
-                    table = tensor_load(gLUT, ((shift + table_bias) * 2,), fx.Uint32, 2)
+                    table = tensor_load(gLUT, ((shift + 15) * 2,), fx.Uint32, 2)
                     t0, t1 = fx.Uint32(table[0]), fx.Uint32(table[1])
                 converted = expand_nibbles(load_W[q], t0, t1, separated_nibbles)
                 offset = fx.Int32(fx.crd2idx((nc, kc), b_layout).unpack())

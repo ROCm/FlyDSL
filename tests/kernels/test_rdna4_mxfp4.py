@@ -45,7 +45,7 @@ def check(actual, expected):
 
 
 @pytest.mark.parametrize("shape", [(1, 70, 32), (7, 128, 96), (33, 70, 160), (73, 513, 1120), (257, 128, 512)])
-@pytest.mark.parametrize("mode", ["e4m3", "e5m2", "grouped"])
+@pytest.mark.parametrize("mode", ["e5m2", "grouped"])
 @pytest.mark.parametrize("strategy", ["register", "hybrid", "auto"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_formats_tails_and_strategies(shape, mode, strategy, dtype):
@@ -64,7 +64,7 @@ def test_formats_tails_and_strategies(shape, mode, strategy, dtype):
     assert bool((storage[:64] == 127).all()) and bool((storage[-64:] == 127).all())
 
 
-@pytest.mark.parametrize("mode", ["e4m3", "e5m2", "grouped"])
+@pytest.mark.parametrize("mode", ["e5m2", "grouped"])
 @pytest.mark.parametrize("shape", [(73, 2117, 1120), (96, 2053, 8192), (2049, 63, 19040)])
 def test_accuracy_after_changed_input_graph_replay(mode, shape):
     x, packed, xs, scales = make_case(shape)
@@ -81,8 +81,8 @@ def test_accuracy_after_changed_input_graph_replay(mode, shape):
     check(y, reference(x, packed, xs, scales))
 
 
-@pytest.mark.parametrize("mode,gap", [("e4m3", 14), ("e5m2", 28)])
-def test_folded_subnormal_bits_are_lossless(mode, gap):
+@pytest.mark.parametrize("gap", [27, 28])
+def test_folded_subnormal_bits_are_lossless(gap):
     x = torch.zeros(16, 64, device="cuda")
     x[:, :32] = 1
     x = x.to(torch.float8_e4m3fn)
@@ -91,7 +91,7 @@ def test_folded_subnormal_bits_are_lossless(mode, gap):
     scales = torch.full((16, 2), 100, device="cuda", dtype=torch.uint8)
     scales[:, 1] += gap
     xs = torch.ones(16, device="cuda")
-    y = gemm(x, prepare_weights(packed, scales, mode=mode), xs)
+    y = gemm(x, prepare_weights(packed, scales, mode="e5m2"), xs)
     torch.testing.assert_close(y, reference(x, packed, xs, scales).to(y.dtype), atol=0, rtol=0)
 
 

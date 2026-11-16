@@ -48,7 +48,7 @@ def build_register(
 ):
     if repeat_m * repeat_n * 8 > REGISTER_MAX_ACCUMULATORS:
         raise ValueError("register repeats exceed the supported accumulator budget")
-    assert fold_mode in ("grouped", "e4m3", "e5m2")
+    assert fold_mode in ("grouped", "e5m2")
     assert isinstance(k_unroll, int) and 1 <= k_unroll <= 16
     assert k % 32 == 0 and m >= 0 and n > 0
     dynamic_m = m == 0
@@ -62,7 +62,6 @@ def build_register(
     nt, groups = npad // 16, k // 32
     grid_m, grid_n = (m + bm - 1) // bm, (n + bn - 1) // bn
     k_unroll = max(d for d in range(1, k_unroll + 1) if groups % d == 0)
-    table_bias = 15 if fold_mode == "e5m2" else 8
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
     def mxfp4_register(
@@ -101,8 +100,8 @@ def build_register(
         gLUT = global_tensor(
             LUT,
             fx.Uint32,
-            fx.make_layout((29 if fold_mode == "e5m2" else 15) * 2, 1),
-            (29 if fold_mode == "e5m2" else 15) * 8,
+            fx.make_layout(29 * 2, 1),
+            29 * 8,
         )
         gX = global_tensor(
             XScale,
@@ -150,10 +149,10 @@ def build_register(
                             )
                         )
                         if const_expr(table_mode == "alu"):
-                            t0, t1 = magnitude_words(exponent - refs[j], fold_mode, normal_only)
+                            t0, t1 = magnitude_words(exponent - refs[j], normal_only)
                             tables.append(Vec.from_elements([t0, t1], fx.Uint32))
                         else:
-                            ti = (exponent - refs[j] + table_bias) * 2
+                            ti = (exponent - refs[j] + 15) * 2
                             tables.append(tensor_load(gLUT, (ti,), fx.Uint32, 2))
                 for step in range_constexpr(2):
                     fx.copy(copy_a, pA[None, None, None, group * 2 + step], copy_frag_A)

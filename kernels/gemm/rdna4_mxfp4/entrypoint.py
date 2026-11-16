@@ -98,18 +98,16 @@ class PreparedMXFP4:
 _tables = {}
 
 
-def _fold_table(device, mode):
-    key = (device, mode)
-    if key not in _tables:
-        low, high, dtype = (-8, 6, torch.float8_e4m3fn) if mode == "e4m3" else (-15, 13, torch.float8_e5m2)
+def _fold_table(device):
+    if device not in _tables:
         values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
-        raw = torch.stack([values * (2.0**shift) for shift in range(low, high + 1)]).to(dtype).view(torch.uint8)
+        original = torch.stack([values * (2.0**shift) for shift in range(-15, 14)])
+        raw = original.to(torch.float8_e5m2).view(torch.uint8)
         # Every table entry in the advertised range must be lossless.
-        decoded = raw.view(dtype).float()
-        original = torch.stack([values * (2.0**shift) for shift in range(low, high + 1)])
+        decoded = raw.view(torch.float8_e5m2).float()
         assert torch.equal(decoded, original)
-        _tables[key] = raw.contiguous().view(torch.int32).to(device)
-    return _tables[key]
+        _tables[device] = raw.contiguous().view(torch.int32).to(device)
+    return _tables[device]
 
 
 def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
@@ -118,8 +116,8 @@ def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
     Args:
         packed: RDNA4 uint8 tensor [N, K/2], even K in the low nibble.
         scales: E8M0 uint8 tensor [N, K/32] on the same device.
-        mode: ``auto`` chooses lossless E4M3, E5M2, or grouped K32 scaling.
-            Forced E4M3/E5M2 raises if the scale span cannot be represented.
+        mode: ``auto`` uses lossless E5M2 folding or grouped K32 scaling.
+            Forced E5M2 raises if the scale span cannot be represented.
         nibble_layout: ``split`` enables byte-permute decoding; ``linear``
             retains interleaved nibbles inside each packed word.
 
@@ -159,7 +157,7 @@ def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
     # One dword per WMMA lane, low/even nibble first; no expanded weights.
     w = w.view(npad // 16, 16, k // 16, 2, 4).permute(0, 2, 3, 1, 4).contiguous()
     s = s.view(npad // 16, 16, k // 32).transpose(1, 2).contiguous()
-    if mode not in ("auto", "grouped", "e4m3", "e5m2"):
+    if mode not in ("auto", "grouped", "e5m2"):
         raise ValueError("unknown weight preparation mode")
     selected = mode
     base = None
@@ -170,18 +168,13 @@ def prepare_weights(packed, scales, *, mode="auto", nibble_layout="split"):
         minima = s.to(torch.int32).amin(1).flatten()
         # Flatten order is tile-N then column, matching WMMA lane columns.
         valid = bool((maxima < 255).all())
-        for candidate, headroom, lower in [("e4m3", 6, -8), ("e5m2", 13, -15)]:
-            if mode not in ("auto", candidate):
-                continue
-            candidate_base = (maxima - headroom).clamp_min(1)
-            lossless = valid and bool(((minima - candidate_base) >= lower).all())
-            if lossless:
-                selected = candidate
-                base = candidate_base.contiguous()
-                table = _fold_table(packed.device, candidate)
-                threshold = -5 if candidate == "e4m3" else -13
-                normal_only = bool(((minima - candidate_base) >= threshold).all())
-                break
+        candidate_base = (maxima - 13).clamp_min(1)
+        lossless = valid and bool(((minima - candidate_base) >= -15).all())
+        if lossless:
+            selected = "e5m2"
+            base = candidate_base.contiguous()
+            table = _fold_table(packed.device)
+            normal_only = bool(((minima - candidate_base) >= -13).all())
         else:
             if mode != "auto":
                 raise ValueError(f"scale range cannot be represented losslessly in {mode}")
@@ -197,13 +190,12 @@ def specialization_key(
     n,
     k,
     *,
-    mode="e4m3",
+    mode="e5m2",
     normal_only=False,
     nibble_layout="split",
     dtype=torch.bfloat16,
     device_id=0,
     config=None,
-    cache_policy="auto",
     num_processors=32,
     cache_size_bytes=64 * 1024**2,
     lds_size_bytes=65536,
@@ -218,7 +210,6 @@ def specialization_key(
                 n,
                 k,
                 mode,
-                cache_policy=cache_policy,
                 num_processors=num_processors,
                 cache_size_bytes=cache_size_bytes,
                 lds_size_bytes=lds_size_bytes,
@@ -282,7 +273,7 @@ def _arguments(x, packed, scales, x_scale, out, base_exponents, table, kernel_m,
     return args
 
 
-def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy="auto"):
+def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None):
     """Multiply FP8 activations by prepared MXFP4 weights on the current stream.
 
     Args:
@@ -293,8 +284,6 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
         dtype: BF16 (default) or FP16, matching ``out`` when supplied.
         config: Optional register/hybrid factory parameters. Otherwise use
             analytical host rules with cached device capacities.
-        cache_policy: ``auto`` balances hot and rotating weights; ``hot`` is
-            for repeated reuse, ``rotating`` for weights cycled between layers.
 
     Returns:
         Tensor [M, N] containing the represented matrix product with per-row
@@ -331,9 +320,7 @@ def gemm(x, weights, x_scale, *, out=None, dtype=None, config=None, cache_policy
     if config:
         options = dict(config)
     else:
-        options = choose_config(
-            m, n, k, weights.mode, cache_policy=cache_policy, **get_device_capabilities(x.device.index)
-        )
+        options = choose_config(m, n, k, weights.mode, **get_device_capabilities(x.device.index))
     key = specialization_key(
         m,
         n,
@@ -380,12 +367,11 @@ def get_warmup_keys(
     k,
     max_m,
     *,
-    mode="e4m3",
+    mode="e5m2",
     normal_only=False,
     nibble_layout="split",
     dtype=torch.bfloat16,
     device_id=0,
-    cache_policy="auto",
     num_processors=32,
     cache_size_bytes=64 * 1024**2,
     lds_size_bytes=65536,
@@ -408,7 +394,6 @@ def get_warmup_keys(
             nibble_layout=nibble_layout,
             dtype=dtype,
             device_id=device_id,
-            cache_policy=cache_policy,
             num_processors=num_processors,
             cache_size_bytes=cache_size_bytes,
             lds_size_bytes=lds_size_bytes,
@@ -449,7 +434,7 @@ def compile_gemm(key):
         x_scale = torch.empty(m, dtype=torch.float32)
         out = torch.empty(m, n, dtype=dtype)
         refs = None if mode == "grouped" else torch.empty(npad, dtype=torch.int32)
-        table = None if mode == "grouped" else torch.empty(29 if mode == "e5m2" else 15, 2, dtype=torch.int32)
+        table = None if mode == "grouped" else torch.empty(29, 2, dtype=torch.int32)
     args = _arguments(x, packed, scales, x_scale, out, refs, table, kernel_m, alignment)
     factory = build_hybrid if engine == "hybrid" else build_register
     launcher = factory(kernel_m, n, k, **options)

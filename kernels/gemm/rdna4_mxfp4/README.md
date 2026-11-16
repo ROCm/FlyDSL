@@ -15,7 +15,7 @@ from kernels.gemm.rdna4_mxfp4 import prepare_weights, gemm
 # packed: uint8 [N, K/2], even K in low nibble, odd K in high nibble.
 # scales: uint8 [N, K/32], OCP E8M0 exponents.
 weights = prepare_weights(packed, scales)
-y = gemm(x_fp8_e4m3, weights, x_scale_fp32, cache_policy="rotating")
+y = gemm(x_fp8_e4m3, weights, x_scale_fp32)
 ```
 
 M and N can have tails. K must be a positive multiple of 32. Inputs and output
@@ -26,9 +26,10 @@ than 4 GiB. GEMM supports the current stream and graph replay with changed input
 Preparation runs once during weight loading. Storage retains 4 bits per weight,
 one E8M0 byte per 32 weights, padding to 16 output columns and one reference
 exponent per padded column for folded plans. It does not retain decoded weights.
-Auto preparation uses lossless E4M3 folding, then E5M2 folding for wider exponent
-spans, then exact grouped K32 rescaling. Forced folding raises when it would
-lose information. Grouped scaling uses the register strategy.
+Auto preparation uses lossless E5M2 folding, with exact grouped K32 rescaling
+when the scales cannot be folded losslessly. Forced `mode="e5m2"` raises when
+it would lose information; `mode="grouped"` forces the fallback. Grouped scaling
+uses the register strategy. Activations remain E4M3 in both paths.
 
 ## Source structure
 
@@ -63,7 +64,7 @@ layout for this kernel; they are specific to the tested shapes on gfx1201.
 
 ## Host selection
 
-`choose_config(M, N, K, mode, cache_policy=..., num_processors=...,
+`choose_config(M, N, K, mode, num_processors=...,
 cache_size_bytes=..., lds_size_bytes=...)` uses only the Python standard library.
 It returns a fresh configuration dictionary and caches decisions on the CPU.
 It can run without importing Torch, querying a GPU, compiling or timing kernels.
@@ -79,8 +80,7 @@ Named hybrid presets cover small
 batches, narrow outputs, partial M tiles and larger prefill work. The selector
 adapts K tiles to legal divisors and checks accumulator, thread and LDS limits.
 K32 hybrid tiles widen N only when padding and CTA coverage permit it. Partial
-row tiles with long power-of-two K can use a two-stage K128 pipeline; the hot
-policy retains the smaller tile when weights fit within half the cache budget.
+row tiles with long power-of-two K can use a two-stage K128 pipeline.
 These are measured shape classes, not a guarantee about cache residency.
 Tile sizes, stages, prefetch and wave distribution are configurations of the
 two algorithms, rather than additional algorithms.
@@ -95,9 +95,8 @@ use odd K32 divisors. Staging is reduced when the supplied LDS budget requires
 it, with a legal register fallback if the hybrid tile still cannot fit.
 
 For folded weights, the footprint estimate is
-`ceil(N/16)*16 * (17*(K/32) + 4)` bytes. `hot` hints that a weight is reused;
-`rotating` describes cycling between model layers; `auto` uses the balanced
-rules. These hints do not inspect memory residency. Empirical thresholds describe
+`ceil(N/16)*16 * (17*(K/32) + 4)` bytes. Selection uses one set of rules,
+independent of invocation history or actual cache residency. Empirical thresholds describe
 broad hardware regimes; model names and exact shape-to-configuration tables
 are absent. A finite palette cannot guarantee the fastest possible launch for
 every unseen shape.
@@ -112,7 +111,7 @@ values when inspecting the configuration selected on another device:
 from kernels.gemm.rdna4_mxfp4 import choose_config, get_device_capabilities
 
 hardware = get_device_capabilities(weights.packed.device.index)
-config = choose_config(M, weights.n, weights.k, weights.mode, cache_policy="rotating", **hardware)
+config = choose_config(M, weights.n, weights.k, weights.mode, **hardware)
 ```
 
 ## Graph startup
@@ -134,7 +133,6 @@ keys = get_warmup_keys(
     normal_only=weights.normal_only,
     dtype=y.dtype,
     device_id=weights.packed.device.index,
-    cache_policy="rotating",
     **hardware,
 )
 for key in keys:
@@ -152,6 +150,7 @@ JSON list supplied through `--configs`. Results are measurement artifacts and
 never change normal dispatch. It validates sampled FP32 reference outputs and
 changed-input replay, then measures paired captured GPU events for hot weights
 and read-evicted weights with warm activations. Eviction runs outside timing.
+Both cache conditions measure the same selected configuration.
 
 ```bash
 PYTHONPATH=. python tests/perf/bench_rdna4_mxfp4.py --m 1 8 128 8192 --nk 5120x17408
