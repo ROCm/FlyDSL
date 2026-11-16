@@ -1,11 +1,56 @@
 {
  "schema": 1,
- "updated": "2026-11-16T09:34:56Z",
+ "updated": "2026-11-16T09:54:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 43840371097,
+   "run_id": 43843002796,
+   "pr": 1422,
+   "commit": "36f2fd812fc37759a99bb92cd4bef070be2abe0a",
+   "branch": "pr/mxfp8-small-tiles",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add 128x128 and 64x64 tiles to the MXFP8 8-wave GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43843002796",
+   "created_at": "2026-11-16T09:47:59Z",
+   "updated_at": "2026-11-16T09:47:59Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 43842989214,
+   "pr": 1421,
+   "commit": "415a4a6e91672abad961923bba96ca9ff3b92a1a",
+   "branch": "pr/softmax-wide-rows",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Split wide softmax rows across blocks",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43842989214",
+   "created_at": "2026-11-16T09:47:54Z",
+   "updated_at": "2026-11-16T09:47:54Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 43841301622,
    "pr": 1267,
+   "commit": "0284f121427d02abc4c9940c32275759d53d725d",
+   "branch": "qiangpan/sageattn2_2",
+   "event": "pull_request",
+   "title": "[Runtime] Report GPU last-level cache size from KFD",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43841301622",
+   "created_at": "2026-11-16T09:36:49Z",
+   "updated_at": "2026-11-16T09:36:49Z",
+   "actor": "qiangpan2",
+   "jobs": []
+  },
+  {
+   "run_id": 43840371097,
+   "pr": null,
    "commit": "f838b9690cb3c799e46343e819837ea509fdee91",
    "branch": "qiangpan/sageattn2_2",
    "event": "pull_request",
@@ -267,20 +312,20 @@
    "branch": "jli/fix-aot-export-amdhip64-link",
    "event": "pull_request",
    "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079",
    "created_at": "2026-11-16T07:54:29Z",
-   "updated_at": "2026-11-16T08:26:09Z",
+   "updated_at": "2026-11-16T09:52:40Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-16T08:26:09Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T09:39:24Z",
+     "completed_at": "2026-11-16T09:52:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079/job/133176608586"
     },
     {
@@ -1835,144 +1880,6 @@
      "started_at": "2026-11-13T04:36:00Z",
      "completed_at": "2026-11-13T04:45:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43363073193/job/131703835003"
-    }
-   ]
-  },
-  {
-   "run_id": 43350674897,
-   "pr": null,
-   "commit": "394da65d931a8df5074485443eded6170e551599",
-   "branch": "moe/k5p-pr",
-   "event": "pull_request",
-   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897",
-   "created_at": "2026-11-13T02:14:00Z",
-   "updated_at": "2026-11-13T03:52:14Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T02:30:54Z",
-     "completed_at": "2026-11-13T03:26:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647079992"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T02:30:36Z",
-     "completed_at": "2026-11-13T02:45:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647080020"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T02:30:46Z",
-     "completed_at": "2026-11-13T02:58:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43350674897/job/131647080090",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43267581390,
-   "pr": 1405,
-   "commit": "3b235ab101c435f9f1e0de39b6abe1b78ccbad81",
-   "branch": "pr/fix-compiled-defaults",
-   "event": "pull_request",
-   "title": "[Fix] Support default trailed arguments in the CompiledFunction",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390",
-   "created_at": "2026-11-12T17:16:00Z",
-   "updated_at": "2026-11-12T19:00:45Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T17:42:40Z",
-     "completed_at": "2026-11-12T18:09:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390/job/131371306800",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T17:42:21Z",
-     "completed_at": "2026-11-12T17:52:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390/job/131371306902"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T17:43:06Z",
-     "completed_at": "2026-11-12T19:00:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43267581390/job/131371307189"
-    }
-   ]
-  },
-  {
-   "run_id": 43239023881,
-   "pr": null,
-   "commit": "9c296bb4d7def28257658bfe61a8492ea8ae9fa7",
-   "branch": "moe/k5p-pr",
-   "event": "pull_request",
-   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881",
-   "created_at": "2026-11-12T14:36:55Z",
-   "updated_at": "2026-11-12T16:37:24Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T15:41:27Z",
-     "completed_at": "2026-11-12T15:50:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094506"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T16:07:40Z",
-     "completed_at": "2026-11-12T16:37:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094582"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-12T14:56:53Z",
-     "completed_at": "2026-11-12T15:20:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43239023881/job/131266094764",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
