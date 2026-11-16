@@ -74,6 +74,27 @@ def _hip_device_count() -> int:
     return 0
 
 
+def _hip_current_pci_location() -> tuple[int, int] | None:
+    """``(pci_domain, location_id)`` of the active HIP device, None without HIP.
+
+    ``location_id`` uses KFD's encoding, ``bus << 8 | device << 3 | function``.
+    HIP applies HIP_VISIBLE_DEVICES and ``hipSetDevice``, so this identifies the
+    physical GPU the caller is using.
+    """
+    dev = _hip_get_device()
+    if _HIP_LIB is None:
+        return None
+    buf = ctypes.create_string_buffer(32)
+    try:
+        if _HIP_LIB.hipDeviceGetPCIBusId(buf, len(buf), dev) != 0:
+            return None
+        domain, bus, dev_fn = buf.value.decode().split(":")  # "0000:83:00.0"
+        slot, fn = dev_fn.split(".")
+        return int(domain, 16), int(bus, 16) << 8 | int(slot, 16) << 3 | int(fn, 16)
+    except Exception:
+        return None
+
+
 class RocmDeviceRuntime(DeviceRuntime):
     """HIP-based runtime; matches compile backend ``rocm``.
 
