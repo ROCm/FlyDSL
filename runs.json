@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-11-16T12:37:57Z",
+ "updated": "2026-11-16T13:36:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 43876998273,
+   "pr": 1380,
+   "commit": "53faac7e67fd046c899abf2ebf7ac1fb95633bdd",
+   "branch": "feat/windows-ci",
+   "event": "pull_request",
+   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43876998273",
+   "created_at": "2026-11-16T13:34:04Z",
+   "updated_at": "2026-11-16T13:34:04Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 43869426498,
+   "pr": 1399,
+   "commit": "68af251732520acdbe1c67cdea09293e9c064961",
+   "branch": "fix/windows-test-portability",
+   "event": "pull_request",
+   "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43869426498",
+   "created_at": "2026-11-16T12:45:16Z",
+   "updated_at": "2026-11-16T13:33:59Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T13:06:06Z",
+     "completed_at": "2026-11-16T13:27:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43869426498/job/133316998694"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T13:06:02Z",
+     "completed_at": "2026-11-16T13:30:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43869426498/job/133316998719",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T13:05:54Z",
+     "completed_at": "2026-11-16T13:16:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43869426498/job/133316998831"
+    }
+   ]
+  },
   {
    "run_id": 43846655147,
    "pr": 1374,
@@ -1841,98 +1902,6 @@
      "started_at": "2026-11-13T08:57:54Z",
      "completed_at": "2026-11-13T09:07:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43390001148/job/131786704587"
-    }
-   ]
-  },
-  {
-   "run_id": 43389992487,
-   "pr": 1380,
-   "commit": "078db31e9a476ff6da0523cecacea176518b7b33",
-   "branch": "feat/windows-ci",
-   "event": "pull_request",
-   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487",
-   "created_at": "2026-11-13T08:01:33Z",
-   "updated_at": "2026-11-13T11:42:44Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T09:10:28Z",
-     "completed_at": "2026-11-13T09:34:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196892",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T09:29:45Z",
-     "completed_at": "2026-11-13T09:38:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196904"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T11:04:34Z",
-     "completed_at": "2026-11-13T11:37:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43389992487/job/131794196920"
-    }
-   ]
-  },
-  {
-   "run_id": 43387962573,
-   "pr": 1406,
-   "commit": "21925efab96d34e8a561003864995c18ec872021",
-   "branch": "pr/enh-coop-warp-permlane-swap",
-   "event": "pull_request",
-   "title": "[Coop] Cross 16-lane rows with gfx950 permlane swaps in the warp over\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573",
-   "created_at": "2026-11-13T07:44:57Z",
-   "updated_at": "2026-11-13T10:42:46Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T10:14:11Z",
-     "completed_at": "2026-11-13T10:40:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825537610",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T08:23:52Z",
-     "completed_at": "2026-11-13T08:33:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825539501"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-13T08:13:53Z",
-     "completed_at": "2026-11-13T09:17:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43387962573/job/131825600665"
     }
    ]
   }
