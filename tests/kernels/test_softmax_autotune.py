@@ -90,12 +90,16 @@ def _reference(x):
 
 # ── kernel specialization ────────────────────────────────────────────────
 @pytest.mark.parametrize("block_threads", [256, 512])
-def test_workgroup_size_tracks_block_threads(block_threads):
+def test_workgroup_size_tracks_block_threads(block_threads, monkeypatch):
     """A 512-thread candidate is only a real candidate if the workgroup limit follows it
     past the 256 default. The launcher passes a static block dim, so the compiler infers
     known_block_size and no explicit attribute is needed -- this pins that inference,
     since a regression would silently shrink the search space to the sizes that fit 256.
     """
+    # source_ir is None for an artifact loaded from the disk cache, also when an
+    # earlier test left one in the in-memory cache.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(softmax_direct, "_mem_cache", {})
     x, out = _inputs(4, 4096, torch.bfloat16)
     stream = torch.cuda.current_stream()
     compiled = flyc.compile(
