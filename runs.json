@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-16T11:09:57Z",
+ "updated": "2026-11-16T11:12:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -204,11 +204,11 @@
    "branch": "ci/block-fork-pr-self-hosted",
    "event": "pull_request",
    "title": "[CI] Keep forked PRs off linux-flydsl-navi-2",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43836777539",
    "created_at": "2026-11-16T09:06:26Z",
-   "updated_at": "2026-11-16T10:36:02Z",
+   "updated_at": "2026-11-16T11:10:19Z",
    "actor": "vlluvia",
    "jobs": [
     {
