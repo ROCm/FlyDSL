@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-17T09:13:24Z",
+ "updated": "2026-11-17T09:15:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Docs] Point the TDM docstrings at the tiled atom (#1424)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44053225099",
    "created_at": "2026-11-17T09:11:09Z",
-   "updated_at": "2026-11-17T09:11:37Z",
+   "updated_at": "2026-11-17T09:12:45Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,13 +55,41 @@
    "branch": "pr/feat-fx-range",
    "event": "pull_request",
    "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188",
    "created_at": "2026-11-17T08:44:55Z",
-   "updated_at": "2026-11-17T08:46:52Z",
+   "updated_at": "2026-11-17T09:13:32Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-17T09:13:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201784"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-17T09:13:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201806"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-17T09:13:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201830"
+    }
+   ]
   },
   {
    "run_id": 44048329122,
