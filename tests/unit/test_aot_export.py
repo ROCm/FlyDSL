@@ -121,7 +121,10 @@ def _amdhip64_candidates() -> list[Path]:
     ):
         roots.extend(Path(sys.prefix).glob(pattern))
     roots.append(Path(sys.prefix))
-    roots.extend(Path(p) for p in ("/opt/rocm", "/opt/rocm-7.14.0", "/opt/rocm-7.14"))
+    # Traditional install prefix plus any /opt/rocm* layout (no pinned version).
+    roots.append(Path("/opt/rocm"))
+    if Path("/opt").is_dir():
+        roots.extend(sorted(Path("/opt").glob("rocm*")))
 
     hits: list[Path] = []
     seen: set[str] = set()
