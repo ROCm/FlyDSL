@@ -150,7 +150,7 @@ page.
 | RMSNorm 8192x8192 bf16 | cold | +2.4% (p = 0.002) with `BLOCK_THREADS=1024`, `waves_per_eu=4`; the winner is exported as an `@autotune` artifact and served back | about 0.77 of the bandwidth floor |
 | bf16 GEMM 4096x4096x4096 | hot | Default is already at the top; `hill` found +0.7% (p = 5e-5), `portfolio` and `random` found nothing better | at or above the measured matmul peak |
 | bf16 GEMM 32x8192x8192 | hot | 5.3x over the default (`256x256` tile) with `split_k` and a smaller tile, all three strategies | memory-bound; hot time is cache-assisted |
-| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default with the knob values the harness first listed; 2.86-2.88x after widening the values (`block_m/n=32`, `block_k=256`, more stages and waves); 3.0x with the `k_rotate` lever below | 0.55 of the steady-state bandwidth floor at the best; torch matmul, same timing, is 11% slower than the winner |
+| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default with the knob values the harness first listed; 2.86-2.88x after widening the values (`block_m/n=32`, `block_k=256`, more stages and waves); 3.0x with the `k_rotate` lever below | 0.55 of the steady-state bandwidth floor at the best; torch matmul, same timing, takes 13% longer than the winner |
 
 Cost of a search (cold GEMM, 120 evaluations, 12 runs): 35-90 s wall for most
 runs, one at 270 s. Compiling a config takes 0.16-0.7 s on average and up to
@@ -177,11 +177,11 @@ space, the four wide searches (two strategies, two seeds) all landed on
 `k_rotate` 3 or 7 and 48.5-49.3 us against 51.5 without it. A paired A/B of one
 config at `k_rotate` 0, 1, 3 and 7, 20 interleaved rounds, cold: `k_rotate=3` is
 1.065x faster than 0 (p = 2e-27); 7 is tied with 3; 1 is slower than both. Applied
-to a differently shaped config it did not help (one run was 7% slower), so keep
+to a differently shaped config it did not help (one search-phase comparison was 7% slower), so keep
 it as a searched knob, not a default.
 
-Where it stands: 3.0x over the shipped default and 11% faster than the torch
-matmul timed the same way, at 0.55 of the steady-state bandwidth floor. That
+Where it stands: 3.0x over the shipped default, and the torch matmul timed the same
+way takes 13% longer,, at 0.55 of the steady-state bandwidth floor. That
 floor is from a 2 GB copy. A cold kernel reading 134 MB does not reach
 steady-state bandwidth: on the same device a cold torch read-reduction of 134 MB
 takes 66 us (2.1 TB/s) and a cold 134 MB copy moves 3.7 TB/s, against 4.8 TB/s
