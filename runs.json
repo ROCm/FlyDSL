@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-17T08:59:22Z",
+ "updated": "2026-11-17T09:06:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44052041217,
+   "pr": null,
+   "commit": "b355fe8ef9dd4d21f6a1d6363b184559bfae54b1",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fly] Add an optional check-resource-limits pass (#1419)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44052041217",
+   "created_at": "2026-11-17T09:03:25Z",
+   "updated_at": "2026-11-17T09:03:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 44051142590,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Make the location, perftest and arch-detection tests pass on \u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44051142590",
    "created_at": "2026-11-17T08:57:19Z",
-   "updated_at": "2026-11-17T08:57:57Z",
+   "updated_at": "2026-11-17T09:03:42Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -163,9 +178,28 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256",
    "created_at": "2026-11-17T07:18:52Z",
-   "updated_at": "2026-11-17T08:32:53Z",
+   "updated_at": "2026-11-17T08:59:35Z",
    "actor": "qiangpan2",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T08:59:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678529"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T08:59:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678580"
+    }
+   ]
   },
   {
    "run_id": 44036166359,
@@ -220,21 +254,21 @@
    "branch": "docs/tdm-atom-point-at-tiled-form",
    "event": "pull_request",
    "title": "[Docs] Point the TDM docstrings at the tiled atom",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282",
    "created_at": "2026-11-17T05:29:49Z",
-   "updated_at": "2026-11-17T07:38:22Z",
+   "updated_at": "2026-11-17T09:03:09Z",
    "actor": "xudoyuan",
    "jobs": [
     {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T05:48:36Z",
-     "completed_at": "2026-11-17T05:56:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133848512315"
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T09:04:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931860652"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -243,16 +277,16 @@
      "conclusion": "success",
      "started_at": "2026-11-17T06:26:31Z",
      "completed_at": "2026-11-17T07:06:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133848512380"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931862117"
     },
     {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-17T05:48:42Z",
-     "completed_at": "2026-11-17T05:54:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133848512382"
+     "conclusion": "success",
+     "started_at": "2026-11-17T05:48:36Z",
+     "completed_at": "2026-11-17T05:56:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931863426"
     }
    ]
   },
@@ -1847,52 +1881,6 @@
      "started_at": "2026-11-14T08:05:30Z",
      "completed_at": "2026-11-14T08:29:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43572233066/job/132384456356",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43562986247,
-   "pr": null,
-   "commit": "c4341ed8fdf30168c94edac2b26fb3becb50403d",
-   "branch": "main",
-   "event": "push",
-   "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regre\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247",
-   "created_at": "2026-11-14T05:44:37Z",
-   "updated_at": "2026-11-14T07:37:11Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T07:09:34Z",
-     "completed_at": "2026-11-14T07:17:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892433"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T06:38:59Z",
-     "completed_at": "2026-11-14T07:37:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892462"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T06:19:28Z",
-     "completed_at": "2026-11-14T06:42:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562986247/job/132355892470",
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
