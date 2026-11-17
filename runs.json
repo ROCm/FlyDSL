@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-17T09:06:04Z",
+ "updated": "2026-11-17T09:13:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44053225099,
+   "pr": null,
+   "commit": "e2a2b1fcd8e1889ba8f31c31cb497869d0591994",
+   "branch": "main",
+   "event": "push",
+   "title": "[Docs] Point the TDM docstrings at the tiled atom (#1424)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44053225099",
+   "created_at": "2026-11-17T09:11:09Z",
+   "updated_at": "2026-11-17T09:11:37Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 44052041217,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Fly] Add an optional check-resource-limits pass (#1419)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44052041217",
    "created_at": "2026-11-17T09:03:25Z",
-   "updated_at": "2026-11-17T09:03:53Z",
+   "updated_at": "2026-11-17T09:11:27Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,11 +85,11 @@
    "branch": "enh-cdna5-tdm-gather-scatter",
    "event": "pull_request",
    "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975",
    "created_at": "2026-11-17T08:22:42Z",
-   "updated_at": "2026-11-17T08:49:36Z",
+   "updated_at": "2026-11-17T09:07:32Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -89,9 +104,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-17T08:49:36Z",
+     "started_at": "2026-11-17T09:07:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975/job/133925280332"
     },
@@ -254,11 +269,11 @@
    "branch": "docs/tdm-atom-point-at-tiled-form",
    "event": "pull_request",
    "title": "[Docs] Point the TDM docstrings at the tiled atom",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282",
    "created_at": "2026-11-17T05:29:49Z",
-   "updated_at": "2026-11-17T09:03:09Z",
+   "updated_at": "2026-11-17T09:04:13Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -1840,52 +1855,6 @@
    "updated_at": "2026-11-14T13:33:14Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 43572233066,
-   "pr": null,
-   "commit": "831620f568f73fd8d47c525d5a9ba386fd8cade2",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43572233066",
-   "created_at": "2026-11-14T07:40:58Z",
-   "updated_at": "2026-11-14T09:15:03Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T08:05:17Z",
-     "completed_at": "2026-11-14T08:34:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43572233066/job/132384456276"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T08:05:26Z",
-     "completed_at": "2026-11-14T08:28:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43572233066/job/132384456299"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T08:05:30Z",
-     "completed_at": "2026-11-14T08:29:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43572233066/job/132384456356",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
