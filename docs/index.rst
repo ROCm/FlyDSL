@@ -54,6 +54,8 @@ to GPU/ROCDL.
 
       * :doc:`Offline autotune configs <autotune_guide>`
 
+      * :doc:`Search-driven kernel tuning <tuning_search_guide>`
+
       * :doc:`Prebuilt kernel library <prebuilt_kernels_guide>`
 
       * :doc:`Testing and benchmarking <testing_benchmarking_guide>`

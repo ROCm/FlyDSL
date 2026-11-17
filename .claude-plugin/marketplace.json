@@ -43,7 +43,8 @@
         "./.claude/skills/lds-optimization",
         "./.claude/skills/llvm",
         "./.claude/skills/oob-detection",
-        "./.claude/skills/prefetch-data-load"
+        "./.claude/skills/prefetch-data-load",
+        "./.claude/skills/search-optimize-flydsl"
       ]
     }
   ]
