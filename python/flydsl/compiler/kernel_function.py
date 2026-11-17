@@ -3,6 +3,7 @@
 
 import inspect
 import threading
+import weakref
 from contextlib import contextmanager
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -122,22 +123,23 @@ def _attach_attrs(op, unit_attrs: Optional[List[str]], value_attrs: Optional[Dic
 # =============================================================================
 
 
-# Keyed by id, since code objects from different files can compare equal; the value keeps the code alive.
-_DEF_LINES: Dict[int, Tuple[Any, int]] = {}
+# Keyed by id, since code objects from different files can compare equal; an entry is dropped when its code is freed.
+_DEF_LINES: Dict[int, int] = {}
 
 
 def func_def_location(func: Callable, context=None) -> ir.Location:
     """File location of *func*'s ``def`` line (the kernel/jit definition)."""
     # getsourcelines tokenizes the whole function, and every call traces: look each code object up once.
     code = inspect.unwrap(func).__code__
-    entry = _DEF_LINES.get(id(code))
-    if entry is None:
+    line = _DEF_LINES.get(id(code))
+    if line is None:
         try:
             line = inspect.getsourcelines(func)[1]
         except (OSError, TypeError):
             line = 0
-        entry = _DEF_LINES[id(code)] = (code, line)
-    return file_location(inspect.getfile(func), entry[1], 0, context)
+        _DEF_LINES[id(code)] = line
+        weakref.finalize(code, _DEF_LINES.pop, id(code), None)
+    return file_location(inspect.getfile(func), line, 0, context)
 
 
 # =============================================================================
