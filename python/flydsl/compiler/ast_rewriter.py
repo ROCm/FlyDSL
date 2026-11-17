@@ -539,7 +539,6 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
-@ASTRewriter.register
 class RewriteBoolOps(Transformer):
     @staticmethod
     def dsl_and_(lhs, rhs):
@@ -639,7 +638,6 @@ class RewriteBoolOps(Transformer):
         return ast.copy_location(ast.fix_missing_locations(replacement), node)
 
 
-@ASTRewriter.register
 class ReplaceIfWithDispatch(Transformer):
     _counter = 0
 
@@ -823,7 +821,8 @@ class ReplaceIfWithDispatch(Transformer):
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         active_symbols_before_if = self.symbol_scopes.snapshot_symbol_scopes()
         if _is_constexpr(node.test):
-            node.test = _unwrap_constexpr(node.test)
+            # The test is reached only from here, so rewrite it on the way out of the wrapper.
+            node.test = self.visit(_unwrap_constexpr(node.test))
             node.body = self._visit_stmt_block(node.body)
             if node.orelse:
                 node.orelse = self._visit_stmt_block(node.orelse)
@@ -956,8 +955,8 @@ class ReplaceIfWithDispatch(Transformer):
 
             return result
 
-    def visit_IfExp(self, node: ast.IfExp):
-        node = self.generic_visit(node)
+    @staticmethod
+    def _ifexp_dispatch_call(node: ast.IfExp):
         empty_args = ast.arguments(
             posonlyargs=[],
             args=[],
@@ -977,6 +976,10 @@ class ReplaceIfWithDispatch(Transformer):
             ),
             node,
         )
+
+    def visit_IfExp(self, node: ast.IfExp):
+        node = self.generic_visit(node)
+        return self._ifexp_dispatch_call(node)
 
     @staticmethod
     def scf_ifexp_dispatch(cond, then_fn, else_fn):
@@ -1011,7 +1014,6 @@ class ReplaceIfWithDispatch(Transformer):
         return _pack_states(op.results, exemplar)[0]
 
 
-@ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
     _counter = 0
 
@@ -1180,9 +1182,13 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     @staticmethod
     def _is_yield(stmt):
-        return (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Yield)) or (
-            isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Yield)
-        )
+        if not isinstance(stmt, (ast.Expr, ast.Assign)):
+            return False
+        value = stmt.value
+        if isinstance(value, ast.Yield):
+            return True
+        # The body is rewritten before the loop is, so a trailing `yield` already reads as scf_yield_().
+        return isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "scf_yield_"
 
     @staticmethod
     def _iter_call_name(iter_node):
@@ -1379,8 +1385,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     def visit_For(self, node: ast.For) -> ast.For:
         if self._is_range_constexpr(node.iter):
+            # Unrolled at trace time, but still its own scope, as every other walk treated it.
             node.iter.func = ast.Name(id="range", ctx=ast.Load())
-            node = self.generic_visit(node)
+            node = super().visit_For(node)
             node = ast.fix_missing_locations(node)
             return node
 
@@ -1407,12 +1414,14 @@ class InsertEmptyYieldForSCFFor(Transformer):
                         last_statement.end_lineno is not None
                     ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
                     new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
-                    node.body.append(new_yield)
+                    # Created after the walk reached this node, so rewrite it explicitly.
+                    node.body.append(self.visit(new_yield))
                 node = ast.fix_missing_locations(node)
-        return node
+                return node
+        # A loop that stays plain Python still has a body to rewrite.
+        return super().visit_For(node)
 
 
-@ASTRewriter.register
 class ReplaceYieldWithSCFYield(Transformer):
     @staticmethod
     def scf_yield_(*args):
@@ -1450,7 +1459,6 @@ class ReplaceYieldWithSCFYield(Transformer):
         return call
 
 
-@ASTRewriter.register
 class CanonicalizeWhile(Transformer):
     _counter = 0
 
@@ -1624,6 +1632,46 @@ class CanonicalizeWhile(Transformer):
             dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
 
             return [before_func, after_func, dispatch_stmt]
+
+
+@ASTRewriter.register
+class StructuralTransforms(
+    RewriteBoolOps,
+    ReplaceIfWithDispatch,
+    InsertEmptyYieldForSCFFor,
+    ReplaceYieldWithSCFYield,
+    CanonicalizeWhile,
+):
+    """The structural rewrites, applied in one walk of the tree.
+
+    The bases define disjoint ``visit_*`` methods, so inheriting them composes the
+    handlers without overriding any: the walk reaches each node once and the
+    handler for that node type runs there. They already drive their own recursion
+    through ``self.visit`` / ``self._visit_stmt_block``, which now dispatches to
+    every handler rather than to one pass at a time, so an inner statement is
+    rewritten before the statement that encloses it.
+
+    Running them as separate passes cost one full traversal each while every pass
+    handled only two or three node types.
+    """
+
+    class _LowerIfExp(ast.NodeTransformer):
+        """Lower the conditional expressions a boolean op builds for its short circuit."""
+
+        def visit_IfExp(self, node: ast.IfExp):
+            node = self.generic_visit(node)
+            return ReplaceIfWithDispatch._ifexp_dispatch_call(node)
+
+    def visit_BoolOp(self, node: ast.BoolOp):
+        # The conditionals this builds are new, so the walk does not reach them on its own.
+        return self._LowerIfExp().visit(super().visit_BoolOp(node))
+
+    @classmethod
+    def rewrite_globals(cls):
+        merged = {}
+        for base in cls.__bases__:
+            merged.update(base.rewrite_globals())
+        return merged
 
 
 @ASTRewriter.register
