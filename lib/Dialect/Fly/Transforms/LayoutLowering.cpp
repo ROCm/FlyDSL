@@ -653,8 +653,16 @@ struct ExpandCopyOpLowering : OpConversionPattern<CopyOp> {
     Value copyAtomVal = adaptor.getCopyAtom();
     if (isa<TiledCopyType>(copyAtomVal.getType()))
       copyAtomVal = GetCopyAtomOp::create(rewriter, loc, copyAtomVal);
+    // A row list rides alongside src/dst: the data side still names the tile, and the
+    // list only says which rows that tile is made of. Because it names the rows of one
+    // issue, it can only ride on a copy that lowers to a single call -- a split tile
+    // would leave the list behind. `emitAtom` is the one funnel every call goes
+    // through, so the count comes from the expansion rather than being predicted here.
+    Value index = adaptor.getIndex();
+    int32_t issued = 0;
     auto emitAtom = [&](Value src, Value dst, Value pred) {
-      CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+      ++issued;
+      CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred, index);
     };
 
     std::optional<int64_t> atomValsSrc, atomValsDst;
@@ -675,6 +683,8 @@ struct ExpandCopyOpLowering : OpConversionPattern<CopyOp> {
     if (failed(expandCopy(rewriter, loc, adaptor.getSrc(), adaptor.getDst(), adaptor.getPred(),
                           atomValsSrc, atomValsDst, emitAtom)))
       return rewriter.notifyMatchFailure(op, "cannot expand the copy into atom calls");
+    if (index && issued != 1)
+      return rewriter.notifyMatchFailure(op, "indexed copy must lower as a single atom call");
     rewriter.eraseOp(op);
     return success();
   }

@@ -39,6 +39,10 @@ class FlyROCDL_MakeTiledTdmAtomOp<string mnemonic>
     DefaultValuedOptionalAttr<BoolAttr, "true">:$initBoundaryCheck,
     DefaultValuedOptionalAttr<I32Attr, "0">:$cacheModifier,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$atomicBarrier,
+    // Width of the row index when the outer descriptor dim is addressed by an
+    // explicit index list: 0 keeps the linear form, 16 or 32 select indexed
+    // addressing and bound how many rows one issue carries.
+    DefaultValuedOptionalAttr<I32Attr, "0">:$indexBits,
     OptionalAttr<TypeAttr>:$internalType
   );
   let results = (outs AnyType:$atom, AnyType:$coordTensor);

@@ -797,32 +797,75 @@ FailureOr<TdmOperands> convertToTdmOperands(AdaptorT adaptor, tdm::EmitErrorFn e
                      params,   adaptor.getInitBoundaryCheck()};
 }
 
+/// What a row-indexed descriptor additionally has to satisfy. The direction does not
+/// matter -- gather and scatter put the row list in the same descriptor groups -- so both
+/// type builders go through this one check.
+LogicalResult checkIndexedDescriptor(const tdm::TdmAuxParams &aux, Type dataType, int32_t indexBits,
+                                     tdm::EmitErrorFn emitError) {
+  if (!indexBits)
+    return success();
+  if (indexBits != 16 && indexBits != 32)
+    return emitError() << "index_bits must be 0, 16 or 32, got " << indexBits;
+  if (aux.rank() != tdm::kIndexedRank)
+    return emitError() << "an indexed TDM descriptor must be 2D, got rank " << aux.rank();
+  // The row list is read as coordinates of the global tensor, so the dim it addresses has
+  // to be one the caller can name. `gbasis` runs innermost axis first, so the addressed
+  // dim is its last; if coalescing folded several global modes into that axis, a row index
+  // is no longer any one mode's coordinate and the caller would have to know how the fold
+  // went to write the list correctly.
+  int32_t mergedModes = 0;
+  for ([[maybe_unused]] auto mode : core::get(aux.gbasis, aux.rank() - 1).stride().leaves())
+    ++mergedModes;
+  if (mergedModes != 1)
+    return emitError() << "an indexed TDM descriptor addresses rows by global coordinate, so "
+                          "its outer dim must come from a single global mode, but "
+                       << mergedModes << " modes were merged into it";
+  // `boxShape` is outermost first, so the row count leads and the row width, which stays
+  // the contiguous run, trails.
+  int32_t rows = aux.boxShape.front();
+  int32_t maxRows = tdm::maxIndexedRows(indexBits);
+  if (rows > maxRows)
+    return emitError() << "one indexed issue carries at most " << maxRows << " rows at "
+                       << indexBits << "-bit indices, got " << rows;
+  int64_t rowBits = static_cast<int64_t>(aux.boxShape.back()) * dataType.getIntOrFloatBitWidth();
+  if (rowBits % (4 * 8))
+    return emitError() << "an indexed TDM row must span a whole multiple of 4 bytes, got "
+                       << aux.boxShape.back() << " elements at " << dataType.getIntOrFloatBitWidth()
+                       << " bits";
+  return success();
+}
+
 FailureOr<Type> tdmLoadOpType(MLIRContext *ctx, const tdm::TdmAuxParams &aux, Type dataType,
-                              bool atomicBarrier, int32_t cacheModifier,
+                              bool atomicBarrier, int32_t cacheModifier, int32_t indexBits,
                               tdm::EmitErrorFn emitError) {
   if (aux.padAmount &&
       static_cast<int64_t>(aux.boxShape.back()) * dataType.getIntOrFloatBitWidth() % 32)
     return emitError() << "padded physical TDM tile_dim0 must span whole dwords";
+  if (failed(checkIndexedDescriptor(aux, dataType, indexBits, emitError)))
+    return failure();
   Type ty = CopyOpCDNA5TensorLoadType::getChecked(emitError, ctx, ArrayRef<int32_t>(aux.boxShape),
                                                   dataType, IntTupleAttr::get(ctx, aux.tensor2tdm),
                                                   atomicBarrier, cacheModifier, /*iterCount=*/1,
-                                                  aux.padInterval, aux.padAmount);
+                                                  indexBits, aux.padInterval, aux.padAmount);
   if (!ty)
     return failure();
   return ty;
 }
 
 FailureOr<Type> tdmStoreOpType(MLIRContext *ctx, const tdm::TdmAuxParams &aux, Type dataType,
-                               bool atomicBarrier, int32_t cacheModifier,
+                               bool atomicBarrier, int32_t cacheModifier, int32_t indexBits,
                                tdm::EmitErrorFn emitError) {
   if (aux.padAmount)
     return emitError() << "a TDM store cannot drain a padded LDS tile (pad interval "
                        << aux.padInterval << ", amount " << aux.padAmount
                        << "); TENSOR_STORE_FROM_LDS has no de-padding, it walks LDS with the "
                           "packed tile stride";
+  if (failed(checkIndexedDescriptor(aux, dataType, indexBits, emitError)))
+    return failure();
   Type ty = CopyOpCDNA5TensorStoreType::getChecked(emitError, ctx, ArrayRef<int32_t>(aux.boxShape),
                                                    dataType, IntTupleAttr::get(ctx, aux.tensor2tdm),
-                                                   atomicBarrier, cacheModifier, /*iterCount=*/1);
+                                                   atomicBarrier, cacheModifier, /*iterCount=*/1,
+                                                   indexBits);
   if (!ty)
     return failure();
   return ty;
@@ -861,9 +904,9 @@ LogicalResult inferTdmAtomTypes(MLIRContext *context, std::optional<Location> lo
 
   FailureOr<Type> copyOp =
       isLoad ? tdmLoadOpType(context, atom->aux, in->dataType, adaptor.getAtomicBarrier(),
-                             adaptor.getCacheModifier(), emitError)
+                             adaptor.getCacheModifier(), adaptor.getIndexBits(), emitError)
              : tdmStoreOpType(context, atom->aux, in->dataType, adaptor.getAtomicBarrier(),
-                              adaptor.getCacheModifier(), emitError);
+                              adaptor.getCacheModifier(), adaptor.getIndexBits(), emitError);
   if (failed(copyOp))
     return failure();
 
