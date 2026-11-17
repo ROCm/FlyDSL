@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-11-17T08:13:06Z",
+ "updated": "2026-11-17T08:47:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44049374188,
+   "pr": 1426,
+   "commit": "3ad4e6a92e83591f8d90cb681a30cbebe75cc827",
+   "branch": "pr/feat-fx-range",
+   "event": "pull_request",
+   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188",
+   "created_at": "2026-11-17T08:44:55Z",
+   "updated_at": "2026-11-17T08:45:29Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44048329122,
+   "pr": 1426,
+   "commit": "4b209f486f66da87e72cb2a669046de269bfe0df",
+   "branch": "pr/feat-fx-range",
+   "event": "pull_request",
+   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44048329122",
+   "created_at": "2026-11-17T08:37:27Z",
+   "updated_at": "2026-11-17T08:45:13Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44046211975,
+   "pr": 1350,
+   "commit": "c7b673d80af9c8d9e4594232356e87db3498e714",
+   "branch": "enh-cdna5-tdm-gather-scatter",
+   "event": "pull_request",
+   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975",
+   "created_at": "2026-11-17T08:22:42Z",
+   "updated_at": "2026-11-17T08:24:43Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 44042130575,
    "pr": null,
@@ -14,9 +59,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575",
    "created_at": "2026-11-17T07:53:04Z",
-   "updated_at": "2026-11-17T08:02:12Z",
+   "updated_at": "2026-11-17T08:44:25Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T08:25:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186770"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-17T08:24:34Z",
+     "completed_at": "2026-11-17T08:43:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186848"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T08:24:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186870"
+    }
+   ]
   },
   {
    "run_id": 44041099793,
@@ -40,11 +113,11 @@
    "branch": "qiangpan/fix_hip_soname7",
    "event": "pull_request",
    "title": "[Runtime] Fix current_device_id() always returning 0 on ROCm 10 pip installs",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256",
    "created_at": "2026-11-17T07:18:52Z",
-   "updated_at": "2026-11-17T07:18:52Z",
+   "updated_at": "2026-11-17T08:32:53Z",
    "actor": "qiangpan2",
    "jobs": []
   },
@@ -1823,141 +1896,6 @@
      "started_at": "2026-11-14T07:17:30Z",
      "completed_at": "2026-11-14T07:37:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562873412/job/132353989965"
-    }
-   ]
-  },
-  {
-   "run_id": 43562407929,
-   "pr": 1411,
-   "commit": "50181c9df54bdd9336ab8415dec08fcae60d0db5",
-   "branch": "ci/test-whl-pipefail",
-   "event": "pull_request",
-   "title": "[CI] Stop tee from masking wheel test/benchmark failures",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562407929",
-   "created_at": "2026-11-14T05:37:09Z",
-   "updated_at": "2026-11-14T06:32:53Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T05:55:10Z",
-     "completed_at": "2026-11-14T06:26:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562407929/job/132352828168"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T05:54:29Z",
-     "completed_at": "2026-11-14T06:19:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562407929/job/132352828177",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T06:05:16Z",
-     "completed_at": "2026-11-14T06:32:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43562407929/job/132352828188"
-    }
-   ]
-  },
-  {
-   "run_id": 43558486890,
-   "pr": 1410,
-   "commit": "91590f8e8ca8b33fdf7800c16c35c3f28cc4b7b0",
-   "branch": "fix/main-ci-arch-env-and-dispatch",
-   "event": "pull_request",
-   "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regression",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890",
-   "created_at": "2026-11-14T04:48:54Z",
-   "updated_at": "2026-11-14T06:31:20Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T05:05:04Z",
-     "completed_at": "2026-11-14T05:23:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890/job/132340525524",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T05:04:48Z",
-     "completed_at": "2026-11-14T05:39:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890/job/132340525551"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T05:11:14Z",
-     "completed_at": "2026-11-14T05:47:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43558486890/job/132340525707"
-    }
-   ]
-  },
-  {
-   "run_id": 43557140270,
-   "pr": null,
-   "commit": "4aa1247d2c02280d93c0a4332e719fa0aaf4b258",
-   "branch": "fix/main-ci-arch-env-and-dispatch",
-   "event": "pull_request",
-   "title": "[JIT] Fix main CI after the ARCH env var removal and a dispatch regression",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270",
-   "created_at": "2026-11-14T04:32:16Z",
-   "updated_at": "2026-11-14T04:49:16Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-14T04:47:26Z",
-     "completed_at": "2026-11-14T04:49:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151616"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-14T04:46:56Z",
-     "completed_at": "2026-11-14T04:48:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151627"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-14T04:47:10Z",
-     "completed_at": "2026-11-14T04:49:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151646"
     }
    ]
   }
