@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-17T08:10:37Z",
+ "updated": "2026-11-17T08:13:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -325,11 +325,11 @@
    "branch": "llvm-reassociate-uniformity",
    "event": "pull_request",
    "title": "[Bugfix] Fix nondeterministic codegen with an LLVM backport ",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137",
    "created_at": "2026-11-16T22:15:01Z",
-   "updated_at": "2026-11-17T07:37:40Z",
+   "updated_at": "2026-11-17T08:09:56Z",
    "actor": "RElbers",
    "jobs": [
     {
