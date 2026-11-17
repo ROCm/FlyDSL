@@ -551,6 +551,11 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
     Small problems (see ``BWD_ROW_KERNEL_*``) run the one-launch row kernel of
     ``_build_layernorm_bwd_row_module`` instead, and so does every problem on
     targets other than gfx95x; ``layernorm_bwd_plan`` reports the choice.
+
+    ``dx`` is bitwise reproducible.  ``dgamma``/``dbias`` are not: both kernels
+    accumulate them with fp32 atomic adds in arrival order (one per column and
+    row group here, one per column and row in the row kernel), so their last
+    bits can change from run to run.
     """
     arch = get_rocm_arch()
     if not _ln_bwd_split_arch(arch):
