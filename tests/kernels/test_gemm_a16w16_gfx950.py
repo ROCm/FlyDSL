@@ -1385,3 +1385,37 @@ if __name__ == "__main__":
         )
     except pytest.skip.Exception as exc:
         print(f"Skipped: {exc}")
+
+
+@pytest.mark.parametrize("split_k", [1, 2])
+@pytest.mark.parametrize("m", [32, 100])
+@pytest.mark.parametrize("k_rotate", [1, 3, 7])
+def test_gemm_a16w16_k_rotate_matches_reference(k_rotate: int, m: int, split_k: int):
+    """Starting each workgroup at its own K tile only reorders the fp32 accumulation."""
+    n, k = 512, 2048
+    torch.manual_seed(0)
+    a = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    b = torch.randn((n, k), dtype=torch.bfloat16, device="cuda").t()  # layout "nt"
+    ref = a.float() @ b.float()
+    kwargs = dict(
+        block_m=32,
+        block_n=32,
+        block_k=128,
+        stages=3,
+        split_k=split_k,
+        m_waves=1,
+        n_waves=2,
+        k_waves=1,
+        group_m=0,
+        use_half_tile_interleaved=False,
+    )
+    outs = []
+    for rotate in (0, k_rotate):
+        out = torch.full((m, n), float("nan"), dtype=torch.bfloat16, device="cuda")
+        gemm_a16w16(a, b, out, user_kwargs={**kwargs, "k_rotate": rotate}, layout="nt")
+        torch.cuda.synchronize()
+        outs.append(out)
+        rel = ((out.float() - ref).norm() / ref.norm()).item()
+        assert rel < 1e-2, f"k_rotate={rotate}: relative L2 error {rel}"
+    # Different accumulation order, so not bitwise equal, but the same result to bf16 resolution.
+    assert torch.allclose(outs[0].float(), outs[1].float(), rtol=2e-2, atol=2e-1)

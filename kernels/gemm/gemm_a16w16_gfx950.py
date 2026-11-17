@@ -60,6 +60,7 @@ class GemmA16W16Gfx950Param:
     block_threads: fx.Constexpr[int]
     ldg_a_iters: fx.Constexpr[int]
     ldg_b_iters: fx.Constexpr[int]
+    k_rotate: fx.Constexpr[int]
 
 
 @dataclass(slots=True, kw_only=True, eq=False)
@@ -106,6 +107,7 @@ def make_gemm_a16w16_gfx950_param(
     mma_m: int = 16,
     mma_n: int = 16,
     mma_k: int = 32,
+    k_rotate: int = 0,
 ) -> GemmA16W16Gfx950Param:
     if in_dtype_id not in (GEMM_A16W16_DTYPE_BF16, GEMM_A16W16_DTYPE_FP16):
         raise ValueError(f"unsupported in_dtype_id={in_dtype_id}")
@@ -123,6 +125,10 @@ def make_gemm_a16w16_gfx950_param(
         raise ValueError("the workgroup cannot contain more than 16 waves")
     if group_m < 0:
         raise ValueError("group_m must be non-negative")
+    if k_rotate < 0:
+        raise ValueError("k_rotate must be non-negative")
+    if k_rotate > 0 and use_half_tile_interleaved:
+        raise ValueError("k_rotate is not supported by the half-tile interleaved kernel")
     in_dbytes = 2  # Shared C remains in the 16-bit input dtype.
     out_dbytes = 4 if out_dtype_id == GEMM_A16W16_DTYPE_FP32 else 2
     block_threads = m_waves * n_waves * k_waves * GFX950_WAVE_SIZE
@@ -261,6 +267,7 @@ def make_gemm_a16w16_gfx950_param(
         block_threads=block_threads,
         ldg_a_iters=ldg_a_iters,
         ldg_b_iters=ldg_b_iters,
+        k_rotate=k_rotate,
         mma_m=mma_m,
         mma_n=mma_n,
         mma_k=mma_k,
@@ -274,6 +281,8 @@ def make_gemm_a16w16_gfx950_kernel_name(param: GemmA16W16Gfx950Param):
     name += "_ksd" if param.is_split_k else "_ks1"
     name += f"_w{param.m_waves}x{param.n_waves}x{param.k_waves}"
     name += f"_gm{param.group_m}"
+    if param.k_rotate:
+        name += f"_kr{param.k_rotate}"
     name += f"_bias{int(param.has_bias)}"
     a_layout = "t" if param.a_is_transposed else "n"
     b_layout = "t" if param.b_is_transposed else "n"
@@ -496,6 +505,17 @@ def gemm_a16w16_gfx950_kernel(
     k_tiles = (ks_end - ks_begin) // block_k
     block_m_offset = bid_m * block_m
     block_n_offset = bid_n * block_n
+    k_rotate = param.k_rotate
+    if const_expr(k_rotate > 0):
+        # Start each workgroup at a different K tile (the sum order changes, the sum does not):
+        # workgroups that stream the same K tile at the same time hit the same memory channels.
+        k_start_tile = (fx.block_idx.x * k_rotate) % k_tiles
+
+    def rotated_k_tile(k_tile):
+        if const_expr(k_rotate > 0):
+            t = k_tile + k_start_tile
+            k_tile = (t >= k_tiles).select(t - k_tiles, t)
+        return k_tile
 
     @fx.struct
     class SharedABStorage:
@@ -607,7 +627,7 @@ def gemm_a16w16_gfx950_kernel(
                 outer_bound=m,
                 global_outer_offset=block_m_offset,
                 leading_stride=a_leading_stride,
-                k_tile=k_tile,
+                k_tile=rotated_k_tile(k_tile),
             ),
             context=ab_load_context,
             load_iters=ldg_a_iters,
@@ -624,7 +644,7 @@ def gemm_a16w16_gfx950_kernel(
                 outer_bound=n,
                 global_outer_offset=block_n_offset,
                 leading_stride=b_leading_stride,
-                k_tile=k_tile,
+                k_tile=rotated_k_tile(k_tile),
             ),
             context=ab_load_context,
             load_iters=ldg_b_iters,

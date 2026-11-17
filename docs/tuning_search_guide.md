@@ -178,7 +178,7 @@ page.
 | RMSNorm 8192x8192 bf16 | cold | +2.4% (p = 0.002) with `BLOCK_THREADS=1024`, `waves_per_eu=4`; the winner is exported as an `@autotune` artifact and served back | about 0.77 of the bandwidth floor |
 | bf16 GEMM 4096x4096x4096 | hot | Default is already at the top; `hill` found +0.7% (p = 5e-5), `portfolio` and `random` found nothing better | at or above the measured matmul peak |
 | bf16 GEMM 32x8192x8192 | hot | 5.3x over the default (`256x256` tile) with `split_k` and a smaller tile, all three strategies | memory-bound; hot time is cache-assisted |
-| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default across four strategies and three seeds | about 0.44 of the bandwidth floor: the knobs this kernel exposes do not reach the roofline |
+| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default with the knob values the harness first listed; 2.86-2.88x after widening the values (`block_m/n=32`, `block_k=256`, more stages and waves); 3.0x with the `k_rotate` lever below | 0.55 of the steady-state bandwidth floor at the best; torch matmul, same timing, takes 13% longer than the winner |
 | flash attention prefill, bf16 causal, S=2048, H=64, D=256 | hot | existing knobs only: 1.51-1.56x over the default in 8 of 9 runs (`hill`, `portfolio`, `gp`, three seeds; p < 1e-13 each), 1.34x in the ninth; the default spills 88 VGPRs and `waves_per_eu=1` (or 4) removes the spill | 0.21 of the compute floor for the default, 0.32 for the winner |
 | flash attention prefill, same | hot | plus two new levers (below): 2.11-2.14x in 8 of 9 runs, 1.89x in the ninth | 0.45 |
 | flash attention prefill, same | cold | 2.12x (one `hill` run) | 0.42 |
@@ -191,15 +191,43 @@ this space does not rank the strategies. `random` spent 19-20% of its
 evaluations on configs that failed the numeric gate, against 1-9% for `hill` and
 `gp`.
 
+### Closing the gap on the cold small-M GEMM
+
+The first search left the cold problem at 0.44 of the bandwidth floor. Widening
+the knob values moved it to 0.52. Then the top configs were the signal: six
+structurally different configs (one to four waves, three to five stages, with
+and without slice-K) were all within 0.3% of each other. A plateau across
+configs that differ in how much they keep in flight points at a limit outside
+those knobs. The hypothesis: all workgroups stream the same K tile at the same
+time, so their loads hit the same memory channels.
+
+The lever is `k_rotate` in `kernels/gemm/gemm_a16w16_gfx950.py`: workgroup `p`
+starts its K loop at tile `(p * k_rotate) % k_tiles` and wraps. It reorders only
+the fp32 accumulation. Added as a launcher `Constexpr` and put in the search
+space, the four wide searches (two strategies, two seeds) all landed on
+`k_rotate` 3 or 7 and 48.5-49.3 us against 51.5 without it. A paired A/B of one
+config at `k_rotate` 0, 1, 3 and 7, 20 interleaved rounds, cold: `k_rotate=3` is
+1.065x faster than 0 (p = 2e-27); 7 is tied with 3; 1 is slower than both. Applied
+to a differently shaped config it did not help (one search-phase comparison was 7% slower), so keep
+it as a searched knob, not a default.
+
+Where it stands: 3.0x over the shipped default, and the torch matmul timed the same
+way takes 13% longer, at 0.55 of the steady-state bandwidth floor. That
+floor is from a 2 GB copy. A cold kernel reading 134 MB does not reach
+steady-state bandwidth: on the same device a cold torch read-reduction of 134 MB
+takes 66 us (2.1 TB/s) and a cold 134 MB copy moves 3.7 TB/s, against 4.8 TB/s
+for 2 GB. The achievable floor at this size is therefore above the 2 GB figure
+and unmeasured here. The remaining distance is not closed.
+
 Two findings about the kernel, not the engine:
 
 - `make_gemm_a16w16_param_and_validate` admits `block_k=32`, and every one of
   the seven numeric failures printed across these runs had `block_k=32` with a
   relative L2 error of 1.23: wrong results, not noise. The gate kept them out
   of the timings.
-- The cold small-M result leaves more than half of the bandwidth floor
-  unreached. Closing it needs a new lever (the skill's step 5), not more
-  search over the existing space.
+- The cold small-M result stalled at 0.44-0.52 of the bandwidth floor until a
+  new lever (the skill's step 5) was added; more search over the existing
+  values did not move it.
 
 ### Flash attention prefill (bf16, causal, S=2048, H=64, D=256)
 
