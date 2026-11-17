@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-17T07:40:51Z",
+ "updated": "2026-11-17T07:55:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44042130575,
+   "pr": null,
+   "commit": "5f6a76e097326b0c7c95bea0288ca5be5adac9bd",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Support static slices in Vector indexing (#1418)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575",
+   "created_at": "2026-11-17T07:53:04Z",
+   "updated_at": "2026-11-17T07:53:41Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44041099793,
+   "pr": null,
+   "commit": "b65b10bef5007e035b17775b233c76ad6da203e2",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Add the Float8E5M2FNUZ numeric type (#1415)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44041099793",
+   "created_at": "2026-11-17T07:45:06Z",
+   "updated_at": "2026-11-17T07:53:27Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 44037732256,
    "pr": 1425,
@@ -25,11 +55,11 @@
    "branch": "jli/fix-aot-export-amdhip64-link",
    "event": "pull_request",
    "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359",
    "created_at": "2026-11-17T07:06:37Z",
-   "updated_at": "2026-11-17T07:30:12Z",
+   "updated_at": "2026-11-17T07:40:58Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -44,19 +74,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-17T07:30:35Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357600"
+     "completed_at": "2026-11-17T07:53:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357600",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-17T07:30:27Z",
-     "completed_at": null,
+     "completed_at": "2026-11-17T07:40:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357623"
     }
    ]
@@ -1925,67 +1958,6 @@
      "started_at": "2026-11-14T04:47:10Z",
      "completed_at": "2026-11-14T04:49:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43557140270/job/132336151646"
-    }
-   ]
-  },
-  {
-   "run_id": 43555708013,
-   "pr": 1377,
-   "commit": "36ac4c62e2f57d2dfbebb9defbc513e8ef402629",
-   "branch": "pr2-gfx120x-swmmac",
-   "event": "pull_request",
-   "title": "[Dialect][DSL] Add GFX120X SWMMAC 2:4 sparse MMA dialect atom",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43555708013",
-   "created_at": "2026-11-14T04:15:16Z",
-   "updated_at": "2026-11-14T04:15:16Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 43547226750,
-   "pr": null,
-   "commit": "cd6261be33d8904425c95b3e43849d9adc2d8907",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43547226750",
-   "created_at": "2026-11-14T02:36:16Z",
-   "updated_at": "2026-11-14T03:36:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T02:52:52Z",
-     "completed_at": "2026-11-14T03:13:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43547226750/job/132305799010"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T02:53:08Z",
-     "completed_at": "2026-11-14T03:19:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43547226750/job/132305799044",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T02:54:21Z",
-     "completed_at": "2026-11-14T03:36:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43547226750/job/132305799061"
     }
    ]
   }
