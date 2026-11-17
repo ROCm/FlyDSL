@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-17T03:30:43Z",
+ "updated": "2026-11-17T05:07:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44014467114,
+   "pr": 1417,
+   "commit": "a5bb627f71a5c75c797dd3f90764d6731d65e80f",
+   "branch": "jli/fix-aot-export-amdhip64-link",
+   "event": "pull_request",
+   "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114",
+   "created_at": "2026-11-17T04:03:24Z",
+   "updated_at": "2026-11-17T04:21:58Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-17T04:22:30Z",
+     "completed_at": "2026-11-17T04:47:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816138998",
+     "machine": "gbt350-odcdh1-b04-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-17T04:21:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816139009"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-17T04:37:33Z",
+     "completed_at": "2026-11-17T04:48:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816139061"
+    }
+   ]
+  },
   {
    "run_id": 44001894852,
    "pr": 1412,
@@ -54,10 +100,10 @@
    "event": "pull_request",
    "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405",
    "created_at": "2026-11-17T00:01:36Z",
-   "updated_at": "2026-11-17T03:28:06Z",
+   "updated_at": "2026-11-17T05:05:31Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -67,7 +113,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T01:59:20Z",
      "completed_at": "2026-11-17T02:22:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133795351657",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133819153734",
      "machine": "gbt350-odcdh1-b10-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
@@ -79,7 +125,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:23:35Z",
      "completed_at": "2026-11-17T00:42:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133795352511"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133819153836"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -88,7 +134,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:27:02Z",
      "completed_at": "2026-11-17T00:36:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133795352594"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133819153911"
     }
    ]
   },
@@ -1946,21 +1992,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43426304146",
    "created_at": "2026-11-13T12:34:23Z",
    "updated_at": "2026-11-13T12:44:20Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 43426226321,
-   "pr": null,
-   "commit": "d9d069f1fd4794927702d5b12ea290a545700539",
-   "branch": "main",
-   "event": "push",
-   "title": "[Fix] Support default trailed arguments in the CompiledFunction (#1405)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43426226321",
-   "created_at": "2026-11-13T12:33:52Z",
-   "updated_at": "2026-11-13T12:34:39Z",
    "actor": "coderfeli",
    "jobs": []
   }
