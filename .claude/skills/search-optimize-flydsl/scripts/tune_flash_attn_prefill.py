@@ -23,8 +23,8 @@ What this harness shows that the GEMM and RMSNorm ones do not:
   (``screened_out`` in the report), so a broken code path does not eat evaluations.
   ``--probe`` prints that one-factor table (status, resources, paired time) and stops.
 - ``--levers shipped`` searches only the knobs the kernel had before this branch;
-  ``--levers all`` adds ``CAUSAL_REVERSE_Q`` and ``PIPE_K``, two levers this
-  harness's diagnosis led to (default off in the kernel).
+  ``--levers all`` adds the default-off builder arguments in ``LEVER_DEFAULTS``
+  (``causal_reverse_q``, ``pipe_k``, ``v_pad``, ...), levers this harness's diagnosis led to.
 - ``--run-config baseline|file.json`` compiles, checks and times one config, for ISA
   dumps (``FLYDSL_DUMP_IR=1``) and profiler runs.
 
@@ -64,11 +64,22 @@ ENV_DEFAULTS = {
     _ENV + "NATIVE_EXP2": True,
     _ENV + "TREE_REDUCE": False,
     _ENV + "PERM_PACK": True,
-    # levers added on this branch (off by default; --levers shipped leaves them out of the search)
-    _ENV + "CAUSAL_REVERSE_Q": False,  # grid order: longest causal q tiles first
-    _ENV + "PIPE_K": False,  # carry the next K tile in registers across the loop
 }
-NEW_LEVERS = (_ENV + "CAUSAL_REVERSE_Q", _ENV + "PIPE_K")
+# Levers added on this branch: default-off builder arguments (part of the kernel's JIT cache key), not
+# environment variables. ``--levers shipped`` leaves them out of the search. Keys are the builder's keyword names.
+LEVER_DEFAULTS = {
+    "causal_reverse_q": False,  # grid order: longest causal q tiles first
+    "pipe_k": False,  # carry the next K tile in registers across the loop
+    "v_pad": None,  # V LDS row padding in elements (None: the kernel's own 4); 32 makes the transposed reads conflict-free
+    "qk_depth": None,  # K packs (ks steps) read ahead of the QK MFMAs (None: the kernel's own 2)
+    "pv_depth": 1,  # V pack steps read ahead of the PV MFMAs
+    "sched_lds": 0,  # pin the K/V LDS read pipeline: 1 = sched_group_barrier pattern, 2 = hard sched_barrier fences
+    "kv_buffer_loads": False,  # stage K/V with bounds-checked buffer loads instead of clamped global loads
+    "k_pad": None,  # K LDS row padding in elements (None: the FLYDSL_FLASH_ATTN_FUNC_K_PAD default)
+    "k_swizzle": True,  # K LDS XOR swizzle; off + k_pad=8 is conflict-free with affine (immediate-offset) reads
+    "addr_fold": False,  # one per-lane LDS base pointer + constant offsets for the K (unswizzled) and V reads
+}
+NEW_LEVERS = tuple(LEVER_DEFAULTS)
 LLVM_DEFAULTS = {
     "llvm:amdgpu-sched-strategy": None,
     "llvm:amdgpu-schedule-metric-bias": None,
@@ -139,7 +150,7 @@ def main() -> int:
         "--levers",
         choices=("all", "shipped"),
         default="all",
-        help="'shipped': search only the knobs the kernel had before this branch (no CAUSAL_REVERSE_Q / PIPE_K)",
+        help="'shipped': search only the knobs the kernel had before this branch (none of the builder-argument levers in LEVER_DEFAULTS)",
     )
     ap.add_argument("--confirm-rounds", type=int, default=7)
     ap.add_argument("--no-references", action="store_true", help="skip the torch / aiter reference timings")
@@ -194,10 +205,14 @@ def main() -> int:
         "waves_per_eu": route_kw["waves_per_eu"],
         "daz": route_kw["daz"],
         **ENV_DEFAULTS,
+        **LEVER_DEFAULTS,
         **LLVM_DEFAULTS,
     }
     shipped_fwg = route_kw["flat_work_group_size"]
     assert shipped_fwg == 2 * shipped["block_m"], "the builder ties flat_work_group_size to 32 rows per wave"
+
+    def lever_kwargs(cfg):
+        return {k: cfg[k] for k in LEVER_DEFAULTS}
 
     def build(cfg):
         """The shipped route's builder call, with this config's knobs."""
@@ -213,6 +228,7 @@ def main() -> int:
             path_tag=cfg["path_tag"],
             waves_per_eu=route_kw["waves_per_eu"],
             daz=cfg["daz"],
+            **lever_kwargs(cfg),
         )
 
     def launcher_for(cfg):
@@ -242,6 +258,7 @@ def main() -> int:
                     path_tag=cfg["path_tag"],
                     waves_per_eu=route_kw["waves_per_eu"],
                     daz=cfg["daz"],
+                    **lever_kwargs(cfg),
                 )
         except (AssertionError, ValueError, NotImplementedError) as e:
             return f"{type(e).__name__}: {e}"
@@ -279,8 +296,16 @@ def main() -> int:
         Param.boolean(_ENV + "TREE_REDUCE"),
         Param.boolean(_ENV + "PERM_PACK"),
         Param.boolean("daz"),
-        Param.boolean(_ENV + "CAUSAL_REVERSE_Q"),  # grid order: causal q tiles longest-first
-        Param.boolean(_ENV + "PIPE_K"),  # next K tile's global load overlaps this tile's compute
+        Param.boolean("causal_reverse_q"),  # grid order: causal q tiles longest-first
+        Param.boolean("pipe_k"),  # next K tile's global load overlaps this tile's compute
+        Param.categorical("v_pad", (None, 16, 32)),  # V LDS row padding: conflict-free transposed reads at 32
+        Param.categorical("qk_depth", (None, 3, 4, 6)),
+        Param.ordinal("pv_depth", (1, 2, 3, 4)),
+        Param.categorical("sched_lds", (0, 1, 2)),
+        Param.boolean("kv_buffer_loads"),
+        Param.categorical("k_pad", (None, 8)),
+        Param.boolean("k_swizzle"),
+        Param.boolean("addr_fold"),
         # occupancy and scheduling
         Param.ordinal("waves_per_eu", (1, 2, 4)),
         Param.boolean("llvm:enable-post-misched"),
@@ -488,6 +513,8 @@ def compare(backend, space, baseline, base_comp, named, args, out_tensor):
         if i:
             row["vs_baseline"] = paired("baseline", n)
             row["vs_previous"] = paired(names[i - 1], n)
+        if i > 1:  # the first named config is the reference (the previous round's winner, say)
+            row["vs_first"] = paired(names[1], n)
         out["rows"].append(row)
     out["baseline_resources"] = base_comp.resources
     out["samples_ms"] = ms

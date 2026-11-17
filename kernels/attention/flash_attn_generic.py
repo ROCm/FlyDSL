@@ -15,16 +15,28 @@ needs to be positive rather than a multiple of 128.
 
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len >= 1.
 
-Experimental levers, off by default, read when the kernel is built and traced
-(found by ``.claude/skills/search-optimize-flydsl/scripts/tune_flash_attn_prefill.py``
-on bf16 causal D=256 on gfx950; not yet measured on other head dims or shapes):
+Experimental levers, off by default. They are builder arguments (part of the JIT cache key; the
+search harness ``.claude/skills/search-optimize-flydsl/scripts/tune_flash_attn_prefill.py`` drives
+them). Found on bf16 causal D=256 on gfx950; not yet measured on other head dims or shapes:
 
-- ``FLYDSL_FLASH_ATTN_FUNC_CAUSAL_REVERSE_Q=1``: dispatch the longest causal Q tiles
-  first (the grid is dispatched in block order and a tile costs ``q_tile + 1``
-  KV iterations). Dense launches only.
-- ``FLYDSL_FLASH_ATTN_FUNC_PIPE_K=1``: carry the next K tile in registers so its
-  global load overlaps the current tile's compute (the gfx942 gpfetch path always
-  does this). Not with the vectorized paged KV layout.
+- ``causal_reverse_q``: dispatch the longest causal Q tiles first (the grid is dispatched in block
+  order and a tile costs ``q_tile + 1`` KV iterations). Dense launches only.
+- ``pipe_k``: carry the next K tile in registers so its global load overlaps the current tile's
+  compute (the gfx942 gpfetch path always does this). Not with the vectorized paged KV layout.
+- ``kv_buffer_loads``: stage K/V with bounds-checked buffer loads (rows past the end read as zero)
+  instead of clamped 64-bit global loads, which removes about 150 VALU instructions per tile.
+  Dense launches only.
+- ``v_pad``: V LDS row padding in elements (default 4). 32 makes the ``ds_read_b64_tr_b16`` reads
+  of the PV GEMM bank-conflict free on gfx950 (64 banks; 4 rows of 64 bytes must tile 256 bytes).
+- ``k_pad`` / ``k_swizzle``: K LDS row padding (default from ``FLYDSL_FLASH_ATTN_FUNC_K_PAD``) and
+  the XOR swizzle. ``k_pad=8, k_swizzle=False`` is conflict free and makes every K read a constant
+  offset from one per-lane pointer.
+- ``addr_fold``: one per-lane LDS base pointer plus constant offsets for the V reads (and the
+  unswizzled K reads), instead of one live address register per step.
+- ``qk_depth`` / ``pv_depth``: how many QK / PV steps of LDS reads are in flight ahead of the MFMAs.
+- ``sched_lds``: 1 pins that read pipeline with ``sched_group_barrier``, 2 with ``sched_barrier``
+  fences. The default scheduler sinks every read next to its MFMA, so each step waits the full
+  LDS latency; the pins make ``qk_depth`` / ``pv_depth`` take effect.
 """
 
 import math as host_math
@@ -73,6 +85,16 @@ def build_flash_attn_func_module_primary(
     kv_cache_layout="linear",
     skip_kv_pad_mask=None,
     return_lse=False,
+    causal_reverse_q=False,
+    pipe_k=False,
+    v_pad=None,
+    qk_depth=None,
+    pv_depth=1,
+    sched_lds=0,
+    kv_buffer_loads=False,
+    k_pad=None,
+    k_swizzle=True,
+    addr_fold=False,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -112,6 +134,16 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            causal_reverse_q=causal_reverse_q,
+            pipe_k=pipe_k,
+            v_pad=v_pad,
+            qk_depth=qk_depth,
+            pv_depth=pv_depth,
+            sched_lds=sched_lds,
+            kv_buffer_loads=kv_buffer_loads,
+            k_pad=k_pad,
+            k_swizzle=k_swizzle,
+            addr_fold=addr_fold,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -135,6 +167,16 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            causal_reverse_q=causal_reverse_q,
+            pipe_k=pipe_k,
+            v_pad=v_pad,
+            qk_depth=qk_depth,
+            pv_depth=pv_depth,
+            sched_lds=sched_lds,
+            kv_buffer_loads=kv_buffer_loads,
+            k_pad=k_pad,
+            k_swizzle=k_swizzle,
+            addr_fold=addr_fold,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -218,6 +260,16 @@ def build_flash_attn_func_module_primary(
         sm_scale=sm_scale,
         skip_kv_pad_mask=skip_kv_pad_mask,
         return_lse=return_lse,
+        causal_reverse_q=causal_reverse_q,
+        pipe_k=pipe_k,
+        v_pad=v_pad,
+        qk_depth=qk_depth,
+        pv_depth=pv_depth,
+        sched_lds=sched_lds,
+        kv_buffer_loads=kv_buffer_loads,
+        k_pad=k_pad,
+        k_swizzle=k_swizzle,
+        addr_fold=addr_fold,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -307,13 +359,10 @@ def build_flash_attn_func_module_primary(
 
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF
-        # PIPE_K (experimental, any arch): carry the next K tile in registers so its global load overlaps this
-        # tile's compute instead of being exposed ahead of the K barrier. The gfx942 gpfetch path always does this.
+        # PIPE_K (any arch): carry the next K tile in registers so its global load overlaps this tile's compute
+        # instead of being exposed ahead of the K barrier. The gfx942 gpfetch path always does this.
         _pipe_k = (
-            (
-                traits.ENABLE_GFX942_KV_GPFETCH
-                or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_PIPE_K", "0") == "1" and not traits.KV_VECTORIZED)
-            )
+            (traits.ENABLE_GFX942_KV_GPFETCH or (traits.PIPE_K and not traits.KV_VECTORIZED))
             and not _use_dma_dbuf
             and not traits.ENABLE_PREFETCH_3BUF
             and traits.N_SUBTILES == 1
@@ -678,6 +727,16 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=True,
             return_lse=return_lse,
+            causal_reverse_q=causal_reverse_q,
+            pipe_k=pipe_k,
+            v_pad=v_pad,
+            qk_depth=qk_depth,
+            pv_depth=pv_depth,
+            sched_lds=sched_lds,
+            kv_buffer_loads=kv_buffer_loads,
+            k_pad=k_pad,
+            k_swizzle=k_swizzle,
+            addr_fold=addr_fold,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -701,6 +760,16 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=False,
             return_lse=return_lse,
+            causal_reverse_q=causal_reverse_q,
+            pipe_k=pipe_k,
+            v_pad=v_pad,
+            qk_depth=qk_depth,
+            pv_depth=pv_depth,
+            sched_lds=sched_lds,
+            kv_buffer_loads=kv_buffer_loads,
+            k_pad=k_pad,
+            k_swizzle=k_swizzle,
+            addr_fold=addr_fold,
         )
 
         def _pad_dispatch(*args, **kwargs):

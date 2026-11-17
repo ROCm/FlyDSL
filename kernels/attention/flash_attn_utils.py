@@ -1141,6 +1141,12 @@ class FlashAttnGenericTraits:
     K_VEC_HI_N_OFFSET: int
     QK_PREFETCH_DEPTH: int
     RETURN_LSE: bool = False
+    CAUSAL_REVERSE_Q: bool = False
+    PIPE_K: bool = False
+    PV_PREFETCH_DEPTH: int = 1
+    SCHED_LDS: int = 0
+    ADDR_FOLD: bool = False
+    KV_BUFFER_LOADS: bool = False
 
     @property
     def cache_tag(self):
@@ -1227,6 +1233,12 @@ class FlashAttnGenericTraits:
             self.K_VEC_HI_N_OFFSET,
             self.QK_PREFETCH_DEPTH,
             self.RETURN_LSE,
+            self.CAUSAL_REVERSE_Q,
+            self.PIPE_K,
+            self.PV_PREFETCH_DEPTH,
+            self.SCHED_LDS,
+            self.ADDR_FOLD,
+            self.KV_BUFFER_LOADS,
         )
 
 
@@ -1251,6 +1263,16 @@ def _make_flash_attn_generic_traits(
     sm_scale=None,
     skip_kv_pad_mask=None,
     return_lse=False,
+    causal_reverse_q=False,
+    pipe_k=False,
+    v_pad=None,
+    qk_depth=None,
+    pv_depth=1,
+    sched_lds=0,
+    kv_buffer_loads=False,
+    k_pad=None,
+    k_swizzle=True,
+    addr_fold=False,
 ):
     """Build compile-time traits for ``flash_attn_generic``."""
     block_n = 64
@@ -1325,13 +1347,28 @@ def _make_flash_attn_generic_traits(
     stride_token_q = num_heads * head_dim
     stride_token_kv = num_kv_heads * head_dim
     _k_pad_default = 4 if (gpu_arch.startswith("gfx942") and not enable_dma) else 0
-    _k_pad = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_K_PAD", str(_k_pad_default)))
+    _k_pad = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_K_PAD", str(_k_pad_default))) if k_pad is None else int(k_pad)
+    if _k_pad < 0 or _k_pad % 8 != 0:
+        raise ValueError(f"k_pad must be a non-negative multiple of 8 elements (16-byte rows), got {_k_pad}")
+    if not k_swizzle and enable_dma:
+        raise ValueError("k_swizzle=False is not supported with the DMA path (it swizzles its own global fetch)")
     k_stride = head_dim + _k_pad
-    k_swz_rowmask = head_dim // 16 - 1
+    # Row-mask 0 turns the K XOR swizzle off: reads and writes then address `row * K_STRIDE + col` (affine).
+    k_swz_rowmask = (head_dim // 16 - 1) if k_swizzle else 0
     if use_hw_tr:
         vt_stride = 0
-        v_stride = head_dim if enable_dma else head_dim + 4
+        if v_pad is None:
+            v_pad = 0 if enable_dma else 4
+        elif enable_dma and v_pad != 0:
+            raise ValueError("v_pad is not supported with the DMA path")
+        if v_pad < 0 or v_pad % 8 != 0 and v_pad != 4:
+            raise ValueError(
+                f"v_pad must be 4 or a multiple of 8 elements (8-byte tr reads, 16-byte stores), got {v_pad}"
+            )
+        v_stride = head_dim + v_pad
     else:
+        if v_pad is not None:
+            raise ValueError("v_pad applies to the hardware-transpose V layout (gfx950) only")
         vt_stride = block_n + 2
         v_stride = vt_stride
 
@@ -1382,6 +1419,20 @@ def _make_flash_attn_generic_traits(
         qk_prefetch_depth = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_QK_PF_DEPTH", "3"))
     else:
         qk_prefetch_depth = 4 if (enable_gfx942_kv_gpfetch or enable_gfx942_vec_k) else (3 if enable_dma else 2)
+    if qk_depth is not None:
+        if not 1 <= qk_depth <= k_steps_qk:
+            raise ValueError(f"qk_depth must be in [1, {k_steps_qk}], got {qk_depth}")
+        qk_prefetch_depth = qk_depth
+    if not 1 <= pv_depth <= d_chunks * pv_k_steps:
+        raise ValueError(f"pv_depth must be in [1, {d_chunks * pv_k_steps}], got {pv_depth}")
+    if kv_buffer_loads and (paged or kv_vectorized):
+        raise ValueError("kv_buffer_loads is for dense (non-paged) K/V")
+    if sched_lds not in (0, 1, 2, False, True):
+        raise ValueError(
+            f"sched_lds must be 0 (off), 1 (sched_group_barrier pattern) or 2 (hard fences), got {sched_lds}"
+        )
+    if sched_lds and not (use_hw_tr and use_k16):
+        raise ValueError("sched_lds pins the gfx950 LDS read pipeline (ds_read_b64_tr_b16, 32x32x16 MFMA) only")
 
     lds_k_tile_size = block_n * k_stride
     if kv_vectorized:
@@ -1476,6 +1527,12 @@ def _make_flash_attn_generic_traits(
         K_VEC_HI_N_OFFSET=k_vec_hi_n_offset,
         QK_PREFETCH_DEPTH=qk_prefetch_depth,
         RETURN_LSE=bool(return_lse),
+        CAUSAL_REVERSE_Q=bool(causal_reverse_q),
+        PIPE_K=bool(pipe_k),
+        PV_PREFETCH_DEPTH=pv_depth,
+        SCHED_LDS=int(sched_lds),
+        ADDR_FOLD=bool(addr_fold),
+        KV_BUFFER_LOADS=bool(kv_buffer_loads),
     )
 
 
@@ -2282,12 +2339,7 @@ class GenericFlashAttnContext:
         self.batch_q_tile_id = self.block_id // traits.NUM_HEADS_Q
         self.num_q_tiles = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
         self.q_tile_idx = self.batch_q_tile_id % self.num_q_tiles
-        if const_expr(
-            traits.CAUSAL
-            and not traits.VARLEN
-            and not traits.PAGED
-            and os.getenv("FLYDSL_FLASH_ATTN_FUNC_CAUSAL_REVERSE_Q", "0") == "1"
-        ):
+        if const_expr(traits.CAUSAL and not traits.VARLEN and not traits.PAGED and traits.CAUSAL_REVERSE_Q):
             # Causal tiles cost (q_tile + 1) KV iterations and the grid dispatches in block_id order, so
             # ascending order leaves the longest tiles for last. Reverse it: longest first.
             self.q_tile_idx = self.num_q_tiles - 1 - self.q_tile_idx
@@ -2365,6 +2417,15 @@ class GenericFlashAttnContext:
         self.o_rsrc = buffer_ops.create_buffer_resource(
             O, max_size=False, num_records_bytes=q_nrec_bytes, base_byte_offset=q_batch_byte_off
         )
+        if const_expr(traits.KV_BUFFER_LOADS):
+            # K/V staging loads go through bounds-checked buffer descriptors: rows past the end read as zero, so
+            # the per-row clamp (compare, two selects and a 64-bit address chain per load) is not needed.
+            self.k_buf_rsrc = buffer_ops.create_buffer_resource(
+                self.K, max_size=False, num_records_bytes=self.kv_nrec_bytes, base_byte_offset=self.kv_batch_byte_off
+            )
+            self.v_buf_rsrc = buffer_ops.create_buffer_resource(
+                self.V, max_size=False, num_records_bytes=self.kv_nrec_bytes, base_byte_offset=self.kv_batch_byte_off
+            )
         # LSE output: fp32 [batch, num_heads, seq_len], per-batch descriptor.
         if const_expr(traits.RETURN_LSE):
             self.lse_per_batch_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
@@ -2584,9 +2645,34 @@ class GenericKvGmemToLdsLoader:
                     vec = self.load_f16xN(ctx.k_ptr, self.global_idx(row_idx, col))
                 fx.ptr_store(vec, lds_kv + fx.Int64(lds_idx))
 
+    def _load_tile_buffer(self, rsrc, tile_start):
+        """Stage one K or V tile with bounds-checked buffer loads (rows past the end read as zero)."""
+        ctx = self.ctx
+        traits = ctx.traits
+        lane_off = (
+            ctx.load_row_in_batch * fx.Index(traits.STRIDE_TOKEN_KV)
+            + ctx.kv_head_idx * fx.Index(traits.HEAD_DIM)
+            + ctx.load_col_base
+        )
+        vecs = []
+        for batch in range_constexpr(traits.NUM_BATCHES_KV):
+            row0 = tile_start + fx.Index(batch * traits.ROWS_PER_BATCH_LOAD)
+            vecs.append(
+                buffer_ops.buffer_load(
+                    rsrc,
+                    lane_off,
+                    vec_width=traits.VEC_WIDTH,
+                    dtype=ctx.elem_dtype,
+                    soffset_bytes=row0 * fx.Index(traits.STRIDE_TOKEN_KV * 2),
+                )
+            )
+        return vecs
+
     def coop_load_k_global(self, tile_start):
         ctx = self.ctx
         traits = ctx.traits
+        if const_expr(traits.KV_BUFFER_LOADS):
+            return self._load_tile_buffer(ctx.k_buf_rsrc, tile_start)
         vecs = []
         if const_expr(traits.PAGED):
             pid = self._tile_page_id(tile_start)
@@ -2659,6 +2745,8 @@ class GenericKvGmemToLdsLoader:
         """Issue global V loads; vectorized mode returns no-major v8 rows."""
         ctx = self.ctx
         traits = ctx.traits
+        if const_expr(traits.KV_BUFFER_LOADS):
+            return self._load_tile_buffer(ctx.v_buf_rsrc, tile_start)
         if const_expr(traits.KV_VECTORIZED):
             pid = self._tile_page_id(tile_start)
             base_v = pid * fx.Index(traits.PAGE_STRIDE_VEC) + ctx.kv_head_idx * fx.Index(traits.HEAD_STRIDE_VEC)
@@ -2916,6 +3004,11 @@ class GenericKvLdsToVgprLoader:
         ptr = buffer_ops.create_llvm_ptr(fx.Int64(byte_offset), address_space=3)
         return rocdl.ds_read_tr16_b64(ctx.v4f16_type, ptr).result
 
+    def ds_read_tr_v4f16_at(self, lane_ptr, const_elems):
+        """Transposed read at ``lane_ptr`` plus a compile-time element offset (folds into the ds_read immediate)."""
+        ptr = buffer_ops.get_element_ptr(lane_ptr, static_byte_offset=const_elems * 2)
+        return rocdl.ds_read_tr16_b64(self.ctx.v4f16_type, ptr).result
+
     def load_k_packs(self, k_base):
         ctx = self.ctx
         traits = ctx.traits
@@ -2935,22 +3028,37 @@ class GenericKvLdsToVgprLoader:
             base = k_base + (k_hi_offset if hi else fx.Index(0)) + ctx.lane_mod_32 * traits.K_STRIDE
             return base + (col ^ k_swz_mask)
 
+        if const_expr(traits.ADDR_FOLD and traits.K_SWZ_ROWMASK == 0 and not traits.ENABLE_GFX942_VEC_K):
+            # Unswizzled K: one per-lane base pointer, every step is a constant offset from it (a ds_read
+            # immediate), instead of one live address register per step.
+            ptr0 = ctx.lds_kv + fx.Int64(k_base + ctx.lane_mod_32 * traits.K_STRIDE + ctx.lane_div_32 * ctx.MFMA_LANE_K)
+
+            def _ptr(ks, hi):
+                return ptr0 + fx.Int64(ks * traits.K_STEP_QK + (k_hi_offset if hi else 0))
+
+        else:
+
+            def _ptr(ks, hi):
+                return ctx.lds_kv + fx.Int64(_idx(ks, hi))
+
         depth = traits.QK_PREFETCH_DEPTH
         lo = [None] * traits.K_STEPS_QK
         hi = [None] * traits.K_STEPS_QK
         for p in range_constexpr(depth):
-            lo[p] = fx.ptr_load(ctx.lds_kv + fx.Int64(_idx(p, False)), result_type=ctx.mfma_pack_type).ir_value()
-            hi[p] = fx.ptr_load(ctx.lds_kv + fx.Int64(_idx(p, True)), result_type=ctx.mfma_pack_type).ir_value()
+            lo[p] = fx.ptr_load(_ptr(p, False), result_type=ctx.mfma_pack_type).ir_value()
+            hi[p] = fx.ptr_load(_ptr(p, True), result_type=ctx.mfma_pack_type).ir_value()
         if const_expr(traits.ENABLE_GFX942_VEC_K or traits.ENABLE_GFX942_KV_GPFETCH):
             rocdl.sched_group_barrier(rocdl.mask_dsrd, depth * 2, 0)
-        self._k_idx = _idx
+        if const_expr(traits.SCHED_LDS == 2):
+            rocdl.sched_barrier(0)
+        self._k_ptr = _ptr
         self._k_depth = depth
         return lo, hi
 
     def load_k_pack_at(self, ks):
         ctx = self.ctx
-        lo = fx.ptr_load(ctx.lds_kv + fx.Int64(self._k_idx(ks, False)), result_type=ctx.mfma_pack_type).ir_value()
-        hi = fx.ptr_load(ctx.lds_kv + fx.Int64(self._k_idx(ks, True)), result_type=ctx.mfma_pack_type).ir_value()
+        lo = fx.ptr_load(self._k_ptr(ks, False), result_type=ctx.mfma_pack_type).ir_value()
+        hi = fx.ptr_load(self._k_ptr(ks, True), result_type=ctx.mfma_pack_type).ir_value()
         return lo, hi
 
     def read_v_pack(self, step_idx, v_base):
@@ -2975,6 +3083,29 @@ class GenericKvLdsToVgprLoader:
         if const_expr(traits.USE_HW_TR):
             d_col = fx.Index(dc * traits.D_CHUNK) + ctx.tr_col_half * 16 + ctx.tr_col_sub * 4
             k_row = fx.Index(pks * traits.PV_K_STEP) + ctx.lane_div_32 * 4 + ctx.tr_k_group
+            if const_expr(traits.ADDR_FOLD and traits.USE_K16 and not traits.ENABLE_DMA):
+                # One per-lane base pointer; (dc, pks, lo/hi, half) are constant offsets from it.
+                lane_elem = (
+                    v_base
+                    + (ctx.lane_div_32 * 4 + ctx.tr_k_group) * traits.V_STRIDE
+                    + ctx.tr_col_half * 16
+                    + ctx.tr_col_sub * 4
+                )
+                lane_ptr = buffer_ops.create_llvm_ptr(fx.Int64(lane_elem * 2 + ctx.lds_kv_offset), address_space=3)
+                c0 = pks * traits.PV_K_STEP * traits.V_STRIDE + dc * traits.D_CHUNK
+                c_hi = traits.K_SUB_N * traits.V_STRIDE
+                c_b = 8 * traits.V_STRIDE
+                vl = (
+                    Vec(self.ds_read_tr_v4f16_at(lane_ptr, c0))
+                    .shuffle(Vec(self.ds_read_tr_v4f16_at(lane_ptr, c0 + c_b)), [0, 1, 2, 3, 4, 5, 6, 7])
+                    .ir_value()
+                )
+                vh = (
+                    Vec(self.ds_read_tr_v4f16_at(lane_ptr, c0 + c_hi))
+                    .shuffle(Vec(self.ds_read_tr_v4f16_at(lane_ptr, c0 + c_hi + c_b)), [0, 1, 2, 3, 4, 5, 6, 7])
+                    .ir_value()
+                )
+                return vl, vh
             d_col_eff = ctx.v_swizzle(k_row, d_col) if traits.ENABLE_DMA else d_col
             lds_lo = v_base + k_row * traits.V_STRIDE + d_col_eff
             lds_hi = lds_lo + fx.Index(traits.K_SUB_N * traits.V_STRIDE)
@@ -3054,8 +3185,21 @@ class GenericGemmHelper:
                 rocdl.sched_barrier(0)
             s_lo = self.mfma_acc(k_lo[ks], q_b_packs[ks], s_lo)
             s_hi = self.mfma_acc(k_hi[ks], q_b_packs[ks], s_hi)
+            if const_expr(traits.SCHED_LDS == 2):
+                rocdl.sched_barrier(0)
             if const_expr(ks + depth < traits.K_STEPS_QK):
                 k_lo[ks + depth], k_hi[ks + depth] = kv_lds_to_vgpr.load_k_pack_at(ks + depth)
+            if const_expr(traits.SCHED_LDS == 2):
+                rocdl.sched_barrier(0)
+        if const_expr(traits.SCHED_LDS == 1):
+            # Pin the LDS pipeline: `depth` K pack pairs in flight, one more pair issued right after each step's
+            # two MFMAs. Without it the scheduler sinks every read next to its MFMA and each step waits out the
+            # full LDS latency.
+            rocdl.sched_group_barrier(rocdl.mask_dsrd, 2 * depth, 1)
+            for ks in range_constexpr(traits.K_STEPS_QK):
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 1)
+                if const_expr(ks + depth < traits.K_STEPS_QK):
+                    rocdl.sched_group_barrier(rocdl.mask_dsrd, 2, 1)
         return s_lo, s_hi
 
     def gemm2_pv(self, kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec):
@@ -3063,18 +3207,31 @@ class GenericGemmHelper:
         traits = self.ctx.traits
         steps = kv_lds_to_vgpr._pv_steps
         total = kv_lds_to_vgpr.total_pv
-        v_lo_cur, v_hi_cur = kv_lds_to_vgpr.read_v_pack(0, v_base)
+        depth = traits.PV_PREFETCH_DEPTH
+        # `depth` steps of V packs are in flight: the pack for step si + depth is read before step si's MFMAs.
+        v_pack = [kv_lds_to_vgpr.read_v_pack(i, v_base) for i in range_constexpr(depth)]
+        if const_expr(traits.SCHED_LDS == 2):
+            rocdl.sched_barrier(0)
         for si in range_constexpr(total):
             dc, pks = steps[si]
-            if const_expr(si + 1 < total):
-                v_lo_nxt, v_hi_nxt = kv_lds_to_vgpr.read_v_pack(si + 1, v_base)
+            if const_expr(si + depth < total):
+                v_pack.append(kv_lds_to_vgpr.read_v_pack(si + depth, v_base))
+            if const_expr(traits.SCHED_LDS == 2):
+                rocdl.sched_barrier(0)
+            v_lo_cur, v_hi_cur = v_pack[si]
             o_accs[dc] = self.mfma_acc(v_lo_cur, p_packs_lo[pks], o_accs[dc])
             o_accs[dc] = self.mfma_acc(v_hi_cur, p_packs_hi[pks], o_accs[dc])
             if const_expr(not traits.USE_HW_TR and dc == 0 and pks < traits.D_CHUNKS - 1):
                 o_accs[pks + 1] = Vec(o_accs[pks + 1]) * corr_vec
-            if const_expr(si + 1 < total):
-                v_lo_cur = v_lo_nxt
-                v_hi_cur = v_hi_nxt
+            if const_expr(traits.SCHED_LDS == 2):
+                rocdl.sched_barrier(0)
+        if const_expr(traits.SCHED_LDS == 1):
+            # Same pinning as GEMM1: `depth` steps of V reads (4 transposed reads per step) ahead of the MFMAs.
+            rocdl.sched_group_barrier(rocdl.mask_dsrd, 4 * depth, 2)
+            for si in range_constexpr(total):
+                if const_expr(si + depth < total):
+                    rocdl.sched_group_barrier(rocdl.mask_dsrd, 4, 2)
+                rocdl.sched_group_barrier(rocdl.mask_mfma, 2, 2)
         return o_accs
 
 
