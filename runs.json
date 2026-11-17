@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-17T00:56:21Z",
+ "updated": "2026-11-17T02:24:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44001894852,
+   "pr": 1412,
+   "commit": "6416892fe7bf055aabaebfc956eb26121e57c419",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44001894852",
+   "created_at": "2026-11-17T02:17:36Z",
+   "updated_at": "2026-11-17T02:19:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 43984216405,
    "pr": 1380,
@@ -14,17 +29,20 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405",
    "created_at": "2026-11-17T00:01:36Z",
-   "updated_at": "2026-11-17T00:51:52Z",
+   "updated_at": "2026-11-17T02:22:49Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-17T00:48:51Z",
-     "completed_at": "2026-11-17T00:51:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133729596287"
+     "conclusion": "success",
+     "started_at": "2026-11-17T01:59:20Z",
+     "completed_at": "2026-11-17T02:22:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133759990084",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -33,7 +51,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:27:02Z",
      "completed_at": "2026-11-17T00:36:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133729598028"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133759991340"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -42,7 +60,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:23:35Z",
      "completed_at": "2026-11-17T00:42:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133729643626"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133759992876"
     }
    ]
   },
@@ -53,21 +71,21 @@
    "branch": "fix/windows-test-portability",
    "event": "pull_request",
    "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238",
    "created_at": "2026-11-16T23:48:05Z",
-   "updated_at": "2026-11-17T00:51:46Z",
+   "updated_at": "2026-11-17T01:59:23Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-17T00:48:52Z",
-     "completed_at": "2026-11-17T00:51:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133729614818"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T01:59:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760008150"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -76,7 +94,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:06:33Z",
      "completed_at": "2026-11-17T00:26:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133729616935"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760008954"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -85,7 +103,7 @@
      "conclusion": "success",
      "started_at": "2026-11-17T00:06:21Z",
      "completed_at": "2026-11-17T00:17:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133729617485"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760055424"
     }
    ]
   },
@@ -1912,21 +1930,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43426226321",
    "created_at": "2026-11-13T12:33:52Z",
    "updated_at": "2026-11-13T12:34:39Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 43424742833,
-   "pr": null,
-   "commit": "04f8347bdbf8132a9214476ce0371bfa23100089",
-   "branch": "main",
-   "event": "push",
-   "title": "[Runtime] Drop the ARCH env var in favor of FLYDSL_GPU_ARCH (#1386)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43424742833",
-   "created_at": "2026-11-13T12:23:29Z",
-   "updated_at": "2026-11-13T12:33:54Z",
    "actor": "coderfeli",
    "jobs": []
   }
