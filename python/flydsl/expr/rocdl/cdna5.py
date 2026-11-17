@@ -419,9 +419,16 @@ def make_tiled_tdm_atom(
         # memory-adjacent modes, so a deeper tiler that compresses to 2D is fine and the
         # derivation is what rejects one that does not. Only the row count is checkable
         # here, and only when the tiler spells it out.
+        #
+        # The budget is per issue and `tdm_tile` is the whole collective tile, so the
+        # rows have to be divided by the warps that share them first -- the geometry
+        # cuts outermost axes first, so with several warps the row dim is what gets cut.
+        # Counting the collective rows here would refuse a tile that every later stage
+        # accepts.
         if not isinstance(tdm_tile, ir.Value) and len(tdm_tile) >= 1:
             rows = tdm_tile[0]
-            check_index_rows(index_bits, rows if isinstance(rows, int) else None, "one indexed issue")
+            per_issue = rows // num_warps if isinstance(rows, int) and rows % num_warps == 0 else None
+            check_index_rows(index_bits, per_issue, "one indexed issue")
         if index_tensor is not None:
             check_index_tensor_shape(index_tensor)
 
@@ -538,4 +545,22 @@ def _partition_index(index, n_warps, warp_id):
     n_rest = layout.rank - 1
     inner = tuple([None] + [0] * (tile.rank - 1))
     rows = index[(inner, *([None] * n_rest))]
-    return rows if n_warps == 1 else rows[(warp_id, *([None] * n_rest))]
+    if n_warps == 1:
+        return rows
+
+    # Several warps share the tile, so each one issues a slice of it and needs the
+    # slice's rows, not a single index. The data side hands warp ``w`` a consecutive
+    # chunk of the compact LDS traversal and the geometry cuts the outermost axis
+    # first, so ``w`` owns rows ``[w * per_issue, (w + 1) * per_issue)``. Cutting the
+    # list the same way is what keeps `tAg[None, k]` and `tAi[None, k]` addressing the
+    # same rows.
+    from ..primitive import TileType, composition, make_layout
+    from ..typing import static
+
+    total = tile.shape[0].unpack()
+    if not isinstance(total, int) or total % n_warps:
+        raise ValueError(f"tdm_partition: a {total}-row list does not divide over {n_warps} warps")
+    per_issue = total // n_warps
+    split = make_layout((per_issue, n_warps), (1, per_issue))
+    cut = composition(rows, static(TileType.get([split.type, *([None] * n_rest)])))
+    return cut[((None, warp_id), *([None] * n_rest))]

@@ -484,3 +484,113 @@ def test_partition_rejects_a_malformed_pair():
             torch.empty(M * N, dtype=torch.float16, device="cpu"),
             torch.empty(M, dtype=torch.int32, device="cpu"),
         )
+
+
+# -- a row list in memory has to be the issue's rows, contiguously ----------------
+#
+# The tuple form is checked against the tile's row count when it is unpacked. A tensor
+# carries a layout but only its pointer survives lowering, which reads the issue's rows
+# one after another from it. A list that disagrees with that -- strided, too short, or
+# still two-dimensional -- would be read as if it did not, and would move rows nobody
+# asked for. These are the cases a call site can reach without going through
+# `tdm_partition`, which is the documented way to hand a copy a list of its own.
+
+
+def _copy_with_row_list(layout):
+    """Hand the copy a row list built straight from the index pointer."""
+
+    @flyc.kernel
+    def k(src: fx.Tensor, idx: fx.Tensor):
+        lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, 8 * WIDTH]).peek()
+        box = fx.make_layout((8, WIDTH), (WIDTH, 1))
+        smem = fx.make_view(lds.ptr, fx.make_layout(((8, WIDTH), 1), ((WIDTH, 1), 8 * WIDTH)))
+        g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
+        gI = fx.Tensor(fx.make_view(idx.iter, fx.make_layout((M, N), (1, 0))))
+        atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoadGather(), g, box, (8, WIDTH), index_tensor=gI
+        )
+        blk = fx.zipped_divide(coord, (8, WIDTH))[None, (0, None)]
+        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
+        fx.copy(atom, [tAg[None, 0], fx.Tensor(fx.make_view(idx.iter, layout()))], tAs[None, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
+
+    @flyc.jit
+    def j(src: fx.Tensor, idx: fx.Tensor):
+        k(src, idx).launch(grid=1, block=32)
+
+    j(
+        torch.empty(M * N, dtype=torch.float16, device="cpu"),
+        torch.empty(M, dtype=torch.int32, device="cpu"),
+    )
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        pytest.param(lambda: fx.make_layout(8, 2), id="strided"),
+        pytest.param(lambda: fx.make_layout(4, 1), id="too_short"),
+        pytest.param(lambda: fx.make_layout((2, 4), (1, 2)), id="still_2d"),
+    ],
+)
+def test_a_row_list_in_memory_must_be_the_issues_rows(monkeypatch, tmp_path, layout):
+    _target_env(monkeypatch, tmp_path)
+    with pytest.raises(Exception, match="indices one after another"):
+        _copy_with_row_list(layout)
+
+
+# -- several warps share the tile -------------------------------------------------
+
+
+def _two_warp_gather(tmp_path):
+    """Two warps split a 16-row tile; each issues its own 8 rows."""
+    rows_total, warps = 16, 2
+
+    @flyc.kernel
+    def k(src: fx.Tensor, idx: fx.Tensor):
+        lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, rows_total * WIDTH]).peek()
+        box = fx.make_layout((rows_total, WIDTH), (WIDTH, 1))
+        smem = fx.make_view(lds.ptr, fx.make_layout(((rows_total, WIDTH), 1), ((WIDTH, 1), rows_total * WIDTH)))
+        g = fx.Tensor(fx.make_view(src.iter, fx.make_layout((M, N), (N, 1))))
+        gI = fx.Tensor(fx.make_view(idx.iter, fx.make_layout((M, N), (1, 0))))
+        atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoadGather(), g, box, (rows_total, WIDTH), warps, index_tensor=gI
+        )
+        blk = fx.zipped_divide(coord, (rows_total, WIDTH))[None, (0, None)]
+        blkI = fx.zipped_divide(gI, (rows_total, WIDTH))[None, (0, None)]
+        wid = fx.Int32(fx.thread_idx.x // 32)
+        tAs, tAg, tAi = fx.rocdl.cdna5.tdm_partition(atom, wid, fx.make_layout(warps, 1), smem, [blk, blkI])
+        fx.copy(atom, [tAg[None, 0], tAi[None, 0]], tAs[None, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
+
+    @flyc.jit
+    def j(src: fx.Tensor, idx: fx.Tensor):
+        k(src, idx).launch(grid=1, block=warps * 32)
+
+    j(
+        torch.empty(M * N, dtype=torch.float16, device="cpu"),
+        torch.empty(M, dtype=torch.int32, device="cpu"),
+    )
+    return _isa(tmp_path)
+
+
+def test_the_row_budget_is_per_issue_not_per_tile(monkeypatch, tmp_path):
+    """The budget bounds one issue. Two warps split a 16-row tile into two 8-row
+    issues, which 32-bit indices carry -- counting the whole tile against the budget
+    would refuse a tile every later stage accepts."""
+    _target_env(monkeypatch, tmp_path)
+    isa = _two_warp_gather(tmp_path)
+    assert "tensor_load_to_lds" in isa
+
+
+def test_each_warp_reads_its_own_slice_of_the_row_list(monkeypatch, tmp_path):
+    """Warp ``w`` owns rows ``[8w, 8w+8)`` of the tile, so it must read those eight
+    indices -- not one index, and not the same eight as its neighbour. The list is
+    contiguous, so the eight land in one scalar load at a warp-dependent offset."""
+    _target_env(monkeypatch, tmp_path)
+    isa = _two_warp_gather(tmp_path)
+    assert "s_load_b256" in isa, f"expected one scalar load of eight indices, got:\n{isa}"
+    # A warp-dependent offset is what makes the two warps read different entries; a
+    # literal offset would mean both read the same place.
+    assert re.search(
+        r"s_load_b256\s+s\[\d+:\d+\], s\[\d+:\d+\], s\d+", isa
+    ), f"expected the row list to be addressed per warp, got:\n{isa}"

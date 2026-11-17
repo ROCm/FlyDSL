@@ -669,6 +669,18 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
         return mlir::emitError(loc)
                << "cdna5 TDM: row indices must be 16- or 32-bit, got " << indexMemTy.getElemTy();
       indexBits = static_cast<int32_t>(elemBitsIdx);
+      // The loads below walk the operand's pointer one element at a time, so the list
+      // has to be exactly this issue's rows, laid out one after another. A memref keeps
+      // its layout but the pointer is all that survives lowering, so a list that is
+      // strided, shorter than the tile, or still carrying its broadcast mode would be
+      // read as if it were none of those -- silently moving the wrong rows. The tuple
+      // form is checked against the same row count just above; this is its counterpart.
+      auto indexLayout = dyn_cast<LayoutAttr>(indexMemTy.getLayout());
+      if (!indexLayout || !indexLayout.getShape().isLeafStaticValue(rows) ||
+          !indexLayout.getStride().isLeafStaticValue(1))
+        return mlir::emitError(loc) << "cdna5 TDM: the row list must be this issue's " << rows
+                                    << " indices one after another (layout " << rows << ":1), got "
+                                    << indexMemTy.getLayout();
       // The descriptor is scalar state, so every index has to reach an SGPR. The loads
       // are uniform across the wave; readfirstlane is what tells the backend so. A narrow
       // index is widened on the way, because the groups are packed as whole words below.
@@ -930,7 +942,11 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   // descriptor iterates, the same three slots redefined as lds_addr_increment,
   // global_addr_increment and iterate_count. That is why iteration costs the fourth dim.
   Value g2s0 = zeroC, g2s1 = zeroC, g2s2 = zeroC, g2s3 = zeroC;
+  Value g3s0 = zeroC, g3s1 = zeroC, g3s2 = zeroC, g3s3 = zeroC;
   if (indexBits) {
+    // The row list fills GROUP2 and GROUP3 whole. None of the branches below can also
+    // fire: an indexed descriptor is 2D and cannot iterate, both of which are verified
+    // at atom construction, so the slots those branches would claim are free.
     SmallVector<Value> words;
     if (indexBits == 32) {
       words.assign(rowIndex.begin(), rowIndex.end());
@@ -943,24 +959,8 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
       }
     }
     words.resize(8, zeroC);
-    Value dgIdx2 =
-        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
-                                       ValueRange{words[0], words[1], words[2], words[3]});
-    Value dgIdx3 =
-        vector::FromElementsOp::create(builder, loc, VectorType::get({4}, i32Ty),
-                                       ValueRange{words[4], words[5], words[6], words[7]});
-    Value dgIdx4 = vector::FromElementsOp::create(
-        builder, loc, VectorType::get({8}, i32Ty),
-        ValueRange{zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC, zeroC});
-    auto idxPolicy = builder.getI32IntegerAttr(static_cast<int32_t>(cfg.cacheModifier));
-    ArrayAttr noScopes;
-    if (cfg.isLoad)
-      ROCDL::TensorLoadToLDSOp::create(builder, loc, dgroup0, dgroup1, dgIdx2, dgIdx3, dgIdx4,
-                                       idxPolicy, noScopes, noScopes, noScopes);
-    else
-      ROCDL::TensorStoreFromLDSOp::create(builder, loc, dgroup0, dgroup1, dgIdx2, dgIdx3, dgIdx4,
-                                          idxPolicy, noScopes, noScopes, noScopes);
-    return success();
+    g2s0 = words[0], g2s1 = words[1], g2s2 = words[2], g2s3 = words[3];
+    g3s0 = words[4], g3s1 = words[5], g3s2 = words[6], g3s3 = words[7];
   }
   if (rank >= 3)
     g2s0 = descTensorDim(2);
@@ -991,7 +991,6 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
                                              ValueRange{g2s0, g2s1, g2s2, g2s3});
 
   // GROUP3 (rank==5): stride3, tensor_dim4, tile_dim4.
-  Value g3s0 = zeroC, g3s1 = zeroC, g3s2 = zeroC, g3s3 = zeroC;
   if (rank == 5) {
     Value td4 = descTensorDim(4);
     g3s0 = descStrideLo32(3);
