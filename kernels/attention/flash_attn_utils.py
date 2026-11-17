@@ -2282,6 +2282,15 @@ class GenericFlashAttnContext:
         self.batch_q_tile_id = self.block_id // traits.NUM_HEADS_Q
         self.num_q_tiles = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
         self.q_tile_idx = self.batch_q_tile_id % self.num_q_tiles
+        if const_expr(
+            traits.CAUSAL
+            and not traits.VARLEN
+            and not traits.PAGED
+            and os.getenv("FLYDSL_FLASH_ATTN_FUNC_CAUSAL_REVERSE_Q", "0") == "1"
+        ):
+            # Causal tiles cost (q_tile + 1) KV iterations and the grid dispatches in block_id order, so
+            # ascending order leaves the longest tiles for last. Reverse it: longest first.
+            self.q_tile_idx = self.num_q_tiles - 1 - self.q_tile_idx
         self.batch_idx = self.batch_q_tile_id // self.num_q_tiles
         self.q_start = self.q_tile_idx * traits.BLOCK_M
         self.kv_head_idx = self.q_head_idx if traits.GQA_GROUP_SIZE == 1 else self.q_head_idx // traits.GQA_GROUP_SIZE

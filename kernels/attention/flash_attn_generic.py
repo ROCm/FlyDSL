@@ -14,6 +14,17 @@ handled by buffer-resource bounds and softmax masking, so dense seq_len only
 needs to be positive rather than a multiple of 128.
 
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len >= 1.
+
+Experimental levers, off by default, read when the kernel is built and traced
+(found by ``.claude/skills/search-optimize-flydsl/scripts/tune_flash_attn_prefill.py``
+on bf16 causal D=256 on gfx950; not yet measured on other head dims or shapes):
+
+- ``FLYDSL_FLASH_ATTN_FUNC_CAUSAL_REVERSE_Q=1``: dispatch the longest causal Q tiles
+  first (the grid is dispatched in block order and a tile costs ``q_tile + 1``
+  KV iterations). Dense launches only.
+- ``FLYDSL_FLASH_ATTN_FUNC_PIPE_K=1``: carry the next K tile in registers so its
+  global load overlaps the current tile's compute (the gfx942 gpfetch path always
+  does this). Not with the vectorized paged KV layout.
 """
 
 import math as host_math
@@ -296,8 +307,13 @@ def build_flash_attn_func_module_primary(
 
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF
+        # PIPE_K (experimental, any arch): carry the next K tile in registers so its global load overlaps this
+        # tile's compute instead of being exposed ahead of the K barrier. The gfx942 gpfetch path always does this.
         _pipe_k = (
-            traits.ENABLE_GFX942_KV_GPFETCH
+            (
+                traits.ENABLE_GFX942_KV_GPFETCH
+                or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_PIPE_K", "0") == "1" and not traits.KV_VECTORIZED)
+            )
             and not _use_dma_dbuf
             and not traits.ENABLE_PREFETCH_3BUF
             and traits.N_SUBTILES == 1
