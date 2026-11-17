@@ -1438,32 +1438,17 @@ def build_rmsnorm_smoothquant_module(
     elem_bits = 32 if dtype_str == "f32" else 16
     vec_width = 128 // elem_bits
     threads = _smoothquant_block_threads(N, elem_bits)
-    if (N // vec_width + threads - 1) // threads * vec_width > SMOOTHQUANT_MAX_ELEMS_PER_THREAD:
+    # The width limit and the grid caps are measured on gfx950 only; other targets keep
+    # the block-per-row kernel.
+    if (
+        not str(get_rocm_arch()).startswith("gfx95")
+        or (N // vec_width + threads - 1) // threads * vec_width > SMOOTHQUANT_MAX_ELEMS_PER_THREAD
+    ):
         return _build_rmsnorm_quant_module(N, dtype_str, is_smooth=True, quant_dtype_str=quant_dtype_str, eps=eps)
 
-    cached_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 0, quant_dtype_str, eps)
-    # As for the plain RMSNorm: on gfx95x, rows whose working set outgrows the LLC stream x
+    # As for the plain RMSNorm, rows whose working set outgrows the LLC stream x
     # non-temporally. x is read once (its u stays in registers), so caching it only evicts.
-    if not str(get_rocm_arch()).startswith("gfx95"):
-
-        @flyc.jit
-        def launch_rmsnorm_smoothquant(
-            Input: fx.Tensor,
-            Gamma: fx.Tensor,
-            XScale: fx.Tensor,
-            Output: fx.Tensor,
-            YScale: fx.Tensor,
-            m_in: fx.Int32,
-            stream: fx.Stream = fx.Stream(None),
-        ):
-            _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, XScale=XScale)
-            nblocks = fx.min(m_in, SMOOTHQUANT_MAX_BLOCKS)
-            cached_kernel(Input, Gamma, XScale, YScale, Output, m_in, nblocks).launch(
-                grid=(nblocks, 1, 1), block=(threads, 1, 1), stream=stream
-            )
-
-        return launch_rmsnorm_smoothquant
-
+    cached_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 0, quant_dtype_str, eps)
     streaming_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 2, quant_dtype_str, eps)
     NT_MIN_ROWS = NT_MIN_WORKING_SET // (N * (elem_bits // 8 + 1))
 
