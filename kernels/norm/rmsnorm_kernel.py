@@ -1246,10 +1246,12 @@ def build_rmsnorm_dynamicquant_module(
 # second weight read.
 SMOOTHQUANT_BLOCK_THREADS = 256
 SMOOTHQUANT_MAX_BLOCK_THREADS = 512
-# Each thread keeps gamma*xscale and u for its tiles in registers; past this many
-# 128-bit tiles per thread they spill (16-bit rows at N >= 98304 ran at 0.72x of the
-# block-per-row kernel on MI355X), so wider rows keep that kernel.
-SMOOTHQUANT_MAX_VEC_ITERS = 16
+# Each thread keeps gamma*xscale and u in fp32 registers, two VGPRs per row element it
+# owns, of the 256 a lane gets in a 512-thread block. At 64 elements per thread (8 tiles
+# of 16-bit, 16 of f32) the kernel needs at most 178 VGPRs on gfx950. Wider 16-bit rows
+# used up to all 256 and spilled at 13, 15 and 16 tiles (N = 65536 bf16: 17 VGPRs, 72
+# bytes of scratch per lane, reloaded every row), so they keep the block-per-row kernel.
+SMOOTHQUANT_MAX_ELEMS_PER_THREAD = 64
 # Grid caps. A shorter grid amortizes the weight pass over more rows; a longer
 # one keeps more independent row pipelines resident per CU. Streaming loads keep
 # gamma*xscale in L1, so the long grid is affordable exactly there.
@@ -1434,8 +1436,9 @@ def build_rmsnorm_smoothquant_module(
     eps: float = EPS,
 ):
     elem_bits = 32 if dtype_str == "f32" else 16
+    vec_width = 128 // elem_bits
     threads = _smoothquant_block_threads(N, elem_bits)
-    if (N // (128 // elem_bits) + threads - 1) // threads > SMOOTHQUANT_MAX_VEC_ITERS:
+    if (N // vec_width + threads - 1) // threads * vec_width > SMOOTHQUANT_MAX_ELEMS_PER_THREAD:
         return _build_rmsnorm_quant_module(N, dtype_str, is_smooth=True, quant_dtype_str=quant_dtype_str, eps=eps)
 
     cached_kernel = _build_smoothquant_kernel(N, dtype_str, threads, 0, quant_dtype_str, eps)

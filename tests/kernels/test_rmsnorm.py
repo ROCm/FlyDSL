@@ -144,11 +144,11 @@ _RMSNORM_FORWARD_EXTRA_CONFIGS = (
     (7, 3073, "f16"),  # large-N vec8 prefix/scalar tail
 )
 
-# Rows on either side of SMOOTHQUANT_MAX_VEC_ITERS: the widest ones the vectorized
+# Rows on either side of SMOOTHQUANT_MAX_ELEMS_PER_THREAD: the widest ones the vectorized
 # SmoothQuant kernel takes, and the first ones that go back to the block-per-row kernel.
 _RMSNORM_SMOOTHQUANT_EXTRA_CONFIGS = (
-    (8, 65537, "bf16"),  # 16 vec8 iterations plus a scalar tail
-    (8, 65544, "bf16"),  # 17 vec8 iterations: block-per-row kernel
+    (8, 32775, "bf16"),  # 8 vec8 iterations plus a scalar tail
+    (8, 32776, "bf16"),  # 9 vec8 iterations: block-per-row kernel
     (8, 32768, "f32"),  # 16 vec4 iterations
     (8, 32772, "f32"),  # 17 vec4 iterations: block-per-row kernel
 )
