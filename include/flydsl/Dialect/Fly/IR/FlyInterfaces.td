@@ -79,6 +79,55 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
   let methods = Fly_MayStaticInterface.methods;
 }
 
+def Fly_GPUTargetInfoAttrInterface : AttrInterface<"GPUTargetInfoAttrInterface"> {
+  let cppNamespace = "::mlir::fly";
+  let description = [{
+    Hardware facts of a `gpu.module` target that Fly passes depend on. A backend
+    attaches it to its target attribute (e.g. `#rocdl.target`) as an external
+    model, so Fly reads them from the target the module is compiled for without
+    depending on the backend.
+  }];
+  let methods = [
+    InterfaceMethod<
+      "Return how much of `resource` one kernel may use, or std::nullopt when the target "
+      "does not know the resource, which is then not checked.",
+      "std::optional<int64_t>",
+      "getResourceLimit",
+      (ins "::mlir::Attribute":$resource)>
+  ];
+}
+
+def Fly_KernelResourceAttrInterface : AttrInterface<"KernelResourceAttrInterface"> {
+  let cppNamespace = "::mlir::fly";
+  let description = [{
+    Implemented by an attribute that names a hardware resource kernels use. As with
+    address spaces, resources every target may have are Fly attributes (e.g.
+    `#fly.kernel_resource<shared_memory>`), and a resource only some targets have is an
+    attribute of the backend dialect that defines it. Target-neutral passes only compare
+    and print resources; ops report how much they use through `ResourceUsageOpInterface`
+    and targets report limits through `GPUTargetInfoAttrInterface`.
+  }];
+  let methods = [
+    InterfaceMethod<"The unit an amount of the resource counts, e.g. \"bytes of shared memory\".",
+      "::llvm::StringRef", "getDescription", (ins)>
+  ];
+}
+
+def Fly_ResourceUsageOpInterface : OpInterface<"ResourceUsageOpInterface"> {
+  let cppNamespace = "::mlir::fly";
+  let description = [{
+    Implemented by an op that allocates a statically known amount of a kernel resource,
+    or frees such an allocation. An allocation is held from the op allocating it to the
+    op freeing it, named by the same handle, or to the end of the kernel; a resource
+    that is never freed, such as shared memory, has no op freeing it.
+  }];
+  let methods = [
+    InterfaceMethod<"Append the allocations and frees this op performs to `usage`.",
+      "void", "getResourceUsage",
+      (ins "::llvm::SmallVectorImpl<::mlir::fly::ResourceUsage> &":$usage)>
+  ];
+}
+
 def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
   let cppNamespace = "::mlir::fly";
   let methods = [

@@ -238,6 +238,8 @@ definition for this checkout:
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
 | 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
+With the `check_resource_limits` compile hint, `gpu.module(fly-check-resource-limits)` also runs after #5 (`canonicalize`) and rejects a kernel whose statically known allocations hold more of a resource at once than its `gpu.module` target allows (`GPUTargetInfoAttrInterface`). Ops report what they allocate and free through `ResourceUsageOpInterface`; shared `fly.make_ptr` allocations are never freed, so they add up. Usage only known at run time, such as a launch's dynamic shared memory, is not counted. An allocation counts whether or not the kernel uses it.
+
 **Stage B — `binary_prep_fragments`** (LLVM lowering, host + kernel)
 
 | # | Pass | Description |

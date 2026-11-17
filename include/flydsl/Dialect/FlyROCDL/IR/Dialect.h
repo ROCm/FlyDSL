@@ -30,6 +30,11 @@
 #define GET_OP_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Ops.h.inc"
 
-namespace mlir::fly_rocdl {} // namespace mlir::fly_rocdl
+namespace mlir::fly_rocdl {
+
+/// Attach fly::GPUTargetInfoAttrInterface to #rocdl.target.
+void registerTargetInfoExternalModels(DialectRegistry &registry);
+
+} // namespace mlir::fly_rocdl
 
 #endif // FLYDSL_DIALECT_FLYROCDL_IR_DIALECT_H
