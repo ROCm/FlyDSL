@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-17T10:23:23Z",
+ "updated": "2026-11-17T11:02:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,20 +55,20 @@
    "branch": "pr/feat-fx-range",
    "event": "pull_request",
    "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188",
    "created_at": "2026-11-17T08:44:55Z",
-   "updated_at": "2026-11-17T10:03:32Z",
+   "updated_at": "2026-11-17T10:59:25Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-17T09:16:53Z",
-     "completed_at": null,
+     "completed_at": "2026-11-17T10:37:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201784"
     },
     {
