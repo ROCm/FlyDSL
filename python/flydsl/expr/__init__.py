@@ -28,11 +28,13 @@ _BACKEND_MODULES = {
 
 _EXTENSION_MODULES = {
     "coop": "..extension.coop",
+    "quant": "..extension.quant",
     "random": "..extension.random",
 }
 
 if TYPE_CHECKING:
     from ..extension import coop as coop
+    from ..extension import quant as quant
     from ..extension import random as random
 
     from . import ktrace as ktrace
