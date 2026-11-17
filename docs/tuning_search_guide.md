@@ -278,14 +278,77 @@ installed on the node.
   first (the grid runs in block order and a tile costs `q_tile + 1` KV iterations); `PIPE_K` carries
   the next K tile in registers so its global load overlaps compute. They are experimental, dense
   only, and measured on this shape only.
-- **Still 0.45 of the floor.** Counters (`rocprofv3 --pmc`) put MFMA busy at about 28% of SIMD
-  cycles for the winner (11% for the default, 19% with the existing knobs only; `SQ_VALU_MFMA_BUSY_CYCLES`
-  over 1024 SIMDs times `GRBM_GUI_ACTIVE` per XCD); the wave is waiting
-  on something 40% of its cycles, and 54% of LDS-active cycles are bank conflicts (67% for the
-  default). One wave per SIMD at 386 registers cannot overlap the softmax VALU
-  (about 6 VALU instructions per MFMA) with the MFMAs. Closing that needs a new structure
-  (a dual-wave/ping-pong schedule for D=256, or a register diet that allows two waves
-  per SIMD), not more search over these knobs.
+- **Still 0.45 of the floor** after the search above (about 580 TFLOPS). Counters put MFMA busy at about 28%
+  of SIMD cycles (`SQ_VALU_MFMA_BUSY_CYCLES` over 1024 SIMDs times `GRBM_GUI_ACTIVE` per XCD), 40% of wave
+  cycles waiting, and 54% of LDS-active cycles bank conflicts. The second round below went after those.
+
+#### Second round: structure (all levers are default-off builder arguments, part of the JIT cache key)
+
+The environment levers `CAUSAL_REVERSE_Q` and `PIPE_K` became builder arguments (`causal_reverse_q`, `pipe_k`).
+Every row below is paired and interleaved on one node, every output is bit-identical to the shipped default, and the
+numbers are times converted to TFLOPS with 137.4 GFLOP per call against the measured 1270 TFLOPS matmul peak
+(nodes differ by 3%: m10-09 gave 184.9 us for the final row, m07-13 gave 190.5 us).
+
+| Config (cumulative) | Time | TFLOPS | of peak | Paired speedup |
+|---|---|---|---|---|
+| shipped default | 534-538 us | 256 | 0.20 | 1.00x |
+| previous winner (`waves_per_eu=1`, reverse Q, `PIPE_K`, vec8 LDS, K_PAD 8, tree reduce, `max-memory-clause`) | 237 us | 580 | 0.46 | 2.24x |
+| + `v_pad=32` | 227.6 us | 604 | 0.48 | 1.04x over the row above |
+| + `kv_buffer_loads` | 214.5 us | 641 | 0.50 | 1.11x over the previous winner |
+| + `sched_lds=2`, `qk_depth=4`, `pv_depth=3`, `k_swizzle=False`, `addr_fold` | 210-215 us | 640-655 | 0.50-0.51 | 2.50x |
+| + `kv_dbuf`, `spread_stage` | 184.9-190.5 us | 721-743 | 0.57-0.585 | 2.83x (p = 6e-30) |
+
+What each lever did, with the evidence:
+
+- **LDS bank conflicts** (`v_pad`, `k_pad`/`k_swizzle`/`k_swz_shift`, `v_swz_shift`). gfx950 has 64 banks and
+  services `ds_read_b128` in four 16-lane phases and `ds_read_b64_tr_b16` in two 32-lane phases. A 20-line phase
+  simulator (lane address in, worst bank multiplicity per phase out) predicted 4.0x for the V transposed reads at the
+  shipped 260-element row stride and 1.0x at stride 288; the K reads are 2.0x with the shipped XOR and 1.0x with
+  `K_PAD=8`. `SQ_LDS_BANK_CONFLICT` went from 31.2M to 0 and `SQ_LDS_IDX_ACTIVE` from 57.9M to 26.7M. The model also
+  reproduced the measured 54% conflict share for the previous winner (384 of 704 LDS cycles per wave). Worth 4% alone.
+- **K/V staging loads** (`kv_buffer_loads`): the clamped 64-bit global loads cost about 9 VALU instructions each, 150
+  per tile (a third of all VALU). Bounds-checked buffer loads read rows past the end as zero. 2.4% alone, 10.6% with
+  `v_pad`.
+- **LDS read pipeline** (`qk_depth`, `pv_depth`, `sched_lds`, `addr_fold`). The ISA showed every K and V read issued
+  right before its MFMA and waited with `s_waitcnt lgkmcnt`, whatever depth the Python asked for: the scheduler sinks
+  loads, and 32 loop-invariant address registers (one per K step, one per V step) used up the 256 arch VGPRs. One
+  per-lane LDS pointer plus constant offsets frees them (VGPR 376 to 332); `sched_barrier(0)` fences between steps
+  (`sched_lds=2`) then make the depth real (8 K reads in flight, `lgkmcnt(6)`). `sched_group_barrier` (mode 1) did the
+  same within 1%. Together +12% on top of `kv_buffer_loads`; none of it works without the fences.
+- **Spreading the staging** (`spread_stage`, needs `kv_dbuf`): ablating the K/V global loads and LDS stores took 26%
+  off the loop, but making the K/V loads L2-resident took only 3%, so the cost is instruction issue, not memory. A
+  wave cannot issue an MFMA while it sits in a burst of 16 `buffer_load` and 16 `ds_write`. `kv_dbuf` double-buffers K
+  and V in LDS (141 KB) and stages the next tile in registers, one barrier per tile; alone it is 0.97x. Emitting one
+  load or store per MFMA pair (`GenericKvStageHooks`, pinned by the fences) makes it 1.13x.
+- **Ablations on the 214 us config** (diagnostic build, outputs invalid): no exp 6%, no O rescale 5%, no barriers
+  12%, no staging loads/stores 24-26%, K/V L2-resident 3%. Ablations that remove the GEMM inputs collapse the kernel
+  by dead-code elimination and say nothing.
+- **A bug fix**: the DMA K fetch hard-coded the XOR mask 0x7 while the K reader uses `head_dim/16 - 1` (15 at D=256).
+  `ENABLE_DMA=1` (and `path_tag=N128`, which implies DMA) returned wrong results at D=256 for that reason; with the
+  mask taken from the traits the DMA path is bit-identical to the default. It is slower than the register-staged path
+  (234-242 us against 215 us), so it is not used; the `N128` path was not re-measured.
+
+Attempts that did not pay, and the base they lost on:
+
+| Attempt | Result | Base |
+|---|---|---|
+| `xcd_remap` (heads dealt to XCDs in contiguous groups) | 0.80x | 210 us row |
+| DMA K/V into LDS, conflict-free swizzles (`k_swz_shift=3`, `v_swz_shift=5`) | 0.89-0.92x | 215 us row |
+| `kv_dbuf` without `spread_stage` | 0.97x | 215 us row |
+| `swp` (S(j+1) overlapped with P(j)), fences, no interleave | 0.93x | 210 us row |
+| `swp` + `spread_stage` | 1.075x, below `kv_dbuf`+`spread_stage` | 210 us row |
+| `swp` + `swp_valu` (exp, rescale, row max emitted between the MFMA steps) | 1.05x, below `kv_dbuf`+`spread_stage` | 215 us row |
+| `waves_per_eu=2` on the final config | same binary (337 VGPR), no change | final row |
+| deeper read pipelines (`qk_depth` 6, `pv_depth` 4) | within noise of 4/3 | final row |
+
+- **Where it stops.** Two successive structural attempts after the last win (`swp`, `swp_valu`) each failed to beat the
+  final configuration, at 0.57-0.585 of the measured matmul peak (0.75 was the target). The final loop is MFMA busy about
+  31% of cycles. What is left: the softmax vector work (exp, row max, sum, pack, about 20% of the loop on the ablations)
+  is still serialized between the two GEMMs, and the `swp` structure that would overlap it ran slower than it saves
+  with this scheduler. A true two-waves-per-SIMD kernel needs the O (128) and Q (64) registers split across waves, with
+  P and the row statistics exchanged through LDS: not attempted, only reasoned (192 of 256 registers go to O and Q).
+- **Not verified:** the levers are measured on bf16 D=256 only; `kv_dbuf`/`swp` require the dense N32 path with
+  `kv_buffer_loads`; `swp_valu` is laid out for D=256.
 
 ## Tests
 

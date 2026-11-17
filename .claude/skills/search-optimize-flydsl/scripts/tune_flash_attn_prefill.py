@@ -78,6 +78,13 @@ LEVER_DEFAULTS = {
     "k_pad": None,  # K LDS row padding in elements (None: the FLYDSL_FLASH_ATTN_FUNC_K_PAD default)
     "k_swizzle": True,  # K LDS XOR swizzle; off + k_pad=8 is conflict-free with affine (immediate-offset) reads
     "addr_fold": False,  # one per-lane LDS base pointer + constant offsets for the K (unswizzled) and V reads
+    "k_swz_shift": None,  # K XOR swizzle granule: 4 = 32-byte chunks (shipped), 3 = 16-byte chunks (conflict-free, 8-wide stores)
+    "v_swz_shift": None,  # V XOR swizzle shift for the DMA path: 4 (shipped) or 5 (conflict-free transposed reads)
+    "kv_dbuf": False,  # double-buffer K and V in LDS, stage the next tile one iteration ahead: one barrier per tile
+    "xcd_remap": False,  # deal heads to XCDs in contiguous groups so concurrent workgroups on one L2 share K/V
+    "swp": False,  # software pipeline: S(j+1) on the matrix cores while the vector unit does P(j) (implies kv_dbuf)
+    "spread_stage": False,  # spread the K/V staging stores and loads over the MFMA steps (needs kv_dbuf or swp)
+    "swp_valu": False,  # interleave the softmax vector work with the GEMM steps (needs swp and spread_stage)
 }
 NEW_LEVERS = tuple(LEVER_DEFAULTS)
 LLVM_DEFAULTS = {
@@ -87,7 +94,7 @@ LLVM_DEFAULTS = {
 }
 
 
-def route_of_shipped_entry(q, k, v):
+def route_of_shipped_entry(q, k, v, causal=True):
     """Call the shipped entry point once and record which dense builder it
     reached and with which arguments. Returns ``(builder name, kwargs)``."""
     seen = []
@@ -103,7 +110,7 @@ def route_of_shipped_entry(q, k, v):
     try:
         for n in saved:
             setattr(fai, n, spy(n))
-        fai.flydsl_flash_attn_func(q, k, v, causal=True)
+        fai.flydsl_flash_attn_func(q, k, v, causal=causal)
     finally:
         for n, f in saved.items():
             setattr(fai, n, f)
@@ -118,6 +125,8 @@ def main() -> int:
     ap.add_argument("--heads", type=int, default=64)
     ap.add_argument("--head-dim", type=int, default=256)
     ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--kv-heads", type=int, default=None, help="K/V head count (GQA); default: --heads")
+    ap.add_argument("--no-causal", action="store_true", help="full (non-causal) attention")
     ap.add_argument("--strategy", default="auto")
     ap.add_argument("--evals", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
@@ -157,23 +166,28 @@ def main() -> int:
     ap.add_argument("--trace", default=None, help="write the search trace (JSON lines) here")
     args = ap.parse_args()
     B, S, H, D = args.batch, args.seq, args.heads, args.head_dim
+    Hkv = args.kv_heads or H
+    causal = not args.no_causal
 
     dev = torch.device("cuda")
     torch.manual_seed(0)
     q = torch.randn(B, S, H, D, device=dev, dtype=torch.bfloat16)
-    k = torch.randn(B, S, H, D, device=dev, dtype=torch.bfloat16)
-    v = torch.randn(B, S, H, D, device=dev, dtype=torch.bfloat16)
+    k = torch.randn(B, S, Hkv, D, device=dev, dtype=torch.bfloat16)
+    v = torch.randn(B, S, Hkv, D, device=dev, dtype=torch.bfloat16)
     out = torch.empty_like(q)
     scale = 1.0 / math.sqrt(D)
 
-    # Independent oracle: fp32 causal attention in torch, one head group at a time.
+    # Independent oracle: fp32 attention in torch, one head group at a time (K/V heads expanded for GQA).
     ref = torch.empty(B, S, H, D, device=dev, dtype=torch.float32)
     causal_mask = torch.ones(S, S, device=dev, dtype=torch.bool).triu(1)
+    kv_rep = H // Hkv
     for h0 in range(0, H, 8):
         qh = q[:, :, h0 : h0 + 8].float().transpose(1, 2)
-        kh = k[:, :, h0 : h0 + 8].float().transpose(1, 2)
-        vh = v[:, :, h0 : h0 + 8].float().transpose(1, 2)
-        p = (qh @ kh.transpose(-1, -2) * scale).masked_fill(causal_mask, float("-inf")).softmax(-1)
+        kv_idx = torch.arange(h0, min(h0 + 8, H), device=dev) // kv_rep
+        kh = k[:, :, kv_idx].float().transpose(1, 2)
+        vh = v[:, :, kv_idx].float().transpose(1, 2)
+        scores = qh @ kh.transpose(-1, -2) * scale
+        p = (scores.masked_fill(causal_mask, float("-inf")) if causal else scores).softmax(-1)
         ref[:, :, h0 : h0 + 8] = (p @ vh).transpose(1, 2)
     ref_norm = ref.norm()
 
@@ -184,14 +198,14 @@ def main() -> int:
         return bool(rel < args.rel_tol and within), f"rel_l2={rel:.3g} max_abs={diff.max().item():.3g}"
 
     # ---------------------------------------------------------------- baseline
-    route, route_kw = route_of_shipped_entry(q, k, v)
+    route, route_kw = route_of_shipped_entry(q, k, v, causal)
     arch = get_rocm_arch()
     shipped_traits = _make_flash_attn_generic_traits(
         H,
-        H,
+        Hkv,
         D,
         arch,
-        causal=True,
+        causal=causal,
         dtype_str="bf16",
         flat_work_group_size=route_kw["flat_work_group_size"],
         block_m=route_kw["block_m"],
@@ -219,9 +233,9 @@ def main() -> int:
         return build_flash_attn_func_module(
             num_heads=H,
             head_dim=D,
-            causal=True,
+            causal=causal,
             dtype_str="bf16",
-            num_kv_heads=H,
+            num_kv_heads=Hkv,
             cross_seqlen=False,
             block_m=cfg["block_m"],
             flat_work_group_size=2 * cfg["block_m"],
@@ -248,10 +262,10 @@ def main() -> int:
                 build(cfg)
                 t = _make_flash_attn_generic_traits(
                     H,
-                    H,
+                    Hkv,
                     D,
                     arch,
-                    causal=True,
+                    causal=causal,
                     dtype_str="bf16",
                     flat_work_group_size=2 * cfg["block_m"],
                     block_m=cfg["block_m"],
@@ -306,6 +320,13 @@ def main() -> int:
         Param.categorical("k_pad", (None, 8)),
         Param.boolean("k_swizzle"),
         Param.boolean("addr_fold"),
+        Param.categorical("k_swz_shift", (None, 3)),
+        Param.categorical("v_swz_shift", (None, 5)),
+        Param.boolean("kv_dbuf"),
+        Param.boolean("xcd_remap"),
+        Param.boolean("swp"),
+        Param.boolean("spread_stage"),
+        Param.boolean("swp_valu"),
         # occupancy and scheduling
         Param.ordinal("waves_per_eu", (1, 2, 4)),
         Param.boolean("llvm:enable-post-misched"),
@@ -420,16 +441,25 @@ def main() -> int:
     }
     compiled = [o.compile_s for o in res.observations if o.compile_s > 0 and not o.cached]
     peaks = measure_peaks(dtypes=("bf16",))
-    flops = 4.0 * B * H * S * S * D / 2  # causal: half of the score matrix
+    flops = 4.0 * B * H * S * S * D / (2 if causal else 1)  # causal: half of the score matrix
     nbytes = 4.0 * B * S * H * D * 2  # Q, K, V and O once, bf16
     rl = Roofline(flops, nbytes, peaks, "bf16")
     best_ms = res.best_value
     win = res.confirmed.get("winner")
     report = {
-        "shape": {"batch": B, "seq": S, "heads": H, "head_dim": D, "causal": True, "dtype": "bf16", "arch": arch},
+        "shape": {
+            "batch": B,
+            "seq": S,
+            "heads": H,
+            "head_dim": D,
+            "kv_heads": Hkv,
+            "causal": causal,
+            "dtype": "bf16",
+            "arch": arch,
+        },
         "route": {"builder": route, "kwargs": route_kw},
         "oracle": {
-            "reference": "fp32 torch causal attention",
+            "reference": "fp32 torch attention (causal unless --no-causal)",
             "rel_l2_lt": args.rel_tol,
             "elementwise": f"|err| <= {args.atol} + {args.rtol} * |ref|",
         },
@@ -605,14 +635,19 @@ def time_fn(fn, inner=10, reps=9, warmup=3):
     return statistics.median(samples)
 
 
+def args_causal(args):
+    return not args.no_causal
+
+
 def reference_timings(q, k, v, ref, args):
     """Hot median times of torch SDPA and (when importable) aiter on the same problem."""
     out = {}
     qh, kh, vh = (t.transpose(1, 2) for t in (q, k, v))  # [B, H, S, D] views
+    causal, Hkv, H = args_causal(args), k.shape[2], q.shape[2]
     sdpa = torch.nn.functional.scaled_dot_product_attention
 
     def run_sdpa():
-        return sdpa(qh, kh, vh, is_causal=True)
+        return sdpa(qh, kh, vh, is_causal=causal, enable_gqa=Hkv != H)
 
     try:
         o = run_sdpa().transpose(1, 2)
@@ -624,7 +659,7 @@ def reference_timings(q, k, v, ref, args):
         import aiter
 
         def run_aiter():
-            return aiter.flash_attn_func(q, k, v, causal=True)
+            return aiter.flash_attn_func(q, k, v, causal=causal)
 
         o = run_aiter()
         o = o[0] if isinstance(o, tuple) else o

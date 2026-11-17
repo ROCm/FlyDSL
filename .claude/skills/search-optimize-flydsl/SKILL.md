@@ -208,6 +208,23 @@ Seen in the pilots:
 - The builder's validity check admitted `block_k=32` for the GEMM and the kernel
   returned wrong results (rel L2 1.23). Only the numeric gate caught it.
 - `random` spent about a fifth of its evaluations on numeric failures.
+- Flash attention D=256, second round (2.2x to 2.8x over the default): read the final ISA of the winner before
+  proposing levers. Three things were invisible in the knob list: the scheduler had sunk every LDS read next to its
+  MFMA (so a deeper Python prefetch changed nothing until `sched_barrier(0)` fences pinned it), 32 loop-invariant
+  LDS address registers capped the pipeline at the 256 arch VGPRs (one base pointer plus constant offsets fixed it),
+  and a burst of 16 `buffer_load` plus 16 `ds_write` stalls a one-wave-per-SIMD kernel's issue (spreading them one per
+  MFMA pair was +13%; making them L2-resident was +3%).
+- Model the hardware before probing it: a 20-line bank-conflict simulator for the 64-bank gfx950 LDS predicted the
+  4x conflict on the V reads and reproduced the 54% conflict counter; the counter then confirmed 0 after the fix.
+- Ablate by removing work, not inputs: deleting the GEMM inputs lets dead-code elimination delete the kernel. Compare
+  ablations that keep the dataflow (no exp, no rescale, no barriers, no staging) in one paired run.
+- A "broken" knob can be a bug: `ENABLE_DMA=1` returned wrong results at D=256 because the DMA fetch hard-coded the XOR
+  swizzle mask of D=128. Read why a level fails before dropping it from the space.
+- Passing a lever is not the same as the compiler honoring it: compare resources (`vgpr`, `lds_bytes`) between the
+  rows of an ablation table; identical resources for different knob values mean the knob did nothing
+  (`waves_per_eu=2` on a 141 KB-LDS kernel, `sched_lds` without fences).
+- A structural change can need its second half to pay: `kv_dbuf` alone was 0.97x, `spread_stage` on top 1.13x.
+  Stop a structural branch when two successive attempts lose to the current winner, and record both.
 
 From the rocKE case study this engine came from:
 - A fixed arm order with best-of-N selection produces a phantom win; the backend

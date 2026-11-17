@@ -37,6 +37,15 @@ them). Found on bf16 causal D=256 on gfx950; not yet measured on other head dims
 - ``sched_lds``: 1 pins that read pipeline with ``sched_group_barrier``, 2 with ``sched_barrier``
   fences. The default scheduler sinks every read next to its MFMA, so each step waits the full
   LDS latency; the pins make ``qk_depth`` / ``pv_depth`` take effect.
+- ``kv_dbuf``: double-buffer K and V in LDS (141 KB at D=256) and stage the next tile in registers one iteration
+  ahead: one barrier per tile. ``spread_stage`` (needs ``kv_dbuf``) emits that tile's LDS stores and global loads one per
+  MFMA step inside the two GEMMs instead of as bursts; with ``sched_lds=2`` this is the best measured configuration.
+- ``swp`` / ``swp_valu``: software-pipelined loop (S(j+1) on the matrix cores while P(j) is computed) and the hook
+  schedule that emits the exp / row-sum / pack / rescale / row-max work between the MFMA steps. Correct, but slower than
+  ``kv_dbuf`` + ``spread_stage`` on D=256 (``swp_valu`` is laid out for D=256 only).
+- ``xcd_remap``: deal heads to XCDs in contiguous groups. Measured slower (0.80x).
+- ``k_swz_shift`` / ``v_swz_shift``: swizzle granule of the K reads (3 = 16-byte chunks) and of the DMA path's V reads
+  (5), the conflict-free choices at stride 256.
 """
 
 import math as host_math
@@ -52,10 +61,12 @@ from kernels.attention.flash_attn_utils import (
     GenericGemmHelper,
     GenericKvGmemToLdsLoader,
     GenericKvLdsToVgprLoader,
+    GenericKvStageHooks,
     GenericPageIdLoader,
     GenericQLoader,
     GenericSoftmaxHelper,
     GenericStoreHelper,
+    GenericSwpHooks,
     _make_flash_attn_generic_traits,
     _waitcnt_vm_n,
     daz_denormal_attr,
@@ -95,6 +106,13 @@ def build_flash_attn_func_module_primary(
     k_pad=None,
     k_swizzle=True,
     addr_fold=False,
+    k_swz_shift=None,
+    v_swz_shift=None,
+    kv_dbuf=False,
+    xcd_remap=False,
+    swp=False,
+    spread_stage=False,
+    swp_valu=False,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -144,6 +162,13 @@ def build_flash_attn_func_module_primary(
             k_pad=k_pad,
             k_swizzle=k_swizzle,
             addr_fold=addr_fold,
+            k_swz_shift=k_swz_shift,
+            v_swz_shift=v_swz_shift,
+            kv_dbuf=kv_dbuf,
+            xcd_remap=xcd_remap,
+            swp=swp,
+            spread_stage=spread_stage,
+            swp_valu=swp_valu,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -177,6 +202,13 @@ def build_flash_attn_func_module_primary(
             k_pad=k_pad,
             k_swizzle=k_swizzle,
             addr_fold=addr_fold,
+            k_swz_shift=k_swz_shift,
+            v_swz_shift=v_swz_shift,
+            kv_dbuf=kv_dbuf,
+            xcd_remap=xcd_remap,
+            swp=swp,
+            spread_stage=spread_stage,
+            swp_valu=swp_valu,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -270,6 +302,13 @@ def build_flash_attn_func_module_primary(
         k_pad=k_pad,
         k_swizzle=k_swizzle,
         addr_fold=addr_fold,
+        k_swz_shift=k_swz_shift,
+        v_swz_shift=v_swz_shift,
+        kv_dbuf=kv_dbuf,
+        xcd_remap=xcd_remap,
+        swp=swp,
+        spread_stage=spread_stage,
+        swp_valu=swp_valu,
     )
     _flash_attn_generic_cache_tag = traits.cache_tag
 
@@ -357,214 +396,419 @@ def build_flash_attn_func_module_primary(
         ctx.init_kv_bounds()
         kv_upper = ctx.kv_upper
 
-        # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
-        _use_dma_dbuf = traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF
-        # PIPE_K (any arch): carry the next K tile in registers so its global load overlaps this tile's compute
-        # instead of being exposed ahead of the K barrier. The gfx942 gpfetch path always does this.
-        _pipe_k = (
-            (traits.ENABLE_GFX942_KV_GPFETCH or (traits.PIPE_K and not traits.KV_VECTORIZED))
-            and not _use_dma_dbuf
-            and not traits.ENABLE_PREFETCH_3BUF
-            and traits.N_SUBTILES == 1
-        )
-        init_args = [ctx.c_neg_inf, ctx.c_zero_f]
-        for _ in range_constexpr(traits.D_CHUNKS):
-            init_args.append(ctx.c_zero_v16f32)
-        if const_expr(_use_dma_dbuf):
-            init_args.append(fx.Index(0))
-            kv_gmem_to_lds.coop_dma_k(fx.Index(0), buf_id=0)
-            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-        if const_expr(_pipe_k):
+        if const_expr(traits.SWP):
+            # ---- Software-pipelined loop (KV double-buffered in LDS, one barrier per tile) ----
+            # Iteration j computes S(j+1) = K(j+1) Q^T on the matrix cores while the vector unit turns S(j) into P(j)
+            # (exp, row sum, bf16 pack), then does O = corr O + V(j) P(j) while the vector unit takes the next row max.
+            # Loop-carried: m (running max incl. tile j), corr, scaled max of tile j, l, S(j) masked, O, staged K/V.
+            _nb = traits.NUM_BATCHES_KV
             _k0_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(0))
-            for _kb in range_constexpr(traits.NUM_BATCHES_KV):
-                init_args.append(_k0_vecs[_kb])
-
-        loop_results = init_args
-        for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
-            m_running = inner_iter_args[0]
-            l_running = inner_iter_args[1]
-            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
-            _cur_buf_id = inner_iter_args[2 + traits.D_CHUNKS] if _use_dma_dbuf else None
-            _carried_k_vecs = (
-                [inner_iter_args[2 + traits.D_CHUNKS + _kb] for _kb in range_constexpr(traits.NUM_BATCHES_KV)]
-                if _pipe_k
-                else None
+            _v0_vecs = kv_gmem_to_lds.coop_load_v_global(fx.Index(0))
+            _k1_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(traits.BLOCK_N_OUT))
+            _waitcnt_vm_n(0)
+            kv_gmem_to_lds.coop_store_k_lds(_k0_vecs, 0)
+            kv_gmem_to_lds.coop_store_v_lds(_v0_vecs, 0)
+            kv_gmem_to_lds.coop_store_k_lds(_k1_vecs, 1)
+            _k2_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(2 * traits.BLOCK_N_OUT))
+            _v1_vecs = kv_gmem_to_lds.coop_load_v_global(fx.Index(traits.BLOCK_N_OUT))
+            gpu.barrier()
+            # S(0) and the softmax statistics of tile 0
+            _k_lo, _k_hi = kv_lds_to_vgpr.load_k_packs(kv_gmem_to_lds.k_buf_base(0))
+            _s0_lo, _s0_hi = gemm_helper.gemm1_accumulate(
+                kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs, kv_gmem_to_lds, fx.Index(0)
             )
-            preload_k_count = traits.NUM_PREFETCH_K if traits.NUM_PREFETCH_K < traits.N_SUBTILES else traits.N_SUBTILES
+            _raw_lo, _raw_hi = softmax_helper.split_scores(_s0_lo, _s0_hi)
+            _raw_lo, _raw_hi = softmax_helper.apply_kv_mask(_raw_lo, _raw_hi, fx.Index(0))
+            _m0, _corr0, _nsm0 = softmax_helper.online_softmax_stats(ctx.c_neg_inf, _raw_lo, _raw_hi)
+            init_args = [_m0, _corr0, _nsm0, ctx.c_zero_f, ctx.c_neg_inf]
+            init_args += list(_raw_lo) + list(_raw_hi)
+            for _ in range_constexpr(traits.D_CHUNKS):
+                init_args.append(ctx.c_zero_v16f32)
+            init_args += list(_k2_vecs) + list(_v1_vecs)
+            _o_at = 5 + 32
+            _stage_at = _o_at + traits.D_CHUNKS
 
-            if const_expr(traits.ENABLE_PREFETCH_3BUF):
-                for pre_k in range_constexpr(preload_k_count):
-                    pre_k_slot = traits.CK_LDS_SEQ[pre_k % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
-                    pre_k_start = kv_block_start + pre_k * traits.BLOCK_N
-                    if const_expr(traits.ENABLE_DMA):
-                        kv_gmem_to_lds.coop_dma_k(pre_k_start, pre_k_slot)
-                    else:
-                        kv_gmem_to_lds.coop_load_k(pre_k_start, pre_k_slot)
-                if const_expr(traits.ENABLE_DMA):
-                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-                else:
-                    rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+            loop_results = init_args
+            for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+                m_cur = inner_iter_args[0]
+                corr_cur = inner_iter_args[1]
+                nsm_cur = inner_iter_args[2]
+                l_running = inner_iter_args[3]
+                s_lo_cur = [inner_iter_args[5 + i] for i in range_constexpr(16)]
+                s_hi_cur = [inner_iter_args[21 + i] for i in range_constexpr(16)]
+                o_accs = [inner_iter_args[_o_at + i] for i in range_constexpr(traits.D_CHUNKS)]
+                k_stage = [inner_iter_args[_stage_at + i] for i in range_constexpr(_nb)]
+                v_stage = [inner_iter_args[_stage_at + _nb + i] for i in range_constexpr(_nb)]
+
+                _cur = (kv_block_start // fx.Index(traits.BLOCK_N_OUT)) % fx.Index(2)
+                _nxt = fx.Index(1) - _cur
                 gpu.barrier()
-
-            for kv_sub in range_constexpr(traits.N_SUBTILES):
-                kv_start = kv_block_start + kv_sub * traits.BLOCK_N
-
-                if const_expr(traits.ENABLE_PREFETCH_3BUF):
-                    k_slot = traits.CK_LDS_SEQ[kv_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
-                elif const_expr(_use_dma_dbuf):
-                    if const_expr(kv_sub % 2 == 0):
-                        _k_buf_id = _cur_buf_id
-                    else:
-                        _k_buf_id = fx.Index(1) - _cur_buf_id
-                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-                    gpu.barrier()
-                    _next_k_buf_id = fx.Index(1) - _k_buf_id
-                    if const_expr(kv_sub + 1 < traits.N_SUBTILES):
-                        kv_gmem_to_lds.coop_dma_k(
-                            kv_block_start + (kv_sub + 1) * traits.BLOCK_N,
-                            _next_k_buf_id,
-                        )
-                    else:
-                        _next_kv = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
-                        _has_next = _next_kv < kv_upper
-                        _prefetch_next_k = kv_gmem_to_lds.coop_dma_k
-                        if _has_next:
-                            _prefetch_next_k(_next_kv, _next_k_buf_id)
-                    rocdl.sched_barrier(0)
-                    k_base = kv_gmem_to_lds.k_buf_base(_k_buf_id)
-                else:
-                    k_slot = 0
-                    if const_expr(_pipe_k):
-                        _waitcnt_vm_n(0)
-                        kv_gmem_to_lds.coop_store_k_lds(_carried_k_vecs, k_slot)
-                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                        _next_kv_start = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
-                        _next_k_vecs = kv_gmem_to_lds.coop_load_k_global(_next_kv_start)
-                    elif const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
-                        _kv_k_vecs = kv_gmem_to_lds.coop_load_k_global(kv_start)
-                        kv_gmem_to_lds.coop_store_k_lds(_kv_k_vecs, k_slot)
-                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                    elif const_expr(traits.ENABLE_GFX942_DMA):
-                        kv_gmem_to_lds.coop_dma_k(kv_start, k_slot)
-                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-                    else:
-                        kv_gmem_to_lds.coop_load_k(kv_start, k_slot)
-                    gpu.barrier()
-                if const_expr(not _use_dma_dbuf):
-                    k_base = kv_gmem_to_lds.k_buf_base(k_slot)
-
-                if const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
-                    kv_gmem_to_lds.coop_dma_v_nomajor(kv_start, 0)
-                elif const_expr(
-                    not traits.ENABLE_GFX942_KV_GPFETCH
-                    and (not traits.USE_HW_TR or (not traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF))
-                ):
-                    _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
-
-                # ==== GEMM1: S = K @ Q^T. Bulk-read K packs, DMA-prefetch V, pipeline MFMAs ====
-                _k_lo, _k_hi = kv_lds_to_vgpr.load_k_packs(k_base)
-                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
-                    s_acc_lo = ctx.c_zero_v16f32
-                    s_acc_hi = ctx.c_zero_v16f32
-                    for ks in range_constexpr(traits.K_STEPS_QK):
-                        if const_expr(ks == 0):
-                            if const_expr(traits.V_PERM_TR):
-                                _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global_perm(kv_start)
-                            else:
-                                _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
-                        s_acc_lo = gemm_helper.mfma_acc(_k_lo[ks], q_b_packs[ks], s_acc_lo)
-                        s_acc_hi = gemm_helper.mfma_acc(_k_hi[ks], q_b_packs[ks], s_acc_hi)
-                        if const_expr(ks + traits.QK_PREFETCH_DEPTH < traits.K_STEPS_QK):
-                            _k_lo[ks + traits.QK_PREFETCH_DEPTH], _k_hi[ks + traits.QK_PREFETCH_DEPTH] = (
-                                kv_lds_to_vgpr.load_k_pack_at(ks + traits.QK_PREFETCH_DEPTH)
-                            )
-                else:
-                    if const_expr(traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF and not traits.USE_HW_TR):
-                        kv_gmem_to_lds.coop_dma_v(kv_start, 0)
-                        rocdl.sched_barrier(0)
-                    s_acc_lo, s_acc_hi = gemm_helper.gemm1_accumulate(
-                        kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs, kv_gmem_to_lds, kv_start
-                    )
-
-                # ==== Online softmax over 64 KV positions ====
-                s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
-                s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
-                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
-                    m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
-                    o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
-                else:
-                    m_new_raw, l_new, corr, p_vals_lo, p_vals_hi = softmax_helper.online_softmax(
-                        m_running, l_running, s_raw_lo, s_raw_hi
-                    )
-                    o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
-
-                if const_expr(traits.ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < traits.N_SUBTILES):
-                    next_k_sub = kv_sub + preload_k_count
-                    next_k_start = kv_block_start + next_k_sub * traits.BLOCK_N
-                    next_k_slot = traits.CK_LDS_SEQ[next_k_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
-                    if const_expr(traits.ENABLE_DMA):
-                        kv_gmem_to_lds.coop_dma_k(next_k_start, next_k_slot)
-                    else:
-                        kv_gmem_to_lds.coop_load_k(next_k_start, next_k_slot)
-
-                if const_expr(traits.ENABLE_PREFETCH_3BUF):
-                    v_slot = traits.CK_LDS_SEQ[kv_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_V
-                    v_base = kv_gmem_to_lds.v_buf_base(v_slot)
-                    kv_gmem_to_lds.coop_load_v(kv_start, v_slot)
-                    rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                    gpu.barrier()
-                elif const_expr(traits.ENABLE_DMA):
-                    v_base = kv_gmem_to_lds.v_buf_base(0)
-                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-                    gpu.barrier()
-                elif const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
-                    v_slot = 0
-                    v_base = kv_gmem_to_lds.v_buf_base(v_slot)
-                    fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-                    gpu.barrier()
-                else:
-                    v_slot = 0
-                    v_base = kv_gmem_to_lds.v_buf_base(v_slot)
-                    _waitcnt_vm_n(0)
-                    if const_expr(traits.V_PERM_TR):
-                        kv_gmem_to_lds.coop_store_v_lds_perm(_v_vecs_prefetch, v_slot)
-                    else:
-                        kv_gmem_to_lds.coop_store_v_lds(_v_vecs_prefetch, v_slot)
-                    rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                    gpu.barrier()
-
-                # ==== Build P packs, then GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
-                if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
-                    o_accs, l_new = softmax_helper.gemm2_gpfetch_fused(
-                        gemm_helper,
-                        kv_lds_to_vgpr,
-                        o_accs,
-                        corr_vec,
-                        corr,
-                        l_running,
-                        s_raw_lo,
-                        s_raw_hi,
-                        neg_scaled_max,
-                        v_base,
+                # K(j+2) -> K buffer j%2 (K(j) was read last iteration), V(j+1) -> V buffer (j+1)%2 (V(j) is read
+                # from buffer j%2 below); then put K(j+3), V(j+2) in flight.
+                _waitcnt_vm_n(0)
+                _k_load_tile = kv_block_start + fx.Index(3 * traits.BLOCK_N_OUT)
+                _v_load_tile = kv_block_start + fx.Index(2 * traits.BLOCK_N_OUT)
+                if const_expr(traits.SPREAD_STAGE):
+                    _stage_hooks = GenericKvStageHooks(
+                        kv_gmem_to_lds, k_stage, v_stage, _cur, _nxt, _k_load_tile, _v_load_tile
                     )
                 else:
+                    _stage_hooks = None
+                    kv_gmem_to_lds.coop_store_k_lds(k_stage, _cur)
+                    kv_gmem_to_lds.coop_store_v_lds(v_stage, _nxt)
+                    _next_k = kv_gmem_to_lds.coop_load_k_global(_k_load_tile)
+                    _next_v = kv_gmem_to_lds.coop_load_v_global(_v_load_tile)
+
+                # Phase A: S(j+1) on the matrix cores || P(j) on the vector unit
+                _k_lo, _k_hi = kv_lds_to_vgpr.load_k_packs(kv_gmem_to_lds.k_buf_base(_nxt))
+                if const_expr(traits.SWP_VALU):
+                    _swp = GenericSwpHooks(softmax_helper, _stage_hooks, s_lo_cur, s_hi_cur, nsm_cur, corr_cur, o_accs)
+                    _gemm_hooks = _swp
+                else:
+                    _gemm_hooks = _stage_hooks
+                s_nx_lo, s_nx_hi = gemm_helper.gemm1_accumulate(
+                    kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs, kv_gmem_to_lds, kv_block_start, hooks=_gemm_hooks
+                )
+                if const_expr(traits.SWP_VALU):
+                    l_new = _swp.row_sum(corr_cur, l_running)
+                    p_packs_lo = _swp.p_packs_lo
+                    p_packs_hi = _swp.p_packs_hi
+                else:
+                    p_vals_lo, p_vals_hi, local_sum = softmax_helper.exp_sum_p(s_lo_cur, s_hi_cur, nsm_cur)
+                    l_new = softmax_helper.finish_row_sum(corr_cur, l_running, local_sum)
                     p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
                     p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
-                    o_accs = gemm_helper.gemm2_pv(kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec)
+                raw_lo, raw_hi = softmax_helper.split_scores(s_nx_lo, s_nx_hi)
+                raw_lo, raw_hi = softmax_helper.apply_kv_mask(
+                    raw_lo, raw_hi, kv_block_start + fx.Index(traits.BLOCK_N_OUT)
+                )
 
-                m_running = m_new_raw
-                l_running = l_new
-
-            _yield_args = [m_running, l_running] + o_accs
-            if const_expr(_use_dma_dbuf):
-                if const_expr(traits.N_SUBTILES % 2 == 1):
-                    _yield_args.append(fx.Index(1) - _cur_buf_id)
+                # Phase B: O(j) on the matrix cores || row max / correction of tile j+1 on the vector unit
+                if const_expr(traits.SWP_VALU):
+                    _swp.raw_lo, _swp.raw_hi, _swp.m_cur = raw_lo, raw_hi, m_cur
+                    _swp.rescale_first()
+                    o_accs = gemm_helper.gemm2_pv(
+                        kv_lds_to_vgpr,
+                        o_accs,
+                        p_packs_lo,
+                        p_packs_hi,
+                        kv_gmem_to_lds.v_buf_base(_cur),
+                        _swp.corr_vec,
+                        hooks=_swp,
+                    )
+                    _stage_hooks.flush(traits.K_STEPS_QK, kv_lds_to_vgpr.total_pv)
+                    _next_k = _stage_hooks.next_k
+                    _next_v = _stage_hooks.next_v
+                    m_nx, corr_nx, nsm_nx = _swp.m_nx, _swp.corr_nx, _swp.nsm_nx
                 else:
-                    _yield_args.append(_cur_buf_id)
+                    o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr_cur)
+                    o_accs = gemm_helper.gemm2_pv(
+                        kv_lds_to_vgpr,
+                        o_accs,
+                        p_packs_lo,
+                        p_packs_hi,
+                        kv_gmem_to_lds.v_buf_base(_cur),
+                        corr_vec,
+                        hooks=_stage_hooks,
+                    )
+                    if const_expr(_stage_hooks is not None):
+                        _stage_hooks.flush(traits.K_STEPS_QK, kv_lds_to_vgpr.total_pv)
+                        _next_k = _stage_hooks.next_k
+                        _next_v = _stage_hooks.next_v
+                    m_nx, corr_nx, nsm_nx = softmax_helper.online_softmax_stats(m_cur, raw_lo, raw_hi)
+
+                _yield_args = [m_nx, corr_nx, nsm_nx, l_new, m_cur] + list(raw_lo) + list(raw_hi) + o_accs
+                _yield_args += list(_next_k) + list(_next_v)
+                loop_results = yield _yield_args
+            # [running max over the real tiles, l, O chunks] in the layout finalize_o expects
+            loop_results = [loop_results[4], loop_results[3]] + [
+                loop_results[_o_at + i] for i in range_constexpr(traits.D_CHUNKS)
+            ]
+        else:
+            # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
+            _use_dma_dbuf = traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF
+            # PIPE_K (any arch): carry the next K tile in registers so its global load overlaps this tile's compute
+            # instead of being exposed ahead of the K barrier. The gfx942 gpfetch path always does this.
+            _pipe_k = (
+                (traits.ENABLE_GFX942_KV_GPFETCH or (traits.PIPE_K and not traits.KV_VECTORIZED))
+                and not _use_dma_dbuf
+                and not traits.ENABLE_PREFETCH_3BUF
+                and traits.N_SUBTILES == 1
+                and not traits.KV_DBUF
+            )
+            # KV_DBUF: K and V are double-buffered in LDS and staged through registers one tile ahead, so each tile
+            # needs one barrier (at the top) instead of two and the V store is off the softmax -> PV critical path.
+            _kv_dbuf = traits.KV_DBUF
+            init_args = [ctx.c_neg_inf, ctx.c_zero_f]
+            for _ in range_constexpr(traits.D_CHUNKS):
+                init_args.append(ctx.c_zero_v16f32)
+            if const_expr(_use_dma_dbuf):
+                init_args.append(fx.Index(0))
+                kv_gmem_to_lds.coop_dma_k(fx.Index(0), buf_id=0)
+                fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             if const_expr(_pipe_k):
+                _k0_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(0))
                 for _kb in range_constexpr(traits.NUM_BATCHES_KV):
-                    _yield_args.append(_next_k_vecs[_kb])
-            loop_results = yield _yield_args
+                    init_args.append(_k0_vecs[_kb])
+            if const_expr(_kv_dbuf):
+                # Tile 0 goes straight to LDS buffer 0; tile 1 is in flight in registers when the loop starts.
+                _k0_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(0))
+                _v0_vecs = kv_gmem_to_lds.coop_load_v_global(fx.Index(0))
+                _waitcnt_vm_n(0)
+                kv_gmem_to_lds.coop_store_k_lds(_k0_vecs, 0)
+                kv_gmem_to_lds.coop_store_v_lds(_v0_vecs, 0)
+                _k1_vecs = kv_gmem_to_lds.coop_load_k_global(fx.Index(traits.BLOCK_N_OUT))
+                _v1_vecs = kv_gmem_to_lds.coop_load_v_global(fx.Index(traits.BLOCK_N_OUT))
+                for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                    init_args.append(_k1_vecs[_kb])
+                for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                    init_args.append(_v1_vecs[_kb])
+
+            loop_results = init_args
+            for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+                m_running = inner_iter_args[0]
+                l_running = inner_iter_args[1]
+                o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
+                _cur_buf_id = inner_iter_args[2 + traits.D_CHUNKS] if _use_dma_dbuf else None
+                _carried_k_vecs = (
+                    [inner_iter_args[2 + traits.D_CHUNKS + _kb] for _kb in range_constexpr(traits.NUM_BATCHES_KV)]
+                    if (_pipe_k or _kv_dbuf)
+                    else None
+                )
+                _carried_v_vecs = (
+                    [
+                        inner_iter_args[2 + traits.D_CHUNKS + traits.NUM_BATCHES_KV + _kb]
+                        for _kb in range_constexpr(traits.NUM_BATCHES_KV)
+                    ]
+                    if _kv_dbuf
+                    else None
+                )
+                preload_k_count = (
+                    traits.NUM_PREFETCH_K if traits.NUM_PREFETCH_K < traits.N_SUBTILES else traits.N_SUBTILES
+                )
+
+                if const_expr(traits.ENABLE_PREFETCH_3BUF):
+                    for pre_k in range_constexpr(preload_k_count):
+                        pre_k_slot = traits.CK_LDS_SEQ[pre_k % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
+                        pre_k_start = kv_block_start + pre_k * traits.BLOCK_N
+                        if const_expr(traits.ENABLE_DMA):
+                            kv_gmem_to_lds.coop_dma_k(pre_k_start, pre_k_slot)
+                        else:
+                            kv_gmem_to_lds.coop_load_k(pre_k_start, pre_k_slot)
+                    if const_expr(traits.ENABLE_DMA):
+                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                    else:
+                        rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+                    gpu.barrier()
+
+                for kv_sub in range_constexpr(traits.N_SUBTILES):
+                    kv_start = kv_block_start + kv_sub * traits.BLOCK_N
+
+                    if const_expr(traits.ENABLE_PREFETCH_3BUF):
+                        k_slot = traits.CK_LDS_SEQ[kv_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
+                    elif const_expr(_use_dma_dbuf):
+                        if const_expr(kv_sub % 2 == 0):
+                            _k_buf_id = _cur_buf_id
+                        else:
+                            _k_buf_id = fx.Index(1) - _cur_buf_id
+                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                        gpu.barrier()
+                        _next_k_buf_id = fx.Index(1) - _k_buf_id
+                        if const_expr(kv_sub + 1 < traits.N_SUBTILES):
+                            kv_gmem_to_lds.coop_dma_k(
+                                kv_block_start + (kv_sub + 1) * traits.BLOCK_N,
+                                _next_k_buf_id,
+                            )
+                        else:
+                            _next_kv = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
+                            _has_next = _next_kv < kv_upper
+                            _prefetch_next_k = kv_gmem_to_lds.coop_dma_k
+                            if _has_next:
+                                _prefetch_next_k(_next_kv, _next_k_buf_id)
+                        rocdl.sched_barrier(0)
+                        k_base = kv_gmem_to_lds.k_buf_base(_k_buf_id)
+                    elif const_expr(_kv_dbuf):
+                        # The tile being computed lives in buffer (kv_block_start / BLOCK_N_OUT) % 2: stored last
+                        # iteration (or by the prologue); this barrier makes it visible and retires the other buffer.
+                        k_slot = (kv_block_start // fx.Index(traits.BLOCK_N_OUT)) % fx.Index(2)
+                        gpu.barrier()
+                    else:
+                        k_slot = 0
+                        if const_expr(_pipe_k):
+                            _waitcnt_vm_n(0)
+                            kv_gmem_to_lds.coop_store_k_lds(_carried_k_vecs, k_slot)
+                            rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                            _next_kv_start = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
+                            _next_k_vecs = kv_gmem_to_lds.coop_load_k_global(_next_kv_start)
+                        elif const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
+                            _kv_k_vecs = kv_gmem_to_lds.coop_load_k_global(kv_start)
+                            kv_gmem_to_lds.coop_store_k_lds(_kv_k_vecs, k_slot)
+                            rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                        elif const_expr(traits.ENABLE_GFX942_DMA):
+                            kv_gmem_to_lds.coop_dma_k(kv_start, k_slot)
+                            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                        else:
+                            kv_gmem_to_lds.coop_load_k(kv_start, k_slot)
+                        gpu.barrier()
+                    if const_expr(not _use_dma_dbuf):
+                        k_base = kv_gmem_to_lds.k_buf_base(k_slot)
+
+                    if const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
+                        kv_gmem_to_lds.coop_dma_v_nomajor(kv_start, 0)
+                    elif const_expr(
+                        not traits.ENABLE_GFX942_KV_GPFETCH
+                        and not _kv_dbuf
+                        and (not traits.USE_HW_TR or (not traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF))
+                    ):
+                        _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
+
+                    _stage_hooks = None
+                    if const_expr(_kv_dbuf and traits.SPREAD_STAGE):
+                        _nxt_slot = fx.Index(1) - k_slot
+                        _waitcnt_vm_n(0)
+                        _after_next = kv_block_start + fx.Index(2 * traits.BLOCK_N_OUT)
+                        _stage_hooks = GenericKvStageHooks(
+                            kv_gmem_to_lds,
+                            _carried_k_vecs,
+                            _carried_v_vecs,
+                            _nxt_slot,
+                            _nxt_slot,
+                            _after_next,
+                            _after_next,
+                        )
+
+                    # ==== GEMM1: S = K @ Q^T. Bulk-read K packs, DMA-prefetch V, pipeline MFMAs ====
+                    _k_lo, _k_hi = kv_lds_to_vgpr.load_k_packs(k_base)
+                    if const_expr(traits.ENABLE_GFX942_KV_GPFETCH):
+                        s_acc_lo = ctx.c_zero_v16f32
+                        s_acc_hi = ctx.c_zero_v16f32
+                        for ks in range_constexpr(traits.K_STEPS_QK):
+                            if const_expr(ks == 0):
+                                if const_expr(traits.V_PERM_TR):
+                                    _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global_perm(kv_start)
+                                else:
+                                    _v_vecs_prefetch = kv_gmem_to_lds.coop_load_v_global(kv_start)
+                            s_acc_lo = gemm_helper.mfma_acc(_k_lo[ks], q_b_packs[ks], s_acc_lo)
+                            s_acc_hi = gemm_helper.mfma_acc(_k_hi[ks], q_b_packs[ks], s_acc_hi)
+                            if const_expr(ks + traits.QK_PREFETCH_DEPTH < traits.K_STEPS_QK):
+                                _k_lo[ks + traits.QK_PREFETCH_DEPTH], _k_hi[ks + traits.QK_PREFETCH_DEPTH] = (
+                                    kv_lds_to_vgpr.load_k_pack_at(ks + traits.QK_PREFETCH_DEPTH)
+                                )
+                    else:
+                        if const_expr(traits.ENABLE_DMA and not traits.ENABLE_PREFETCH_3BUF and not traits.USE_HW_TR):
+                            kv_gmem_to_lds.coop_dma_v(kv_start, 0)
+                            rocdl.sched_barrier(0)
+                        s_acc_lo, s_acc_hi = gemm_helper.gemm1_accumulate(
+                            kv_lds_to_vgpr, _k_lo, _k_hi, q_b_packs, kv_gmem_to_lds, kv_start, hooks=_stage_hooks
+                        )
+
+                    if const_expr(_kv_dbuf and not traits.SPREAD_STAGE):
+                        # Stage the next tile into the other buffer (its readers are past this iteration's barrier), then
+                        # put the tile after it in flight; it is stored one iteration from now.
+                        _nxt_slot = fx.Index(1) - k_slot
+                        _waitcnt_vm_n(0)
+                        kv_gmem_to_lds.coop_store_k_lds(_carried_k_vecs, _nxt_slot)
+                        kv_gmem_to_lds.coop_store_v_lds(_carried_v_vecs, _nxt_slot)
+                        _after_next = kv_block_start + fx.Index(2 * traits.BLOCK_N_OUT)
+                        _next_k_vecs = kv_gmem_to_lds.coop_load_k_global(_after_next)
+                        _next_v_vecs = kv_gmem_to_lds.coop_load_v_global(_after_next)
+
+                    # ==== Online softmax over 64 KV positions ====
+                    s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
+                    s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
+                    if const_expr(
+                        traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16
+                    ):
+                        m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(
+                            m_running, s_raw_lo, s_raw_hi
+                        )
+                        o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
+                    else:
+                        m_new_raw, l_new, corr, p_vals_lo, p_vals_hi = softmax_helper.online_softmax(
+                            m_running, l_running, s_raw_lo, s_raw_hi
+                        )
+                        o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
+
+                    if const_expr(traits.ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < traits.N_SUBTILES):
+                        next_k_sub = kv_sub + preload_k_count
+                        next_k_start = kv_block_start + next_k_sub * traits.BLOCK_N
+                        next_k_slot = traits.CK_LDS_SEQ[next_k_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_K
+                        if const_expr(traits.ENABLE_DMA):
+                            kv_gmem_to_lds.coop_dma_k(next_k_start, next_k_slot)
+                        else:
+                            kv_gmem_to_lds.coop_load_k(next_k_start, next_k_slot)
+
+                    if const_expr(traits.ENABLE_PREFETCH_3BUF):
+                        v_slot = traits.CK_LDS_SEQ[kv_sub % len(traits.CK_LDS_SEQ)] % traits.NUM_PREFETCH_V
+                        v_base = kv_gmem_to_lds.v_buf_base(v_slot)
+                        kv_gmem_to_lds.coop_load_v(kv_start, v_slot)
+                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                        gpu.barrier()
+                    elif const_expr(traits.ENABLE_DMA):
+                        v_base = kv_gmem_to_lds.v_buf_base(0)
+                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                        gpu.barrier()
+                    elif const_expr(traits.KV_VECTORIZED and traits.V_NOMAJOR_DMA):
+                        v_slot = 0
+                        v_base = kv_gmem_to_lds.v_buf_base(v_slot)
+                        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                        gpu.barrier()
+                    elif const_expr(_kv_dbuf):
+                        v_base = kv_gmem_to_lds.v_buf_base(k_slot)
+                    else:
+                        v_slot = 0
+                        v_base = kv_gmem_to_lds.v_buf_base(v_slot)
+                        _waitcnt_vm_n(0)
+                        if const_expr(traits.V_PERM_TR):
+                            kv_gmem_to_lds.coop_store_v_lds_perm(_v_vecs_prefetch, v_slot)
+                        else:
+                            kv_gmem_to_lds.coop_store_v_lds(_v_vecs_prefetch, v_slot)
+                        rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                        gpu.barrier()
+
+                    # ==== Build P packs, then GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
+                    if const_expr(
+                        traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16
+                    ):
+                        o_accs, l_new = softmax_helper.gemm2_gpfetch_fused(
+                            gemm_helper,
+                            kv_lds_to_vgpr,
+                            o_accs,
+                            corr_vec,
+                            corr,
+                            l_running,
+                            s_raw_lo,
+                            s_raw_hi,
+                            neg_scaled_max,
+                            v_base,
+                        )
+                    else:
+                        p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
+                        p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
+                        o_accs = gemm_helper.gemm2_pv(
+                            kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec, hooks=_stage_hooks
+                        )
+                    if const_expr(_stage_hooks is not None):
+                        _stage_hooks.flush(traits.K_STEPS_QK, kv_lds_to_vgpr.total_pv)
+                        _next_k_vecs = _stage_hooks.next_k
+                        _next_v_vecs = _stage_hooks.next_v
+
+                    m_running = m_new_raw
+                    l_running = l_new
+
+                _yield_args = [m_running, l_running] + o_accs
+                if const_expr(_use_dma_dbuf):
+                    if const_expr(traits.N_SUBTILES % 2 == 1):
+                        _yield_args.append(fx.Index(1) - _cur_buf_id)
+                    else:
+                        _yield_args.append(_cur_buf_id)
+                if const_expr(_pipe_k or _kv_dbuf):
+                    for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                        _yield_args.append(_next_k_vecs[_kb])
+                if const_expr(_kv_dbuf):
+                    for _kb in range_constexpr(traits.NUM_BATCHES_KV):
+                        _yield_args.append(_next_v_vecs[_kb])
+                loop_results = yield _yield_args
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
         store_helper.finalize_o(loop_results)
@@ -737,6 +981,13 @@ def build_flash_attn_func_module_primary(
             k_pad=k_pad,
             k_swizzle=k_swizzle,
             addr_fold=addr_fold,
+            k_swz_shift=k_swz_shift,
+            v_swz_shift=v_swz_shift,
+            kv_dbuf=kv_dbuf,
+            xcd_remap=xcd_remap,
+            swp=swp,
+            spread_stage=spread_stage,
+            swp_valu=swp_valu,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -770,6 +1021,13 @@ def build_flash_attn_func_module_primary(
             k_pad=k_pad,
             k_swizzle=k_swizzle,
             addr_fold=addr_fold,
+            k_swz_shift=k_swz_shift,
+            v_swz_shift=v_swz_shift,
+            kv_dbuf=kv_dbuf,
+            xcd_remap=xcd_remap,
+            swp=swp,
+            spread_stage=spread_stage,
+            swp_valu=swp_valu,
         )
 
         def _pad_dispatch(*args, **kwargs):

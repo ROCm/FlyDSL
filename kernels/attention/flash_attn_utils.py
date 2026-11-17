@@ -1146,6 +1146,13 @@ class FlashAttnGenericTraits:
     PV_PREFETCH_DEPTH: int = 1
     SCHED_LDS: int = 0
     ADDR_FOLD: bool = False
+    K_SWZ_SHIFT: int = 4
+    V_SWZ_SHIFT: int = 4
+    KV_DBUF: bool = False
+    XCD_REMAP: bool = False
+    SWP: bool = False
+    SPREAD_STAGE: bool = False
+    SWP_VALU: bool = False
     KV_BUFFER_LOADS: bool = False
 
     @property
@@ -1238,6 +1245,13 @@ class FlashAttnGenericTraits:
             self.PV_PREFETCH_DEPTH,
             self.SCHED_LDS,
             self.ADDR_FOLD,
+            self.K_SWZ_SHIFT,
+            self.V_SWZ_SHIFT,
+            self.KV_DBUF,
+            self.XCD_REMAP,
+            self.SWP,
+            self.SPREAD_STAGE,
+            self.SWP_VALU,
             self.KV_BUFFER_LOADS,
         )
 
@@ -1273,6 +1287,13 @@ def _make_flash_attn_generic_traits(
     k_pad=None,
     k_swizzle=True,
     addr_fold=False,
+    k_swz_shift=None,
+    v_swz_shift=None,
+    kv_dbuf=False,
+    xcd_remap=False,
+    swp=False,
+    spread_stage=False,
+    swp_valu=False,
 ):
     """Build compile-time traits for ``flash_attn_generic``."""
     block_n = 64
@@ -1322,8 +1343,27 @@ def _make_flash_attn_generic_traits(
         skip_kv_pad_mask = os.getenv("FLYDSL_FLASH_ATTN_FUNC_SKIP_KV_PAD_MASK", "0") == "1"
     else:
         skip_kv_pad_mask = bool(skip_kv_pad_mask)
-    num_prefetch_k = 3 if enable_prefetch_3buf else (2 if (enable_dma and not enable_gfx942_dma) else 1)
-    num_prefetch_v = 3 if enable_prefetch_3buf else 1
+    if xcd_remap and (num_heads % 8 != 0 or varlen or paged):
+        raise ValueError("xcd_remap needs dense launches and a head count divisible by 8 (the XCD count)")
+    traits_d_chunks_even_ok = head_dim == 256  # the hook schedule is laid out for 16 + 16 GEMM steps (D = 256)
+    kv_dbuf = bool(kv_dbuf or swp)  # the software pipeline runs on the double-buffered staging
+    if swp_valu and not (swp and spread_stage and traits_d_chunks_even_ok):
+        raise ValueError("swp_valu interleaves the softmax with the GEMM steps: it needs swp and spread_stage")
+    if spread_stage and not kv_dbuf:
+        raise ValueError("spread_stage spreads the double-buffered staging: it needs kv_dbuf or swp")
+    if kv_dbuf and (
+        enable_dma
+        or enable_prefetch_3buf
+        or enable_gfx942_kv_gpfetch
+        or paged
+        or not kv_buffer_loads
+        or block_n_out != block_n
+    ):
+        raise ValueError(
+            "kv_dbuf/swp need the plain dense N32 path with kv_buffer_loads=True (no DMA, 3-buffer prefetch, gpfetch, paged)"
+        )
+    num_prefetch_k = 3 if enable_prefetch_3buf else (2 if ((enable_dma and not enable_gfx942_dma) or kv_dbuf) else 1)
+    num_prefetch_v = 3 if enable_prefetch_3buf else (2 if kv_dbuf else 1)
     ck_lds_seq = (1, 2, 0, 1, 0, 1, 2, 0) if enable_prefetch_3buf else (0,)
 
     use_hw_tr = gpu_arch.startswith("gfx950")
@@ -1347,14 +1387,30 @@ def _make_flash_attn_generic_traits(
     stride_token_q = num_heads * head_dim
     stride_token_kv = num_kv_heads * head_dim
     _k_pad_default = 4 if (gpu_arch.startswith("gfx942") and not enable_dma) else 0
-    _k_pad = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_K_PAD", str(_k_pad_default))) if k_pad is None else int(k_pad)
-    if _k_pad < 0 or _k_pad % 8 != 0:
-        raise ValueError(f"k_pad must be a non-negative multiple of 8 elements (16-byte rows), got {_k_pad}")
+    if k_pad is None:
+        _k_pad = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_K_PAD", str(_k_pad_default)))
+    else:
+        _k_pad = int(k_pad)
+        if _k_pad < 0 or _k_pad % 8 != 0:
+            raise ValueError(f"k_pad must be a non-negative multiple of 8 elements (16-byte rows), got {_k_pad}")
     if not k_swizzle and enable_dma:
         raise ValueError("k_swizzle=False is not supported with the DMA path (it swizzles its own global fetch)")
     k_stride = head_dim + _k_pad
-    # Row-mask 0 turns the K XOR swizzle off: reads and writes then address `row * K_STRIDE + col` (affine).
-    k_swz_rowmask = (head_dim // 16 - 1) if k_swizzle else 0
+    # K XOR swizzle: element column ^= (row & mask) << shift. Shift 4 swaps 32-byte chunks (the shipped layout);
+    # shift 3 swaps 16-byte chunks, which makes the 16-row ds_read_b128 phases bank-conflict free at stride 256.
+    k_swz_shift = 4 if k_swz_shift is None else int(k_swz_shift)
+    v_swz_shift = 4 if v_swz_shift is None else int(v_swz_shift)
+    if k_swz_shift not in (3, 4) or v_swz_shift not in (4, 5):
+        raise ValueError(f"k_swz_shift must be 3 or 4 and v_swz_shift 4 or 5, got {k_swz_shift}, {v_swz_shift}")
+    if enable_dma and _k_pad != 0:
+        raise ValueError("the DMA path writes K rows contiguously: k_pad must be 0")
+    if k_swz_shift == 3 and head_dim < 128:
+        raise ValueError("k_swz_shift=3 needs head_dim >= 128")
+    if v_swz_shift == 5 and head_dim < 128:
+        raise ValueError("v_swz_shift=5 needs head_dim >= 128")
+    if v_swz_shift != 4 and not enable_dma:
+        raise ValueError("v_swz_shift applies to the DMA path (the other V layouts are padded, not swizzled)")
+    k_swz_rowmask = ((min(15, head_dim // 8 - 1) if k_swz_shift == 3 else head_dim // 16 - 1)) if k_swizzle else 0
     if use_hw_tr:
         vt_stride = 0
         if v_pad is None:
@@ -1532,6 +1588,13 @@ def _make_flash_attn_generic_traits(
         PV_PREFETCH_DEPTH=pv_depth,
         SCHED_LDS=int(sched_lds),
         ADDR_FOLD=bool(addr_fold),
+        K_SWZ_SHIFT=k_swz_shift,
+        V_SWZ_SHIFT=v_swz_shift,
+        KV_DBUF=kv_dbuf,
+        XCD_REMAP=bool(xcd_remap),
+        SWP=bool(swp),
+        SPREAD_STAGE=bool(spread_stage),
+        SWP_VALU=bool(swp_valu),
         KV_BUFFER_LOADS=bool(kv_buffer_loads),
     )
 
@@ -2335,8 +2398,19 @@ class GenericFlashAttnContext:
 
     def init_block_mapping(self):
         traits = self.traits
-        self.q_head_idx = self.block_id % traits.NUM_HEADS_Q
-        self.batch_q_tile_id = self.block_id // traits.NUM_HEADS_Q
+        if const_expr(traits.XCD_REMAP):
+            # Workgroups are dealt to the 8 XCDs round-robin and each XCD has its own L2. Give XCD x the heads
+            # [x*H/8, (x+1)*H/8) and walk them head by head (q tiles fastest), so the workgroups running at the same
+            # time on one XCD share a few heads' K/V instead of one tile each of H/8 heads spread over the XCD.
+            heads_per_xcd = traits.NUM_HEADS_Q // 8
+            tiles_per_head = fx.Index(gpu.grid_dim.x) // fx.Index(traits.NUM_HEADS_Q)  # batch * q tiles
+            xcd = self.block_id % fx.Index(8)
+            seq = self.block_id // fx.Index(8)
+            self.q_head_idx = xcd * fx.Index(heads_per_xcd) + seq // tiles_per_head
+            self.batch_q_tile_id = seq % tiles_per_head
+        else:
+            self.q_head_idx = self.block_id % traits.NUM_HEADS_Q
+            self.batch_q_tile_id = self.block_id // traits.NUM_HEADS_Q
         self.num_q_tiles = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
         self.q_tile_idx = self.batch_q_tile_id % self.num_q_tiles
         if const_expr(traits.CAUSAL and not traits.VARLEN and not traits.PAGED and traits.CAUSAL_REVERSE_Q):
@@ -2493,14 +2567,16 @@ class GenericFlashAttnContext:
         return buf_id * fx.Index(self.traits.LDS_K_TILE_SIZE)
 
     def v_buf_base(self, buf_id):
-        return fx.Index(self.traits.LDS_V_BASE + buf_id * self.traits.LDS_V_TILE_SIZE)
+        if const_expr(isinstance(buf_id, int)):
+            return fx.Index(self.traits.LDS_V_BASE + buf_id * self.traits.LDS_V_TILE_SIZE)
+        return fx.Index(self.traits.LDS_V_BASE) + buf_id * fx.Index(self.traits.LDS_V_TILE_SIZE)
 
     def k_swizzle(self, row_idx, col_idx):
-        mask = (row_idx & fx.Index(self.traits.K_SWZ_ROWMASK)) << fx.Index(4)
+        mask = (row_idx & fx.Index(self.traits.K_SWZ_ROWMASK)) << fx.Index(self.traits.K_SWZ_SHIFT)
         return col_idx ^ mask
 
     def v_swizzle(self, row_idx, col_idx):
-        mask = (row_idx & fx.Index(0x3)) << fx.Index(4)
+        mask = (row_idx & fx.Index(0x3)) << fx.Index(self.traits.V_SWZ_SHIFT)
         return col_idx ^ mask
 
     def sigma_kv(self, n):
@@ -2667,6 +2743,42 @@ class GenericKvGmemToLdsLoader:
                 )
             )
         return vecs
+
+    def _lane_buffer_off(self):
+        ctx = self.ctx
+        traits = ctx.traits
+        return (
+            ctx.load_row_in_batch * fx.Index(traits.STRIDE_TOKEN_KV)
+            + ctx.kv_head_idx * fx.Index(traits.HEAD_DIM)
+            + ctx.load_col_base
+        )
+
+    def load_batch_buffer(self, rsrc, tile_start, batch):
+        """One of the NUM_BATCHES_KV staging loads of a K or V tile (see ``_load_tile_buffer``)."""
+        traits = self.ctx.traits
+        row0 = tile_start + fx.Index(batch * traits.ROWS_PER_BATCH_LOAD)
+        return buffer_ops.buffer_load(
+            rsrc,
+            self._lane_buffer_off(),
+            vec_width=traits.VEC_WIDTH,
+            dtype=self.ctx.elem_dtype,
+            soffset_bytes=row0 * fx.Index(traits.STRIDE_TOKEN_KV * 2),
+        )
+
+    def store_k_batch(self, vec, batch, buf_id):
+        """LDS store of staging batch ``batch`` of a K tile (the unguarded dense layout)."""
+        ctx = self.ctx
+        traits = ctx.traits
+        lds_row = ctx.load_row_in_batch + fx.Index(batch * traits.ROWS_PER_BATCH_LOAD)
+        lds_idx = self.k_buf_base(buf_id) + lds_row * traits.K_STRIDE + self.k_swizzle(lds_row, ctx.load_col_base)
+        fx.ptr_store(vec, ctx.lds_kv + fx.Int64(lds_idx))
+
+    def store_v_batch(self, vec, batch, buf_id):
+        """LDS store of staging batch ``batch`` of a V tile (the unguarded dense layout)."""
+        ctx = self.ctx
+        traits = ctx.traits
+        lds_row = ctx.load_row_in_batch + fx.Index(batch * traits.ROWS_PER_BATCH_LOAD)
+        self._v_store_to_lds(self.v_buf_base(buf_id), lds_row, vec)
 
     def coop_load_k_global(self, tile_start):
         ctx = self.ctx
@@ -2910,7 +3022,9 @@ class GenericKvGmemToLdsLoader:
         self.LANES_PER_V_ROW = traits.HEAD_DIM * 2 // self.DMA_BYTES
         self.ROWS_PER_DMA_BATCH_V = self.DMA_BATCH_BYTES // (traits.HEAD_DIM * 2)
 
-    def _coop_dma_row(self, rsrc, lds_byte_base, num_dma, lanes_per_row, rows_per_batch, tile_start, xor_and):
+    def _coop_dma_row(
+        self, rsrc, lds_byte_base, num_dma, lanes_per_row, rows_per_batch, tile_start, xor_and, xor_shift
+    ):
         ctx = self.ctx
         traits = ctx.traits
         for d in range_constexpr(num_dma):
@@ -2923,7 +3037,7 @@ class GenericKvGmemToLdsLoader:
             lds_ptr = buffer_ops.create_llvm_ptr(lds_lane0, address_space=3)
             row_in_tile = ctx.tid // lanes_per_row + fx.Index(d * rows_per_batch)
             swiz_col_f16 = (ctx.tid % lanes_per_row) * (self.DMA_BYTES // 2)
-            xor_mask = (row_in_tile & fx.Index(xor_and)) << fx.Index(4)
+            xor_mask = (row_in_tile & fx.Index(xor_and)) << fx.Index(xor_shift)
             col_byte = (swiz_col_f16 ^ xor_mask) * 2
             global_row = tile_start + row_in_tile  # 0-based: batch base folded into k/v_rsrc
             global_byte = (
@@ -2974,7 +3088,8 @@ class GenericKvGmemToLdsLoader:
                 self.LANES_PER_K_ROW,
                 self.ROWS_PER_DMA_BATCH,
                 tile_start,
-                0x7,
+                traits.K_SWZ_ROWMASK,
+                traits.K_SWZ_SHIFT,
             )
 
     def coop_dma_v(self, tile_start, buf_id=0):
@@ -2989,6 +3104,7 @@ class GenericKvGmemToLdsLoader:
             self.ROWS_PER_DMA_BATCH_V,
             tile_start,
             0x3,
+            traits.V_SWZ_SHIFT,
         )
 
 
@@ -3013,7 +3129,7 @@ class GenericKvLdsToVgprLoader:
         ctx = self.ctx
         traits = ctx.traits
         k_hi_offset = traits.K_SUB_N * traits.K_STRIDE
-        k_swz_mask = (ctx.lane_mod_32 & fx.Index(traits.K_SWZ_ROWMASK)) << fx.Index(4)
+        k_swz_mask = (ctx.lane_mod_32 & fx.Index(traits.K_SWZ_ROWMASK)) << fx.Index(traits.K_SWZ_SHIFT)
 
         def _idx(ks, hi):
             if const_expr(traits.ENABLE_GFX942_VEC_K):
@@ -3129,6 +3245,121 @@ class GenericKvLdsToVgprLoader:
         return vl, vh
 
 
+class GenericKvStageHooks:
+    """K/V staging work spread over the MFMA steps of the two GEMMs instead of issued as one burst.
+
+    One wave per SIMD cannot run anything else while a burst of 16 ``buffer_load`` or ``ds_write`` instructions
+    drains through the shared address/data paths, so the matrix pipe idles; one instruction per MFMA pair does not.
+    ``gemm1_step`` emits the LDS stores of the staged next tiles, ``gemm2_step`` the global loads of the tiles after.
+    """
+
+    def __init__(self, kv_gmem_to_lds, k_stage, v_stage, store_k_buf, store_v_buf, k_load_tile, v_load_tile):
+        self.loader = kv_gmem_to_lds
+        self.nb = kv_gmem_to_lds.ctx.traits.NUM_BATCHES_KV
+        self.k_stage, self.v_stage = k_stage, v_stage
+        self.store_k_buf, self.store_v_buf = store_k_buf, store_v_buf
+        self.k_load_tile, self.v_load_tile = k_load_tile, v_load_tile
+        self.next_k = [None] * self.nb
+        self.next_v = [None] * self.nb
+
+    def gemm1_step(self, step):
+        if const_expr(step < self.nb):
+            self.loader.store_k_batch(self.k_stage[step], step, self.store_k_buf)
+        elif const_expr(step < 2 * self.nb):
+            self.loader.store_v_batch(self.v_stage[step - self.nb], step - self.nb, self.store_v_buf)
+
+    def gemm2_step(self, step):
+        ctx = self.loader.ctx
+        if const_expr(step < self.nb):
+            self.next_k[step] = self.loader.load_batch_buffer(ctx.k_buf_rsrc, self.k_load_tile, step)
+        elif const_expr(step < 2 * self.nb):
+            self.next_v[step - self.nb] = self.loader.load_batch_buffer(
+                ctx.v_buf_rsrc, self.v_load_tile, step - self.nb
+            )
+
+    def flush(self, gemm1_steps, gemm2_steps):
+        """Emit the stores/loads the GEMM steps did not reach (a GEMM with fewer steps than 2 * batches)."""
+        for step in range_constexpr(gemm1_steps, 2 * self.nb):
+            self.gemm1_step(step)
+        for step in range_constexpr(gemm2_steps, 2 * self.nb):
+            self.gemm2_step(step)
+
+
+class GenericSwpHooks:
+    """Vector-unit work of the software-pipelined loop, interleaved with the MFMA steps of the two GEMMs.
+
+    GEMM1 (K^T-side, 16 steps of 2 MFMAs): the exp / row-sum / bf16 pack of the *previous* tile's scores, two
+    elements a step (one ``v_pk_fma``, two ``v_exp``, two adds: about 44 of the 64 cycles two MFMAs take).
+    GEMM2 (16 steps): the O rescale one accumulator ahead of its first MFMA, and the next tile's row max and
+    correction factors in three slices. The K/V staging stores (GEMM1) and loads (GEMM2) ride along via
+    ``stage``. Emission order is the schedule: the GEMM helpers fence every step with ``sched_barrier(0)``.
+    """
+
+    def __init__(self, softmax, stage, s_lo, s_hi, nsm, corr, o_accs):
+        self.sm = softmax
+        self.ctx = softmax.ctx
+        self.stage = stage
+        self.s = list(s_lo) + list(s_hi)
+        self.nsm = nsm
+        self.corr = corr
+        self.o_accs = o_accs
+        self.p = [None] * 32
+        self.local_sum = self.ctx.c_zero_f
+        self.p_packs_lo = None
+        self.p_packs_hi = None
+        self.corr_vec = fx.full(16, fx.Float32(corr), fx.Float32)
+        # phase B inputs, set once the next tile's scores are masked
+        self.raw_lo = None
+        self.raw_hi = None
+        self.m_cur = None
+        self._lmax = [None, None]
+        self._local_max = None
+        self._m_new = None
+        self.m_nx = self.corr_nx = self.nsm_nx = None
+
+    def rescale_first(self):
+        self.o_accs[0] = Vec(self.o_accs[0]) * self.corr_vec
+
+    def gemm1_step(self, step):
+        ctx = self.ctx
+        self.stage.gemm1_step(step)
+        for e in (2 * step, 2 * step + 1):
+            p = self.sm._exp2(fx.fma(self.s[e], ctx.c_sm_scale_log2e, self.nsm, fastmath=ctx.fm_fast))
+            self.p[e] = p
+            self.local_sum = self.local_sum + p
+        if const_expr(step == 7):
+            self.p_packs_lo = self.sm.build_p_packs(self.p[:16])
+        if const_expr(step == 15):
+            self.p_packs_hi = self.sm.build_p_packs(self.p[16:])
+
+    def row_sum(self, corr, l_running):
+        """l = corr * l + this tile's row sum (after all 16 GEMM1 steps)."""
+        return self.sm.finish_row_sum(corr, l_running, self.local_sum)
+
+    def gemm2_step(self, step):
+        ctx = self.ctx
+        traits = ctx.traits
+        self.stage.gemm2_step(step)
+        if const_expr(step % 2 == 0 and step // 2 + 1 < traits.D_CHUNKS):
+            # O[dc + 1] is rescaled while O[dc] is being accumulated
+            dc = step // 2 + 1
+            self.o_accs[dc] = Vec(self.o_accs[dc]) * self.corr_vec
+        if const_expr(step == 4):
+            self._lmax[0] = _tree_reduce(list(self.raw_lo), fx.maxnumf)
+        elif const_expr(step == 6):
+            self._lmax[1] = _tree_reduce(list(self.raw_hi), fx.maxnumf)
+        elif const_expr(step == 8):
+            local_max = fx.maxnumf(self._lmax[0], self._lmax[1])
+            row_max = fx.maxnumf(local_max, self.sm.reduction_peer(local_max))
+            m_new = fx.maxnumf(self.m_cur, row_max)
+            if const_expr(traits.CAUSAL):
+                m_new = fx.maxnumf(m_new, ctx.c_neg_floor)
+            self.m_nx = m_new
+        elif const_expr(step == 10):
+            self.corr_nx = self.sm._exp2((self.m_cur - self.m_nx) * ctx.c_sm_scale_log2e)
+            self.nsm_nx = ctx.c_zero_f - ctx.c_sm_scale_log2e * self.m_nx
+
+
 class GenericQLoader:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -3168,7 +3399,7 @@ class GenericGemmHelper:
             return self._mfma(rocdl.mfma_f32_32x32x8bf16_1k, a, b, c)
         return self._mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)
 
-    def gemm1_accumulate(self, kv_lds_to_vgpr, k_lo, k_hi, q_b_packs, kv_gmem_to_lds=None, kv_start=None):
+    def gemm1_accumulate(self, kv_lds_to_vgpr, k_lo, k_hi, q_b_packs, kv_gmem_to_lds=None, kv_start=None, hooks=None):
         ctx = self.ctx
         traits = ctx.traits
         depth = traits.QK_PREFETCH_DEPTH
@@ -3189,6 +3420,8 @@ class GenericGemmHelper:
                 rocdl.sched_barrier(0)
             if const_expr(ks + depth < traits.K_STEPS_QK):
                 k_lo[ks + depth], k_hi[ks + depth] = kv_lds_to_vgpr.load_k_pack_at(ks + depth)
+            if const_expr(hooks is not None):
+                hooks.gemm1_step(ks)
             if const_expr(traits.SCHED_LDS == 2):
                 rocdl.sched_barrier(0)
         if const_expr(traits.SCHED_LDS == 1):
@@ -3202,7 +3435,7 @@ class GenericGemmHelper:
                     rocdl.sched_group_barrier(rocdl.mask_dsrd, 2, 1)
         return s_lo, s_hi
 
-    def gemm2_pv(self, kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec):
+    def gemm2_pv(self, kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec, hooks=None):
         # O += V^T_lo @ P_lo + V^T_hi @ P_hi with interleaved V prefetch.
         traits = self.ctx.traits
         steps = kv_lds_to_vgpr._pv_steps
@@ -3223,6 +3456,8 @@ class GenericGemmHelper:
             o_accs[dc] = self.mfma_acc(v_hi_cur, p_packs_hi[pks], o_accs[dc])
             if const_expr(not traits.USE_HW_TR and dc == 0 and pks < traits.D_CHUNKS - 1):
                 o_accs[pks + 1] = Vec(o_accs[pks + 1]) * corr_vec
+            if const_expr(hooks is not None):
+                hooks.gemm2_step(si)
             if const_expr(traits.SCHED_LDS == 2):
                 rocdl.sched_barrier(0)
         if const_expr(traits.SCHED_LDS == 1):
@@ -3335,6 +3570,26 @@ class GenericSoftmaxHelper:
         corr = self._exp2(diff_m_scaled)
         neg_scaled_max = ctx.c_zero_f - ctx.c_sm_scale_log2e * m_new_raw
         return m_new_raw, corr, neg_scaled_max
+
+    def exp_sum_p(self, s_raw_lo, s_raw_hi, neg_scaled_max):
+        """Second half of the online softmax: P = exp2(scale * s - scaled max) and this lane's row sum of P."""
+        ctx = self.ctx
+        p_vals_lo = []
+        p_vals_hi = []
+        local_sum = ctx.c_zero_f
+        for r in range_constexpr(16):
+            p_lo = self._exp2(fx.fma(s_raw_lo[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast))
+            p_vals_lo.append(p_lo)
+            local_sum = local_sum + p_lo
+        for r in range_constexpr(16):
+            p_hi = self._exp2(fx.fma(s_raw_hi[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast))
+            p_vals_hi.append(p_hi)
+            local_sum = local_sum + p_hi
+        return p_vals_lo, p_vals_hi, local_sum
+
+    def finish_row_sum(self, corr, l_running, local_sum):
+        """l = corr * l + the tile's row sum (reduced over the two half-waves that share a row)."""
+        return corr * l_running + (local_sum + self.reduction_peer(local_sum))
 
     def online_softmax(self, m_running, l_running, s_raw_lo, s_raw_hi):
         ctx = self.ctx
