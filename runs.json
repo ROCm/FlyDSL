@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-17T09:25:02Z",
+ "updated": "2026-11-17T09:40:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -227,11 +227,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-17T08:59:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678529"
+     "completed_at": "2026-11-17T09:24:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678529",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -297,21 +300,24 @@
    "branch": "docs/tdm-atom-point-at-tiled-form",
    "event": "pull_request",
    "title": "[Docs] Point the TDM docstrings at the tiled atom",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282",
    "created_at": "2026-11-17T05:29:49Z",
-   "updated_at": "2026-11-17T09:04:13Z",
+   "updated_at": "2026-11-17T09:37:46Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-17T09:04:13Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931860652"
+     "completed_at": "2026-11-17T09:28:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931860652",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1863,9 +1869,7 @@
      "started_at": "2026-11-14T13:47:04Z",
      "completed_at": "2026-11-14T14:11:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827700172",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
+     "log_fetch_failed": true
     }
    ]
   },
