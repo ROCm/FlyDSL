@@ -72,7 +72,7 @@ TEST(LeafParity, Mod) {
   EXPECT_EQ(toString(-7_ct % -2_ct), "-1");
   EXPECT_EQ(toString(-7_dt % 2_ct), "?-1");
   EXPECT_EQ(toString(dyn(24, 8) % 12_ct), "?0{div=4}");
-  EXPECT_EQ(toString(dyn(16, 8) % dyn(12, 4)), "?4");
+  EXPECT_EQ(toString(dyn(16, 8) % dyn(12, 4)), "?4{div=4}");
 }
 
 TEST(LeafParity, MinMaxGcd) {

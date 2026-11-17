@@ -61,10 +61,8 @@ def _reset_jit_caches(jit_fn, monkeypatch, tmp_path):
     """Full isolation: clear in-process caches AND point the disk cache at a
     fresh temp dir, so a warm developer/CI cache can never satisfy (and thus
     mask) what these tests compile."""
-    jit_fn._call_state_cache.clear()
     jit_fn._mem_cache.clear()
     jit_fn._last_compiled = None
-    jit_fn.manager_key = None
     jit_fn.cache_manager = None
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setenv("FLYDSL_CACHE_DIR", str(tmp_path / "flydsl-cache"))

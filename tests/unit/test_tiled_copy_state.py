@@ -40,8 +40,7 @@ def test_tiled_copy_set_value_preserves_type_and_copy_state(setter, runtime):
                 func.ReturnOp([])
         assert module.operation.verify()
         PassManager.parse(
-            "builtin.module(fly-rewrite-func-signature,fly-canonicalize,fly-layout-lowering,"
-            "canonicalize,convert-fly-to-rocdl,canonicalize)"
+            "builtin.module(fly-canonicalize,fly-layout-lowering," "canonicalize,convert-fly-to-rocdl,canonicalize)"
         ).run(module.operation)
         function = next(op for op in module.body.operations if op.operation.name == "func.func")
         loads = [op for op in function.body.blocks[0].operations if op.name == "rocdl.raw.ptr.buffer.load"]
@@ -83,7 +82,7 @@ def test_tiled_copy_tdm_boundary_check_with_coord_tensor(direction, runtime):
         assert ir.StringAttr(setter.attributes["field"]).value == "boundary_check_axes"
         assert setter.result.type == tiled.type
         PassManager.parse(
-            "builtin.module(fly-rewrite-func-signature,fly-canonicalize,fly-layout-lowering,"
+            "builtin.module(fly-canonicalize,fly-layout-lowering,"
             "canonicalize,fly-convert-atom-call-to-ssa-form,convert-fly-to-rocdl,canonicalize)"
         ).run(module.operation)
         assert module.operation.verify()

@@ -97,12 +97,12 @@ def gfx120_frontend(monkeypatch):
     monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1201")
-    monkeypatch.setenv("ARCH", "gfx1201")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key-g1")
 
-    def compile_only(cls, module, **_kwargs):
+    def compile_only(cls, asm, **_kwargs):
+        module = ir.Module.parse(asm)
         assert module.operation.verify()
         return module
 

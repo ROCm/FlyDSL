@@ -35,8 +35,9 @@ class DslType(Protocol):
 @runtime_checkable
 class JitArgument(Protocol):
     def __get_ir_types__(self) -> List[ir.Type]: ...
-    def __cache_signature__(self) -> object: ...
     def __c_abi_spec__(self) -> List[Tuple[type, Callable]]: ...
+
+    # Optional: def __cache_signature__(self) -> object
 
 
 @runtime_checkable
@@ -71,6 +72,12 @@ def get_ir_types(obj) -> List[ir.Type]:
 
 
 def cache_signature(obj) -> object:
+    """Hashable identity of what ``obj`` specializes in a compiled call, for this process.
+
+    An optional tool for keying user-managed caches of ``flyc.compile`` handles: equal signatures
+    for every runtime argument select the same specialization. JIT artifacts are identified by their
+    traced IR and never consult it.
+    """
     if hasattr(obj, "__cache_signature__"):
         return obj.__cache_signature__()
     if isinstance(obj, SimpleNamespace):

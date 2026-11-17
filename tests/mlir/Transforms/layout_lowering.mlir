@@ -29,22 +29,21 @@ func.func @test_vector_buffer_atomic_copy(
 
 // === Extractor Lowering: get_shape, get_stride ===
 
-// get_shape forwards the shape operand from make_layout.
+// A fully static get_shape folds to fly.static.
 // CHECK-LABEL: @test_get_shape
 func.func @test_get_shape() -> !fly.int_tuple<(4, 8)> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // get_shape is eliminated, returns the shape int_tuple directly.
   // CHECK-NOT: fly.get_shape
   // CHECK-NOT: fly.make_layout
-  // CHECK: %[[S:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(4,8)>
+  // CHECK: %[[S:.*]] = fly.static : !fly.int_tuple<(4,8)>
   // CHECK: return %[[S]]
   %shape = fly.get_shape(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)>
   return %shape : !fly.int_tuple<(4, 8)>
 }
 
-// get_stride forwards the stride operand from make_layout.
+// A fully static get_stride folds to fly.static.
 // CHECK-LABEL: @test_get_stride
 func.func @test_get_stride() -> !fly.int_tuple<(1, 4)> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
@@ -52,7 +51,7 @@ func.func @test_get_stride() -> !fly.int_tuple<(1, 4)> {
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   // CHECK-NOT: fly.get_stride
   // CHECK-NOT: fly.make_layout
-  // CHECK: %[[D:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(1,4)>
+  // CHECK: %[[D:.*]] = fly.static : !fly.int_tuple<(1,4)>
   // CHECK: return %[[D]]
   %stride = fly.get_stride(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(1, 4)>
   return %stride : !fly.int_tuple<(1, 4)>
@@ -62,7 +61,7 @@ func.func @test_get_stride() -> !fly.int_tuple<(1, 4)> {
 
 // === Extractor Lowering: get_layout, get_iter (from make_view) ===
 
-// get_layout forwards the layout from make_view; make_view and get_iter are DCE'd.
+// A fully static get_layout folds to fly.static; make_view is DCE'd.
 // CHECK-LABEL: @test_get_layout
 func.func @test_get_layout(%ptr: !fly.ptr<f32, global>) -> !fly.layout<(4,8):(1,4)> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
@@ -71,7 +70,7 @@ func.func @test_get_layout(%ptr: !fly.ptr<f32, global>) -> !fly.layout<(4,8):(1,
   %view = fly.make_view(%ptr, %layout) : (!fly.ptr<f32, global>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.memref<f32, global, (4, 8) : (1, 4)>
   // CHECK-NOT: fly.get_layout
   // CHECK-NOT: fly.make_view
-  // CHECK: %[[LAYOUT:.*]] = fly.make_layout
+  // CHECK: %[[LAYOUT:.*]] = fly.static : !fly.layout<(4,8):(1,4)>
   // CHECK: return %[[LAYOUT]]
   %result = fly.get_layout(%view) : (!fly.memref<f32, global, (4, 8) : (1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   return %result : !fly.layout<(4,8):(1,4)>
@@ -90,6 +89,28 @@ func.func @test_get_iter(%ptr: !fly.ptr<f32, global>) -> !fly.ptr<f32, global> {
   // CHECK: return %[[PTR]]
   %result = fly.get_iter(%view) : (!fly.memref<f32, global, (4, 8) : (1, 4)>) -> !fly.ptr<f32, global>
   return %result : !fly.ptr<f32, global>
+}
+
+// A coordinate tensor's iterator is its base coordinate, read from the leaves
+// of any producer; a static base folds to fly.static.
+// CHECK-LABEL: @test_coord_tensor_get_iter
+// CHECK-SAME: (%[[T:.*]]: !fly.coord_tensor
+// CHECK-NOT: fly.get_iter
+// CHECK: %[[LEAVES:.*]]:3 = fly.get_leaves(%[[T]])
+// CHECK: %[[BASE:.*]] = fly.make_int_tuple(%[[LEAVES]]#0) : (i64) -> !fly.int_tuple<?{i64}>
+// CHECK: return %[[BASE]]
+func.func @test_coord_tensor_get_iter(%t: !fly.coord_tensor<?{i64},(?,4):(1,?{i64})>) -> !fly.int_tuple<?{i64}> {
+  %result = fly.get_iter(%t) : (!fly.coord_tensor<?{i64},(?,4):(1,?{i64})>) -> !fly.int_tuple<?{i64}>
+  return %result : !fly.int_tuple<?{i64}>
+}
+
+// CHECK-LABEL: @test_coord_tensor_static_base_get_iter
+// CHECK-NOT: fly.get_iter
+// CHECK: %[[BASE:.*]] = fly.static : !fly.int_tuple<0>
+// CHECK: return %[[BASE]]
+func.func @test_coord_tensor_static_base_get_iter(%t: !fly.coord_tensor<0,(?,4):(1,?{i64})>) -> !fly.int_tuple<0> {
+  %result = fly.get_iter(%t) : (!fly.coord_tensor<0,(?,4):(1,?{i64})>) -> !fly.int_tuple<0>
+  return %result : !fly.int_tuple<0>
 }
 
 // -----
@@ -151,7 +172,7 @@ func.func @test_size_int_tuple() -> !fly.int_tuple<32> {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   // 4 * 8 = 32
   // CHECK-NOT: fly.size
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<32>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<32>
   // CHECK: return %[[R]]
   %size = fly.size(%s) : (!fly.int_tuple<(4, 8)>) -> !fly.int_tuple<32>
   return %size : !fly.int_tuple<32>
@@ -164,7 +185,7 @@ func.func @test_size_layout() -> !fly.int_tuple<32> {
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   // CHECK-NOT: fly.size
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<32>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<32>
   // CHECK: return %[[R]]
   %size = fly.size(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<32>
   return %size : !fly.int_tuple<32>
@@ -182,7 +203,7 @@ func.func @test_crd2idx_static() -> !fly.int_tuple<14> {
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   %coord = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
   // CHECK-NOT: fly.crd2idx
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<14>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<14>
   // CHECK: return %[[R]]
   %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(2, 3)>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<14>
   return %idx : !fly.int_tuple<14>
@@ -215,7 +236,7 @@ func.func @test_crd2idx_composed_outer() -> !fly.int_tuple<28> {
       -> !fly.composed_layout<32:2 o 0 o [32:1 o 0 o (4, 8) : (1, 4)]>
   %coord = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
   // CHECK-NOT: fly.crd2idx
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<28>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<28>
   // CHECK: return %[[R]]
   %idx = fly.crd2idx(%coord, %cl2)
       : (!fly.int_tuple<(2, 3)>,
@@ -256,7 +277,7 @@ func.func @test_decomposition_composed_outer(%ptr: !fly.ptr<f32, global>)
          !fly.composed_layout<128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>)
       -> !fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>
   // CHECK-NOT: fly.decomposition
-  // CHECK: fly.make_int_tuple() : () -> !fly.int_tuple<52>
+  // CHECK: fly.static : !fly.int_tuple<52>
   // CHECK: fly.make_view{{.*}} -> !fly.memref<f32, global, (4,8):(1,4)>
   %decomp = fly.decomposition(%view)
       : (!fly.memref<f32, global, 128:2 o 5 o [128:3 o 7 o (4, 8) : (1, 4)]>)
@@ -275,7 +296,7 @@ func.func @test_crd2idx_dynamic(%c0: i32, %c1: i32) -> i32 {
   %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(?, ?)>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<?>
   // CHECK: %[[C4:.*]] = arith.constant 4 : i32
   // CHECK: %[[MUL:.*]] = arith.muli %[[C1]], %[[C4]] : i32
-  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] : i32
+  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] overflow<nsw> : i32
   // CHECK: return %[[ADD]]
   %scalar = fly.get_scalar(%idx) : (!fly.int_tuple<?>) -> i32
   return %scalar : i32
@@ -293,7 +314,7 @@ func.func @test_crd2idx_dynamic_scaled_basis(%c0: i32, %c1: i32) -> i32 {
   %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(?, ?)>, !fly.layout<(48, 21) : (1E1, 48E1)>) -> !fly.int_tuple<(0, ?)>
   // CHECK: %[[C48:.*]] = arith.constant 48 : i32
   // CHECK: %[[MUL:.*]] = arith.muli %[[C1]], %[[C48]] : i32
-  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] : i32
+  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] overflow<nsw> : i32
   // CHECK: return %[[ADD]]
   %elem = fly.select(%idx) {indices = array<i32: 1>} : (!fly.int_tuple<(0, ?)>) -> !fly.int_tuple<?>
   %scalar = fly.get_scalar(%elem) : (!fly.int_tuple<?>) -> i32
@@ -310,7 +331,7 @@ func.func @test_int_tuple_add() -> !fly.int_tuple<(5, 11)> {
   %a = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
   %b = fly.make_int_tuple() : () -> !fly.int_tuple<(3, 8)>
   // CHECK-NOT: fly.int_tuple_add
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(5,11)>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<(5,11)>
   // CHECK: return %[[R]]
   %result = fly.int_tuple_add(%a, %b) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(3, 8)>) -> !fly.int_tuple<(5, 11)>
   return %result : !fly.int_tuple<(5, 11)>
@@ -322,7 +343,7 @@ func.func @test_int_tuple_mul() -> !fly.int_tuple<(6, 24)> {
   %a = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
   %b = fly.make_int_tuple() : () -> !fly.int_tuple<(3, 8)>
   // CHECK-NOT: fly.int_tuple_mul
-  // CHECK: %[[R:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(6,24)>
+  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<(6,24)>
   // CHECK: return %[[R]]
   %result = fly.int_tuple_mul(%a, %b) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(3, 8)>) -> !fly.int_tuple<(6, 24)>
   return %result : !fly.int_tuple<(6, 24)>
@@ -342,9 +363,7 @@ func.func @test_logical_divide() -> !fly.layout<((2,4),1):((1,2),0)> {
   %dd = fly.make_int_tuple() : () -> !fly.int_tuple<(1,2)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(1,2)>) -> !fly.layout<(2,4):(1,2)>
   // CHECK-NOT: fly.logical_divide
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((2,4),1)>
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((1,2),0)>
-  // CHECK: %[[R:.*]] = fly.make_layout
+  // CHECK: %[[R:.*]] = fly.static : !fly.layout<((2,4),1):((1,2),0)>
   // CHECK: return %[[R]]
   %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<8:1>, !fly.layout<(2,4):(1,2)>) -> !fly.layout<((2,4),1):((1,2),0)>
   return %result : !fly.layout<((2,4),1):((1,2),0)>
@@ -364,9 +383,7 @@ func.func @test_logical_product() -> !fly.layout<((4,8),(2,2)):((1,4),(32,64))> 
   %td = fly.make_int_tuple() : () -> !fly.int_tuple<(1,2)>
   %tile = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2,2)>, !fly.int_tuple<(1,2)>) -> !fly.layout<(2,2):(1,2)>
   // CHECK-NOT: fly.logical_product
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((4,8),(2,2))>
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((1,4),(32,64))>
-  // CHECK: %[[R:.*]] = fly.make_layout
+  // CHECK: %[[R:.*]] = fly.static : !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
   // CHECK: return %[[R]]
   %result = fly.logical_product(%layout, %tile) : (!fly.layout<(4,8):(1,4)>, !fly.layout<(2,2):(1,2)>) -> !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
   return %result : !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
@@ -383,9 +400,7 @@ func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(4,1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(4,1)>) -> !fly.layout<(2,4):(4,1)>
   // CHECK-NOT: fly.right_inverse
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<(4,2)>
-  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<(2,1)>
-  // CHECK: %[[R:.*]] = fly.make_layout
+  // CHECK: %[[R:.*]] = fly.static : !fly.layout<(4,2):(2,1)>
   // CHECK: return %[[R]]
   %result = fly.right_inverse(%layout) : (!fly.layout<(2,4):(4,1)>) -> !fly.layout<(4,2):(2,1)>
   return %result : !fly.layout<(4,2):(2,1)>
@@ -395,32 +410,61 @@ func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
 
 // === GetLeavesOp Lowering ===
 
-// dynamicOnly=false: all leaves returned, static as arith.constant, dynamic forwarded.
+// Only dynamic leaves are returned; static leaves stay in the type.
 // Mixed i32/i64 dynamic leaves.
-// CHECK-LABEL: @test_get_leaves_all
+// CHECK-LABEL: @test_get_leaves_dynamic
 // CHECK-SAME: (%[[X:.*]]: i32, %[[Y:.*]]: i64)
-func.func @test_get_leaves_all(%x: i32, %y: i64) -> (i32, i32, i64) {
-  %t = fly.make_int_tuple(%x, %y) : (i32, i64) -> !fly.int_tuple<(4, ?, ?{i64})>
-  // CHECK-NOT: fly.get_leaves
-  // CHECK-DAG: %[[C4:.*]] = arith.constant 4 : i32
-  // CHECK: return %[[C4]], %[[X]], %[[Y]]
-  %0:3 = fly.get_leaves(%t) : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i32, i64)
-  return %0#0, %0#1, %0#2 : i32, i32, i64
-}
-
-// -----
-
-// dynamicOnly=true: only dynamic leaves returned, static skipped.
-// Mixed i32/i64 dynamic leaves.
-// CHECK-LABEL: @test_get_leaves_dynamic_only
-// CHECK-SAME: (%[[X:.*]]: i32, %[[Y:.*]]: i64)
-func.func @test_get_leaves_dynamic_only(%x: i32, %y: i64) -> (i32, i64) {
+func.func @test_get_leaves_dynamic(%x: i32, %y: i64) -> (i32, i64) {
   %t = fly.make_int_tuple(%x, %y) : (i32, i64) -> !fly.int_tuple<(4, ?, ?{i64})>
   // CHECK-NOT: fly.get_leaves
   // CHECK-NOT: arith.constant
   // CHECK: return %[[X]], %[[Y]]
-  %0:2 = fly.get_leaves(%t) {dynamicOnly = true} : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i64)
+  %0:2 = fly.get_leaves(%t) : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i64)
   return %0#0, %0#1 : i32, i64
+}
+
+// -----
+
+// A tile constructor's operands are the dynamic leaves of its layouts.
+// CHECK-LABEL: @test_get_leaves_make_tile
+// CHECK-SAME: (%[[X:.*]]: i32, %[[Y:.*]]: i64)
+func.func @test_get_leaves_make_tile(%x: i32, %y: i64) -> (i32, i64) {
+  %t = fly.make_tile(%x, %y) : (i32, i64) -> !fly.tile<[?:1|(4,?{i64}):(1,4)|*]>
+  // CHECK-NOT: fly.get_leaves
+  // CHECK: return %[[X]], %[[Y]]
+  %0:2 = fly.get_leaves(%t) : (!fly.tile<[?:1|(4,?{i64}):(1,4)|*]>) -> (i32, i64)
+  return %0#0, %0#1 : i32, i64
+}
+
+// -----
+
+// A dynamic tiler binds the operands of its constructor.
+// CHECK-LABEL: @test_composition_dynamic_tile
+// CHECK-SAME: (%[[X:.*]]: i32,
+func.func @test_composition_dynamic_tile(%x: i32, %l: !fly.layout<(8,16):(1,8)>) -> !fly.layout<(?,16):(1,8)> {
+  %t = fly.make_tile(%x) : (i32) -> !fly.tile<[?:1|*]>
+  // CHECK-NOT: fly.composition
+  // CHECK: %[[S:.*]] = fly.make_int_tuple(%[[X]]) : (i32) -> !fly.int_tuple<(?,16)>
+  // CHECK: %[[D:.*]] = fly.static : !fly.int_tuple<(1,8)>
+  // CHECK: %[[R:.*]] = fly.make_layout(%[[S]], %[[D]])
+  // CHECK: return %[[R]]
+  %r = fly.composition(%l, %t) : (!fly.layout<(8,16):(1,8)>, !fly.tile<[?:1|*]>) -> !fly.layout<(?,16):(1,8)>
+  return %r : !fly.layout<(?,16):(1,8)>
+}
+
+// -----
+
+// A dynamic tiler without a constructor binds the leaves fly.get_leaves extracts.
+// CHECK-LABEL: @test_logical_divide_dynamic_tile_arg
+// CHECK-SAME: (%[[T:.*]]: !fly.tile<[?:1|*]>,
+func.func @test_logical_divide_dynamic_tile_arg(%t: !fly.tile<[?:1|*]>, %l: !fly.layout<(8,16):(1,8)>) -> !fly.layout<((?,?),16):((1,?),8)> {
+  // CHECK-NOT: fly.logical_divide
+  // CHECK: %[[N:.*]] = fly.get_leaves(%[[T]]) : (!fly.tile<[?:1|*]>) -> i32
+  // CHECK: %[[Q:.*]] = arith.ceildivsi %{{.*}}, %[[N]] : i32
+  // CHECK: fly.make_int_tuple(%[[N]], %[[Q]]) : (i32, i32) -> !fly.int_tuple<((?,?),16)>
+  // CHECK: fly.make_int_tuple(%[[N]]) : (i32) -> !fly.int_tuple<((1,?),8)>
+  %r = fly.logical_divide(%l, %t) : (!fly.layout<(8,16):(1,8)>, !fly.tile<[?:1|*]>) -> !fly.layout<((?,?),16):((1,?),8)>
+  return %r : !fly.layout<((?,?),16):((1,?),8)>
 }
 
 // -----
@@ -528,7 +572,7 @@ func.func @test_add_offset_static_dyn_swapped(%ptr: !fly.ptr<f32, shared>, %x: i
 func.func @test_add_offset_static_static_fused(%ptr: !fly.ptr<f32, shared>) -> f32 {
   %a = fly.make_int_tuple() : () -> !fly.int_tuple<64>
   %b = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
+  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
   // CHECK: fly.add_offset(%{{.*}}, %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
   // CHECK-NOT: fly.add_offset
   %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
@@ -560,7 +604,7 @@ func.func @test_add_offset_dyn_c1_c2(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f3
   %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // CHECK-NOT: arith.addi
   // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
+  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
   // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
   %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
@@ -578,7 +622,7 @@ func.func @test_add_offset_static_dyn_static(%ptr: !fly.ptr<f32, shared>, %x: i3
   %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // CHECK-NOT: arith.addi
   // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
+  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
   // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
   %p1 = fly.add_offset(%ptr, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
@@ -636,7 +680,7 @@ func.func @test_add_offset_zero_and_negative(%ptr: !fly.ptr<f32, shared>, %x: i3
   %n = fly.make_int_tuple() : () -> !fly.int_tuple<-32>
   // CHECK-NOT: arith.addi
   // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<-32>
+  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<-32>
   // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<-32>) -> !fly.ptr<f32, shared>
   %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %z) : (!fly.ptr<f32, shared>, !fly.int_tuple<0>) -> !fly.ptr<f32, shared>
@@ -654,7 +698,7 @@ func.func @test_add_offset_multi_use_inner_still_fuses(%ptr: !fly.ptr<f32, share
   %b = fly.make_int_tuple() : () -> !fly.int_tuple<32>
   // The outer offset is folded into a single static tail off the base pointer,
   // even though %p1 is also loaded from directly.
-  // CHECK: %[[C96:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<96>
+  // CHECK: %[[C96:.*]] = fly.static : !fly.int_tuple<96>
   // CHECK: fly.add_offset(%{{.*}}, %[[C96]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
   %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
   %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>

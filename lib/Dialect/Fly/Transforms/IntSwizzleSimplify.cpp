@@ -31,7 +31,7 @@ namespace {
 // For each value we take max() of two evidences:
 //   * forward, from the defining arith op (gcd / sat-mul / shl);
 //   * backward, from any Make*Op user that carries a static
-//     IntAttr.divisibility annotation on its result IntTupleAttr.
+//     LeafAttr.divisibility annotation on its result IntTupleAttr.
 //===----------------------------------------------------------------------===//
 
 class Divisibility {
@@ -99,31 +99,16 @@ int Divisibility::fromMakeOpUser(Operation *user, unsigned operandIdx) {
   if (!resTy)
     return 1;
 
-  // DFS the IntTupleAttr to find the operandIdx-th dynamic leaf.
+  // The constructor operands are the dynamic leaves in tuple preorder.
   unsigned cursor = 0;
-  int result = 1;
-  std::function<bool(IntTupleAttr)> visit = [&](IntTupleAttr a) -> bool {
-    if (a.isLeaf()) {
-      auto leaf = a.extractIntFromLeaf();
-      if (!leaf || leaf.getStaticFlag())
-        return false;
-      if (cursor++ == operandIdx) {
-        int32_t d = leaf.getDivisibility();
-        result = d > 0 ? (int)d : 1;
-        return true;
-      }
-      return false;
-    }
-    auto arr = dyn_cast<ArrayAttr>(a.getValue());
-    if (!arr)
-      return false;
-    for (int i = 0, e = arr.size(); i < e; ++i)
-      if (visit(a.at(i)))
-        return true;
-    return false;
-  };
-  visit(resTy.getAttr());
-  return result;
+  for (auto leaf : resTy.getRef().leaves()) {
+    auto scale = leaf.scale();
+    if (scale.isStatic())
+      continue;
+    if (cursor++ == operandIdx)
+      return std::max<int>(scale.divisibility(), 1);
+  }
+  return 1;
 }
 
 //===------------------------------------------------------------------------------------------===//

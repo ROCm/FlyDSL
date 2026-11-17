@@ -82,7 +82,6 @@ def test_toolkit_root_uses_a_ready_rocm_path_or_says_what_to_install(tmp_path, m
 
 
 def test_detect_target_without_an_arch_names_flydsl_gpu_arch(monkeypatch):
-    monkeypatch.delenv("ARCH", raising=False)
     monkeypatch.setattr("flydsl.compiler.backends.rocm.get_rocm_arch", lambda: "")
     with pytest.raises(RuntimeError, match="FLYDSL_GPU_ARCH"):
         RocmBackend.detect_target()

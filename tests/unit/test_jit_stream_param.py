@@ -113,6 +113,7 @@ class TestKernelStream:
     def test_torch_stream_object(self, abc_tensors):
         a, b, c = abc_tensors
         stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
         _vecadd(a, b, c, SIZE, BLOCK_DIM, VEC_WIDTH, stream=stream)
         torch.cuda.synchronize()
         assert torch.allclose(c, a + b, atol=1e-5)
@@ -121,6 +122,7 @@ class TestKernelStream:
         """aiter passes cuda_stream as raw int."""
         a, b, c = abc_tensors
         stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
         _vecadd(a, b, c, SIZE, BLOCK_DIM, VEC_WIDTH, stream=stream.cuda_stream)
         torch.cuda.synchronize()
         assert torch.allclose(c, a + b, atol=1e-5)
@@ -130,6 +132,7 @@ class TestKernelStream:
         a, b, c1 = abc_tensors
         c2 = torch.empty_like(a)
         stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
 
         _vecadd(a, b, c1, SIZE, BLOCK_DIM, VEC_WIDTH, stream=stream)
         _vecadd(a, b, c2, SIZE, BLOCK_DIM, VEC_WIDTH, stream=stream.cuda_stream)
@@ -175,6 +178,7 @@ class TestKernelParameter:
         b = torch.randn(SIZE, device="cuda", dtype=torch.float32)
         c = torch.empty_like(b)
         stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
         _vecadd(w, b, c, SIZE, BLOCK_DIM, VEC_WIDTH, stream=stream.cuda_stream)
         torch.cuda.synchronize()
         assert torch.allclose(c, w.data + b, atol=1e-5)

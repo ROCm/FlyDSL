@@ -10,21 +10,54 @@ import random
 import sys
 from itertools import combinations, product
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import pytest
 import torch
-import triton
 
 from flydsl.runtime.device import get_rocm_arch
 
+# triton and aiter only provide the gluon PA comparison. Without them the FlyDSL
+# kernel is still checked against the PyTorch reference, with torch stand-ins for
+# the aiter dtypes and quant helpers used below.
 try:
-    import aiter
+    import triton
+except ImportError:
+    triton = None
+
+try:
+    import aiter  # noqa: F401
     from aiter import dtypes, per_tensor_quant, pertoken_quant
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+
+    HAS_AITER = True
 except Exception as exc:
-    pytest.skip(f"aiter is not available: {exc}", allow_module_level=True)
+    HAS_AITER = False
+    print(f"Warning: aiter is not available ({exc}); using torch quant helpers.")
+
+    def pertoken_quant(x: torch.Tensor, quant_dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x.to(torch.float32)
+        scale = torch.abs(x).amax(dim=-1, keepdim=True) / torch.finfo(quant_dtype).max
+        scale[scale == 0] = 1
+        return (x / scale).to(quant_dtype), scale
+
+    def per_tensor_quant(x: torch.Tensor, quant_dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x.to(torch.float32)
+        scale = torch.abs(x).max() / torch.finfo(quant_dtype).max
+        return (x / scale).to(quant_dtype), scale.view(1)
+
+    def _str2tuple(value: str) -> Union[int, Tuple[int, ...]]:
+        parts = [int(part.strip()) for part in value.strip("()").split(",") if part.strip()]
+        return parts[0] if "," not in value and len(parts) == 1 else tuple(parts)
+
+    _fp8 = torch.float8_e4m3fnuz if get_rocm_arch() == "gfx942" else torch.float8_e4m3fn
+    dtypes = SimpleNamespace(
+        fp8=_fp8,
+        d_dtypes={"fp8": _fp8, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32},
+        str2tuple=_str2tuple,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -34,10 +67,11 @@ try:
     from triton.experimental import gluon  # noqa: F401
     from triton.experimental.gluon import language as gl  # noqa: F401
 
-    HAS_GLUON = True
+    HAS_GLUON = HAS_AITER
 except ImportError:
     HAS_GLUON = False
-    print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
+if not HAS_GLUON:
+    print("Warning: aiter's Gluon PA is unavailable; the Gluon comparison is skipped.")
 
 try:
     from kernels.attention.pa_decode_fp8 import (
@@ -55,13 +89,26 @@ except ImportError as exc:
     HAS_FLYDSL_PS = False
     print(f"Warning: FlyDSL PA decode PS not available: {exc}")
 
-torch.set_default_device("cuda")
 torch.set_printoptions(sci_mode=False)
 
-TRITON_VERSION = triton.__version__
+TRITON_VERSION = triton.__version__ if triton is not None else "none"
 TEST_NAME = "ps_accuracy"
 UNIFORM_RANGE = (-1, 1)
 USE_CUDA_GRAPH_TEST = False
+
+
+def cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+@pytest.fixture(autouse=True)
+def _cuda_default_device():
+    """Allocate on cuda by default in these tests only, not in later modules."""
+    previous = torch.get_default_device()
+    torch.set_default_device("cuda")
+    yield
+    torch.set_default_device(previous)
+
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -441,7 +488,7 @@ def get_gluon_partition_count(
             context_partition_size,
             query_length,
         )
-    split_kv_blocks = triton.cdiv(block_size, context_partition_size)
+    split_kv_blocks = cdiv(block_size, context_partition_size)
     return get_recommended_splits(num_seqs, num_kv_heads, split_kv_blocks)
 
 
@@ -584,7 +631,7 @@ def run_pa_decode_ps_test(
 ) -> Dict[str, Union[float, int, str, bool, Tuple[int, int]]]:
     if not HAS_FLYDSL_PS:
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
-    if compute_type != aiter.dtypes.fp8:
+    if compute_type != dtypes.fp8:
         raise ValueError("This PS-only harness only keeps fp8 cases.")
     results: Dict[str, Union[float, int, str, bool, Tuple[int, int]]] = {
         "compute_type": dtype_to_name(compute_type),
@@ -609,7 +656,7 @@ def run_pa_decode_ps_test(
     num_query_heads, num_kv_heads = num_heads
     if num_query_heads % num_kv_heads != 0:
         raise ValueError("Query heads must be divisible by KV heads")
-    data_type = torch.bfloat16 if compute_type == aiter.dtypes.fp8 else compute_type
+    data_type = torch.bfloat16 if compute_type == dtypes.fp8 else compute_type
     softmax_scale = 1.0 / (head_size**0.5)
     total_queries = batch_size * query_length
     query_output_indptr = torch.arange(
@@ -634,9 +681,9 @@ def run_pa_decode_ps_test(
         kv_len_list = [context_length] * batch_size
     context_lengths = torch.tensor(kv_len_list, dtype=torch.int32, device=device)
     max_context_length = max(16384, context_length)
-    max_blocks_per_sequence = triton.cdiv(max_context_length, block_size)
+    max_blocks_per_sequence = cdiv(max_context_length, block_size)
     total_blocks = max_blocks_per_sequence * batch_size
-    blocks_per_sequence = triton.cdiv(context_length, block_size)
+    blocks_per_sequence = cdiv(context_length, block_size)
     block_tables_list: List[List[int]] = []
     for _ in range(batch_size):
         block_tables_list.append([random.randint(0, total_blocks - 1) for _ in range(blocks_per_sequence)])
@@ -669,7 +716,7 @@ def run_pa_decode_ps_test(
         ) = quantize_kv_cache_symmetric(
             key_cache,
             value_cache,
-            quant_dtype=aiter.dtypes.fp8,
+            quant_dtype=dtypes.fp8,
         )
     else:
         (
@@ -682,7 +729,7 @@ def run_pa_decode_ps_test(
         ) = quantize_kv_cache_per_tensor(
             key_cache,
             value_cache,
-            quant_dtype=aiter.dtypes.fp8,
+            quant_dtype=dtypes.fp8,
         )
     reference_output = torch_mha_extend(
         query,
@@ -754,6 +801,8 @@ def run_pa_decode_ps_test(
         print("\nGluon vs Torch:")
         torch.testing.assert_close(gluon_output, reference_output, atol=gluon_tol, rtol=gluon_tol)
         print("Gluon vs Torch PASSED")
+    else:
+        print("\nGluon vs Torch: skipped, aiter's Gluon PA is unavailable")
 
     kv_page_indices, kv_indptr = build_ps_page_data(
         block_tables_list,
@@ -1055,7 +1104,7 @@ def run_multi_pa_decode_ps_test(
 
 
 def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST_NAME) -> None:
-    print(f"Triton version: {triton.__version__}")
+    print(f"Triton version: {TRITON_VERSION}")
     parser = create_argument_parser()
     running_via_pytest = "pytest" in sys.argv[0] or sys.argv[0].endswith("py.test")
     args = parser.parse_args([] if running_via_pytest else None)
@@ -1221,7 +1270,7 @@ def test_tile_pa_vectorized_5d_matches_torch(
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
     num_query_heads, num_kv_heads = num_heads
-    blocks_per_sequence = triton.cdiv(context_length, block_size)
+    blocks_per_sequence = cdiv(context_length, block_size)
     total_blocks = batch_size * blocks_per_sequence
     device = torch.device("cuda:0")
     cache_dtype = dtypes.d_dtypes[compute_type]
@@ -1493,7 +1542,7 @@ def test_fp8_cache_offset_above_2gib(
     num_query_heads, num_kv_heads = num_heads
     cache_dtype = dtypes.d_dtypes[compute_type]
     page_bytes = num_kv_heads * head_size * block_size * cache_dtype.itemsize
-    high_page = triton.cdiv(2**31, page_bytes)
+    high_page = cdiv(2**31, page_bytes)
     total_blocks = high_page + 1
     device = torch.device("cuda:0")
 
@@ -1655,4 +1704,5 @@ def test_sliding_window_accuracy(
 
 
 if __name__ == "__main__":
+    torch.set_default_device("cuda")
     parse_arg_and_run_test()

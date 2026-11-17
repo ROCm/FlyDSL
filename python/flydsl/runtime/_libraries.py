@@ -10,10 +10,10 @@ from typing import List, Optional
 def _distribution_dirs() -> List[Path]:
     import flydsl
 
-    root = Path(flydsl.__file__).resolve().parent
+    root = Path(flydsl.__file__).parent
     # ``flydsl.libs`` holds libraries vendored into a repaired wheel.
     candidates = [root / "_mlir" / "_mlir_libs", root.parent / "flydsl.libs"]
-    return [d.resolve() for d in candidates if d.is_dir()]
+    return [d for d in candidates if d.is_dir()]
 
 
 def _find_aot_runtime_archive(backend: Optional[str] = None) -> Path:

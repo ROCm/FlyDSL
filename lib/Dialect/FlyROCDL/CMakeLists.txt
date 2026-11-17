@@ -8,7 +8,6 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   CDNA4/MmaAtom.cpp
   CDNA4/CopyAtom.cpp
   CDNA5/CopyAtom.cpp
-  CDNA5/TdmGeometry.cpp
   CDNA5/TdmAtomBuilder.cpp
   Transforms/ExpandOps.cpp
   Transforms/ClusterAttr.cpp
@@ -21,4 +20,9 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   DEPENDS
   MLIRFlyROCDLIncGen
   FlyROCDLTransformPassIncGen
+
+  LINK_LIBS
+  MLIRArithUtils
+  MLIRFlyDialect
+  MLIRROCDLDialect
 )

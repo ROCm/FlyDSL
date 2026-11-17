@@ -35,26 +35,26 @@ class RewriteToMakeIntTuple final : public OpRewritePattern<IntTupleLikeOp> {
   }
 };
 
-class RebuildStaticValue : public RewritePattern {
+class RebuildStaticResult : public RewritePattern {
 public:
-  RebuildStaticValue(MLIRContext *context, PatternBenefit benefit = 1)
+  RebuildStaticResult(MLIRContext *context, PatternBenefit benefit = 1)
       : RewritePattern(MatchAnyOpTypeTag(), benefit, context) {}
 
   LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
-    if (op->getNumResults() != 1)
+    if (isa<StaticOp>(op))
       return failure();
-    Type resultType = op->getResult(0).getType();
-
-    auto mayStatic = dyn_cast<MayStaticTypeInterface>(resultType);
-    if (!mayStatic || !mayStatic.isStatic())
-      return failure();
-
-    Value rebuild = mayStatic.rebuildStaticValue(rewriter, op->getLoc(), op->getResult(0));
-    if (!rebuild)
-      return failure();
-
-    rewriter.replaceOp(op, rebuild);
-    return success();
+    bool changed = false;
+    for (Value result : op->getResults()) {
+      auto mayStatic = dyn_cast<MayStaticTypeInterface>(result.getType());
+      // result.use_empty() keeps any side effects it has.
+      if (!mayStatic || !mayStatic.isStatic() || result.use_empty())
+        continue;
+      rewriter.setInsertionPoint(op);
+      Value rebuilt = StaticOp::create(rewriter, op->getLoc(), result.getType());
+      rewriter.replaceAllUsesWith(result, rebuilt);
+      changed = true;
+    }
+    return success(changed);
   }
 };
 
@@ -68,7 +68,7 @@ public:
 
     patterns.add<RewriteToMakeIntTuple<MakeShapeOp>, RewriteToMakeIntTuple<MakeStrideOp>,
                  RewriteToMakeIntTuple<MakeCoordOp>>(context);
-    patterns.add<RebuildStaticValue>(context);
+    patterns.add<RebuildStaticResult>(context);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();

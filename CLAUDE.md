@@ -141,15 +141,15 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 | Purpose | Variable |
 |---|---|
 | Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
-| Override compile arch | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` disables disk cache; in-memory cache remains) |
 | AOT-cache-only execution | `FLYDSL_RUNTIME_RUN_ONLY` (`1` skips JIT; loads disk cache only, raises on cache miss; incompatible with `FLYDSL_DUMP_IR=1`) |
 | External LLVM/MLIR codegen | `FLYDSL_COMPILE_LLVM_DIR` (install prefix; enables external-binary final codegen, part of the JIT cache key) |
+| ROCm device-bitcode root | `FLYDSL_COMPILE_ROCM_PATH` (overrides the `amdgcn/bitcode` bundled with the package and `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME`) |
 | IR dumps | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Runtime kind | `FLYDSL_RUNTIME_KIND` |
-| GPU arch hints | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| Override GPU arch (compile target and arch checks) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 | Debug info / pass diagnostics | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_DEBUG_PRINT_AFTER_ALL`, `FLYDSL_DEBUG_AST_DIFF` |
 
 The JIT disk cache normally invalidates on kernel source and closure changes.

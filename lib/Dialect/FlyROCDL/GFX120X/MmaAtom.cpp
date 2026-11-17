@@ -53,13 +53,6 @@ static LayoutAttr getThrValLayoutAB_IU4_K32(MLIRContext *ctx) {
 
 bool MmaOpGFX120X_WMMAType::isStatic() const { return true; }
 
-Value MmaOpGFX120X_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                Value currentValue) const {
-  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
-}
-
 Type MmaOpGFX120X_WMMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpGFX120X_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX120X_WMMAType::getValTypeC() const { return getElemTyAcc(); }

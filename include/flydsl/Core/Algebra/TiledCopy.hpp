@@ -33,6 +33,11 @@ public:
            Layout thrLayout, Layout thrBitLayoutSrc, Layout thrBitLayoutDst,
            Layout thrBitLayoutRef);
 
+  /// Whether these layouts form an atom: each bit layout, recast to values,
+  /// spans the threads of `thrLayout`.
+  static bool isValid(int32_t valueBitWidth, const Layout &thrLayout, const Layout &thrBitLayoutSrc,
+                      const Layout &thrBitLayoutDst, const Layout &thrBitLayoutRef);
+
   const OpaqueValue &copyOperation() const;
   const OpaqueValue &copyInternalType() const;
   int32_t valueBitWidth() const;
@@ -62,6 +67,9 @@ public:
   struct Storage;
 
   TiledCopy(CopyAtom<Cat> copyAtom, Layout layoutCopyTV, Tile<Cat> tilerMN);
+
+  /// Whether `layoutCopyTV` tiles whole atoms of `copyAtom`.
+  static bool isValid(const CopyAtom<Cat> &copyAtom, const Layout &layoutCopyTV);
 
   const CopyAtom<Cat> &copyAtom() const;
 
@@ -216,6 +224,22 @@ CopyAtom<Cat>::CopyAtom(OpaqueValue copyOperation, OpaqueValue copyInternalType,
   FLYDSL_CORE_ASSERT(size<0>(valLayoutRef()) == storage_->thrLayout.size());
 }
 
+template <class Cat>
+bool CopyAtom<Cat>::isValid(int32_t valueBitWidth, const Layout &thrLayout,
+                            const Layout &thrBitLayoutSrc, const Layout &thrBitLayoutDst,
+                            const Layout &thrBitLayoutRef) {
+  if (valueBitWidth <= 0)
+    return false;
+  for (const Layout *bits : {&thrBitLayoutSrc, &thrBitLayoutDst, &thrBitLayoutRef}) {
+    if (bits->rank() < 2)
+      return false;
+    auto values = recast_layout(valueBitWidth, 1, *bits);
+    if (values.isError() || !(size<0>(values) == thrLayout.size()))
+      return false;
+  }
+  return true;
+}
+
 template <class Cat> const OpaqueValue &CopyAtom<Cat>::copyOperation() const {
   return storage_->copyOperation;
 }
@@ -257,6 +281,21 @@ TiledCopy<Cat>::TiledCopy(CopyAtom<Cat> copyAtom, typename TiledCopy<Cat>::Layou
 
   FLYDSL_CORE_ASSERT(tiledThreads.staticValue() % atomThreads.staticValue() == 0);
   FLYDSL_CORE_ASSERT(tiledValues.staticValue() % atomValues.staticValue() == 0);
+}
+
+template <class Cat>
+bool TiledCopy<Cat>::isValid(const CopyAtom<Cat> &copyAtom, const Layout &layoutCopyTV) {
+  if (layoutCopyTV.rank() < 2)
+    return false;
+  auto tiledThreads = size<0>(layoutCopyTV);
+  auto tiledValues = size<1>(layoutCopyTV);
+  auto atomThreads = copyAtom.atomNumThr();
+  auto atomValues = copyAtom.atomNumVal();
+  if (!tiledThreads.isStatic() || !tiledValues.isStatic() || !atomThreads.isStatic() ||
+      !atomValues.isStatic() || atomThreads.staticValue() <= 0 || atomValues.staticValue() <= 0)
+    return false;
+  return tiledThreads.staticValue() % atomThreads.staticValue() == 0 &&
+         tiledValues.staticValue() % atomValues.staticValue() == 0;
 }
 
 template <class Cat>

@@ -153,6 +153,7 @@ def benchmark_vector_add(vec_width: int = 4, *, size_multiplier: int = 10000, ru
     c_dev = torch.empty_like(a_dev)
 
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
 
     tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
 

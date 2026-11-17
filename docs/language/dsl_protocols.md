@@ -21,13 +21,17 @@ their respective pages.
 | Hook | Meaning |
 |---|---|
 | `value.__get_ir_types__()` | MLIR argument types contributed to the function signature |
-| `value.__cache_signature__()` | stable, hashable argument contribution to the compilation cache key |
 | `value.__c_abi_spec__()` | ordered `(ctype, fill)` entries for the packed C interface |
+| `value.__cache_signature__()` | *optional*: auxiliary hashable identity of what the argument specializes |
 
 The IR types and final ABI slots must describe the same arguments in corresponding order, and that
-order must also agree with `DslType` reconstruction. Cache signatures should include
-compilation-relevant metadata such as type, dtype, rank, address space, alignment, and static
-layout, but exclude run-time values and addresses.
+order must also agree with `DslType` reconstruction.
+
+The JIT identifies compiled artifacts by their traced IR and never reads `__cache_signature__`.
+The hook only serves `flydsl.compiler.protocol.cache_signature()`, which callers use to key their
+own caches of `flyc.compile` handles. A signature should include what specializes the compiled
+code, such as type, dtype, rank, address space, alignment and static layout, but exclude run-time
+values and addresses.
 
 Each C-ABI `fill(argument, storage)` callback writes the current Python argument into preallocated
 `ctypes` storage. It must read each call's value from `argument`, rather than capture that value
@@ -94,8 +98,7 @@ Python calls @jit
     │
     └─ adapt ─────> JitArgument
                       │
-          compilation │ __cache_signature__ -> cache key
-                      │ __get_ir_types__     -> JIT MLIR signature
+          compilation │ __get_ir_types__     -> JIT MLIR signature
                       │
                       v
               JIT function arguments

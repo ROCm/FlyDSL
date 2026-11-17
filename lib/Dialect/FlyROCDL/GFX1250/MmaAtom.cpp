@@ -84,13 +84,6 @@ namespace mlir::fly_rocdl {
 
 bool MmaOpGFX1250_WMMAType::isStatic() const { return true; }
 
-Value MmaOpGFX1250_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                Value currentValue) const {
-  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
-    return nullptr;
-  return MakeMmaAtomOp::create(builder, loc, MmaAtomType::get(*this));
-}
-
 Type MmaOpGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
@@ -99,7 +92,7 @@ Type MmaOpGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
 Attribute MmaOpGFX1250_WMMAType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
 
 Attribute MmaOpGFX1250_WMMAType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+  return FxT(FxC(getM()), FxC(getN()), FxC(getK()));
 }
 
 Attribute MmaOpGFX1250_WMMAType::getThrValLayoutA() const {

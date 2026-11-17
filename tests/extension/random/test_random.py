@@ -217,7 +217,9 @@ def test_randint4x_uniform():
         kernel(Out, seed).launch(grid=(NBLOCKS, 1, 1), block=(BLOCK, 1, 1), stream=stream)
 
     out = torch.zeros(P, dtype=torch.int32, device="cuda")
-    launch(out, 7, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(out, 7, stream=stream)
     torch.cuda.synchronize()
 
     u = out.cpu().numpy().astype(np.uint32).astype(np.float64) / 2**32
@@ -277,7 +279,9 @@ def test_rand4x_randn4x_match_reference():
     uniform = torch.zeros(P * 4, dtype=torch.float32, device="cuda")
     normal = torch.zeros(P * 4, dtype=torch.float32, device="cuda")
     scalar = torch.zeros(P * 2, dtype=torch.float32, device="cuda")
-    launch(uniform, normal, scalar, SEED, stream=torch.cuda.Stream())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    launch(uniform, normal, scalar, SEED, stream=stream)
     torch.cuda.synchronize()
 
     uniform = uniform.cpu().numpy().reshape(P, 4)

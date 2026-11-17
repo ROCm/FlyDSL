@@ -53,6 +53,22 @@ def _is_fp8(dtype: torch.dtype) -> bool:
     return dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
 
 
+# (num_cus, lds_size, argument signatures) -> CompiledFunction. The Constexpr
+# launcher arguments have no runtime slot, so they enter the key as values.
+_compiled_decode = {}
+
+
+def _arg_signatures(args):
+    from flydsl.compiler import JitArgumentRegistry
+    from flydsl.compiler.protocol import cache_signature
+
+    signatures = []
+    for value in args:
+        adapter, _ = JitArgumentRegistry.get(type(value))
+        signatures.append(cache_signature(adapter(value) if adapter else value))
+    return tuple(signatures)
+
+
 def flydsl_mla_fwd_decode(
     query: torch.Tensor,  # [num_seqs, num_heads, head_size]
     kv_buffer: torch.Tensor,  # [num_page, page_size, num_kv_heads, head_size]
@@ -147,7 +163,7 @@ def flydsl_mla_fwd_decode(
         arch = _gcn_arch_base(torch.cuda.get_device_properties(dev).gcnArchName)
         lds_size = _get_lds_size_per_cu(arch) // OCCUPANCY
 
-        launch_mla_fwd_decode_m16x8_fp8_fp8(
+        args = (
             query_flat,
             kv_flat,
             kv_idx_flat,
@@ -159,8 +175,18 @@ def flydsl_mla_fwd_decode(
             softmax_scale,
             num_cus,
             lds_size,
-            stream=torch.cuda.current_stream(),
+            torch.cuda.current_stream(),
         )
+        # A direct @flyc.jit call retraces the launcher; reuse one compiled handle.
+        key = (num_cus, lds_size, _arg_signatures(args))
+        compiled = _compiled_decode.get(key)
+        if compiled is None:
+            import flydsl.compiler as flyc
+
+            # Compiles and launches once.
+            _compiled_decode[key] = flyc.compile(launch_mla_fwd_decode_m16x8_fp8_fp8, *args)
+        else:
+            compiled(*args)
     else:
         raise NotImplementedError(
             f"flydsl_mla_fwd_decode: unsupported num_heads={num_heads}, " f"q_dtype={q_dtype}, kv_dtype={kv_dtype}"

@@ -51,8 +51,8 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    A. ``pre_binary_fragments`` (Fly → ROCDL):
 
-      - ``fly-rewrite-func-signature``
       - ``fly-canonicalize``
+      - ``fly-rocdl-expand-ops``
       - ``fly-layout-lowering``
       - ``fly-int-swizzle-simplify``
       - ``canonicalize``
@@ -64,13 +64,9 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    B. ``binary_prep_fragments`` (→ LLVM):
 
-      - ``rocdl-attach-target{chip=gfxNNN ...}``
-      - ``convert-scf-to-cf``
-      - ``convert-cf-to-llvm``
-      - ``gpu-to-llvm{use-bare-pointers-...=true}``
+      - ``func.func(convert-scf-to-cf)``
       - ``convert-vector-to-llvm``
-      - ``convert-arith-to-llvm``
-      - ``convert-func-to-llvm``
+      - ``gpu-to-llvm{use-bare-pointers-...=true}``
       - ``reconcile-unrealized-casts``
       - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
 
@@ -116,6 +112,20 @@ GNU-compatible relocatable linking and ``objcopy`` tools. The ROCm adapter
 requires HIP and pthread. Exported objects are tied to the host ABI and GPU
 target used during compilation. They can be moved and linked independently,
 but must run on a compatible backend and GPU architecture.
+
+On Windows x64, ``export_to_c`` writes a COFF ``<file_name>.obj`` instead and
+needs no external tools: the adapter is compiled into the object itself. Link
+it with MSVC ``cl`` (C callers need ``/std:c11``) or ``clang-cl`` against the
+HIP SDK's ``amdhip64.lib``, the link flag the header records::
+
+   cl /std:c11 main.c vector_add.obj amdhip64.lib /link /LIBPATH:<rocm>\lib
+
+``<rocm>`` is the ROCm SDK root, for example ``rocm-sdk path --root`` for
+TheRock wheels. The program loads ``amdhip64_7.dll`` at run time. Like objects
+compiled with ``/Zl``, the exported object names no C runtime library and takes
+the one the program's other objects use; a DLL linked from exported objects
+alone needs one named, for example ``msvcrt.lib``. Exports into one directory
+take turns on an empty ``.flydsl_export.lock`` file that stays in that directory.
 
 Tensor arguments
 -----------------
@@ -179,11 +189,18 @@ The lowered IR is parsed and its export ABI validated on the first
 ``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
 
+``flyc.compile(launcher, *args, compile_only=True)`` compiles without executing
+the launcher for any arguments, including live device arguments, and always
+returns a ``CompiledFunction``, also under ``COMPILE_ONLY=1``. Call the returned
+function to execute it. ``compile_only`` is reserved by ``flyc.compile`` and is
+not forwarded to the launcher. Without it, ``flyc.compile`` behaves as described
+below.
+
 Passing live device arguments to ``flyc.compile`` preserves its normal initial
 launch, including when other pointer arguments are null to disable optional
 inputs. For an offline or CPU-only build host, use null pointer wrappers created
 with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
-set the target architecture explicitly, for example with ``ARCH=gfx950``.
+set the target architecture explicitly, for example with ``FLYDSL_GPU_ARCH=gfx950``.
 Null pointers suppress the initial launch only when no live device buffers are
 present. Non-device tensor placeholders still suppress execution even alongside
 device buffers. ``COMPILE_ONLY=1`` explicitly disables execution for all argument

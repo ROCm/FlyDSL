@@ -10,14 +10,19 @@ rule with no such PR does not belong here.
 ### A — Cache and recompilation correctness
 
 _The signature FlyDSL failure, silent by construction: the wrong artifact runs and nothing
-reports an error._ Keys have two levels: `manager_key` (function source, transitive helper
-sources, closure values, `_flydsl_key()`) and a per-call tuple (`_env_`, `_target_`, `_hints_`,
-argument signatures). **Every A finding must state its direction**, because the fixes are
-opposite: over-keying recompiles or misses a shipped cache; under-keying serves a stale binary.
+reports an error._ Every ordinary `@flyc.jit` call traces; the artifact key (`_artifact_cache_key`)
+hashes the prepared MLIR text with the pass pipeline, LLVM options, target, `backend.hash()` and
+the `_CACHE_INVALIDATING_ENV_VARS` values; the disk key (`_disk_cache_key`) adds `_flydsl_key()`.
+Python-side inputs reach the key only
+through the IR, so under-keying comes from codegen inputs outside it: options that bypass the
+pipeline fragments and IR attributes, env vars a pass reads but the list omits, and user-level
+factory caches (`cache_tag`, `lru_cache`) that return a stale launcher before tracing. **Every A
+finding must state its direction**, because the fixes are opposite: over-keying recompiles or
+misses a shipped cache; under-keying serves a stale binary.
 
 **A1 — Over-keying: an input already captured elsewhere, or with no effect, enters the key** ⚠️/🔴
 The canonical case is an arch env var: AOT precompilation runs on a GPU-less build host with
-`ARCH=gfx950` injected, while runtime detects the arch from the device. The resolved target is
+`FLYDSL_GPU_ARCH=gfx950` injected, while runtime detects the arch from the device. The resolved target is
 identical, but the raw `_env_` segment differs, so every shipped cache misses.
 Real example (PR #624): `ARCH`, `FLYDSL_GPU_ARCH` and `HSA_OVERRIDE_GFX_VERSION` were removed
 from the invalidating env vars after aiter hit `RuntimeError: AOT cache miss`.
@@ -40,12 +45,14 @@ Two places to check. (1) Hand-maintained `cache_tag` tuples, for example the `ca
 in `kernels/attention/flash_attn_utils.py`: nothing enforces their completeness, so a new trait,
 constexpr or builder kwarg that reaches codegen without a matching tag entry makes two
 configurations share one artifact. `$WORK/scan.txt` pairs new traits with tag edits under
-`cache_key`. (2) The automatic dependency collector in `python/flydsl/compiler/jit_function.py`.
-Real example (PR #1130): captured dtype classes (`fx.BFloat16` vs `fx.Float16`) specialize the
-binary but were dropped by the collector, so the second dtype was served the first one's
-binary; the `@flyc.jit` nested-kernel walk had the same hole.
+`cache_key`. (2) Lowering inputs outside the traced IR: a compile hint or env var that changes
+codegen without reaching the pipeline fragments, LLVM options, an IR attribute or
+`_CACHE_INVALIDATING_ENV_VARS`.
+Real example (PR #1130, before IR keys): captured dtype classes (`fx.BFloat16` vs `fx.Float16`)
+specialize the binary but were dropped by the source-walk collector, so the second dtype was
+served the first one's binary; issue #1324 found the same hole for nested defs.
 Ask for a test that compiles with two values of the new input and asserts two cache entries.
-→ `🔴 A3: [input] changes codegen but is absent from [cache_tag / the collector] — [config X] and [config Y] share one artifact`
+→ `🔴 A3: [input] changes codegen but is absent from [cache_tag / the artifact key] — [config X] and [config Y] share one artifact`
 
 **A4 — A trait in the key that nothing reads** ⚠️
 The dual of A3: count read sites for every name in `cache_tag`; zero reads means the user-facing
@@ -156,7 +163,8 @@ which kills the Python process with no traceback.
 Real examples: PR #544 (restrict a WMMA atom to gfx11 so older RDNA targets do not select it);
 PR #943 (narrowed `gfx12` to `gfx120` so it no longer overlaps gfx1250); PR #1122
 (`buffer_load ... lds` has no gfx11 hardware path; the fix raises `ValueError` at the kernel line,
-reading `ARCH` before `get_rocm_arch()` so cross-compilation gates the right target).
+gating on the compile target rather than the installed device so cross-compilation gates the
+right target).
 Severity: 🔴 when the target aborts or computes wrong values; ⚠️ for a predicate that selects an
 unsupported but failing-loudly path.
 → `🔴/⚠️ C2: [predicate] [also matches / does not gate] [arch], which lacks [feature] — [abort / wrong atom]; narrow or add the gate`
@@ -218,7 +226,9 @@ N=16512`, i32 output put the invalid tail row at byte offset exactly 2^32.
 → `⚠️/🔴 D3: the guard covers [one bound] but not [the other] — [input] passes validation and still wraps`
 
 **D4 — A defaulted width on a width-carrying C++ factory** ⚠️
-`IntAttr::getDynamic(MLIRContext*, int32_t width = 32, ...)` silently records width 32 for an i64.
+A factory that defaults the width records the wrong one: the former `IntAttr::getDynamic(MLIRContext*,
+int32_t width = 32, ...)` silently recorded width 32 for an i64. Core's `Leaf<Trait>::getDInt` takes the
+width explicitly, and `Leaf<EmitOp>::getDyn` reads it from the SSA value's type.
 Real example (PR #729): fixed by reading the actual `IntegerType` width and rejecting anything but
 32 or 64.
 → `⚠️ D4: getDynamic called without an explicit width — an i64 value is recorded as i32`
@@ -331,8 +341,9 @@ Real example (PR #973): `Uint32(0xFFFFFFFF) + Uint32(2)` folded to `0x100000001`
 ### G — Layout algebra and compiler internals
 
 **G1 — A `{value, attr}` adaptor pair describing different shapes** 🔴
-Pairing a scalar value with a nested-tuple attr in `IntTupleValueAdaptor` yields wrong coordinates,
-which can make edge predicates true and permit out-of-bounds accesses.
+Binding SSA scalars to a profile of another shape (`core::bind(profile, bindings, ctx)`, formerly the
+`IntTupleValueAdaptor` pair) yields wrong coordinates, which can make edge predicates true and permit
+out-of-bounds accesses.
 Real example (PR #1052): a `(48,48)` tile returned grid coordinate `(0,1)` as logical `(0,1)`
 instead of `(0,48)`.
 → `🔴 G1: [adaptor] pairs a [scalar] value with a [nested] attr — coordinates resolve to [wrong value]`
@@ -342,7 +353,8 @@ Real example (PR #707): `SliceOp` recomputed the layout and left the base unmove
 → `🔴 G2: [op]'s inferred type updates [component] but not [component] — addresses stay at the source base`
 
 **G3 — Reading a value off an attribute without its static predicate** 🔴
-A dynamic `IntAttr` carries `value == 0`, so `getValue()` without `isStatic()` returns 0.
+A static value read off a dynamic leaf is meaningless: the former `IntAttr` carried `value == 0`, so
+`getValue()` without `isStatic()` returned 0. Check `isStatic()` before `Leaf::staticValue()`.
 Real example (PR #926): `add_offset(reg_ptr, dynamic)` dropped the dynamic index and always
 accessed slot 0.
 → `🔴 G3: getValue() without isStatic() — a dynamic attr reads back as 0 and [access] targets slot 0`
@@ -496,11 +508,11 @@ Compare head against base. A test-only widening with no numerical justification 
 → `⚠️ T6: [test] runs only under [harness] / no CI job — it never executes in [the other]`
 
 **T7 — A measurement taken with a warm JIT cache** 🔴
-The disk cache invalidates on kernel source and closure changes, not on C++ passes or helper code
-outside the traced closure. Any number in a PR that edits `lib/` or a non-closure helper, taken
-without `FLYDSL_RUNTIME_ENABLE_CACHE=0`, is unverified. PRs #1009, #1033 and #1035 state the cache
-setting explicitly; that is the local standard.
-→ `🔴 T7: the PR edits [C++ pass / non-closure helper] but the numbers were taken with a warm cache — **Author must** re-run with FLYDSL_RUNTIME_ENABLE_CACHE=0`
+The disk key covers the traced MLIR and the native-library digest that a full build regenerates;
+a partial `cmake --build --target` build or a hand-replaced library keeps the old digest. Any
+number in a PR that edits `lib/`, taken without `FLYDSL_RUNTIME_ENABLE_CACHE=0`, is unverified.
+PRs #1009, #1033 and #1035 state the cache setting explicitly; that is the local standard.
+→ `🔴 T7: the PR edits [C++ pass] but the numbers were taken with a warm cache — **Author must** re-run with FLYDSL_RUNTIME_ENABLE_CACHE=0`
 
 **T8 — A skip that reports as a pass** ⚠️
 Real examples: PR #1146 (the MLIR lit stage skipped when FileCheck was missing and still printed

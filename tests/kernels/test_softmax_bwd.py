@@ -25,6 +25,7 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
+import flydsl.compiler as flyc  # noqa: E402
 from kernels.norm.softmax_bwd_kernel import (  # noqa: E402
     build_softmax_bwd_module,
     softmax_bwd_buffered_operands,
@@ -117,9 +118,11 @@ def run_bwd_test(M, N, dtype_str, verbose=True):
     expected = _reference_softmax_bwd(y, dy)
 
     stream = torch.cuda.current_stream()
+    # Time a CompiledFunction: every direct @flyc.jit call retraces the launcher.
+    compiled = flyc.compile(launch_fn, dy, y, dx, M, stream)
 
     def kernel_launch():
-        launch_fn(dy, y, dx, M, stream=stream)
+        compiled(dy, y, dx, M, stream)
 
     kernel_launch()
     torch.cuda.synchronize()

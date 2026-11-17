@@ -58,7 +58,6 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Purpose | Variable |
 |---------|----------|
 | Compile backend id | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
-| Override GPU arch for compile | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` to disable; in-memory cache remains active) |
@@ -66,12 +65,12 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Autotune result cache directory | `FLYDSL_AUTOTUNE_CACHE_DIR` |
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
-| ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| Override GPU arch (compile target and arch checks) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 
 Session-level pytest options are supported in `tests/conftest.py`:
 
 - `--flydsl-compile-backend` -> sets `FLYDSL_COMPILE_BACKEND`
-- `--flydsl-compile-arch` -> sets `ARCH`
+- `--flydsl-compile-arch` -> sets `FLYDSL_GPU_ARCH`
 
 When these options are unset, default environment behavior remains unchanged.
 
@@ -100,7 +99,7 @@ python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests
 # python3 -m pytest tests/ -m "l2_device" -v
 ```
 
-The JIT disk cache auto-invalidates when kernel source or closure values change. Only disable it when modifying C++ passes or non-closure helper functions:
+The JIT disk cache is keyed by the traced MLIR and the toolchain fingerprint, so Python edits and rebuilt C++ passes invalidate it. Disable it when debugging a suspected stale artifact:
 
 ```bash
 export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache

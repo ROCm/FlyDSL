@@ -6,14 +6,16 @@
 #define FxVA_DISPATCH_IMPL(MACRO, N) FxVA_DISPATCH_CONCAT(MACRO, N)
 #define FxVA_DISPATCH_CONCAT(MACRO, N) MACRO##N
 
-#define FxC(val) IntTupleAttr::getLeafStatic(getContext(), val)
-#define FxT_2(a, b) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b}))
-#define FxT_3(a, b, c) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c}))
-#define FxT_4(a, b, c, d) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d}))
-#define FxT_5(a, b, c, d, e) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e}))
-#define FxT_6(a, b, c, d, e, f) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f}))
-#define FxT_7(a, b, c, d, e, f, g) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f, g}))
-#define FxT_8(a, b, c, d, e, f, g, h) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f, g, h}))
+
+#define FxC(val) ::mlir::fly::IntTupleAttr::getLeafStatic(getContext(), val)
+#define FxM(x) (x).getRef()
+#define FxT_2(a, b) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b)))
+#define FxT_3(a, b, c) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c)))
+#define FxT_4(a, b, c, d) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c), FxM(d)))
+#define FxT_5(a, b, c, d, e) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c), FxM(d), FxM(e)))
+#define FxT_6(a, b, c, d, e, f) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c), FxM(d), FxM(e), FxM(f)))
+#define FxT_7(a, b, c, d, e, f, g) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c), FxM(d), FxM(e), FxM(f), FxM(g)))
+#define FxT_8(a, b, c, d, e, f, g, h) ::mlir::fly::IntTupleAttr::get(getContext(), ::mlir::fly::core::make_tuple(FxM(a), FxM(b), FxM(c), FxM(d), FxM(e), FxM(f), FxM(g), FxM(h)))
 #define FxT(...) FxVA_DISPATCH(FxT_, __VA_ARGS__)
 
 #define FxThr1(a) FxC(a)
@@ -56,5 +58,5 @@
 #define FxStride8(a, b, c, d, e, f, g, h) FxT_8(a, b, c, d, e, f, g, h)
 #define FxStride(...) FxVA_DISPATCH(FxStride, __VA_ARGS__)
 
-#define FxLayout(shape, stride) LayoutAttr::get(shape, stride)
+#define FxLayout(shape, stride) ::mlir::fly::LayoutAttr::get(shape, stride)
 // clang-format on
