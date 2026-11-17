@@ -82,17 +82,21 @@ def _as_pointer(tensor, elem_dtype):
     return flyc.from_c_void_p(elem_dtype, tensor.data_ptr())
 
 
+def _shapes_from_env(name: str):
+    """Parse ``"M,N,dtype;..."`` from environment variable ``name`` (empty list if unset)."""
+    configs = []
+    for part in os.environ.get(name, "").split(";"):
+        p = part.strip()
+        if not p:
+            continue
+        m_s, n_s, dt = [x.strip() for x in p.split(",")]
+        configs.append((int(m_s), int(n_s), dt))
+    return configs
+
+
 def _get_layernorm_configs():
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
+    configs = _shapes_from_env("ROCDSL_LAYERNORM_SHAPES")
+    if not configs:
         configs = [
             (64, 256, "f32"),  # f32 aligned
             (32, 128, "f16"),  # f16 aligned
@@ -1099,7 +1103,7 @@ def _reference_layernorm_bwd_fp64(x, weight, dy, mean, rstd):
     return (dx, dgamma_terms.sum(dim=0), dy.sum(dim=0)), (dx_budget, dgamma_budget, dbias_budget)
 
 
-def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
+def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32", bench: bool = False):
     print(f"\nTesting LayerNorm backward (M={M}, N={N}, dtype={dtype})")
     kernel, threads = layernorm_bwd_plan(M, N, dtype)
     print(f"  kernel              = {kernel}, {threads} threads")
@@ -1210,6 +1214,33 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
         print(f"  {name + ' err / bound':<19} = {worst:.3f} ({over} of {excess.numel()} elements over)")
         ok = ok and over == 0
     print(f"  -> {'PASSED' if ok else 'FAILED'}")
+
+    if bench:
+
+        def kernel_launch():
+            bwd_c(
+                x.data_ptr(),
+                weight.data_ptr(),
+                dy.data_ptr(),
+                mean.data_ptr(),
+                rstd.data_ptr(),
+                dx.data_ptr(),
+                dgamma.data_ptr(),
+                dbias.data_ptr(),
+                M,
+                stream,
+            )
+
+        # Device time of every kernel the launcher runs (dgamma/dbias and dx on the split path).
+        _, avg_us = run_perftest(
+            lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS
+        )
+        elem_bytes = 4 if dtype == "f32" else 2
+        total_bytes = 3 * M * N * elem_bytes  # read x and dy, write dx
+        print(
+            f"Kernel avg time: {avg_us / 1000.0:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})"
+        )
+        print(f"Bandwidth: {total_bytes / (avg_us / 1e6) / 1e9:.2f} GB/s")
     return ok
 
 
@@ -1330,6 +1361,16 @@ def test_layernorm_bwd_dispatch():
     # Targets where the split kernels were not measured keep the row kernel.
     for arch in ("gfx942", "gfx1201"):
         assert layernorm_bwd_plan(4096, 4096, "bf16", arch=arch) == ("row", 256)
+
+
+def benchmark_layernorm_backward():
+    """Check and time the backward on ROCDSL_LAYERNORM_BWD_SHAPES (run by scripts/run_benchmark.sh)."""
+    failures = 0
+    for M, N, dtype in _shapes_from_env("ROCDSL_LAYERNORM_BWD_SHAPES"):
+        if not run_layernorm_bwd_test(M, N, dtype, bench=True):
+            failures += 1
+    if failures != 0:
+        raise SystemExit(1)
 
 
 def test_layernorm_autograd():
@@ -1570,6 +1611,10 @@ def test_layernorm_affine_shape_mismatch():
 
 
 if __name__ == "__main__":
+    if os.environ.get("ROCDSL_LAYERNORM_BWD_SHAPES"):
+        # scripts/run_benchmark.sh times the backward alone.
+        benchmark_layernorm_backward()
+        raise SystemExit(0)
     test_layernorm()
     test_layernorm_backward()
     test_layernorm_autograd()
