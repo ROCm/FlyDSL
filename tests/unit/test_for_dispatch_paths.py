@@ -252,6 +252,33 @@ def _for_dispatch_ir(*, unroll=-1, unroll_full=False):
         return str(module)
 
 
+def test_for_dispatch_int64_bound_gives_an_i64_loop():
+    """An Int64 bound makes the loop i64; the Python int start and step are sign-extended to match."""
+    from flydsl.expr.numeric import Int64
+
+    with Context(), Location.unknown():
+        module = Module.create()
+        i64 = IntegerType.get_signless(64)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("t", FunctionType.get([i64], [i64]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                acc = Int64(arith.ConstantOp(i64, 0).result)
+
+                def body_fn(iv, names, acc):
+                    return {"acc": acc + Int64(iv)}
+
+                r = InsertEmptyYieldForSCFFor.scf_for_dispatch(
+                    0, Int64(entry.arguments[0]), 1, body_fn, result_names=("acc",), result_values=(acc,)
+                )
+                func.ReturnOp([r.ir_value()])
+        assert module.operation.verify()
+        ir_text = str(module)
+    loop = next(line for line in ir_text.splitlines() if "scf.for" in line)
+    assert loop.rstrip().endswith(": i64 {")
+    assert ir_text.count("arith.extsi") == 2
+
+
 def test_for_dispatch_unroll_full_attr():
     ir_text = _for_dispatch_ir(unroll_full=True)
     assert "loop_annotation" in ir_text
@@ -337,6 +364,48 @@ def test_ast_rewrite_for_threads_unroll_kwargs():
     assert "scf_range(" in init_path
     assert "init=[0]" in init_path
     assert "unroll_full=True" in init_path
+
+    spelled = rewrite("""
+        def s(n):
+            acc = 0
+            for i in fx.range(n, unroll_full=True):
+                acc = acc + 1
+            return acc
+        """)
+    # fx.range names the same loop as range.
+    assert "scf_for_dispatch(0, n, 1" in spelled
+    assert "unroll_full=True" in spelled
+
+
+def test_fx_range_outside_a_for_statement():
+    """Outside a rewritten loop fx.range raises."""
+    import flydsl.expr as fx
+
+    for kwargs in ({}, {"unroll": 4}):
+        with pytest.raises(RuntimeError, match="range_constexpr"):
+            fx.range(4, **kwargs)
+
+
+def test_range_constexpr_loop_ignores_the_binding_of_range():
+    """A module that binds `range` to fx.range (e.g. a star import) keeps its range_constexpr loops."""
+    import ast
+    import types
+    from textwrap import dedent
+
+    import flydsl.expr as fx
+
+    module = ast.parse(dedent("""
+        def s():
+            acc = 0
+            for i in range_constexpr(4):
+                acc = acc + i
+            return acc
+        """))
+    rw = InsertEmptyYieldForSCFFor(context=types.SimpleNamespace(python_globals={}, filename="<t>"), first_lineno=0)
+    module.body[0] = rw.visit(module.body[0])
+    scope = {"range": fx.range, "range_constexpr": fx.range_constexpr}
+    exec(compile(ast.fix_missing_locations(module), "<t>", "exec"), scope)
+    assert scope["s"]() == 6
 
 
 # ---------------------------------------------------------------------------

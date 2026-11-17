@@ -184,7 +184,7 @@ def _gather_scatter_expand(offset_tensor, operand, pred):
 
     tv = offset_tensor.shape[0].unpack()
     if offset_rank == 1:
-        for v in range(tv):
+        for v in range_constexpr(tv):
             operand_v = operand[None, v]
             pred_v = None if pred is None else pred[None, v]
             yield offset_tensor[v], operand_v, pred_v
@@ -197,8 +197,8 @@ def _gather_scatter_expand(offset_tensor, operand, pred):
 
     rest = size(offset_tensor.shape[1]).unpack()
 
-    for v in range(tv):
-        for i in range(rest):
+    for v in range_constexpr(tv):
+        for i in range_constexpr(rest):
             operand_v = operand[(None, v), i]
             pred_v = None if pred is None else pred[None, v, i]
             yield offset_tensor[v, i], operand_v, pred_v
