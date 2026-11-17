@@ -178,7 +178,7 @@ page.
 | RMSNorm 8192x8192 bf16 | cold | +2.4% (p = 0.002) with `BLOCK_THREADS=1024`, `waves_per_eu=4`; the winner is exported as an `@autotune` artifact and served back | about 0.77 of the bandwidth floor |
 | bf16 GEMM 4096x4096x4096 | hot | Default is already at the top; `hill` found +0.7% (p = 5e-5), `portfolio` and `random` found nothing better | at or above the measured matmul peak |
 | bf16 GEMM 32x8192x8192 | hot | 5.3x over the default (`256x256` tile) with `split_k` and a smaller tile, all three strategies | memory-bound; hot time is cache-assisted |
-| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default with the knob values the harness first listed; 2.86-2.88x after widening the values (`block_m/n=32`, `block_k=256`, more stages and waves); 3.0x with the `k_rotate` lever below | 0.55 of the steady-state bandwidth floor at the best; torch matmul, same timing, takes 13% longer than the winner |
+| bf16 GEMM 32x8192x8192 | cold | 2.34-2.47x over the default with the knob values the harness first listed; 2.86-2.88x after widening the values (`block_m/n=32`, `block_k=256`, more stages and waves); 3.0x with the `k_rotate` lever below | 0.53-0.55 of the steady-state bandwidth floor at the best; torch matmul, same timing, takes 13% longer than the winner |
 | flash attention prefill, bf16 causal, S=2048, H=64, D=256 | hot | existing knobs only: 1.51-1.56x over the default in 8 of 9 runs (`hill`, `portfolio`, `gp`, three seeds; p < 1e-13 each), 1.34x in the ninth; the default spills 88 VGPRs and `waves_per_eu=1` (or 4) removes the spill | 0.21 of the compute floor for the default, 0.32 for the winner |
 | flash attention prefill, same | hot | plus two new levers (below): 2.11-2.14x in 8 of 9 runs, 1.89x in the ninth | 0.45 |
 | flash attention prefill, same | cold | 2.12x (one `hill` run) | 0.42 |
@@ -212,7 +212,7 @@ to a differently shaped config it did not help (one search-phase comparison was 
 it as a searched knob, not a default.
 
 Where it stands: 3.0x over the shipped default, and the torch matmul timed the same
-way takes 13% longer, at 0.55 of the steady-state bandwidth floor. That
+way takes 13% longer, at 0.53-0.55 of the steady-state bandwidth floor. That
 floor is from a 2 GB copy. A cold kernel reading 134 MB does not reach
 steady-state bandwidth: on the same device a cold torch read-reduction of 134 MB
 takes 66 us (2.1 TB/s) and a cold 134 MB copy moves 3.7 TB/s, against 4.8 TB/s
