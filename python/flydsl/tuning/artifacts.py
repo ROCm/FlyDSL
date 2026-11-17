@@ -8,9 +8,9 @@ from ``FLYDSL_AUTOTUNE_CONFIG_DIR`` without benchmarking
 writes it in that artifact format so nothing else in the serving path changes.
 
 An artifact carries launcher keyword arguments, ``num_warps`` and
-``waves_per_eu`` (``flydsl.autotune.Config``). ``llvm:<option>`` search keys
-have no place in an artifact, so a winner that sets one is refused: bake the
-option into the launcher (or its ``compile_hints``) instead.
+``waves_per_eu`` (``flydsl.autotune.Config``). ``llvm:<option>`` and ``env:<NAME>``
+search keys have no place in an artifact, so a winner that sets one is refused:
+bake the option into the launcher (or its ``compile_hints``) instead.
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ def export_winner(tuner, config: Mapping[str, object], *args: Any, **kwargs: Any
     """
     from ..autotune import Config
 
-    llvm = sorted(k for k in config if k.startswith("llvm:"))
-    if llvm:
+    outside = sorted(k for k in config if k.startswith(("llvm:", "env:")))
+    if outside:
         raise ValueError(
-            f"export_winner: config sets {llvm}; offline artifacts carry launcher kwargs, "
-            "num_warps and waves_per_eu only. Apply the LLVM options in the launcher."
+            f"export_winner: config sets {outside}; offline artifacts carry launcher kwargs, "
+            "num_warps and waves_per_eu only. Apply the LLVM options and environment variables in the launcher."
         )
     chosen = Config.from_dict({k: v for k, v in config.items() if v is not None})
     ref = tuner._artifact_ref(args, kwargs, required=True)

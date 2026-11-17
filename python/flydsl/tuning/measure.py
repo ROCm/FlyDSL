@@ -551,10 +551,11 @@ class Evaluator:
             return lambda: self.backend.check(config, key, artifact, fidelity)
         return lambda: self.backend.check(config, key, artifact)
 
-    def _prepare(self, t: Trial, key: str, fid: int, config: dict):
+    def _prepare(self, t: Trial, key: str, fid: int, config: dict, *, allow_spill: bool = False):
         """Compile (once per process) and check (once per artifact) ``key``
         at ``fid``'s problem: ``(failure_observation, None)`` or ``(None,
-        artifact)``."""
+        artifact)``. ``allow_spill`` skips the spill gate (the confirmation's
+        baseline: what ships is the reference whether or not it spills)."""
         akey = self._akey(key, fid)
         comp = self._compiled.get(akey)
         compile_s = 0.0
@@ -593,7 +594,7 @@ class Evaluator:
                     ),
                     None,
                 )
-            if self.reject_spill:
+            if self.reject_spill and not allow_spill:
                 spilled = {k: comp.resources[k] for k in self.spill_keys if float(comp.resources.get(k, 0) or 0) > 0}
                 if spilled:
                     return (
@@ -785,6 +786,7 @@ class Evaluator:
         *,
         fidelity: int = -1,
         rounds: int = 1,
+        allow_spill: Sequence[str] = (),
     ) -> dict[str, list[list[float]]]:
         """Fresh interleaved samples of configs, bypassing the cache:
         ``rounds`` batches; per key, one sample list per round (empty when
@@ -794,7 +796,8 @@ class Evaluator:
 
         A key without a live artifact (measured before a resume, or never
         measured, like a baseline) is compiled and checked first; one that
-        fails is left out."""
+        fails is left out. Keys in ``allow_spill`` are exempt from the spill
+        gate (the shipped baseline is the reference even when it spills)."""
         fid = self.resolve(fidelity)
         out: dict[str, list[list[float]]] = {k: [] for k in keys}
         live = []
@@ -809,7 +812,7 @@ class Evaluator:
                 continue
             g = tuple(genomes[k])
             t = Trial(genome=g, uid=f"confirm:{k}", origin="confirm", fidelity=fid)
-            ob, _art = self._prepare(t, k, fid, self.space.decode(g))
+            ob, _art = self._prepare(t, k, fid, self.space.decode(g), allow_spill=k in allow_spill)
             if ob is None:
                 self._pending_compile_s.pop(k, None)
                 live.append(k)

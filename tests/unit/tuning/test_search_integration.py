@@ -117,6 +117,33 @@ def test_tune_records_and_db_serves_the_pick(tmp_path):
     assert again.serve("searchtoy", "gfx950", problem_key({"m": 1})) is None
 
 
+def test_spilling_baseline_is_still_the_confirmation_reference():
+    """The shipped default is the reference even when it spills: the spill gate
+    keeps it out of the search, not out of the paired confirmation."""
+    space = _toy_space()
+    shipped = space.decode(space.encode({}))
+    backend = CallableBackend(
+        compile=lambda cfg, key: CompileOutcome(
+            True, artifact=dict(cfg), resources={"spill_vgpr": 8.0 if dict(cfg) == shipped else 0.0}
+        ),
+        check=lambda cfg, key, art: (True, "ok"),
+        measure=lambda cfg, key, art, fid: [_truth(art)] * fid.reps,
+    )
+    res = tune(
+        space,
+        backend,
+        budget=Budget(evaluations=200),
+        strategy="exhaustive",
+        baseline=space.encode({}),
+        confirm=2,
+        confirm_rounds=3,
+    )
+    c = res.confirmed
+    assert c["baseline"] in c["values"], "the spilling baseline was left out of the confirmation"
+    assert c["speedup"] > 1.0 and c["winner"] != c["baseline"]
+    assert not any(o.status == "ok" and o.key == c["baseline"] for o in res.observations if o.full)
+
+
 def test_unconfirmed_pick_is_stored_but_never_served():
     space = _toy_space()
     res = tune(

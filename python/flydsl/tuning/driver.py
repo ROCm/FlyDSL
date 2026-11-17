@@ -356,7 +356,7 @@ def _confirm(evaluator, observations, k, rounds, race, meter, *, baseline=None) 
             keys.append(base_key)
     if len(keys) < 2:
         return {}
-    per_round = evaluator.remeasure(keys, genomes, rounds=rounds)
+    per_round = evaluator.remeasure(keys, genomes, rounds=rounds, allow_spill=(base_key,) if base_key else ())
     calls = {kk: [(r, median(v)) for r, v in enumerate(rs) if v] for kk, rs in per_round.items()}
     calls = {kk: c for kk, c in calls.items() if c}
     if not calls:
