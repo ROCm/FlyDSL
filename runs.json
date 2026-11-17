@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-17T07:09:08Z",
+ "updated": "2026-11-17T07:40:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44037732256,
+   "pr": 1425,
+   "commit": "dfbff064625be212b2809ef2563bdf6160e3c3ea",
+   "branch": "qiangpan/fix_hip_soname7",
+   "event": "pull_request",
+   "title": "[Runtime] Fix current_device_id() always returning 0 on ROCm 10 pip installs",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256",
+   "created_at": "2026-11-17T07:18:52Z",
+   "updated_at": "2026-11-17T07:18:52Z",
+   "actor": "qiangpan2",
+   "jobs": []
+  },
   {
    "run_id": 44036166359,
    "pr": 1417,
@@ -10,13 +25,41 @@
    "branch": "jli/fix-aot-export-amdhip64-link",
    "event": "pull_request",
    "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359",
    "created_at": "2026-11-17T07:06:37Z",
-   "updated_at": "2026-11-17T07:07:08Z",
+   "updated_at": "2026-11-17T07:30:12Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T07:30:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357543"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T07:30:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357600"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-17T07:30:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357623"
+    }
+   ]
   },
   {
    "run_id": 44024503282,
@@ -25,11 +68,11 @@
    "branch": "docs/tdm-atom-point-at-tiled-form",
    "event": "pull_request",
    "title": "[Docs] Point the TDM docstrings at the tiled atom",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282",
    "created_at": "2026-11-17T05:29:49Z",
-   "updated_at": "2026-11-17T05:48:27Z",
+   "updated_at": "2026-11-17T07:38:22Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -249,22 +292,13 @@
    "branch": "llvm-reassociate-uniformity",
    "event": "pull_request",
    "title": "[Bugfix] Fix nondeterministic codegen with an LLVM backport ",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137",
    "created_at": "2026-11-16T22:15:01Z",
-   "updated_at": "2026-11-16T23:18:31Z",
+   "updated_at": "2026-11-17T07:37:40Z",
    "actor": "RElbers",
    "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T22:47:27Z",
-     "completed_at": "2026-11-16T22:56:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133670901822"
-    },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
@@ -272,10 +306,19 @@
      "conclusion": "success",
      "started_at": "2026-11-16T22:47:36Z",
      "completed_at": "2026-11-16T23:10:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133670901918",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892315114",
      "machine": "smci350-rck-g03-f12-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-16T22:47:27Z",
+     "completed_at": "2026-11-16T22:56:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892315209"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -284,7 +327,7 @@
      "conclusion": "success",
      "started_at": "2026-11-16T22:47:42Z",
      "completed_at": "2026-11-16T23:18:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133670902048"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892355248"
     }
    ]
   },
@@ -1943,52 +1986,6 @@
      "started_at": "2026-11-14T02:54:21Z",
      "completed_at": "2026-11-14T03:36:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43547226750/job/132305799061"
-    }
-   ]
-  },
-  {
-   "run_id": 43537407985,
-   "pr": null,
-   "commit": "1472cde6082bfe833ba8870f2f948ba192ffa316",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985",
-   "created_at": "2026-11-14T00:56:04Z",
-   "updated_at": "2026-11-14T02:34:32Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T01:15:38Z",
-     "completed_at": "2026-11-14T01:38:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256393",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T01:16:24Z",
-     "completed_at": "2026-11-14T02:34:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256424"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T01:24:16Z",
-     "completed_at": "2026-11-14T01:34:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43537407985/job/132276256554"
     }
    ]
   }
