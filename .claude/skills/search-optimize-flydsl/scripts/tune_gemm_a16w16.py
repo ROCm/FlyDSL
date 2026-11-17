@@ -13,6 +13,7 @@ configuration ``gemm_a16w16`` ships when no ``user_kwargs`` are given.
 """
 
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -27,8 +28,11 @@ from kernels.gemm.gemm_a16w16_gfx950 import (
     _dynamic_tensor_arg,
     gemm_a16w16_gfx950,
     get_split_k_buffers,
+    make_gemm_a16w16_gfx950_param,
     make_gemm_a16w16_param_and_validate,
 )
+
+HAS_K_ROTATE = "k_rotate" in inspect.signature(make_gemm_a16w16_gfx950_param).parameters
 
 SHIPPED = dict(
     block_m=256,
@@ -43,6 +47,8 @@ SHIPPED = dict(
     use_half_tile_interleaved=True,
     waves_per_eu=None,
 )
+if HAS_K_ROTATE:
+    SHIPPED["k_rotate"] = 0
 
 
 def main() -> int:
@@ -94,20 +100,23 @@ def main() -> int:
         configure=configure,
         prepare=lambda: out.fill_(float("nan")),  # a skipped store must fail the oracle
     )
+    params = [
+        Param.ordinal("block_m", (32, 64, 128, 256)),
+        Param.ordinal("block_n", (32, 64, 128, 256)),
+        Param.ordinal("block_k", (64, 128, 256)),  # 32 is admitted by the builder but computes wrong results
+        Param.ordinal("stages", (2, 3, 4, 5, 6)),
+        Param.ordinal("m_waves", (1, 2, 4)),
+        Param.ordinal("n_waves", (1, 2, 4, 8)),
+        Param.ordinal("k_waves", (1, 2, 4)),
+        Param.ordinal("group_m", (0, 4, 8)),
+        Param.boolean("use_half_tile_interleaved"),
+        Param.ordinal("split_k", (1, 2, 4, 8, 16)),
+        Param.categorical("waves_per_eu", (None, 1, 2)),
+    ]
+    if HAS_K_ROTATE:  # the workgroup-staggered K start lever (see docs/tuning_search_guide.md)
+        params.append(Param.ordinal("k_rotate", (0, 1, 3, 7)))
     space = SearchSpace(
-        [
-            Param.ordinal("block_m", (64, 128, 256)),
-            Param.ordinal("block_n", (64, 128, 256)),
-            Param.ordinal("block_k", (32, 64, 128)),
-            Param.ordinal("stages", (2, 3, 4)),
-            Param.ordinal("m_waves", (1, 2, 4)),
-            Param.ordinal("n_waves", (1, 2, 4)),
-            Param.ordinal("k_waves", (1, 2)),
-            Param.ordinal("group_m", (0, 4, 8)),
-            Param.boolean("use_half_tile_interleaved"),
-            Param.ordinal("split_k", (1, 2, 4)),
-            Param.categorical("waves_per_eu", (None, 1, 2)),
-        ],
+        params,
         is_valid=lambda c: c.get("block_k", 64) <= K and param_of(c) is not None,
         name="a16w16",
     )
@@ -124,6 +133,26 @@ def main() -> int:
         trace=args.trace,
         ladder=(Fidelity(reps=8, warmup=2, cold=args.cold),),
     )
+
+    def bench_ref(fn, n=20):
+        """Median ms of ``fn`` timed the way the search timed (cold: cache flushed before each launch)."""
+        flush = torch.empty(512 * 1024 * 1024 // 4, dtype=torch.float32, device=dev)
+        for _ in range(3):
+            fn()
+        ts = []
+        for _ in range(n):
+            torch.cuda.synchronize()
+            torch.cuda._sleep(20_000_000)
+            if args.cold:
+                flush.zero_()
+            s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            s.record()
+            fn()
+            e.record()
+            e.synchronize()
+            ts.append(s.elapsed_time(e))
+        return sorted(ts)[len(ts) // 2]
+
     peaks = measure_peaks(dtypes=("bf16",))
     rl = gemm_roofline(M, N, K, peaks, "bf16", a_bytes=2, b_bytes=2, c_bytes=2)
     statuses: dict = {}
@@ -142,6 +171,7 @@ def main() -> int:
         "confirmed_speedup": res.confirmed.get("speedup"),
         "p_value": res.confirmed.get("p_value"),
         "roofline": rl.report(res.best_value * 1e3),
+        "torch_matmul_ms": bench_ref(lambda: a @ b),  # reference point, same timing mode
     }
     json.dump(report, sys.stdout, indent=1, default=str)
     print()
