@@ -15,6 +15,7 @@
 #include "LlvmConfig/llvm.h"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace nb = nanobind;
@@ -55,6 +56,12 @@ struct PyBasis {
   std::vector<int32_t> modes;
 };
 
+/// A dynamic int_tuple leaf whose value is known to be a multiple of `divisibility`.
+struct PyDivInt {
+  nb::object value;
+  int32_t divisibility;
+};
+
 bool isPythonRatio(nb::handle value) {
   return nb::isinstance(value, nb::module_::import_("fractions").attr("Fraction"));
 }
@@ -88,9 +95,14 @@ struct IntTupleAttrBuilder {
 
   void clear() { dyncElems.clear(); }
 
-  /// The leaf a dynamic value binds: an i32 or i64, or, where `fastDivMod`
-  /// allows, the handle of a fast-divmod divisor.
-  LeafAttr dynamicIntFromValue(nb::handle handle, const char *what, bool fastDivMod = false) {
+  /// The leaf a dynamic value binds: an i32 or i64, a `_DivInt` wrapping one, or,
+  /// where `fastDivMod` allows, the handle of a fast-divmod divisor.
+  LeafAttr dynamicIntFromValue(nb::handle handle, const char *what, bool fastDivMod = false,
+                               int32_t divisibility = 1) {
+    if (nb::isinstance<PyDivInt>(handle)) {
+      const auto &divInt = nb::cast<const PyDivInt &>(handle);
+      return dynamicIntFromValue(divInt.value, what, /*fastDivMod=*/false, divInt.divisibility);
+    }
     auto typeName = [&] { return std::string(nb::str(nb::type_name(handle.type())).c_str()); };
     if (!nb::hasattr(handle, MLIR_PYTHON_CAPI_PTR_ATTR))
       throw std::invalid_argument(std::string(what) +
@@ -109,7 +121,7 @@ struct IntTupleAttrBuilder {
       throw std::invalid_argument(std::string(what) +
                                   " must be an i32 or i64 value, got: " + typeName());
     dyncElems.push_back(handle);
-    return LeafAttr::getDynamic(ctx, intTy.getWidth());
+    return LeafAttr::getDynamic(ctx, intTy.getWidth(), divisibility);
   }
 
   using Tuple = core::IntTuple<core::Trait>;
@@ -124,7 +136,7 @@ struct IntTupleAttrBuilder {
       if (m < 0 || m > UINT8_MAX)
         throw std::invalid_argument("Basis mode must be non-negative, got " + std::to_string(m));
     }
-    // A static coefficient is a python int; a dynamic one is an i32/i64 MLIR Value.
+    // A static coefficient is a python int; a dynamic one is an i32/i64 MLIR Value or a _DivInt.
     nb::handle value = basis.value;
     LeafAttr scale = PyLong_Check(value.ptr()) || isPythonRatio(value)
                          ? staticIntFromPython(ctx, value)
@@ -148,6 +160,7 @@ struct IntTupleAttrBuilder {
       return Tuple::fromLeaf(core::Leaf<core::Trait>::getNone());
     if (nb::isinstance<PyBasis>(args))
       return buildBasisLeaf(nb::cast<const PyBasis &>(args));
+    // A dynamic leaf: an i32/i64 MLIR Value, a _DivInt, or a fast-divmod divisor.
     return Tuple::fromLeaf(
         dynamicIntFromValue(args, "Dynamic int_tuple leaf", /*fastDivMod=*/true).getRef());
   }
@@ -299,6 +312,12 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
       if (!attr.isLeafInt() || !attr.isStatic())
         throw std::invalid_argument("expected a static scalar leaf");
       return staticIntToPython(attr.getLeaf());
+    });
+    c.def_prop_ro("divisibility", [](PyIntTupleType &self) {
+      auto ty = self.toCppType();
+      if (!ty.isLeaf() || ty.isStatic())
+        throw std::invalid_argument("expected a dynamic leaf");
+      return ty.getAttr().getLeaf().getRef().divisibility();
     });
     c.def_prop_ro("is_leaf_int",
                   [](PyIntTupleType &self) { return self.toCppType().getAttr().isLeafInt(); });
@@ -1122,6 +1141,77 @@ NB_MODULE(_mlirDialectsFly, m) {
           "value"_a, "modes"_a)
       .def_ro("value", &PyBasis::value)
       .def_ro("modes", &PyBasis::modes);
+
+  // Internal dynamic-int marker: a DSL integer with a known divisibility enters
+  // infer_int_tuple_type as this, so its leaf type carries `?{div=N}`.
+  nb::class_<PyDivInt>(m, "_DivInt")
+      .def(
+          "__init__",
+          [](PyDivInt *self, nb::object value, int32_t divisibility) {
+            if (divisibility <= 0)
+              throw std::invalid_argument("divisibility must be positive");
+            new (self) PyDivInt{std::move(value), divisibility};
+          },
+          "value"_a.none(), "divisibility"_a)
+      .def_ro("value", &PyDivInt::value)
+      .def_ro("divisibility", &PyDivInt::divisibility);
+
+  // The divisibility the Core leaf rules give `lhs op rhs`, where an operand is a
+  // Python int (static) or a _DivInt (dynamic, `width` bits). 1 when the rules
+  // give nothing better.
+  m.def(
+      "leaf_divisibility",
+      [](const std::string &op, nb::handle lhs, nb::handle rhs, int32_t width) -> int32_t {
+        using Tuple = core::IntTuple<core::Trait>;
+        auto logWidth = width == 64 ? core::LogWidth::I64 : core::LogWidth::I32;
+        auto operand = [&](nb::handle h) -> std::optional<Tuple> {
+          if (nb::isinstance<PyDivInt>(h))
+            return Tuple::getDInt(logWidth, nb::cast<const PyDivInt &>(h).divisibility);
+          int64_t value;
+          if (!nb::try_cast(h, value))
+            return std::nullopt;
+          return Tuple::getSInt(value);
+        };
+        auto a = operand(lhs), b = operand(rhs);
+        if (!a || !b)
+          return 1;
+        std::optional<Tuple> result;
+        if (op == "add")
+          result = core::leaf_add(*a, *b);
+        else if (op == "sub")
+          result = core::leaf_sub(*a, *b);
+        else if (op == "mul")
+          result = core::leaf_mul(*a, *b);
+        else if (op == "div")
+          result = core::leaf_div(*a, *b);
+        else if (op == "mod")
+          result = core::leaf_mod(*a, *b);
+        else if (op == "and")
+          result = core::leaf_bit_and(*a, *b);
+        else if (op == "or")
+          result = core::leaf_bit_or(*a, *b);
+        else if (op == "xor")
+          result = core::leaf_bit_xor(*a, *b);
+        else if (op == "shl")
+          result = core::leaf_shl(*a, *b);
+        else if (op == "shr")
+          result = core::leaf_shr(*a, *b);
+        else if (op == "lshr")
+          result = core::leaf_lshr(*a, *b);
+        else
+          throw std::invalid_argument("leaf_divisibility: unknown op " + op);
+        auto leaf = result->asRef().getLeaf();
+        if (leaf.isDInt())
+          return leaf.divisibility();
+        if (leaf.isSInt() && !leaf.isZero()) {
+          auto value = leaf.staticValue();
+          auto magnitude =
+              value < 0 ? uint64_t{0} - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+          return magnitude <= INT32_MAX ? static_cast<int32_t>(magnitude) : 1;
+        }
+        return 1;
+      },
+      "op"_a, "lhs"_a, "rhs"_a, "width"_a);
 
   // -------------------------------------------------------------------------
   // Module-level helper functions

@@ -44,8 +44,10 @@ from .numeric import (  # noqa: F401
     Uint64,
     Uint128,
     _common_numeric_type_for_op,
+    _is_dynamic_int,
     _resolve_numeric_type,
     _result_numeric_type_for_op,
+    _set_divisibility,
     as_numeric,
 )
 from .primitive import *
@@ -703,6 +705,8 @@ class IntTuple(BuiltinDslType):
     @staticmethod
     def _dynamic_leaf_to_py(ty, value):
         value = as_dsl_value(value)
+        if _is_dynamic_int(value):
+            _set_divisibility(value, ty.divisibility)
         if ty.is_leaf_basis:
             return Basis(value, list(ty.get_leaf_as_basis.modes))
         return value

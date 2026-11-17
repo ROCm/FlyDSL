@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     _P = ParamSpec("_P")
 
 from .._mlir import ir
-from .._mlir._mlir_libs._mlirDialectsFly import _Basis
 from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
@@ -241,22 +240,26 @@ def _is_int_tuple_value(value):
 
 
 def _expand_int_tuple_leaves(value):
-    from .numeric import Int32, Int64, Numeric
+    from .numeric import Index, Int32, Int64, Numeric, _is_dynamic_int
     from .typing import Basis
 
     if _is_int_tuple_value(value):
         return _expand_int_tuple_leaves(value.to_py_value())
-    # widen narrow dynamic ints to i32
+    # a dynamic int leaf is i32/i64 (narrow ints widened) and carries its divisibility
+    if _is_dynamic_int(value):
+        if isinstance(value, Index):
+            value = Int64(value)
+        elif type(value).width < 32:
+            value = Int32(value)
+        return fly._DivInt(value.value, value.divisibility) if value.divisibility > 1 else value.value
     if isinstance(value, Numeric):
-        if isinstance(value.value, ir.Value) and type(value).width < 32:
-            return Int32(value).value
         return _expand_int_tuple_leaves(value.value)
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IntegerType) and value.type.width < 32:
         return Int32(value).value
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IndexType):
         return Int64(value).value
     if isinstance(value, Basis):
-        return _Basis(_expand_int_tuple_leaves(value.value), value.modes)
+        return fly._Basis(_expand_int_tuple_leaves(value.value), value.modes)
     if isinstance(value, (list, tuple)):
         return tuple(_expand_int_tuple_leaves(v) for v in value)
     return value
@@ -1497,11 +1500,31 @@ def printf(*args, format_str=""):
 
 
 @dsl_loc_tracing
-def assume(result_type, dst, src):
+def assume(value, divby):
+    """Declare that the int_tuple leaf *value* is a multiple of *divby*; returns the leaf with that
+    divisibility (``!fly.int_tuple<?{div=N}>``), the lcm of *divby* and what was already known.
+
+    Emits ``fly.assume``, which generates no machine code; a false claim is undefined behavior.
+    A static leaf is checked instead.
+    An integer declares its divisibility when constructed: ``fx.Int32(x, divisibility=16)``.
+
+    Examples:
+        ld = fx.assume(fx.get_stride(layout)[0], 8)   # !fly.int_tuple<?{div=8}>
     """
-    WIP, unsupported for now
-    """
-    return fly.assume(result_type, dst, src)
+    if isinstance(divby, bool) or not isinstance(divby, int) or not 0 < divby < 2**31:
+        raise ValueError(f"divby must be a positive int32, got {divby!r}")
+    if not _is_int_tuple_value(value) or not value.type.is_leaf:
+        got = value.type if _is_int_tuple_value(value) else type(value).__name__
+        raise TypeError(
+            f"assume expects an int_tuple leaf, got {got}; declare an integer's divisibility with "
+            "fx.Int32(x, divisibility=...)"
+        )
+    if value.type.is_static:
+        scalar = get_scalar(value)
+        if scalar % divby:
+            raise ValueError(f"{scalar} is not a multiple of {divby}")
+        return value
+    return fly.assume(value, divby)
 
 
 @dsl_loc_tracing
