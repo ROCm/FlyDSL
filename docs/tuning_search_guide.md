@@ -328,6 +328,15 @@ What each lever did, with the evidence:
   mask taken from the traits the DMA path is bit-identical to the default. It is slower than the register-staged path
   (234-242 us against 215 us), so it is not used; the `N128` path was not re-measured.
 
+The engine on the widened space (all levers above, 150 evaluations, `hill` seeds 0-1, `portfolio` seed 0; 11-24 of
+114 searched evaluations were `spill`, none other failed once `kv_buffer_loads` was restricted to 8-wide LDS vectors):
+confirmed 2.64x, 2.65x and 2.68x over the default (p < 1e-19), 191.8-194.6 us, 706-717 TFLOPS, 0.55-0.56 of the measured
+peak. They land within 3% of the hand-built `kv_dbuf` + `spread_stage` row (184.9-190.5 us) and do not beat it. The
+three remaining runs (`portfolio` seed 1, `gp` seeds 0-1) had not finished when this was written. A first search
+attempt aborted the whole process in LLVM (`Do not know how to expand ... i256 buffer.load`): `kv_buffer_loads` with
+the default 16-wide LDS vectors asks for a 32-byte buffer load, and a backend `LLVM ERROR` is not a catchable
+compile failure; the builder now rejects that combination.
+
 Attempts that did not pay, and the base they lost on:
 
 | Attempt | Result | Base |
@@ -347,6 +356,7 @@ Attempts that did not pay, and the base they lost on:
   is still serialized between the two GEMMs, and the `swp` structure that would overlap it ran slower than it saves
   with this scheduler. A true two-waves-per-SIMD kernel needs the O (128) and Q (64) registers split across waves, with
   P and the row statistics exchanged through LDS: not attempted, only reasoned (192 of 256 registers go to O and Q).
+- **Other shapes** (paired, outputs bit-identical to the default, harness `--kv-heads`/`--no-causal`): S=1024 H=64 2.70x, S=4096 H=32 1.49x, S=2000 H=16 2.71x (tail tile), GQA 64/8 2.75x, B=2 H=16 3.24x, non-causal S=2048 H=64 2.75x, non-causal S=1000 H=8 2.65x, for `kv_dbuf` + `spread_stage`. The default configuration compiles to identical ISA and bit-identical output on five shapes.
 - **Not verified:** the levers are measured on bf16 D=256 only; `kv_dbuf`/`swp` require the dense N32 path with
   `kv_buffer_loads`; `swp_valu` is laid out for D=256.
 

@@ -1443,6 +1443,8 @@ def _make_flash_attn_generic_traits(
         v_nomajor_dma = False
 
     vec_width = 16 if enable_lds_vec16 else 8
+    if kv_buffer_loads and vec_width != 8:
+        raise ValueError("kv_buffer_loads stages 16-byte rows: it needs 8-wide LDS vectors (ENABLE_LDS_VEC16=0)")
     assert head_dim % vec_width == 0
     threads_per_row_load = head_dim // vec_width
     assert block_size % threads_per_row_load == 0

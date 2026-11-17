@@ -245,13 +245,20 @@ def main() -> int:
             **lever_kwargs(cfg),
         )
 
-    def launcher_for(cfg):
-        # The builder returns a python wrapper; the @flyc.jit launcher and the
-        # compile hints the wrapper applies are in its closure.
+    def closure_of(cfg):
+        """Closure of the builder's launch wrapper. The non-causal builder wraps two launchers (rows padded to 64
+        or not) in a dispatcher; take the one for this sequence length."""
         nl = inspect.getclosurevars(build(cfg)).nonlocals
-        return nl["launch_flash_attn_generic"]
+        if "_launch_skip" in nl:
+            nl = inspect.getclosurevars(nl["_launch_skip"] if S % 64 == 0 else nl["_launch_mask"]).nonlocals
+        return nl
 
-    base_hints = inspect.getclosurevars(build(shipped)).nonlocals["_fmha_compile_hints"]
+    def launcher_for(cfg):
+        # The @flyc.jit launcher and the compile hints the wrapper applies are in its closure.
+        return closure_of(cfg)["launch_flash_attn_generic"]
+
+    base_hints = closure_of(shipped)["_fmha_compile_hints"]
+
     stream = fx.Stream(torch.cuda.current_stream())
     call = (q, k, v, out, out, out, out, out, 0, B, S, S, stream)  # the dense call of the shipped route
 
