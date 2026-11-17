@@ -127,7 +127,8 @@ def TDM(
     The global base pointer comes from the ``copy_atom_call`` global operand; the
     per-dim extent (OOB), per-dim stride, ``imm_offset`` (K-loop tile bump), and the
     MCAST ``workgroup_mask`` are runtime atom state set via ``fx.atom.set_value``.
-    :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor.
+    :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor;
+    both are the legacy form. :func:`make_tiled_tdm_atom` is preferred for new kernels.
     """
     return fly_rocdl.CopyOpGFX1250TDMType.get(
         rank,
@@ -153,6 +154,10 @@ def make_tdm_atom(
     early_timeout=False,
 ) -> object:
     """Build a gfx1250 N-D TDM copy atom carrying ``tensor``'s tile descriptor.
+
+    Legacy form: prefer :func:`make_tiled_tdm_atom`, which derives the per-dim
+    extent and stride from the LDS layout and the tiler instead of taking them
+    here. This one is kept for copies that atom cannot express.
 
     The global base pointer comes from the ``copy_atom_call`` global operand (not
     atom state); the atom carries the tensor's per-dim extent (for hardware
