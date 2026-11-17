@@ -28,6 +28,7 @@ from kernels.norm.layernorm_kernel import (
     build_layernorm_module,
     build_layernorm_smoothquant_module,
     layernorm,
+    layernorm_bwd_plan,
 )
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -1063,8 +1064,45 @@ def _reference_layernorm_bwd(x_dev, weight_dev, bias_dev, dy_dev):
     )
 
 
+def _dtype_spacing(ref, dtype: str):
+    """Gap between adjacent ``dtype`` values around each ``|ref|`` (fp64 in and out)."""
+    mantissa_bits, min_exp = {"f32": (23, -126), "f16": (10, -14), "bf16": (7, -126)}[dtype]
+    # frexp puts |ref| in [2**(exp - 1), 2**exp); zeros and subnormals get the subnormal gap.
+    _, exp = torch.frexp(ref)
+    exp = torch.where(ref == 0, min_exp + 1, exp)
+    return torch.exp2(((exp - 1).clamp(min=min_exp) - mantissa_bits).to(torch.float64))
+
+
+def _reference_layernorm_bwd_fp64(x, weight, dy, mean, rstd):
+    """fp64 backward from exactly what the backward kernels read, with fp32 error budgets.
+
+    Takes the forward's fp32 mean/rstd, so the only gap left to the kernels is
+    their own fp32 arithmetic and the rounding of dx to the storage dtype.
+    Returns (dx, dgamma, dbias) and the fp32 error budget of each.
+    """
+    x = x.to(torch.float64)
+    dy = dy.to(torch.float64)
+    w = weight.to(torch.float64)
+    mean = mean.to(torch.float64).unsqueeze(1)
+    rstd = rstd.to(torch.float64).unsqueeze(1)
+    x_hat = (x - mean) * rstd
+    wdy = dy * w
+    c1 = wdy.mean(dim=1, keepdim=True)
+    c2 = (wdy * x_hat).mean(dim=1, keepdim=True)
+    dx = (wdy - c1 - x_hat * c2) * rstd
+    dgamma_terms = dy * x_hat
+    # A few fp32 roundings per element, plus the fp32 sums behind c1/c2 and dgamma/dbias.
+    reduce_scale = wdy.abs().mean(dim=1, keepdim=True) + x_hat.abs() * (wdy * x_hat).abs().mean(dim=1, keepdim=True)
+    dx_budget = rstd * (2.0**-20 * (wdy.abs() + c1.abs() + (x_hat * c2).abs()) + 2.0**-16 * reduce_scale)
+    dgamma_budget = 2.0**-14 * dgamma_terms.abs().sum(dim=0)
+    dbias_budget = 2.0**-14 * dy.abs().sum(dim=0)
+    return (dx, dgamma_terms.sum(dim=0), dy.sum(dim=0)), (dx_budget, dgamma_budget, dbias_budget)
+
+
 def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm backward (M={M}, N={N}, dtype={dtype})")
+    kernel, threads = layernorm_bwd_plan(M, N, dtype)
+    print(f"  kernel              = {kernel}, {threads} threads")
 
     torch_dtype = _torch_dtype(dtype)
     try:
@@ -1080,7 +1118,7 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     bias = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
     dy = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
 
-    dx_ref, dgamma_ref, dbias_ref, mean_ref, rstd_ref = _reference_layernorm_bwd(x, weight, bias, dy)
+    _, _, _, mean_ref, rstd_ref = _reference_layernorm_bwd(x, weight, bias, dy)
 
     stream = torch.cuda.current_stream()
 
@@ -1155,43 +1193,22 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     )
     torch.cuda.synchronize()
 
-    dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
-
-    # Tolerances (calibrated). dgamma/dbias summed over M -> larger magnitude -> relative.
     stat_atol = 1e-3
-    dx_atol = {"f32": 1e-3, "f16": 3e-2, "bf16": 2e-1}[dtype]
-    dg_rtol = {"f32": 1e-4, "f16": 3e-2, "bf16": 1e-1}[dtype]
-    dg_atol = {"f32": 1e-2, "f16": 1e-1, "bf16": 5e-1}[dtype]
-
     print(f"  mean max abs err    = {mean_err:.3e} (atol={stat_atol})")
     print(f"  rstd max abs err    = {rstd_err:.3e} (atol={stat_atol})")
-    print(f"  dx max abs err      = {dx_err:.3e} (atol={dx_atol})")
 
-    dg_ok = True
-    try:
-        torch.testing.assert_close(dgamma, dgamma_ref, rtol=dg_rtol, atol=dg_atol)
-    except AssertionError as e:
-        dg_ok = False
-        dg_err = (dgamma - dgamma_ref).abs().max().item()
-        print(f"  dgamma max abs err  = {dg_err:.3e} (rtol={dg_rtol}, atol={dg_atol})")
-        print(f"  [dgamma mismatch] {e}")
-    else:
-        dg_err = (dgamma - dgamma_ref).abs().max().item()
-        print(f"  dgamma max abs err  = {dg_err:.3e} (rtol={dg_rtol}, atol={dg_atol})")
-
-    db_ok = True
-    try:
-        torch.testing.assert_close(dbias, dbias_ref, rtol=dg_rtol, atol=dg_atol)
-    except AssertionError as e:
-        db_ok = False
-        db_err = (dbias - dbias_ref).abs().max().item()
-        print(f"  dbias max abs err   = {db_err:.3e} (rtol={dg_rtol}, atol={dg_atol})")
-        print(f"  [dbias mismatch] {e}")
-    else:
-        db_err = (dbias - dbias_ref).abs().max().item()
-        print(f"  dbias max abs err   = {db_err:.3e} (rtol={dg_rtol}, atol={dg_atol})")
-
-    ok = mean_err < stat_atol and rstd_err < stat_atol and dx_err < dx_atol and dg_ok and db_ok
+    # Every element must sit within its own bound: dx within one step of its storage
+    # dtype plus the fp32 budget, dgamma/dbias within the fp32 budget of their sums.
+    # A max-abs tolerance would hide a wrong c1/c2 behind the largest elements.
+    refs, budgets = _reference_layernorm_bwd_fp64(x, weight, dy, mean, rstd)
+    dx_budget = budgets[0] + _dtype_spacing(refs[0], dtype)
+    ok = mean_err < stat_atol and rstd_err < stat_atol
+    for name, out, ref, budget in zip(("dx", "dgamma", "dbias"), (dx, dgamma, dbias), refs, (dx_budget, *budgets[1:])):
+        excess = (out.to(torch.float64) - ref).abs() / budget
+        worst = excess.max().item()
+        over = int((excess > 1).sum().item())
+        print(f"  {name + ' err / bound':<19} = {worst:.3f} ({over} of {excess.numel()} elements over)")
+        ok = ok and over == 0
     print(f"  -> {'PASSED' if ok else 'FAILED'}")
     return ok
 
@@ -1253,10 +1270,11 @@ def test_layernorm_backward():
     print("Running LayerNorm Backward Tests")
     print("=" * 80)
 
+    # The paths below are the gfx95x ones; other targets run the row kernel throughout.
     configs = [
         (64, 256, "f32"),  # row kernel, f32 aligned
         (16, 512, "bf16"),  # row kernel, bf16
-        (4096, 4096, "bf16"),  # split kernels, large
+        (4096, 4096, "bf16"),  # split kernels, large: 512-thread dx blocks, 4 rows each
         (64, 2000, "f32"),  # row kernel, unaligned
         (128, 4096, "f16"),  # split kernels, f16
         (1024, 2000, "f32"),  # split kernels, f32 with a partial column tile
@@ -1267,7 +1285,18 @@ def test_layernorm_backward():
         (64, 4100, "bf16"),  # split kernels, N % 8 == 4: 4-element bf16 stores
         (2048, 8192, "bf16"),  # split kernels, wide rows: half-height dgamma/dbias blocks
         (8, 65536, "bf16"),  # split kernels, long rows: dx re-reads the row instead of caching it
+        (512, 256, "f16"),  # split kernels, 32-thread dx blocks
+        (4096, 256, "f32"),  # split kernels, 64-thread dx blocks, 2 rows each
+        (1000, 1000, "f32"),  # split kernels, 128-thread dx blocks, partial second tile
+        (192, 1024, "bf16"),  # row kernel, its last row count at N = 1024
+        (193, 1024, "bf16"),  # split kernels, their first row count at N = 1024
+        (4096, 1024, "bf16"),  # split kernels, 128-thread dx blocks, 4 rows each
+        (4096, 1024, "f32"),  # split kernels, 256-thread dx blocks, 4 rows each
     ]
+
+    # Wherever the split kernels run, every dx block size must be covered.
+    split_threads = {threads for kernel, threads in (layernorm_bwd_plan(*c) for c in configs) if kernel == "split"}
+    assert not split_threads or split_threads == {32, 64, 128, 256, 512}, split_threads
 
     failures = 0
     for M, N, dtype in configs:
@@ -1282,6 +1311,25 @@ def test_layernorm_backward():
     print("=" * 80)
     if failures != 0:
         raise SystemExit(1)
+
+
+def test_layernorm_bwd_dispatch():
+    """Pin the backward dispatch so that retuning the BWD_* limits is deliberate."""
+    # gfx95x: the row kernel takes up to min(320, 64 * log2(8192 / N)) rows at N <= 4096.
+    assert layernorm_bwd_plan(64, 4096, "bf16", arch="gfx950") == ("row", 256)
+    assert layernorm_bwd_plan(65, 4096, "bf16", arch="gfx950") == ("split", 512)
+    assert layernorm_bwd_plan(192, 1024, "bf16", arch="gfx950") == ("row", 256)
+    assert layernorm_bwd_plan(193, 1024, "bf16", arch="gfx950") == ("split", 128)
+    assert layernorm_bwd_plan(320, 128, "f32", arch="gfx950") == ("row", 256)
+    assert layernorm_bwd_plan(321, 128, "f32", arch="gfx950") == ("split", 32)
+    assert layernorm_bwd_plan(1, 8192, "bf16", arch="gfx950") == ("split", 512)
+    # The dx block follows the row's tile count.
+    assert layernorm_bwd_plan(512, 256, "f16", arch="gfx950") == ("split", 32)
+    assert layernorm_bwd_plan(4096, 256, "f32", arch="gfx950") == ("split", 64)
+    assert layernorm_bwd_plan(4096, 1024, "f32", arch="gfx950") == ("split", 256)
+    # Targets where the split kernels were not measured keep the row kernel.
+    for arch in ("gfx942", "gfx1201"):
+        assert layernorm_bwd_plan(4096, 4096, "bf16", arch=arch) == ("row", 256)
 
 
 def test_layernorm_autograd():
