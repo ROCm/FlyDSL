@@ -18,6 +18,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location
+from ..expr.numeric import Numeric
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -1100,6 +1101,8 @@ class InsertEmptyYieldForSCFFor(Transformer):
     def scf_for_dispatch(
         start, stop, step, body_fn, *, result_names=(), result_values=(), unroll=-1, unroll_full=False
     ):
+        # as_ir_value drops the DSL type, so record which bounds are unsigned first.
+        unsigned = [isinstance(x, Numeric) and x.signed is False for x in (start, stop, step)]
         start_val = as_ir_value(start)
         stop_val = as_ir_value(stop)
         step_val = as_ir_value(step)
@@ -1115,14 +1118,15 @@ class InsertEmptyYieldForSCFFor(Transformer):
             if val.type not in (i32_ty, i64_ty, idx_ty):
                 raise TypeError(f"for-loop {name} must be i32 or i64, got {val.type}")
             bounds.append(val)
-        # An i64 bound makes the whole loop i64; narrower bounds are sign-extended to match.
+        # An i64 bound makes the whole loop i64; narrower bounds are extended to match by their signedness.
         loop_ty = i64_ty if any(val.type == i64_ty for val in bounds) else i32_ty
         for i, (name, val) in enumerate(zip(names, bounds)):
             if val.type == idx_ty:
                 log().warning("for-loop %s is index type, consider using fx.Int32 or fx.Int64 instead", name)
                 bounds[i] = arith.IndexCastOp(loop_ty, val, loc=capture_user_location()).result
             elif val.type != loop_ty:
-                bounds[i] = arith.ExtSIOp(loop_ty, val, loc=capture_user_location()).result
+                extend = arith.ExtUIOp if unsigned[i] else arith.ExtSIOp
+                bounds[i] = extend(loop_ty, val, loc=capture_user_location()).result
         start_val, stop_val, step_val = bounds
 
         result_names = tuple(result_names)

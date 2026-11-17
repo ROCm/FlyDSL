@@ -253,14 +253,15 @@ def _for_dispatch_ir(*, unroll=-1, unroll_full=False):
 
 
 def test_for_dispatch_int64_bound_gives_an_i64_loop():
-    """An Int64 bound makes the loop i64; the Python int start and step are sign-extended to match."""
-    from flydsl.expr.numeric import Int64
+    """An Int64 bound makes the loop i64; a Uint32 bound is zero-extended and a Python int sign-extended."""
+    from flydsl.expr.numeric import Int64, Uint32
 
     with Context(), Location.unknown():
         module = Module.create()
+        i32 = IntegerType.get_signless(32)
         i64 = IntegerType.get_signless(64)
         with InsertionPoint(module.body):
-            f = func.FuncOp("t", FunctionType.get([i64], [i64]))
+            f = func.FuncOp("t", FunctionType.get([i64, i32], [i64]))
             entry = f.add_entry_block()
             with InsertionPoint(entry):
                 acc = Int64(arith.ConstantOp(i64, 0).result)
@@ -268,15 +269,17 @@ def test_for_dispatch_int64_bound_gives_an_i64_loop():
                 def body_fn(iv, names, acc):
                     return {"acc": acc + Int64(iv)}
 
+                start, stop = entry.arguments
                 r = InsertEmptyYieldForSCFFor.scf_for_dispatch(
-                    0, Int64(entry.arguments[0]), 1, body_fn, result_names=("acc",), result_values=(acc,)
+                    Int64(start), Uint32(stop), 1, body_fn, result_names=("acc",), result_values=(acc,)
                 )
                 func.ReturnOp([r.ir_value()])
         assert module.operation.verify()
         ir_text = str(module)
     loop = next(line for line in ir_text.splitlines() if "scf.for" in line)
     assert loop.rstrip().endswith(": i64 {")
-    assert ir_text.count("arith.extsi") == 2
+    assert "arith.extui %arg1" in ir_text
+    assert ir_text.count("arith.extsi") == 1
 
 
 def test_for_dispatch_unroll_full_attr():
