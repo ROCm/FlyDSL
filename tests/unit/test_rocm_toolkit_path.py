@@ -196,6 +196,8 @@ def test_mlir_or_opt_rocm_fallback_avoids_none_fingerprint(monkeypatch, tmp_path
     monkeypatch.setattr(rocm_backend, "BUNDLED_ROCM_PATH", tmp_path / "no_bundle")
     fallback = _embedded_override_root(tmp_path / "mlir_rocm")
     monkeypatch.setattr(rocm_backend, "_mlir_baked_rocm_path", lambda: fallback)
+    # Windows also offers the staged TheRock SDK ahead of the MLIR fallback.
+    monkeypatch.setattr(rocm_backend, "_windows_therock_toolkit_root", lambda: None)
 
     assert Path(rocm_toolkit_path()) == fallback
     fingerprint = RocmBackend(RocmBackend.make_target("gfx942")).toolkit_fingerprint()
