@@ -181,7 +181,7 @@ to a differently shaped config it did not help (one search-phase comparison was 
 it as a searched knob, not a default.
 
 Where it stands: 3.0x over the shipped default, and the torch matmul timed the same
-way takes 13% longer,, at 0.55 of the steady-state bandwidth floor. That
+way takes 13% longer, at 0.55 of the steady-state bandwidth floor. That
 floor is from a 2 GB copy. A cold kernel reading 134 MB does not reach
 steady-state bandwidth: on the same device a cold torch read-reduction of 134 MB
 takes 66 us (2.1 TB/s) and a cold 134 MB copy moves 3.7 TB/s, against 4.8 TB/s
