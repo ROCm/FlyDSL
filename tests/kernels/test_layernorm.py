@@ -772,6 +772,14 @@ def test_layernorm():
     print("=" * 80)
 
     configs = _get_layernorm_configs()
+    if not os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip():
+        configs += [
+            (40, 128, "bf16"),  # short rows, one small block per row
+            (100, 128, "bf16"),  # short rows between the small-M and large-M geometries
+            (4100, 128, "bf16"),  # short rows packed for large M, M not a multiple of the block's rows
+            (33, 1001, "f32"),  # unaligned rows: scalar path, small-M geometry
+            (16384, 8192, "bf16"),  # input past the last-level cache: non-temporal loads
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
