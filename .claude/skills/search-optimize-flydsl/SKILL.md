@@ -43,6 +43,10 @@ first for `FlyBackend`, `SearchSpace`, `tune` and `roofline`.
 - Read the kernel's builder and launcher (`kernels/<family>/`) and its existing
   test. Note every `Constexpr` that changes the binary, and which values the
   builder rejects (a validity predicate often already exists).
+- Compile the shipped default and read its resources (`FlyBackend.compile`). A default
+  that already spills or sits at a register cap points at occupancy
+  (`waves_per_eu`, wave count) before anything else; the flash-attention D=256 default
+  spills 88 VGPRs and `waves_per_eu=1` alone is worth 1.58x.
 - Compute the roofline for the problem:
 
 ```python
@@ -71,6 +75,8 @@ carries the base it lost on. Typical FlyDSL knobs:
 | Pipelining | `stages`, `lds_stage`, `use_async_copy`, half-tile interleave | launcher `Constexpr` |
 | Scheduling | `group_m`, `waves_per_eu` | launcher / `waves_per_eu` |
 | Compiler | `amdgpu-kernarg-preload-count`, scheduling flags (`/llvm`) | `llvm:<option>` |
+| Environment | a `FLYDSL_*` variable the kernel reads while it builds or traces | `env:<NAME>` |
+| Builder arguments | `build_*_module(...)` tile, waves, path (the builder returns a new `@flyc.jit` closure per config) | plain key, with `launcher_for=` |
 
 ### 2. Harness
 Build a `FlyBackend` around the real launcher. The oracle is independent (fp32
@@ -92,7 +98,19 @@ result = tune(space, backend, strategy="auto", budget=Budget(evaluations=150),
 ```
 
 - Build the baseline from what the kernel ships today for this arch and shape.
-  A baseline that fails to build inflates every win.
+  A baseline that fails to build inflates every win. Do not read the router and
+  guess: call the real entry point once with a spy on the builder and record the
+  arguments it used (`route` in `tune_flash_attn_prefill.py`).
+- A kernel built by `build_*_module(...)` has no single launcher: pass
+  `launcher_for=cfg -> @flyc.jit closure` (and `compile_hints=` for the hints its
+  wrapper adds) instead of `launcher`. See the guide's "Kernels whose knobs are
+  builder arguments".
+- Before searching, flip each knob level alone against the baseline (`--probe` /
+  `--screen` in the attention harness): compile, numeric check, resources, paired time.
+  It costs a minute, names the levels that are broken (not slow) and lets the search
+  skip them. Do not infer which knob broke a config from a 12-evaluation smoke run:
+  the first guess here (`NATIVE_EXP2`, `TREE_REDUCE`) was wrong; the culprits were
+  `ENABLE_DMA` and `REDUCE_MODE`.
 - Read `Observation.detail` for every non-ok status: an opaque `compile_error`
   hides an unsupported arch or a validity gap.
 - Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` when you want honest compile times; leave
@@ -156,6 +174,9 @@ roofline bytes:
   the builder's own legality check as `is_valid`, split-K, cold fidelity.
 - `.claude/skills/search-optimize-flydsl/scripts/tune_rmsnorm.py`: plain `Constexpr` launcher, and the export to an
   `@autotune` offline artifact (`--export`).
+- `.claude/skills/search-optimize-flydsl/scripts/tune_flash_attn_prefill.py`: builder-style kernel (`launcher_for=`),
+  `env:` and `llvm:` knobs, baseline read off the shipped entry point, the single-flip screen (`--screen`, `--probe`),
+  paired ablation tables (`--compare`) and one-config runs for ISA dumps and profiler passes (`--run-config`).
 
 The evidence behind this skill is in
 [`docs/tuning_search_guide.md`](../../../docs/tuning_search_guide.md#pilot-results-gfx950-mi355x):
@@ -167,6 +188,19 @@ the existing kernel; the roofline gap that remains is a new-lever problem
 
 ## Failure modes
 Seen in the pilots:
+- The shipped default spilled (flash attention D=256, 88 VGPRs). The spill gate keeps
+  spilled configs out of the search, but the confirmation's baseline is exempt;
+  before that fix a spilling default was dropped and no speedup was reported.
+- Time through the compiled callable `FlyBackend` builds, never through the Python
+  entry point: a direct `@flyc.jit` call re-traces every time (65 ms per call with the
+  cache off), which hides the kernel.
+- A lever that loses alone can win in combination, and the reverse: `ENABLE_LDS_VEC16=0`
+  was 0.89x on `waves_per_eu=1` + reverse-order grid and +4% once the K prefetch was on.
+  Read ablations from the paired table (`--compare`), not from one run's winner config:
+  winners carry several knobs that are within noise.
+- The levers that mattered most after the register fix (causal tile order +17%, K
+  prefetch +4%) were not in the kernel's knob list. They came from the loop, the
+  ISA mix and the counters, and were then put into the space as default-off knobs.
 - A tolerance copied from another dtype rejected every config, including the
   baseline. Check that the baseline passes the oracle first.
 - A hot timing of a cache-resident working set read above the HBM roofline.
