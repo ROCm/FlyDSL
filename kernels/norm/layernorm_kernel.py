@@ -444,11 +444,29 @@ BWD_DX_PROGRAMS_NARROW = 2048
 BWD_DX_MAX_CACHED_ITERS = 4
 
 # On small problems the row kernel's single launch beats the split kernels' two.
-# Measured on MI355X it wins up to 64 rows at N = 4096, 64 rows more each time N
-# halves, and never past 320 rows; on wider rows the split kernels always win.
+# Measured on MI355X, and rechecked on MI350X, it wins up to 64 rows at N = 4096,
+# 64 rows more each time N halves, and never past 320 rows; on wider rows the
+# split kernels always win.
 BWD_ROW_KERNEL_MAX_N = 4096
 BWD_ROW_KERNEL_ROWS_PER_HALVING = 64
 BWD_ROW_KERNEL_MAX_ROWS = 320
+
+
+def _ln_bwd_split_arch(arch: str) -> bool:
+    """Targets that run the split kernels.
+
+    Their shapes and the limits above were tuned on gfx950; other targets keep
+    the row kernel until someone measures them.
+    """
+    return str(arch).startswith("gfx95")
+
+
+def _ln_bwd_row_kernel_max_rows(N: int) -> int:
+    """Most rows the row kernel still takes at width N (none past ``BWD_ROW_KERNEL_MAX_N``)."""
+    if N > BWD_ROW_KERNEL_MAX_N:
+        return 0
+    halvings = math.log2(2 * BWD_ROW_KERNEL_MAX_N / N)
+    return min(BWD_ROW_KERNEL_MAX_ROWS, int(BWD_ROW_KERNEL_ROWS_PER_HALVING * halvings))
 
 
 def _ln_bwd_vec(N: int, dtype_str: str) -> int:
@@ -496,6 +514,20 @@ def _ln_bwd_dx_config(N: int, vec: int):
     return threads, progs
 
 
+def layernorm_bwd_plan(M: int, N: int, dtype_str: str, arch: str | None = None):
+    """The kernel that ``build_layernorm_bwd_module`` runs on M rows, and its block size.
+
+    Returns ``("row", BLOCK_THREADS)`` for the one-launch row kernel or
+    ``("split", threads)`` for the split kernels, where ``threads`` is the dx
+    kernel's block size.  ``arch`` defaults to the current target.
+    """
+    if arch is None:
+        arch = get_rocm_arch()
+    if not _ln_bwd_split_arch(arch) or M <= _ln_bwd_row_kernel_max_rows(N):
+        return "row", BLOCK_THREADS
+    return "split", _ln_bwd_dx_config(N, _ln_bwd_vec(N, dtype_str))[0]
+
+
 def build_layernorm_bwd_module(N: int, dtype_str: str):
     """LayerNorm backward (dx, fp32 dgamma/dbias) as two vectorized kernels.
 
@@ -517,12 +549,16 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
     saturated at any row count.  ``eps`` is baked into ``Rstd`` by the forward.
 
     Small problems (see ``BWD_ROW_KERNEL_*``) run the one-launch row kernel of
-    ``_build_layernorm_bwd_row_module`` instead.
+    ``_build_layernorm_bwd_row_module`` instead, and so does every problem on
+    targets other than gfx95x; ``layernorm_bwd_plan`` reports the choice.
     """
+    arch = get_rocm_arch()
+    if not _ln_bwd_split_arch(arch):
+        return _build_layernorm_bwd_row_module(N, dtype_str)
+
     vec = _ln_bwd_vec(N, dtype_str)
     elem_bits = 32 if dtype_str == "f32" else 16
     ntiles = (N + vec - 1) // vec
-    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
     CopyOp = _ln_bwd_copy_op(vec, elem_bits)
 
@@ -788,12 +824,11 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
         dxk = layernorm_bwd_dx_kernel(Input, Gamma, DY, Mean, Rstd, DX, m_in)
         dxk.launch(grid=(dx_progs, 1, 1), block=(dx_threads, 1, 1), stream=stream)
 
-    if N > BWD_ROW_KERNEL_MAX_N:
+    ROW_KERNEL_MAX_ROWS = _ln_bwd_row_kernel_max_rows(N)
+    if ROW_KERNEL_MAX_ROWS == 0:
         return launch_split
 
     launch_rows = _build_layernorm_bwd_row_module(N, dtype_str)
-    halvings = math.log2(2 * BWD_ROW_KERNEL_MAX_N / N)
-    ROW_KERNEL_MAX_ROWS = min(BWD_ROW_KERNEL_MAX_ROWS, int(BWD_ROW_KERNEL_ROWS_PER_HALVING * halvings))
 
     @flyc.jit
     def launch_layernorm_bwd(
