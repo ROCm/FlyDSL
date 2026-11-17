@@ -760,6 +760,10 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
                     dx_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, dx)
                     _store_vec(copy_atom, vec, elem_dtype, dx_e, row_dx, idx)
 
+            # BlockReduce reads its slots after its last barrier, so a wave that
+            # starts the next row must wait until every wave has read this row's.
+            gpu.barrier()
+
     @flyc.jit
     def launch_split(
         Input: fx.Pointer,
