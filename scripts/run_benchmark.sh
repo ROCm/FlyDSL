@@ -437,6 +437,12 @@ try:
 except Exception:
     txt = ""
 
+# Variants timed in another op's log: parse only from their own header on.
+sections = {"rmsnorm_smoothquant": "Testing RMSNorm smoothquant"}
+if op in sections:
+    start = txt.find(sections[op])
+    txt = txt[start:] if start >= 0 else ""
+
 # GEMM-style: "Throughput: ..., XX.XX TFLOPS, BW: Y.YYY TB/s"
 m = None
 for m in re.finditer(r"Throughput:.*?([0-9.]+)\s*TFLOPS.*?BW:\s*([0-9.]+)\s*TB/s", txt):
@@ -612,6 +618,10 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
       _fail_or_skip "${log}" "rmsnorm"
     fi
     row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+    # The same run also times SmoothQuant on this shape.
+    row="$(_py_parse_and_emit rmsnorm_smoothquant "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
