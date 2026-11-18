@@ -19,6 +19,7 @@ import pytest
 import flydsl.compiler as flyc
 from kernels.norm.softmax_autotune import _RTOL
 from kernels.norm.softmax_kernel import build_softmax_module
+from kernels.norm.softmax_split import build_split_softmax_module, split_softmax_workspace_elems
 from tests.kernels.benchmark_common import (
     PerfRow,
     bench_gpu_us_torch,
@@ -121,6 +122,37 @@ def run_test(M, N, dtype_str):
     else:
         print("  Failed")
         return False, flydsl_gpu_us
+
+
+@pytest.mark.parametrize(
+    "M, N, dtype_str",
+    [
+        (1, 129280, "f32"),
+        (4, 154880, "bf16"),
+        (8, 163840, "f16"),
+        (24, 163840, "f32"),
+        (3, 129283, "bf16"),  # N % 8 != 0: the scalar tail of the last chunk
+        (64, 65537, "bf16"),  # first width past WIDE_ROW_MIN_N, at DECODE_MAX_ROWS, with a tail
+        (2051, 106497, "f32"),  # past ALL_ROWS_SPLIT_N["f32"], with a tail, over 2051 rows
+    ],
+)
+def test_split_softmax(M, N, dtype_str):
+    """The wide-row split launcher over a caller workspace (kernels/norm/softmax_split.py)."""
+    torch.manual_seed(0)
+    dtype = {"f32": DTYPE_FP32, "f16": DTYPE_FP16, "bf16": DTYPE_BF16}[dtype_str]
+    a = ((torch.rand((M, N), device="cuda", dtype=DTYPE_FP32) * 4.0) - 2.0).to(dtype)
+    c = torch.empty_like(a)
+    w = torch.empty(split_softmax_workspace_elems(M, N, dtype_str), device="cuda", dtype=DTYPE_FP32)
+    stream = torch.cuda.current_stream()
+    compiled = flyc.compile(build_split_softmax_module(N, dtype_str), a, c, w, M, stream)
+    c.fill_(float("nan"))
+    compiled(a, c, w, M, stream)
+    torch.cuda.synchronize()
+
+    expected = torch.softmax(a.to(DTYPE_FP32), dim=1)
+    scale = expected.abs() + expected.amax(dim=-1, keepdim=True)
+    max_err = ((c.to(DTYPE_FP32) - expected).abs() / scale).max().item()
+    assert max_err < _RTOL[dtype_str], f"max relative error {max_err:.2e} (rtol={_RTOL[dtype_str]})"
 
 
 def test_all():

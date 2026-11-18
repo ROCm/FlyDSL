@@ -3,16 +3,19 @@
 
 """Opt-in Softmax autotuning through the normal direct JIT path."""
 
+import functools
 import os
 from contextlib import contextmanager
 
 from flydsl.autotune import Config, _tuning_enabled, autotune
+from flydsl.runtime.device import get_rocm_arch
 from kernels.norm.softmax_kernel import (
     BLOCK_THREADS,
     TUNING_SCHEMA,
     WARP_SIZE,
     softmax_direct,
 )
+from kernels.norm.softmax_split import build_split_softmax_module, split_softmax_workspace_elems, use_split_softmax
 
 # HIP's hard workgroup ceiling. There is no device-property helper in the repo and this
 # adopter is not the place to add the first one.
@@ -49,6 +52,7 @@ _FAST_CONTEXT_ENV_VARS = (
 )
 _FAST_CONTEXT_ENV_VARS_BYTES = tuple(os.fsencode(name) for name in _FAST_CONTEXT_ENV_VARS)
 _softmax_hot_cache = {}
+_split_hot_cache = {}
 
 
 def elem_bits(dtype_str: str) -> int:
@@ -354,6 +358,34 @@ def _compile_resolved(config, input_t, output, m, n, dtype_str, stream):
     return compiled, positional
 
 
+@functools.lru_cache(maxsize=1)
+def _split_arch() -> bool:
+    """The split thresholds and chunk geometry were measured on gfx950 only."""
+    return str(get_rocm_arch()).startswith("gfx95")
+
+
+def _softmax_split(input_t, output, M, N, dtype_str, stream):
+    """The split kernel over a per-call fp32 workspace, for shapes ``use_split_softmax`` picks."""
+    import torch
+
+    import flydsl.compiler as flyc
+
+    with torch.cuda.device(input_t.device):
+        launch_stream = torch.cuda.current_stream() if stream is None else stream
+        workspace = torch.empty(
+            split_softmax_workspace_elems(M, N, dtype_str), dtype=torch.float32, device=input_t.device
+        )
+        hot_key = _hot_key(input_t, output, M, N, dtype_str, launch_stream)
+        compiled = _split_hot_cache.get(hot_key)
+        if compiled is not None:
+            return compiled(input_t, output, workspace, M, launch_stream)
+        # flyc.compile launches the kernel it compiles.
+        compiled = flyc.compile(build_split_softmax_module(N, dtype_str), input_t, output, workspace, M, launch_stream)
+        if compiled is not None:
+            _split_hot_cache[hot_key] = compiled
+    return None
+
+
 def _overlaps(a, b) -> bool:
     """Whether two contiguous tensors share any byte of storage."""
     a_start = a.data_ptr()
@@ -368,6 +400,8 @@ def softmax_autotuned(input_t, output, stream=None):
 
     Normal calls follow the scratch-cache -> offline-artifact -> compatibility-default
     ordering and never benchmark. ``FLYDSL_AUTOTUNE=1`` is the explicit forced search.
+    On gfx95*, the wide-row shapes ``use_split_softmax`` picks take the split
+    kernel (``softmax_split.py``) and are not tuned.
     """
     import torch
 
@@ -397,6 +431,8 @@ def softmax_autotuned(input_t, output, stream=None):
         return None
     if _overlaps(input_t, output):
         raise ValueError("softmax_autotuned is out-of-place; input and output storage must not overlap")
+    if use_split_softmax(M, N, dtype_str) and _split_arch():
+        return _softmax_split(input_t, output, M, N, dtype_str, stream)
 
     with torch.cuda.device(input_t.device):
         launch_stream = torch.cuda.current_stream() if stream is None else stream
