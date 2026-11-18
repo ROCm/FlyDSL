@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-11-18T07:45:43Z",
+ "updated": "2026-11-18T07:58:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44262804346,
+   "pr": null,
+   "commit": "508c2429c442af00fcbe042be82eb13912a65243",
+   "branch": "main",
+   "event": "push",
+   "title": "[Misc] Bump version to 0.5.1 (#1433)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346",
+   "created_at": "2026-11-18T07:56:33Z",
+   "updated_at": "2026-11-18T07:56:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44262529742,
+   "pr": 1433,
+   "commit": "c985905e2bb17078929f37fd27d55a79d5f5acbc",
+   "branch": "bump-version-0.5.1",
+   "event": "pull_request",
+   "title": "[Misc] Bump version to 0.5.1",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742",
+   "created_at": "2026-11-18T07:54:25Z",
+   "updated_at": "2026-11-18T07:56:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44262402390,
+   "pr": null,
+   "commit": "b8023a054f53888d858cef5462d7d1801925012e",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma (#1426)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262402390",
+   "created_at": "2026-11-18T07:53:27Z",
+   "updated_at": "2026-11-18T07:56:34Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44261767281,
+   "pr": 1374,
+   "commit": "b8d25cfcea13eee9a195f2ffec79fa3975eba1f0",
+   "branch": "rdna4-mxfp4-upstream",
+   "event": "pull_request",
+   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44261767281",
+   "created_at": "2026-11-18T07:48:33Z",
+   "updated_at": "2026-11-18T07:48:33Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 44260805638,
    "pr": 1432,
@@ -10,11 +70,11 @@
    "branch": "perf/fuse-ast-transformers",
    "event": "pull_request",
    "title": "[AST] Apply the structural rewrites in one walk",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638",
    "created_at": "2026-11-18T07:41:08Z",
-   "updated_at": "2026-11-18T07:42:28Z",
+   "updated_at": "2026-11-18T07:45:45Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -105,10 +165,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T07:11:18Z",
-     "completed_at": null,
+     "completed_at": "2026-11-18T07:45:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257/job/134598556548"
     }
    ]
@@ -400,7 +460,7 @@
   },
   {
    "run_id": 44049374188,
-   "pr": 1426,
+   "pr": null,
    "commit": "3ad4e6a92e83591f8d90cb681a30cbebe75cc827",
    "branch": "pr/feat-fx-range",
    "event": "pull_request",
@@ -443,7 +503,7 @@
   },
   {
    "run_id": 44048329122,
-   "pr": 1426,
+   "pr": null,
    "commit": "4b209f486f66da87e72cb2a669046de269bfe0df",
    "branch": "pr/feat-fx-range",
    "event": "pull_request",
@@ -1025,7 +1085,7 @@
   },
   {
    "run_id": 43846655147,
-   "pr": 1374,
+   "pr": null,
    "commit": "495bb86d30e3d5062444b867f4a5c9348dfea151",
    "branch": "rdna4-mxfp4-upstream",
    "event": "pull_request",
@@ -1757,125 +1817,6 @@
      "started_at": "2026-11-16T05:34:16Z",
      "completed_at": "2026-11-16T06:14:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43809172827/job/133112710192"
-    }
-   ]
-  },
-  {
-   "run_id": 43801599077,
-   "pr": null,
-   "commit": "355e7c5950a38c973b0acd30a45c71f36f8a43bc",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43801599077",
-   "created_at": "2026-11-16T04:02:00Z",
-   "updated_at": "2026-11-16T04:02:00Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 43801515664,
-   "pr": null,
-   "commit": "004aa1081fb822cb7b4db860b697a93137b2a1c4",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43801515664",
-   "created_at": "2026-11-16T04:01:08Z",
-   "updated_at": "2026-11-16T04:01:08Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 43796151574,
-   "pr": null,
-   "commit": "50c2af9fde9589bb094bbbd397d499073e2f7d05",
-   "branch": "oidc-probe",
-   "event": "pull_request",
-   "title": "CI: add OIDC audience probe",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43796151574",
-   "created_at": "2026-11-16T03:06:40Z",
-   "updated_at": "2026-11-16T03:33:34Z",
-   "actor": "miramar-labs",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-16T03:31:27Z",
-     "completed_at": "2026-11-16T03:33:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43796151574/job/133073216882"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-16T03:30:59Z",
-     "completed_at": "2026-11-16T03:33:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43796151574/job/133073216972"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-16T03:31:25Z",
-     "completed_at": "2026-11-16T03:33:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43796151574/job/133073217011"
-    }
-   ]
-  },
-  {
-   "run_id": 43792856611,
-   "pr": 1368,
-   "commit": "1e9aa00ecc9b564a0de11b226b4c3e9bb60cef75",
-   "branch": "jli/strict-pin-agpr",
-   "event": "pull_request",
-   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage to replace inline_asm ",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611",
-   "created_at": "2026-11-16T02:33:06Z",
-   "updated_at": "2026-11-16T03:37:08Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T03:04:08Z",
-     "completed_at": "2026-11-16T03:12:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446536"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T03:04:21Z",
-     "completed_at": "2026-11-16T03:22:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446542"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T03:04:24Z",
-     "completed_at": "2026-11-16T03:29:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43792856611/job/133064446553",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
