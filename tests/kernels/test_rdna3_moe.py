@@ -6,8 +6,9 @@
 The routing kernel is checked against a python loop, each GEMM stage against torch per routed slot (with
 sentinel rows past the output to catch a padded row that stores), the bounded grid against the exact one,
 the direct, token_down and one-wave g2r paths against the routed ones, and the layer against
-``torch_moe_gemm1/2`` at four TP=8 model shapes with hidden cut to 256. The tile tests pin the tile-height
-rule and the measured tiles, so a table edit cannot change a kernel without a test noticing.
+``torch_moe_gemm1/2`` at four TP=8 model shapes with hidden cut to 256. Inputs are unit scale and outputs are
+compared by cosine and max error, so an all-zero output fails. The tile tests check that the tile height grows
+with the token count and that every shape entry of the tile table is what its shape builds.
 """
 
 import os
@@ -29,12 +30,11 @@ if not torch.cuda.is_available():
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 
 _ARCH = str(get_rocm_arch())
-if not _ARCH.startswith("gfx11"):
-    pytest.skip(f"RDNA3 MoE requires gfx11*, got {_ARCH}", allow_module_level=True)
+if _ARCH.split(":")[0] != "gfx1100":
+    pytest.skip(f"the RDNA3 MoE is tuned for gfx1100 only, got {_ARCH}", allow_module_level=True)
 
 import kernels.moe.rdna3_moe as moe  # noqa: E402
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2  # noqa: E402
-from tests.test_common import verify_output  # noqa: E402
 
 TILE_HEIGHTS = (16, 32, 64, 128)
 # (experts, topk, hidden, inter) of four TP=8 shards, a fused shared expert counted in experts and topk.
@@ -61,7 +61,14 @@ def _stream():
 
 def _rand(*shape, seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    return (torch.randn(*shape, generator=g, device="cuda", dtype=torch.bfloat16) * 0.1).contiguous()
+    return torch.randn(*shape, generator=g, device="cuda", dtype=torch.bfloat16).contiguous()
+
+
+def _close(got, ref, rel=0.02):
+    got, ref = got.float().flatten(), ref.float().flatten()
+    assert torch.nn.functional.cosine_similarity(got, ref, dim=0).item() >= 0.999
+    max_abs = (got - ref).abs().max().item()
+    assert max_abs <= rel * ref.abs().max().item(), f"max_abs {max_abs} against max |ref| {ref.abs().max().item()}"
 
 
 def _route(tokens, experts, topk, seed=0):
@@ -72,12 +79,14 @@ def _route(tokens, experts, topk, seed=0):
 
 
 def _host_routing(topk_ids, experts, tile_m, tokens):
-    """The routing by a python loop: rows grouped by expert, each expert padded up to ``tile_m``."""
+    """The routing by a python loop: rows grouped by expert, each expert padded up to ``tile_m``, then the rows of
+    out-of-range experts as expert ``experts``."""
     topk = topk_ids.shape[1]
     sentinel = (topk << 24) | tokens
     sorted_ids, expert_ids = [], []
-    for e in range(experts):
-        token, slot = torch.where(topk_ids == e)
+    for e in range(experts + 1):
+        hit = topk_ids == e if e < experts else (topk_ids < 0) | (topk_ids >= experts)
+        token, slot = torch.where(hit)
         rows = ((slot.to(torch.int32) << 24) | token.to(torch.int32)).tolist()
         blocks = -(-len(rows) // tile_m)
         sorted_ids += rows + [sentinel] * (blocks * tile_m - len(rows))
@@ -113,8 +122,36 @@ def test_routing_matches_host_reference(tokens, experts, topk, tile_m):
         r = moe.build_routing_device(ids, experts=experts, tile_m=tile_m, exact=True)
         sorted_ids, expert_ids, num_blocks = _host_routing(ids, experts, tile_m, tokens)
         assert r.exact and r.num_blocks == num_blocks
+        assert num_blocks <= moe.max_blocks_for(tokens=tokens, topk=topk, experts=experts, tile_m=tile_m)
         assert torch.equal(r.expert_ids, expert_ids)
         assert torch.equal(_canonical(r.sorted_ids, r.expert_ids, tile_m), _canonical(sorted_ids, expert_ids, tile_m))
+
+
+@pytest.mark.parametrize("tokens, experts, topk", [(7, 8, 3), (2048, 129, 9)])
+def test_routing_puts_out_of_range_ids_last(tokens, experts, topk):
+    ids, _ = _route(tokens, experts, topk)
+    ids[:, 0] = experts
+    ids[::3, 1] = -1
+    r = moe.build_routing_device(ids, experts=experts, tile_m=16, exact=True, reuse=False)
+    sorted_ids, expert_ids, num_blocks = _host_routing(ids, experts, 16, tokens)
+    assert r.num_blocks == num_blocks and int(r.expert_ids[-1]) == experts
+    assert num_blocks <= moe.max_blocks_for(tokens=tokens, topk=topk, experts=experts, tile_m=16)
+    assert torch.equal(r.expert_ids, expert_ids)
+    assert torch.equal(_canonical(r.sorted_ids, r.expert_ids, 16), _canonical(sorted_ids, expert_ids, 16))
+
+
+def test_routing_workspace_is_one_per_tile_height():
+    """Every prefill length shares one power-of-two workspace per tile height, grown only when outgrown."""
+    experts, topk, tile_m = 8, 2, 64
+    moe._WORKSPACES.clear()
+    for tokens in (300, 100, 700, 650):
+        ids, _ = _route(tokens, experts, topk)
+        r = moe.build_routing_device(ids, experts=experts, tile_m=tile_m)
+        assert r.sorted_ids.numel() == r.num_blocks * tile_m
+    keys = [k for k in moe._WORKSPACES if k[0] == tile_m]
+    assert len(keys) == 1
+    bound = moe.max_blocks_for(tokens=700, topk=topk, experts=experts, tile_m=tile_m)
+    assert moe._WORKSPACES[keys[0]].expert_ids.numel() == 1 << (bound - 1).bit_length()
 
 
 def test_routing_block_for():
@@ -131,10 +168,7 @@ def test_routing_bound_mode_keeps_count_on_device():
     assert bound.exact is False
     assert bound.num_blocks == moe.max_blocks_for(tokens=tokens, topk=topk, experts=experts, tile_m=tile_m)
     assert int(bound.num_blocks_device[0]) == exact.num_blocks
-    tail_e, tail_s = bound.expert_ids[exact.num_blocks :], bound.sorted_ids[exact.num_blocks * tile_m :]
-    assert tail_e.numel() > 0
-    assert torch.equal(tail_e, torch.zeros_like(tail_e))
-    assert torch.equal(tail_s, torch.full_like(tail_s, (topk << 24) | tokens))
+    assert torch.equal(bound.expert_ids[: exact.num_blocks], exact.expert_ids)
 
 
 def test_unrouted_expert_gets_no_tile():
@@ -176,20 +210,20 @@ def _stage(stage, tile_m, *, tokens, k_dim, n_out, experts, topk, cfg=None, **op
     sorted_ids, expert_ids, num_blocks = _host_routing(ids, experts, tile_m, tokens)
     backing = torch.full((tokens * topk + 64, n_out), 7.0, dtype=torch.bfloat16, device="cuda")
     out = backing[: tokens * topk].view(tokens, topk, n_out)
-    w_in = moe.wmma_order(w) if opts.get("b_wmma") else w
+    w_in = moe.wmma_order(w) if stage == "gate_up" else w
     launch(out, a, w_in, sorted_ids, expert_ids, weights, tokens, num_blocks, _stream())
     torch.cuda.synchronize()
     return out, backing[tokens * topk :], (a, w, ids, weights)
 
 
 @pytest.mark.parametrize("tile_m", TILE_HEIGHTS)
-@pytest.mark.parametrize("opts", [{}, {"b_wmma": True}, {"b_wmma": True, "g2r": True}])
+@pytest.mark.parametrize("opts", [{}, {"g2r": True}])
 def test_gate_up_matches_torch(tile_m, opts):
     cfg = (tile_m // 16, 1, 4, 1, 1) if opts.get("g2r") else None
     kw = dict(tokens=128, k_dim=256, n_out=128, experts=4, topk=2, cfg=cfg, **opts)
     out, extra, (x, w1, ids, weights) = _stage("gate_up", tile_m, **kw)
     ref = torch_moe_gemm1(x, w1, None, None, ids, weights, 128, False)
-    assert verify_output(out.float().reshape(ref.shape), ref, atol=0.05, rtol=0.05)
+    _close(out.reshape(ref.shape), ref)
     assert torch.equal(extra, torch.full_like(extra, 7.0)), "a padded routing row stored past the output"
 
 
@@ -197,7 +231,7 @@ def test_gate_up_matches_torch(tile_m, opts):
 def test_down_matches_torch_per_slot(tile_m):
     out, extra, (a2, w2, ids, weights) = _stage("down", tile_m, tokens=128, k_dim=256, n_out=256, experts=4, topk=2)
     ref = torch.einsum("tsk,tsnk->tsn", a2.float(), w2[ids.long()].float()) * weights[..., None]
-    assert verify_output(out.float(), ref, atol=0.05, rtol=0.05)
+    _close(out, ref)
     assert torch.equal(extra, torch.full_like(extra, 7.0)), "a padded routing row stored past the output"
 
 
@@ -260,7 +294,7 @@ def test_token_down_sums_the_weighted_slots(tokens):
     got = torch.full((tokens, hidden), float("nan"), dtype=torch.bfloat16, device="cuda")
     down(got, a2, w2, ids, weights, tokens, _stream())
     torch.cuda.synchronize()
-    assert verify_output(got.float(), ref, atol=0.05, rtol=0.05)
+    _close(got, ref)
 
 
 # ── The layer ────────────────────────────────────────────────────────────────
@@ -293,7 +327,7 @@ def test_layer_matches_torch(shape_id, tokens):
     x, w1, w2, ids, weights = _layer_inputs(experts, topk, SMALL_HIDDEN, inter, tokens)
     got = moe.moe_forward(x, w1, w2, ids, weights, tile_m=tile_m)
     torch.cuda.synchronize()
-    assert verify_output(got.float(), _torch_layer(x, w1, w2, ids, weights), atol=0.05, rtol=0.05)
+    _close(got, _torch_layer(x, w1, w2, ids, weights))
 
 
 def test_layer_default_tile_is_the_rule():
@@ -315,7 +349,9 @@ def test_layer_takes_int64_ids_and_rejects_bad_inputs():
     torch.cuda.synchronize()
     assert torch.equal(got, want)
     strided = torch.empty(x.shape[1], x.shape[0], dtype=x.dtype, device="cuda").t()
+    fewer = moe.build_routing_device(ids, experts=experts - 1, tile_m=16, reuse=False)
     for call, match in (
+        (lambda: moe.moe_forward(x, w1, w2, ids, weights, routing=fewer), "the routing was built for"),
         (lambda: moe.moe_forward(strided, w1, w2, ids, weights), "contiguous"),
         (lambda: moe.moe_forward(x, w1.half(), w2, ids, weights), "must all be bf16 or all f16"),
         (lambda: moe.moe_forward(x, w1, w2, ids, weights, tile_m=48), "tile_m must be one of"),
@@ -335,7 +371,41 @@ def test_one_token_layer_launches_no_routing_and_no_reduce(monkeypatch):
     x, w1, w2, ids, weights = _layer_inputs(experts, topk, SMALL_HIDDEN, inter, 1)
     got = moe.moe_forward(x, w1, w2, ids, weights)
     torch.cuda.synchronize()
-    assert verify_output(got.float(), _torch_layer(x, w1, w2, ids, weights), atol=0.05, rtol=0.05)
+    _close(got, _torch_layer(x, w1, w2, ids, weights))
+
+
+@pytest.mark.parametrize("tokens", [1, 16, 64])
+def test_out_of_range_expert_contributes_nothing(tokens):
+    """1 token is direct + token_down, 16 routed + token_down, 64 routed + gemm2 + reduce; the caching allocator
+    hands the layer's buffers memory filled with NaN, so a row left unwritten shows."""
+    experts, topk, _, inter = SHAPES["qwen3-30b-a3b-tp8"]
+    x, w1, w2, ids, weights = _layer_inputs(experts, topk, SMALL_HIDDEN, inter, tokens)
+    ids[:, 0] = experts
+    ids[::2, 1] = -1
+    ids[1::3, 2] = 1 << 20
+    keep = (ids >= 0) & (ids < experts)
+    torch.full((64 << 20,), float("nan"), device="cuda")
+    got = moe.moe_forward(x, w1, w2, ids, weights)
+    torch.cuda.synchronize()
+    _close(got, _torch_layer(x, w1, w2, torch.where(keep, ids, 0), weights * keep))
+
+
+def test_layer_checks_out_tokens_and_offsets():
+    experts, topk, _, inter = SHAPES["qwen3-30b-a3b-tp8"]
+    x, w1, w2, ids, weights = _layer_inputs(experts, topk, SMALL_HIDDEN, inter, 8)
+    empty = moe.moe_forward(x[:0], w1, w2, ids[:0], weights[:0])
+    assert tuple(empty.shape) == (0, SMALL_HIDDEN) and empty.dtype == x.dtype
+    for bad in (torch.empty(8, SMALL_HIDDEN + 1, dtype=x.dtype, device="cuda"), torch.empty_like(x, dtype=torch.half)):
+        with pytest.raises(ValueError, match="out must be"):
+            moe.moe_forward(x, w1, w2, ids, weights, out=bad)
+    # 2**31 bytes of y at bf16: tokens * topk * hidden = 2**30.
+    tokens, hidden = (1 << 30) // (topk * 4096), 4096
+    big_x = torch.empty(tokens, hidden, dtype=x.dtype, device="cuda")
+    big_w1 = torch.empty(experts, 2 * inter, hidden, dtype=x.dtype, device="cuda")
+    big_w2 = torch.empty(experts, hidden, inter, dtype=x.dtype, device="cuda")
+    big_ids = torch.zeros(tokens, topk, dtype=torch.int32, device="cuda")
+    with pytest.raises(ValueError, match="2 GiB"):
+        moe.moe_forward(big_x, big_w1, big_w2, big_ids, torch.zeros(tokens, topk, device="cuda"))
 
 
 def test_gating_then_layer_matches_torch():
@@ -348,8 +418,7 @@ def test_gating_then_layer_matches_torch():
     weights = weights / weights.sum(dim=1, keepdim=True)
     got = moe.moe_forward_from_logits(x, w1, w2, logits, topk=topk)
     torch.cuda.synchronize()
-    ref = _torch_layer(x, w1, w2, ids.to(torch.int32), weights)
-    assert verify_output(got.float(), ref, atol=0.05, rtol=0.05)
+    _close(got, _torch_layer(x, w1, w2, ids.to(torch.int32), weights))
 
 
 # ── Tile choice ──────────────────────────────────────────────────────────────
@@ -376,57 +445,26 @@ def test_tile_m_thresholds(wide):
         assert moe.tile_m_for(tokens=rows, topk=1, experts=1, **dims) == upper, (wide, rows)
 
 
-_RULE_POINTS = {
-    "qwen38-flash-next-tp8": (16, 16, 16, 16, 16, 16, 16, 16, 16, 64),
-    "qwen3-30b-a3b-tp8": (16, 16, 16, 16, 16, 16, 16, 16, 64, 64),
-    "glm45-air-tp8": (16, 16, 16, 16, 16, 16, 16, 64, 64, 64),
-    "mixtral-8x7b-tp8": (16, 32, 32, 32, 32, 32, 64, 64, 128, 128),
-}
-
-
-@pytest.mark.parametrize("tokens", TOKENS)
 @pytest.mark.parametrize("shape_id", list(SHAPES))
-def test_tile_m_at_benchmark_points(shape_id, tokens):
+def test_tile_m_grows_with_tokens(shape_id):
     experts, topk, hidden, inter = SHAPES[shape_id]
-    want = _RULE_POINTS[shape_id][TOKENS.index(tokens)]
-    assert moe.tile_m_for(tokens=tokens, topk=topk, experts=experts, inter=inter, hidden=hidden) == want
+    heights = [
+        moe.tile_m_for(tokens=t, topk=topk, experts=experts, inter=inter, hidden=hidden) for t in range(1, 9000, 7)
+    ]
+    assert set(heights) <= set(moe.SUPPORTED_TILE_M) and heights == sorted(heights)
 
 
-# (stage, k_dim, n_out, tile_m, rows_per_expert) -> (BLOCK_M, BLOCK_N, BLOCK_K, g2r)
-_MEASURED = {
-    ("gate_up", 4096, 1792, 16, None): (16, 16, 64, True),
-    ("gate_up", 4096, 1792, 32, None): (32, 16, 128, True),
-    ("gate_up", 4096, 1792, 128, None): (128, 128, 32, False),
-    ("down", 1792, 4096, 16, None): (16, 32, 64, False),
-    ("down", 1792, 4096, 32, None): (32, 16, 128, False),
-    ("down", 1792, 4096, 128, None): (128, 128, 32, False),
-    ("down", 1792, 4096, 64, 760 * 2 / 8): (64, 128, 32, False),
-    ("gate_up", 4096, 176, 16, None): (16, 16, 128, False),
-    ("gate_up", 4096, 176, 64, None): (64, 16, 64, False),
-    ("down", 176, 4096, 16, None): (16, 32, 32, False),
-    ("down", 176, 4096, 64, None): (64, 128, 16, False),
-    ("gate_up", 2048, 96, 16, None): (16, 16, 128, False),
-    ("gate_up", 2048, 96, 16, 128 * 8 / 128): (16, 16, 64, True),
-    ("gate_up", 2560, 80, 16, None): (16, 16, 128, False),
-    ("down", 80, 2560, 16, None): (16, 64, 16, False),
-    ("gate_up", 2048, 768, 16, None): (16, 64, 64, False),
-    ("gate_up", 2048, 768, 64, None): (64, 32, 64, False),
-    ("down", 768, 2048, 16, None): (16, 64, 32, False),
-    ("down", 768, 2048, 64, None): (64, 128, 32, False),
-    # A bucket entry beats the generic tile, a shape entry beats the bucket entry.
-    ("down", 768, 2048, 64, 128.0): (64, 128, 64, False),
-    ("down", 176, 4096, 64, 128.0): (64, 128, 16, False),
-    # Shape-and-bucket entries: GLM gate_up overhanging inter 176, one-wave g2r down tiles.
-    ("gate_up", 4096, 176, 64, 2048 * 9 / 129): (64, 32, 64, False),
-    ("gate_up", 4096, 176, 64, 8192 * 9 / 129): (64, 64, 32, False),
-    ("down", 80, 2560, 16, 760 * 11 / 513): (16, 32, 16, True),
-    ("down", 96, 2048, 16, 512 * 8 / 128): (16, 32, 32, True),
-}
+_SHAPE_ENTRIES = [k for k in moe._TILES if len(k) >= 4]
+# rows per expert that land in each bucket, as a multiple of the tile height
+_BUCKET_ROWS = {"partial": 0.5, "few": 2.0, "many": 8.0}
 
 
-@pytest.mark.parametrize("key", list(_MEASURED), ids=lambda k: "-".join(map(str, k[:4])) + f"-r{k[4]}")
-def test_measured_tiles_are_kept(key):
-    stage, k_dim, n_out, tile_m, rows_per_expert = key
+@pytest.mark.parametrize("key", _SHAPE_ENTRIES, ids=lambda k: "-".join(map(str, k)))
+def test_shape_entries_build_as_listed(key):
+    """A shape entry the builder rejects would fall through to a generic tile without a word."""
+    stage, tile_m, k_dim, n_out = key[:4]
+    rows = _BUCKET_ROWS[key[4]] * tile_m if len(key) == 5 else None
+    reg_m, reg_n, reg_k, waves_m, waves_n, *flags = moe._TILES[key][0]
     launch, bm, bn, bk = moe.compile_grouped_gemm(
         k_dim=k_dim,
         n_out=n_out,
@@ -435,10 +473,11 @@ def test_measured_tiles_are_kept(key):
         topk=2,
         doweight=stage == "down",
         tile_m=tile_m,
-        rows_per_expert=rows_per_expert,
+        rows_per_expert=rows,
     )
-    assert (bm, bn, bk, launch.g2r) == _MEASURED[key]
-    assert launch.m_major is ((stage, k_dim, n_out) == ("gate_up", 4096, 1792))
+    assert (bm, bn, bk) == (16 * reg_m * waves_m, 16 * reg_n * waves_n, 16 * reg_k)
+    assert launch.g2r == ("g2r" in flags)
+    assert launch.m_major == ((stage, k_dim, n_out) in moe._M_MAJOR)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
-"""bf16 / f16 MoE for RDNA3 / RDNA3.5 (gfx11*, wave32 WMMA).
+"""bf16 / f16 MoE for RDNA3 (gfx1100, wave32 WMMA).
 
 One routed layer is five launches:
 
@@ -17,10 +17,13 @@ With few rows per expert two launches drop out: up to ``TOKEN_DOWN_ROWS_PER_EXPE
 (``compile_token_down``) does gemm2 and the reduce together, and up to ``DIRECT_ROWS_PER_EXPERT`` gemm1 also
 takes one tile per slot straight from ``topk_ids`` (``direct``), so nothing builds a routing.
 
+A ``topk_ids`` entry outside ``[0, experts)`` contributes zero on every path: the routing puts its rows in tiles
+of expert ``experts``, and a GEMM tile of such an expert reads nothing and writes zeros.
+
 The tile count stays on the device, because reading it back costs more than the routing kernel: the grid is
 ``max_blocks_for``'s bound and each GEMM workgroup compares its tile index against the count (``bounded_blocks``).
 ``w1``/``w2`` hold this rank's experts (tensor parallelism only), and ``w1`` is read in ``wmma_order``. The tile
-tables and thresholds were measured on a W7900 (gfx1100).
+tables and thresholds were measured on a W7900 (gfx1100), so the kernels only build there.
 """
 
 import functools
@@ -32,13 +35,11 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import vector
-from flydsl.expr import as_ir_value, const_expr, gpu, ptrtoint, range_constexpr, rocdl
-from flydsl.expr.arith import ArithValue
+from flydsl.expr import const_expr, gpu, ptrtoint, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.act import silu_mul_batch
+from kernels.common.rdna3 import barrier, lds_load_v8, wmma_f32_16x16x16
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import cdiv, global_pointer_from_addr
 from kernels.gemm.rdna3_f16_gemm import K_PAD, WAVE_SIZE, WMMA_K, WMMA_M, WMMA_N
@@ -47,23 +48,24 @@ from kernels.moe.topk_gating_softmax_kernel import build_topk_gating_softmax_mod
 
 __all__ = [
     "Routing",
-    "SUPPORTED_TILE_M",
     "build_routing_device",
-    "compile_grouped_gemm",
-    "compile_moe_gemm1",
-    "compile_moe_gemm2",
-    "compile_routing",
-    "compile_token_down",
-    "create_grouped_gemm_module",
-    "max_blocks_for",
     "moe_forward",
     "moe_forward_from_logits",
     "moe_gating",
-    "moe_reduce",
-    "tile_bucket_for",
     "tile_m_for",
     "wmma_order",
 ]
+
+ARCH = "gfx1100"
+
+
+def _check_arch() -> None:
+    arch = str(get_rocm_arch() or "")
+    if arch.split(":")[0] != ARCH:
+        raise RuntimeError(
+            f"rdna3_moe is tuned for {ARCH} only, got {arch!r}; the CDNA MoE kernels are in kernels/moe/moe_gemm_2stage"
+        )
+
 
 # ── Routing ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +91,7 @@ class Routing(NamedTuple):
     topk: int
     exact: bool = True
     num_blocks_device: torch.Tensor | None = None
+    experts: int = 0
 
     @property
     def rows(self) -> int:
@@ -115,7 +118,7 @@ _ROUTING_BLOCK = 256
 # The one workgroup walks every row twice (histogram, scatter), so prefill row counts take a wider one.
 _WIDE_ROUTING_BLOCK = 1024
 _ROWS_FOR_WIDE_ROUTING = 2048
-# One LDS counter per expert, next to the block scan's storage.
+# One LDS counter per expert and one for the dropped rows, next to the block scan's storage.
 MAX_EXPERTS = 1024
 
 
@@ -132,8 +135,7 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
     # inside an expert is not fixed; no output depends on it.
     E, TOPK, TILE = int(experts), int(topk), int(tile_m)
     BLOCK = int(block)
-    if not str(get_rocm_arch() or "").startswith("gfx11"):
-        raise RuntimeError(f"rdna3_moe requires gfx11*, got {get_rocm_arch()!r}")
+    _check_arch()
     if not 1 <= E <= MAX_EXPERTS:
         raise ValueError(f"experts must be in [1, {MAX_EXPERTS}], got {E}")
     if not 1 <= TOPK <= 0xFF:
@@ -141,13 +143,15 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
     if TILE < 1:
         raise ValueError(f"tile_m must be positive, got {TILE}")
 
-    CHUNKS = cdiv(E, BLOCK)
+    # Bucket E holds the rows whose expert is out of range, so their tiles come after every real expert's.
+    BUCKETS = E + 1
+    CHUNKS = cdiv(BUCKETS, BLOCK)
     SCAN = fx.coop.BlockScan[fx.Int32, BLOCK]
 
     @fx.struct
     class _Shared:
-        # Per expert: the row count, then the slot its rows start at, then the scatter's cursor.
-        cnt: fx.Array[fx.Int32, E, 16]
+        # Per bucket: the row count, then the slot its rows start at, then the scatter's cursor.
+        cnt: fx.Array[fx.Int32, BUCKETS, 16]
 
     @flyc.kernel(known_block_size=[BLOCK, 1, 1])
     def routing_kernel(
@@ -156,7 +160,6 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
         ExpertIds: fx.Pointer,
         Aux: fx.Pointer,
         i32_tokens: fx.Int32,
-        i32_max_blocks: fx.Int32,
     ):
         ids, out, eout, aux = (_global_ptr(p, fx.Int32, 4) for p in (TopkIds, SortedIds, ExpertIds, Aux))
         alloc = fx.SharedAllocator()
@@ -165,7 +168,6 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
 
         tid = gpu.thread_idx.x
         c0, c1 = fx.Int32(0), fx.Int32(1)
-        c_tile = fx.Int32(TILE)
         c_e = fx.Int32(E)
 
         def _claim(eid):
@@ -174,84 +176,62 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
 
         def _tiles(count):
             # An expert with no rows owns no tile: an all-padding tile still streams its expert's weights.
-            return (count + c_tile - c1) // c_tile
+            return (count + TILE - 1) // TILE
 
-        rows = i32_tokens * fx.Int32(TOPK)
-        sentinel = (fx.Int32(TOPK) << fx.Int32(SLOT_SHIFT)) | i32_tokens
-        steps = ArithValue((rows + fx.Int32(BLOCK - 1)) // fx.Int32(BLOCK)).index_cast(T.index)
+        rows = i32_tokens * TOPK
+        sentinel = i32_tokens | (TOPK << SLOT_SHIFT)
+        steps = (rows + BLOCK - 1) // BLOCK
 
         def _my_row(_i):
-            row = tid + fx.Int32(_i) * fx.Int32(BLOCK)
+            row = tid + _i * BLOCK
             return row, row < rows
 
-        def _expert_of(row, inb):
-            # A row naming an expert this rank does not hold is dropped.
-            eid = ids[inb.select(row, c0)]
-            return eid, inb & (eid >= c0) & (eid < c_e)
+        def _bucket_of(row):
+            eid = ids[row]
+            return ((eid >= c0) & (eid < c_e)).select(eid, c_e)
 
         for _c in range_constexpr(CHUNKS):
-            e = fx.Int32(_c * BLOCK) + tid
-            if e < c_e:
+            e = tid + _c * BLOCK
+            if e < BUCKETS:
                 fx.ptr_store(c0, cnt_mr + e)
         gpu.barrier()
 
-        for _i in range(fx.Index(0), steps, fx.Index(1)):
+        for _i in range(c0, steps, c1):
             row, inb = _my_row(_i)
-            eid, keep = _expert_of(row, inb)
-            if keep:
-                _claim(eid)
+            if inb:
+                _claim(_bucket_of(row))
         gpu.barrier()
 
         nblocks = c0
         for _c in range_constexpr(CHUNKS):
-            e = fx.Int32(_c * BLOCK) + tid
-            inr = e < c_e
+            e = tid + _c * BLOCK
+            inr = e < BUCKETS
             count = inr.select(cnt_mr[inr.select(e, c0)], c0)
             mine = _tiles(count)
             cur, chunk_tiles = SCAN.inclusive_with_aggregate(mine, fx.ReductionOp.ADD, storage=scan_lds)
 
             first = nblocks + cur - mine
-            row0 = first * c_tile
+            row0 = first * TILE
             if inr:
                 fx.ptr_store(row0, cnt_mr + e)
 
-            named = ArithValue(mine).index_cast(T.index)
-            for _b in range(fx.Index(0), named, fx.Index(1)):
-                fx.ptr_store(e, eout + (first + fx.Int32(_b)))
+            for _b in range(c0, mine, c1):
+                fx.ptr_store(e, eout + (first + _b))
             # Pad slots of this expert's last tile; disjoint from every slot the scatter claims.
-            pad = ArithValue(mine * c_tile - count).index_cast(T.index)
-            for _p in range(fx.Index(0), pad, fx.Index(1)):
-                fx.ptr_store(sentinel, out + (row0 + count + fx.Int32(_p)))
+            for _p in range(c0, mine * TILE - count, c1):
+                fx.ptr_store(sentinel, out + (row0 + count + _p))
 
             nblocks = nblocks + chunk_tiles
             gpu.barrier()
 
-        for _i in range(fx.Index(0), steps, fx.Index(1)):
+        for _i in range(c0, steps, c1):
             row, inb = _my_row(_i)
-            eid, keep = _expert_of(row, inb)
-            safe = inb.select(row, c0)
-            packed = ((safe % fx.Int32(TOPK)) << fx.Int32(SLOT_SHIFT)) | (safe // fx.Int32(TOPK))
-            if keep:
-                fx.ptr_store(packed, out + _claim(eid))
+            if inb:
+                packed = ((row % TOPK) << SLOT_SHIFT) | (row // TOPK)
+                fx.ptr_store(packed, out + _claim(_bucket_of(row)))
 
         if tid == c0:
             fx.ptr_store(nblocks, aux)
-
-        # Tiles between the real count and the caller's bound: expert 0, all padding.
-        tail_b = ArithValue((i32_max_blocks - nblocks - tid + fx.Int32(BLOCK - 1)) // fx.Int32(BLOCK)).index_cast(
-            T.index
-        )
-        for _t in range(fx.Index(0), tail_b, fx.Index(1)):
-            blk = nblocks + tid + fx.Int32(_t) * fx.Int32(BLOCK)
-            if blk < i32_max_blocks:
-                fx.ptr_store(c0, eout + blk)
-        tail_r = ArithValue(
-            ((i32_max_blocks - nblocks) * c_tile - tid + fx.Int32(BLOCK - 1)) // fx.Int32(BLOCK)
-        ).index_cast(T.index)
-        for _t in range(fx.Index(0), tail_r, fx.Index(1)):
-            slot = nblocks * c_tile + tid + fx.Int32(_t) * fx.Int32(BLOCK)
-            if slot < i32_max_blocks * c_tile:
-                fx.ptr_store(sentinel, out + slot)
 
     @flyc.jit
     def launch_routing(
@@ -260,16 +240,17 @@ def _create_routing_module(*, experts: int, topk: int, tile_m: int, block: int =
         ExpertIds: fx.Pointer,
         Aux: fx.Pointer,
         i32_tokens: fx.Int32,
-        i32_max_blocks: fx.Int32,
         stream: fx.Stream,
     ):
-        routing_kernel(TopkIds, SortedIds, ExpertIds, Aux, i32_tokens, i32_max_blocks).launch(
+        routing_kernel(TopkIds, SortedIds, ExpertIds, Aux, i32_tokens).launch(
             grid=(1, 1, 1), block=(BLOCK, 1, 1), stream=stream
         )
 
+    # max_blocks is not read: tiles past the count keep what they held, so a GEMM reading a bound must be built
+    # with bounded_blocks.
     def launch(topk_ids, sorted_ids, expert_ids, aux, tokens, max_blocks, stream):
         ptrs = [_ptr(t) for t in (topk_ids, sorted_ids, expert_ids, aux)]
-        return _run_compiled(launch_routing, *ptrs, fx.Int32(int(tokens)), fx.Int32(int(max_blocks)), stream)
+        return _run_compiled(launch_routing, *ptrs, fx.Int32(int(tokens)), stream)
 
     return launch
 
@@ -291,9 +272,10 @@ def compile_routing(*, experts: int, topk: int, tile_m: int) -> Callable:
 
 
 def max_blocks_for(*, tokens: int, topk: int, experts: int, tile_m: int) -> int:
-    """An upper bound on the tile count: ``n`` non-empty experts own at most ``n + rows // tile_m`` tiles."""
-    rows = int(tokens) * int(topk)
-    return max(1, min(int(experts), rows) + rows // int(tile_m))
+    """An upper bound on the tile count: ``n`` non-empty buckets (the experts and the dropped rows) holding
+    ``rows`` rows own at most ``(rows + n * (tile_m - 1)) // tile_m`` tiles."""
+    rows, tile = int(tokens) * int(topk), int(tile_m)
+    return max(1, (rows + min(int(experts) + 1, rows) * (tile - 1)) // tile)
 
 
 class _Workspace(NamedTuple):
@@ -302,6 +284,7 @@ class _Workspace(NamedTuple):
     aux: torch.Tensor
 
 
+# One workspace per (tile_m, device), grown to the next power of two of max_blocks.
 _WORKSPACES: dict[tuple, _Workspace] = {}
 
 
@@ -320,8 +303,9 @@ def build_routing_device(
     """The padded routing order of ``topk_ids`` (``[tokens, topk]``), built on the device.
 
     ``exact=True`` reads the tile count back and slices to it; the default returns the bound as ``num_blocks``
-    and leaves the count in ``num_blocks_device``. ``reuse`` keeps one set of buffers per shape, which is safe
-    on one stream because the next routing queues behind the GEMMs reading this one.
+    and leaves the count in ``num_blocks_device``. ``reuse`` keeps one set of buffers per ``tile_m`` and device,
+    shared by every call, which is safe on one stream because the next routing queues behind the GEMMs reading
+    this one; a caller that holds a routing across another call must pass ``reuse=False``.
     """
     if topk_ids.dim() != 2:
         raise ValueError(f"topk_ids must be [tokens, topk], got {tuple(topk_ids.shape)}")
@@ -335,21 +319,24 @@ def build_routing_device(
     max_blocks = max_blocks_for(tokens=tokens, topk=topk, experts=experts, tile_m=tile_m)
     dev = topk_ids.device
     if reuse:
-        key = (int(max_blocks), int(tile_m), str(dev))
+        key = (int(tile_m), str(dev))
         ws = _WORKSPACES.get(key)
-        if ws is None:
-            ws = _WORKSPACES[key] = _new_workspace(max_blocks, int(tile_m), dev)
+        if ws is None or ws.expert_ids.numel() < max_blocks:
+            ws = _WORKSPACES[key] = _new_workspace(1 << (max_blocks - 1).bit_length(), int(tile_m), dev)
     else:
         ws = _new_workspace(max_blocks, int(tile_m), dev)
 
     st = stream if stream is not None else torch.cuda.current_stream()
     launch(topk_ids.contiguous(), ws.sorted_ids, ws.expert_ids, ws.aux, int(tokens), max_blocks, st)
-    common = dict(tile_m=int(tile_m), tokens=int(tokens), topk=int(topk), num_blocks_device=ws.aux)
-    if not exact:
-        return Routing(ws.sorted_ids, ws.expert_ids, max_blocks, exact=False, **common)
-    st.synchronize()
-    num_blocks = int(ws.aux[0])
-    return Routing(ws.sorted_ids[: num_blocks * tile_m], ws.expert_ids[:num_blocks], num_blocks, exact=True, **common)
+    common = dict(
+        tile_m=int(tile_m), tokens=int(tokens), topk=int(topk), num_blocks_device=ws.aux, experts=int(experts)
+    )
+    num_blocks = max_blocks
+    if exact:
+        st.synchronize()
+        num_blocks = int(ws.aux[0])
+    sorted_ids, expert_ids = ws.sorted_ids[: num_blocks * tile_m], ws.expert_ids[:num_blocks]
+    return Routing(sorted_ids, expert_ids, num_blocks, exact=exact, **common)
 
 
 # ── Grouped GEMM ─────────────────────────────────────────────────────────────
@@ -363,12 +350,7 @@ STAGES = ("gate_up", "down")
 
 
 def validate_request(*, stage: str, in_dtype: str, out_dtype: str, doweight: bool, topk: int) -> None:
-    gpu_arch = str(get_rocm_arch() or "")
-    if not gpu_arch.startswith("gfx11"):
-        raise RuntimeError(
-            f"rdna3_moe requires gfx11* (RDNA3 / RDNA3.5); current arch is {gpu_arch!r}. "
-            "The CDNA MoE kernels live in kernels/moe/moe_gemm_2stage."
-        )
+    _check_arch()
     if stage not in STAGES:
         raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     if in_dtype not in IN_DTYPES:
@@ -401,11 +383,10 @@ def create_grouped_gemm_module(
     m_major: bool = False,
     direct: bool = False,
     g2r: bool = False,
-    b_wmma: bool = False,
 ) -> tuple[Callable, int, int, int]:
     """Build one MoE stage. Returns ``(launch, BLOCK_M, BLOCK_N, BLOCK_K)``.
 
-    ``gate_up``: weight ``[experts, 2*n_out, k_dim]`` gate half first, output ``silu(gate) * up`` as
+    ``gate_up``: weight ``[experts, 2*n_out, k_dim]`` in ``wmma_order``, gate half first, output ``silu(gate) * up`` as
     ``[tokens, topk, n_out]``. ``down``: A is ``[tokens, topk, k_dim]`` (row ``token*topk + slot``), weight
     ``[experts, n_out, k_dim]``, output ``[tokens, topk, n_out]``; ``doweight`` multiplies by the routing weight.
     Tile ``t`` belongs to expert ``expert_ids[t]`` and gathers its rows through ``sorted_ids``.
@@ -415,7 +396,7 @@ def create_grouped_gemm_module(
     ``m_major``: M tiles innermost in the grid, so an expert's weight slab is reused from cache. ``direct``: tile
     ``t`` is slot ``t`` of the flat ``[tokens, topk]`` in row 0, and ``expert_ids`` is ``topk_ids``. ``g2r``: a
     one-wave tile loads its operands from global memory straight into the WMMA registers; the LDS it frees is what
-    limits workgroups per CU. ``b_wmma``: the weight is in ``wmma_order``.
+    limits workgroups per CU. A tile whose expert is out of range reads nothing and writes zeros.
 
     Buffer offsets are 32-bit, so one A buffer and one output buffer are each limited to 2 GiB; the weight is
     offset to its expert in 64 bits first, so only one expert's slab has to fit.
@@ -429,7 +410,9 @@ def create_grouped_gemm_module(
     K = int(k_dim)
     N = int(n_out)
     TOPK = int(topk)
+    E = int(experts)
     ld_a = ld_b = K
+    b_wmma = stage == "gate_up"
     n_b_tiles = 2 if stage == "gate_up" else 1
     w_slab_rows = n_b_tiles * N
     a_rows_per_token = TOPK if stage == "down" else 1
@@ -446,11 +429,10 @@ def create_grouped_gemm_module(
         )
     # A tile may overhang N and K: B is bounded at n_out rows, A columns past k_dim read past the end of A, and the
     # scatter drops channels past n_out.
-    TAIL = bool(N % BLOCK_N or K % BLOCK_K)
     if ld_a % LOAD_VEC or ld_b % LOAD_VEC:
         raise ValueError(f"k_dim={K} must be a multiple of {LOAD_VEC} for the 128-bit copy")
     if b_wmma and N % WMMA_N:
-        raise ValueError(f"b_wmma groups the weight by {WMMA_N} rows, so n_out={N} must be a multiple of it")
+        raise ValueError(f"wmma_order groups the weight by {WMMA_N} rows, so n_out={N} must be a multiple of it")
 
     num_k_tiles = cdiv(K, BLOCK_K)
     if num_k_tiles < 2:
@@ -481,7 +463,6 @@ def create_grouped_gemm_module(
     out_elem_cls = OUT_DTYPES[out_dtype]
     elem_bytes = elem_dtype.width // 8
     out_bytes = out_elem_cls.width // 8
-    acc_size = 8 * reg_m * reg_n
 
     # A gfx11 lane holds eight rows of one channel, so the scatter goes through LDS and reads back 128-bit rows;
     # the row pad keeps those reads on different banks.
@@ -508,12 +489,6 @@ def create_grouped_gemm_module(
     grid_n = cdiv(N, BLOCK_N)
     is_bf16 = in_dtype == "bf16"
 
-    def _wmma_op(a_vec, b_vec, acc):
-        # gfx11 WMMA takes v16 operands and a v8 accumulator, and spells bf16 as i16.
-        if is_bf16:
-            return rocdl.wmma_f32_16x16x16_bf16(acc.type, a_vec.bitcast(fx.Int16), b_vec.bitcast(fx.Int16), acc).result
-        return rocdl.wmma_f32_16x16x16_f16(acc.type, a_vec, b_vec, acc).result
-
     @fx.struct
     class _SharedStorage:
         lds: fx.Array[elem_dtype, LDS_TOTAL, 16]
@@ -534,10 +509,8 @@ def create_grouped_gemm_module(
         lds_storage = fx.SharedAllocator().allocate(_SharedStorage).peek()
         lds_ptr = lds_storage.lds.ptr
 
-        def _v8_load(v8_idx):
-            elem_off = fx.Int32(v8_idx * 8)
-            ptr_off = fx.add_offset(lds_ptr, fx.make_int_tuple(elem_off))
-            return fx.make_view(fx.recast_iter(elem_dtype, ptr_off), fx.make_layout(8, 1)).load()
+        _v8_load = functools.partial(lds_load_v8, lds_ptr, elem_dtype)
+        _wmma_op = functools.partial(wmma_f32_16x16x16, bf16=is_bf16)
 
         tid = gpu.thread_id("x")
         if const_expr(m_major):
@@ -565,56 +538,55 @@ def create_grouped_gemm_module(
         sid_iter = fx.recast_iter(fx.Int32, fx.get_iter(arg_sorted_ids))
         eid_iter = fx.recast_iter(fx.Int32, fx.get_iter(arg_expert_ids))
         expert_id = _load_scalar(eid_iter, bid_m)
-        row_base = bid_m * fx.Int32(BLOCK_M)
+        # The routing's dropped rows, or a bad id read directly: A and B have no records, so the tile reads zeros
+        # and stores zeros into its real rows.
+        drop = (expert_id < 0) | (expert_id >= E)
+        expert_id = drop.select(fx.Int32(0), expert_id)
+
+        def _records(n_bytes):
+            return drop.select(fx.Int64(0), fx.Int64(n_bytes))
+
+        row_base = bid_m * BLOCK_M
+        pad_id = i32_tokens | (TOPK << SLOT_SHIFT)
 
         def _routing_row(packed):
-            token = packed & fx.Int32(TOKEN_MASK)
-            slot = packed >> fx.Int32(SLOT_SHIFT)
-            return token * fx.Int32(TOPK) + slot
+            return (packed & TOKEN_MASK) * TOPK + (packed >> SLOT_SHIFT)
 
         def _routing_id(row):
             if const_expr(direct):
-                own = ((bid_m % fx.Int32(TOPK)) << fx.Int32(SLOT_SHIFT)) | (bid_m // fx.Int32(TOPK))
-                pad = (fx.Int32(TOPK) << fx.Int32(SLOT_SHIFT)) | fx.Int32(i32_tokens)
-                return (row == fx.Int32(0)).select(own, pad)
+                own = ((bid_m % TOPK) << SLOT_SHIFT) | (bid_m // TOPK)
+                return (row == 0).select(own, pad_id)
             return _load_scalar(sid_iter, row_base + row)
 
         def _a_row(r):
             packed = _routing_id(r)
-            return _routing_row(packed) if const_expr(stage == "down") else packed & fx.Int32(TOKEN_MASK)
+            return _routing_row(packed) if const_expr(stage == "down") else packed & TOKEN_MASK
 
         # A and the output are bounded at their real row count (num_records_bytes makes the descriptor check
         # it), so a padded row's sentinel address is out of range: its loads read zero, its stores are dropped.
         a_buf = fx.rocdl.make_buffer_tensor(
             fx.make_view(fx.get_iter(arg_a), fx.make_layout(1, 1)),
-            num_records_bytes=fx.Int64(i32_tokens) * fx.Int64(a_rows_per_token * ld_a * elem_bytes),
+            num_records_bytes=_records(fx.Int64(i32_tokens) * (a_rows_per_token * ld_a * elem_bytes)),
         )
         a_iter = fx.get_iter(a_buf)
-        a_end = fx.Int32(i32_tokens) * fx.Int32(a_rows_per_token * ld_a)
+        a_end = i32_tokens * (a_rows_per_token * ld_a)
 
-        tm = tid_i // fx.Int32(THRS_K)
-        tk = tid_i % fx.Int32(THRS_K)
-        a_row_off = [
-            _a_row(fx.Int32(r * THRS_M) + tm) * fx.Int32(ld_a) + tk * fx.Int32(LOAD_VEC)
-            for r in range_constexpr(REPS_M_A)
-        ]
+        tm = tid_i // THRS_K
+        tk = tid_i % THRS_K
+        a_row_off = [_a_row(tm + r * THRS_M) * ld_a + tk * LOAD_VEC for r in range_constexpr(REPS_M_A)]
 
         buf_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
         uni_copy = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
 
-        w_base = fx.get_iter(arg_w) + fx.Int64(expert_id) * fx.Int64(w_slab_rows * ld_b)
+        w_base = fx.get_iter(arg_w) + fx.Int64(expert_id) * (w_slab_rows * ld_b)
 
         def _b_stream(row_offset):
             shape = (grid_n * BLOCK_N, num_k_tiles * BLOCK_K)
             view = fx.make_view(w_base + fx.Int64(row_offset), fx.make_layout(shape, (ld_b, 1)))
-            bound = {"num_records_bytes": fx.Int64(N * ld_b * elem_bytes)} if TAIL else {}
-            return thr_g2s.partition_S(
-                fx.flat_divide(fx.rocdl.make_buffer_tensor(view, **bound), fx.make_tile(BLOCK_N, BLOCK_K))[
-                    None, None, bid_n, None
-                ]
-            )
+            buf = fx.rocdl.make_buffer_tensor(view, num_records_bytes=_records(N * ld_b * elem_bytes))
+            return thr_g2s.partition_S(fx.flat_divide(buf, fx.make_tile(BLOCK_N, BLOCK_K))[None, None, bid_n, None])
 
-        pB_g = [_b_stream(h * N * ld_b) for h in range_constexpr(n_b_tiles)]
+        pB_g = [] if b_wmma else [_b_stream(h * N * ld_b) for h in range_constexpr(n_b_tiles)]
 
         def _lds_dst(buf_offset, base, rows, row_stride):
             ptr = fx.add_offset(lds_ptr, fx.make_int_tuple(buf_offset + base))
@@ -639,13 +611,13 @@ def create_grouped_gemm_module(
 
         # In wmma_order, element (n, c) of a slab is at (n//16)*16*K + (n%16)*8 + c*16 for c a multiple of 8.
         def _wmma_row(n):
-            return (n // fx.Int32(WMMA_N)) * fx.Int32(WMMA_N * ld_b) + (n % fx.Int32(WMMA_N)) * fx.Int32(LOAD_VEC)
+            return (n // WMMA_N) * (WMMA_N * ld_b) + (n % WMMA_N) * LOAD_VEC
 
         w_slab = fx.rocdl.make_buffer_tensor(
-            fx.make_view(w_base, fx.make_layout(1, 1)), num_records_bytes=fx.Int64(w_slab_rows * ld_b * elem_bytes)
+            fx.make_view(w_base, fx.make_layout(1, 1)), num_records_bytes=_records(w_slab_rows * ld_b * elem_bytes)
         )
         reps_n_b = BLOCK_N // THRS_M
-        b_row_off = [_wmma_row(bid_n * fx.Int32(BLOCK_N) + fx.Int32(r * THRS_M) + tm) for r in range(reps_n_b)]
+        b_row_off = [_wmma_row(bid_n * BLOCK_N + tm + r * THRS_M) for r in range(reps_n_b)]
         frag_b_slots = [
             [
                 fx.make_view(fx.get_iter(frag_copy_B[h][None, r, 0]), fx.make_layout(LOAD_VEC, 1))
@@ -655,18 +627,18 @@ def create_grouped_gemm_module(
         ]
 
         def _gmem_load(k_tile):
-            k_off = fx.Int32(k_tile) * fx.Int32(BLOCK_K)
+            k_off = fx.Int32(k_tile) * BLOCK_K
             for r in range_constexpr(REPS_M_A):
                 off = a_row_off[r] + k_off
                 if const_expr(K % BLOCK_K):
-                    off = (k_off + tk * fx.Int32(LOAD_VEC) < fx.Int32(K)).select(off, a_end)
+                    off = (k_off + tk * LOAD_VEC < K).select(off, a_end)
                 mem = fx.make_view(a_iter + off, fx.make_layout(LOAD_VEC, 1))
                 fx.copy(buf_copy, mem, frag_a_slots[r])
             for h in range_constexpr(n_b_tiles):
                 if const_expr(b_wmma):
-                    col = (k_off + tk * fx.Int32(LOAD_VEC)) * fx.Int32(WMMA_N)
+                    col = (k_off + tk * LOAD_VEC) * WMMA_N
                     for r in range_constexpr(reps_n_b):
-                        off = fx.Int32(h * N * ld_b) + b_row_off[r] + col
+                        off = h * N * ld_b + b_row_off[r] + col
                         fx.copy(
                             buf_copy,
                             fx.make_view(fx.get_iter(w_slab) + off, fx.make_layout(LOAD_VEC, 1)),
@@ -698,16 +670,6 @@ def create_grouped_gemm_module(
             hi = _v8_load((buf_offset + (row * ROW_STRIDE_A + (16 * rk + 8))) // 8)
             return lo.shuffle(hi, _concat16_mask)
 
-        def _barrier():
-            # gfx11 barrier: the split signal/wait and s_wait_dscnt are gfx12+.
-            _llvm.inline_asm(
-                res=None,
-                operands_=[],
-                asm_string="s_waitcnt lgkmcnt(0)\ns_barrier",
-                constraints="",
-                has_side_effects=True,
-            )
-
         def _compute_k_tile(accs_in, buf_offset):
             new_accs = list(accs_in)
             for rk in range_constexpr(reg_k):
@@ -729,25 +691,25 @@ def create_grouped_gemm_module(
 
         # g2r: rows and columns past the shape read zero (A past its bound, B past the end of the expert's slab).
         def _g2r_rows():
-            lane_row = tid_i % fx.Int32(16)
+            lane_row = tid_i % 16
             b_end = fx.Int32(w_slab_rows * ld_b)
-            a_rows = [_a_row(fx.Int32(16 * rm) + lane_row) * fx.Int32(ld_a) for rm in range_constexpr(reg_m)]
+            a_rows = [_a_row(lane_row + 16 * rm) * ld_a for rm in range_constexpr(reg_m)]
             b_rows = []
             for h in range_constexpr(n_b_tiles):
                 for rn in range_constexpr(reg_n):
-                    n = bid_n * fx.Int32(BLOCK_N) + fx.Int32(16 * rn) + lane_row
-                    off = fx.Int32(h * N * ld_b) + (_wmma_row(n) if const_expr(b_wmma) else n * fx.Int32(ld_b))
-                    b_rows.append((n < fx.Int32(N)).select(off, b_end) if const_expr(N % BLOCK_N) else off)
+                    n = bid_n * BLOCK_N + lane_row + 16 * rn
+                    off = (_wmma_row(n) if const_expr(b_wmma) else n * ld_b) + h * N * ld_b
+                    b_rows.append((n < N).select(off, b_end) if const_expr(N % BLOCK_N) else off)
             return (a_iter, a_end, a_rows, 1), (fx.get_iter(w_slab), b_end, b_rows, WMMA_N if b_wmma else 1)
 
         def _g2r_v16(operand, i, col):
             it, end, rows, col_step = operand
             halves = []
             for half in range_constexpr(2):
-                c = col + fx.Int32(8 * half)
-                off = rows[i] + c * fx.Int32(col_step)
+                c = col + 8 * half
+                off = rows[i] + c * col_step
                 if const_expr(K % BLOCK_K):
-                    off = (c < fx.Int32(K)).select(off, end)
+                    off = (c < K).select(off, end)
                 frag = fx.make_rmem_tensor(fx.make_layout(LOAD_VEC, 1), elem_dtype)
                 fx.copy(buf_copy, fx.make_view(it + off, fx.make_layout(LOAD_VEC, 1)), frag)
                 halves.append(frag.load())
@@ -759,7 +721,7 @@ def create_grouped_gemm_module(
             for iv, state in range(0, num_k_tiles, 1, init=init_state):
                 accs = list(state[:n_acc])
                 for rk in range_constexpr(reg_k):
-                    col = fx.Int32(iv) * fx.Int32(BLOCK_K) + fx.Int32(16 * rk)
+                    col = fx.Int32(iv) * BLOCK_K + 16 * rk
                     b_vecs = [_g2r_v16(b_op, i, col) for i in range_constexpr(n_b_tiles * reg_n)]
                     for rm in range_constexpr(reg_m):
                         a_vec = _g2r_v16(a_op, rm, col)
@@ -775,7 +737,7 @@ def create_grouped_gemm_module(
                 return _g2r_accumulate()
             _gmem_load(fx.Int32(0))
             _lds_store(0)
-            _barrier()
+            barrier()
 
             init_state = [zero_acc for _ in range_constexpr(n_acc)]
             for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
@@ -783,7 +745,7 @@ def create_grouped_gemm_module(
                 _gmem_load(iv + 1)
                 s_accs = _compute_k_tile(s_accs, iv % 2 * c_lds_buf_stride)
                 _lds_store((1 - iv % 2) * c_lds_buf_stride)
-                _barrier()
+                barrier()
                 results = yield list(s_accs)
 
             return _compute_k_tile(list(results[:n_acc]), ((num_k_tiles - 1) % 2) * c_lds_buf_stride)
@@ -803,9 +765,7 @@ def create_grouped_gemm_module(
                 frag_out = frag_C
             else:
                 frag_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
-            frag_out.store(
-                vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
-            )
+            frag_out.store(fx.Vector.from_elements(out_elems, out_elem_cls))
             return frag_out
 
         def _epilogue_values(accs):
@@ -825,13 +785,13 @@ def create_grouped_gemm_module(
             frag_out = _fill_out_frag(thr_mma.make_fragment_C(lds_c), _epilogue_values(accs))
 
             # The last _compute_k_tile may still be reading the buffer this overwrites.
-            _barrier()
+            barrier()
             fx.copy(cshuf_atom, thr_cshuf.retile(frag_out), thr_cshuf.partition_D(lds_c))
-            _barrier()
+            barrier()
 
             out_buf = fx.rocdl.make_buffer_tensor(
                 fx.make_view(fx.get_iter(arg_c), fx.make_layout(1, 1)),
-                num_records_bytes=fx.Int64(i32_tokens) * fx.Int64(TOPK * N * out_bytes),
+                num_records_bytes=fx.Int64(i32_tokens) * (TOPK * N * out_bytes),
             )
             out_iter = fx.get_iter(out_buf)
             lds_c_ptr = fx.recast_iter(out_elem_cls, lds_ptr)
@@ -839,19 +799,19 @@ def create_grouped_gemm_module(
             buf_copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), out_elem_cls)
             if const_expr(doweight):
                 wt_iter = fx.recast_iter(fx.Float32, fx.get_iter(arg_topk_weights))
-                n_rows = fx.Int32(i32_tokens) * fx.Int32(TOPK)
+                n_rows = i32_tokens * TOPK
 
-            chan = (tid_i % fx.Int32(LANES_N)) * fx.Int32(SVEC)
-            row_in_pass = tid_i // fx.Int32(LANES_N)
+            chan = (tid_i % LANES_N) * SVEC
+            row_in_pass = tid_i // LANES_N
             for rep in range_constexpr(C_REPS_M):
-                row = row_in_pass + fx.Int32(rep * ROWS_PER_PASS)
+                row = row_in_pass + rep * ROWS_PER_PASS
                 out_row = _routing_row(_routing_id(row))
                 if const_expr(N % BLOCK_N):
-                    col_ok = bid_n * fx.Int32(BLOCK_N) + chan < fx.Int32(N)
-                    out_row = col_ok.select(out_row, fx.Int32(i32_tokens) * fx.Int32(TOPK))
+                    col_ok = bid_n * BLOCK_N + chan < N
+                    out_row = col_ok.select(out_row, i32_tokens * TOPK)
 
                 src = fx.make_view(
-                    fx.add_offset(lds_c_ptr, fx.make_int_tuple(row * fx.Int32(C_ROW_STRIDE) + chan)),
+                    fx.add_offset(lds_c_ptr, fx.make_int_tuple(row * C_ROW_STRIDE + chan)),
                     fx.make_layout(SVEC, 1),
                 )
                 staged = fx.make_fragment_like(src)
@@ -860,16 +820,12 @@ def create_grouped_gemm_module(
                 if const_expr(doweight):
                     # A padded row reads weight 0's slot; its store is dropped.
                     safe_row = (out_row < n_rows).select(out_row, fx.Int32(0))
-                    w = fx.Float32(_load_scalar(wt_iter, safe_row))
+                    w = drop.select(fx.Float32(0.0), fx.Float32(_load_scalar(wt_iter, safe_row)))
                     cur = staged.load()
                     scaled = _to_out([fx.Float32(cur[i]) * w for i in range_constexpr(SVEC)])
-                    staged.store(
-                        vector.from_elements(T.vec(SVEC, out_elem_cls.ir_type), [as_ir_value(v) for v in scaled])
-                    )
+                    staged.store(fx.Vector.from_elements(scaled, out_elem_cls))
 
-                dst = fx.make_view(
-                    out_iter + (out_row * fx.Int32(N) + bid_n * fx.Int32(BLOCK_N) + chan), fx.make_layout(SVEC, 1)
-                )
+                dst = fx.make_view(out_iter + (out_row * N + bid_n * BLOCK_N + chan), fx.make_layout(SVEC, 1))
                 fx.copy(buf_copy_out, staged, dst)
 
         if const_expr(bounded_blocks):
@@ -961,12 +917,11 @@ def create_grouped_gemm_module(
     launch.m_major = m_major
     launch.direct = direct
     launch.g2r = g2r
-    launch.b_wmma = b_wmma
     return launch, BLOCK_M, BLOCK_N, BLOCK_K
 
 
 def wmma_order(w: torch.Tensor) -> torch.Tensor:
-    """``[experts, rows, k]`` -> the order a ``b_wmma`` build reads: each 16 rows x 8 columns contiguous, so a
+    """``[experts, rows, k]`` -> the order gate_up reads ``w1`` in: each 16 rows x 8 columns contiguous, so a
     16-lane WMMA operand is one 256 B run rather than 32 B from each of 16 rows."""
     e, n, k = w.shape
     return w.view(e, n // WMMA_N, WMMA_N, k // LOAD_VEC, LOAD_VEC).transpose(2, 3).contiguous().view(e, n, k)
@@ -993,7 +948,7 @@ def compile_token_down(*, model_dim: int, inter_dim: int, experts: int, topk: in
     Tokens go innermost when ``w2`` overflows the Infinity Cache, so two tokens on one expert share its rows in
     L2. ``launch(out, a2, w2, topk_ids, topk_weights, tokens, stream)``.
     """
-    N, K, TOPK = int(model_dim), int(inter_dim), int(topk)
+    N, K, TOPK, E = int(model_dim), int(inter_dim), int(topk), int(experts)
     if not token_down_fits(N, K):
         raise ValueError(
             f"token_down needs inter_dim % {LOAD_VEC} == 0 and model_dim % {_TD_CHANNELS} == 0, got {K}, {N}"
@@ -1002,39 +957,51 @@ def compile_token_down(*, model_dim: int, inter_dim: int, experts: int, topk: in
     CHUNKS = K // LOAD_VEC
     STEPS = cdiv(CHUNKS, LANES)
     elem = IN_DTYPES[in_dtype]
-    tokens_inner = int(experts) * N * K * (elem.width // 8) > _INFINITY_CACHE_BYTES
+    tokens_inner = E * N * K * (elem.width // 8) > _INFINITY_CACHE_BYTES
 
     @flyc.kernel(known_block_size=[_TD_THREADS, 1, 1])
     def token_down_kernel(Out: fx.Pointer, A: fx.Pointer, W: fx.Pointer, Ids: fx.Pointer, Wts: fx.Pointer):
         vec_in, vec_f32 = T.vec(LOAD_VEC, elem.ir_type), T.vec(LOAD_VEC, T.f32)
         tid = fx.Int32(gpu.thread_id("x"))
         token = fx.Int32(gpu.block_id("x" if tokens_inner else "y"))
-        lane = tid % fx.Int32(LANES)
-        n = fx.Int32(gpu.block_id("y" if tokens_inner else "x")) * fx.Int32(CHANNELS) + tid // fx.Int32(LANES)
+        lane = tid % LANES
+        n = fx.Int32(gpu.block_id("y" if tokens_inner else "x")) * CHANNELS + tid // LANES
         a_ptr, w_ptr = _global_ptr(A, elem, 16), _global_ptr(W, elem, 16)
         ids, wts = _global_ptr(Ids, fx.Int32, 4), _global_ptr(Wts, fx.Float32, 4)
+        buf_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem)
         acc = fx.Float32(0.0)
         for k in range_constexpr(TOPK):
-            slot = token * fx.Int32(TOPK) + fx.Int32(k)
-            w_row = (fx.Int64(fx.Int32(ids[slot])) * fx.Int64(N) + fx.Int64(n)) * fx.Int64(K)
+            slot = token * TOPK + k
+            eid = ids[slot]
+            # An expert this rank does not hold has no records, so its loads read zero and touch no memory.
+            ok = (eid >= 0) & (eid < E)
+            w_slab = fx.rocdl.make_buffer_tensor(
+                fx.make_view(w_ptr + fx.Int64(ok.select(eid, fx.Int32(0))) * (N * K), fx.make_layout(1, 1)),
+                num_records_bytes=ok.select(fx.Int64(N * K * (elem.width // 8)), fx.Int64(0)),
+            )
+            w_it = fx.get_iter(w_slab)
             part = fx.full(LOAD_VEC, 0.0, fx.Float32)
             for s in range_constexpr(STEPS):
-                c = lane + fx.Int32(s * LANES)
+                c = lane + s * LANES
+                b_off = n * K + c * LOAD_VEC
                 if const_expr((s + 1) * LANES > CHUNKS):
-                    live = c < fx.Int32(CHUNKS)
+                    live = c < CHUNKS
                     c = live.select(c, fx.Int32(0))
-                a_off = fx.Int64(slot * fx.Int32(K) + c * fx.Int32(LOAD_VEC))
+                    b_off = live.select(b_off, fx.Int32(N * K))
+                a_off = fx.Int64(slot * K + c * LOAD_VEC)
                 a = fx.Vector(fx.ptr_load(a_ptr + a_off, vec_in)).extf(vec_f32)
-                b = fx.Vector(fx.ptr_load(w_ptr + (w_row + fx.Int64(c * fx.Int32(LOAD_VEC))), vec_in)).extf(vec_f32)
+                b_frag = fx.make_rmem_tensor(fx.make_layout(LOAD_VEC, 1), elem)
+                fx.copy(buf_copy, fx.make_view(w_it + b_off, fx.make_layout(LOAD_VEC, 1)), b_frag)
+                b = b_frag.load().extf(vec_f32)
                 if const_expr((s + 1) * LANES > CHUNKS):
                     part = part + live.select(a * b, fx.full(LOAD_VEC, 0.0, fx.Float32))
                 else:
                     part = part + a * b
-            acc = acc + part.reduce("add") * fx.Float32(wts[slot])
+            acc = acc + part.reduce("add") * ok.select(fx.Float32(wts[slot]), fx.Float32(0.0))
         for off in (LANES // 2, LANES // 4, LANES // 8, LANES // 16):
             acc = acc + acc.bitcast(fx.Int32).shuffle_xor(fx.Int32(off), fx.Int32(32)).bitcast(fx.Float32)
-        if lane == fx.Int32(0):
-            fx.ptr_store(acc.to(elem), _global_ptr(Out, elem, 2) + fx.Int64(token * fx.Int32(N) + n))
+        if lane == 0:
+            fx.ptr_store(acc.to(elem), _global_ptr(Out, elem, 2) + fx.Int64(token * N + n))
 
     @flyc.jit
     def launch_token_down(
@@ -1220,7 +1187,6 @@ def _build(
                 m_major=(stage, k_dim, n_out) in _M_MAJOR,
                 direct=direct,
                 g2r="g2r" in flags,
-                b_wmma=stage == "gate_up",
             )
         except ValueError as exc:
             tried.append(f"{(reg_m, reg_n, reg_k, waves_m, waves_n)}: {exc}")
@@ -1336,6 +1302,16 @@ _DTYPES = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float32: "f32"}
 # also reads w1 once per slot, which stops paying for the routing launch it saves past 0.6 rows an expert.
 TOKEN_DOWN_ROWS_PER_EXPERT = 2.0
 DIRECT_ROWS_PER_EXPERT = 0.6
+# Activation and output offsets are 32-bit, and a padded row addresses one row of topk slots past the end.
+_MAX_BUFFER_BYTES = 1 << 31
+
+
+def _check_out(out: torch.Tensor, shape: tuple, dtype: torch.dtype, device: torch.device) -> None:
+    if tuple(out.shape) != tuple(shape) or out.dtype != dtype or out.device != device or not out.is_contiguous():
+        raise ValueError(
+            f"out must be a contiguous {tuple(shape)} {dtype} tensor on {device}, "
+            f"got {tuple(out.shape)} {out.dtype} on {out.device}"
+        )
 
 
 @functools.lru_cache(maxsize=64)
@@ -1364,10 +1340,12 @@ def moe_gating(
     if dtype_str is None:
         raise ValueError(f"gating_logits dtype must be bf16/f16/f32, got {gating_logits.dtype}")
 
-    launch = _gating_launch(int(experts), int(topk), dtype_str, bool(renormalize))
     dev = gating_logits.device
     weights = torch.empty(tokens, topk, dtype=torch.float32, device=dev)
     ids = torch.empty(tokens, topk, dtype=torch.int32, device=dev)
+    if tokens == 0:
+        return ids, weights
+    launch = _gating_launch(int(experts), int(topk), dtype_str, bool(renormalize))
     token_expert_indices = torch.empty(tokens, topk, dtype=torch.int32, device=dev)
     st = stream if stream is not None else torch.cuda.current_stream()
     _run_compiled(launch, gating_logits.contiguous(), weights, ids, token_expert_indices, fx.Int32(int(tokens)), st)
@@ -1386,6 +1364,9 @@ def moe_reduce(y: torch.Tensor, *, out: torch.Tensor | None = None, stream=None)
 
     if out is None:
         out = torch.empty(tokens, model_dim, dtype=y.dtype, device=y.device)
+    _check_out(out, (tokens, model_dim), y.dtype, y.device)
+    if tokens == 0:
+        return out
     exe = _reduce_exe(int(topk), int(model_dim), dtype_str)
     # The expert mask and routing ids are for EP, where a slot can be invalid; neither is read here.
     unused = torch.empty(0, dtype=torch.int32, device=y.device)
@@ -1412,8 +1393,8 @@ def moe_forward(
     ``x`` is ``[tokens, model_dim]``, ``w1`` ``[experts, 2*inter_dim, model_dim]`` gate half first and put
     through ``wmma_order`` once at load, ``w2`` ``[experts, model_dim, inter_dim]``, all contiguous and of one
     dtype, and ``topk_weights`` f32.
-    ``topk_ids`` must lie in ``[0, experts)``: the kernels do not check them. ``tile_m`` defaults to
-    ``tile_m_for`` on these shapes. ``routing`` reuses one already built for this ``topk_ids`` and ``tile_m``;
+    A ``topk_ids`` entry outside ``[0, experts)`` contributes nothing. ``tile_m`` defaults to ``tile_m_for`` on
+    these shapes. ``routing`` reuses one already built for this ``topk_ids`` and ``tile_m``;
     otherwise ``build_routing_device`` builds one without waiting for its tile count.
     """
     if x.dim() != 2 or topk_ids.dim() != 2:
@@ -1444,6 +1425,16 @@ def moe_forward(
         )
     if topk_weights.dtype != torch.float32:
         raise ValueError(f"topk_weights must be f32, got {topk_weights.dtype}")
+    if out is not None:
+        _check_out(out, (tokens, model_dim), x.dtype, x.device)
+    if tokens == 0:
+        return out if out is not None else x.new_empty(0, model_dim)
+    # (tokens + 1) * topk rows covers the padded row's address; a weight is offset to its expert in 64 bits, and
+    # w1's slab is the larger one.
+    row_bytes = topk * max(model_dim, inter_dim) * x.element_size()
+    for name, nbytes in (("activation", (tokens + 1) * row_bytes), ("w1 expert slab", w1.nbytes // max(experts, 1))):
+        if nbytes >= _MAX_BUFFER_BYTES:
+            raise ValueError(f"the {name} buffers need {nbytes} B, past the 2 GiB that 32-bit offsets reach")
     if tile_m is None:
         tile_m = (
             routing.tile_m
@@ -1460,11 +1451,13 @@ def moe_forward(
     topk_weights = topk_weights.contiguous()
     if routing is None and not direct:
         routing = build_routing_device(ids, experts=experts, tile_m=tile_m, stream=stream)
-    elif routing is not None and (routing.tile_m, routing.tokens, routing.topk) != (tile_m, tokens, topk):
-        raise ValueError(
-            f"the routing was built for tile_m={routing.tile_m}, tokens={routing.tokens}, "
-            f"topk={routing.topk}, not tile_m={tile_m}, tokens={tokens}, topk={topk}"
-        )
+    elif routing is not None:
+        built = (routing.tile_m, routing.tokens, routing.topk, routing.experts)
+        if built != (tile_m, tokens, topk, experts):
+            raise ValueError(
+                f"the routing was built for (tile_m, tokens, topk, experts)={built}, "
+                f"not {(tile_m, tokens, topk, experts)}"
+            )
 
     bounded = not direct and not routing.exact
     gemm1, _, _, _ = compile_moe_gemm1(
@@ -1481,13 +1474,12 @@ def moe_forward(
     )
     if stream is None:
         stream = torch.cuda.current_stream()
-    # Every (token, slot) is in the routing exactly once, so a2 and y are fully written.
     a2 = torch.empty(tokens, topk, inter_dim, dtype=x.dtype, device=x.device)
     unused = torch.empty(0, dtype=torch.float32, device=x.device)
+    nb_dev = routing.num_blocks_device if bounded else None
     if direct:
         gemm1(a2, x, w1, ids, ids, unused, tokens, tokens * topk, stream)
     else:
-        nb_dev = routing.num_blocks_device if bounded else None
         gemm1(a2, x, w1, routing.sorted_ids, routing.expert_ids, unused, tokens, routing.num_blocks, stream, nb_dev)
     if down_in_registers:
         down = compile_token_down(
