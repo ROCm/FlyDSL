@@ -145,11 +145,9 @@ void storeToRegion(OpBuilder &b, Location loc, const KernelTraceState &st, Value
       b, loc, Type(), ValueRange{data, st.rsrc, byteOffset},
       b.getStringAttr((op + " $0, $1, $2").str()), b.getStringAttr("s,s,s"),
       /*has_side_effects=*/b.getUnitAttr(), /*is_align_stack=*/UnitAttr(),
-      LLVM::TailCallKindAttr::get(b.getContext(),
-                                  LLVM::tailcallkind::TailCallKind::None),
+      LLVM::TailCallKindAttr::get(b.getContext(), LLVM::tailcallkind::TailCallKind::None),
       /*convergent=*/UnitAttr(),
-      LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
-      ArrayAttr());
+      LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT), ArrayAttr());
 }
 
 FailureOr<BufferLayout> bufferLayout(Operation *root, int64_t capacitySlots, int64_t partitions) {
