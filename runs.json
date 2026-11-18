@@ -1,8 +1,113 @@
 {
  "schema": 1,
- "updated": "2026-11-18T14:46:40Z",
+ "updated": "2026-11-18T21:23:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44352053921,
+   "pr": 1421,
+   "commit": "2d57589aa4efba9b6799f82e8528e52332aa66dd",
+   "branch": "pr/softmax-wide-rows",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Split wide softmax rows across blocks",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44352053921",
+   "created_at": "2026-11-18T16:51:29Z",
+   "updated_at": "2026-11-18T16:51:29Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44352051602,
+   "pr": 1422,
+   "commit": "9b2a3a3b93ff7f165b2ca777069ec66524010efd",
+   "branch": "pr/mxfp8-small-tiles",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add 128x128 and 64x64 tiles to the MXFP8 8-wave GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44352051602",
+   "created_at": "2026-11-18T16:51:28Z",
+   "updated_at": "2026-11-18T16:51:28Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44344329178,
+   "pr": 1441,
+   "commit": "bddc48efab2ee9f4bd66d99b684cccfb99e758f3",
+   "branch": "pr/fused-add-rmsnorm-smoothquant",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Single-pass fused add + RMSNorm + smooth quant",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344329178",
+   "created_at": "2026-11-18T16:11:37Z",
+   "updated_at": "2026-11-18T16:11:37Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44344328188,
+   "pr": 1442,
+   "commit": "f9c5ad73f4fef4ef66c136c7546a56bbea99ee90",
+   "branch": "pr/layernorm-fwd",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Multi-row blocks and f32 vectorisation for LayerNorm forward",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344328188",
+   "created_at": "2026-11-18T16:11:37Z",
+   "updated_at": "2026-11-18T16:11:37Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44344315512,
+   "pr": 1443,
+   "commit": "e430e3a1a1367018b9dca7926aa3f06a61fd04c5",
+   "branch": "pr/layernorm-smoothquant",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Register-cached vectorised LayerNorm smooth quant",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344315512",
+   "created_at": "2026-11-18T16:11:32Z",
+   "updated_at": "2026-11-18T16:11:32Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44344310565,
+   "pr": 1440,
+   "commit": "e6264f99affae6f62ba39174e6e9820052c32607",
+   "branch": "pr/fused-add-rmsnorm-fwd",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Vectorise fused add + RMSNorm forward for every dtype and width",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344310565",
+   "created_at": "2026-11-18T16:11:31Z",
+   "updated_at": "2026-11-18T16:11:31Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44344248306,
+   "pr": 1439,
+   "commit": "2f63f8794ade2242acd0d8de68b1fa2f765caafa",
+   "branch": "pr/rmsnorm-dynamicquant",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Single-sweep vectorised RMSNorm dynamic quant",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344248306",
+   "created_at": "2026-11-18T16:11:11Z",
+   "updated_at": "2026-11-18T16:11:11Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44308611453,
    "pr": 1404,
@@ -1525,7 +1630,7 @@
   },
   {
    "run_id": 43843002796,
-   "pr": 1422,
+   "pr": null,
    "commit": "36f2fd812fc37759a99bb92cd4bef070be2abe0a",
    "branch": "pr/mxfp8-small-tiles",
    "event": "pull_request",
@@ -1540,7 +1645,7 @@
   },
   {
    "run_id": 43842989214,
-   "pr": 1421,
+   "pr": null,
    "commit": "415a4a6e91672abad961923bba96ca9ff3b92a1a",
    "branch": "pr/softmax-wide-rows",
    "event": "pull_request",
@@ -1771,235 +1876,6 @@
    "updated_at": "2026-11-16T08:40:21Z",
    "actor": "qiangpan2",
    "jobs": []
-  },
-  {
-   "run_id": 43832869434,
-   "pr": null,
-   "commit": "67cf8aa7519716bd8856fc150cf26e05f8730130",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43832869434",
-   "created_at": "2026-11-16T08:38:27Z",
-   "updated_at": "2026-11-16T08:38:27Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43832028279,
-   "pr": null,
-   "commit": "4352de8e7854e27bd2b366c5d436af080e02dc77",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43832028279",
-   "created_at": "2026-11-16T08:32:19Z",
-   "updated_at": "2026-11-16T08:32:19Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43830179155,
-   "pr": null,
-   "commit": "a206906fc5b9b0caf965c190ee666012bf4b2c9e",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43830179155",
-   "created_at": "2026-11-16T08:18:34Z",
-   "updated_at": "2026-11-16T08:18:34Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43829504227,
-   "pr": 1419,
-   "commit": "5685d62aba02c700fef65ddd594e179ffa6d89ca",
-   "branch": "pr/feat-check-resource-limits",
-   "event": "pull_request",
-   "title": "[Pass] Add an optional check-resource-limits pass",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43829504227",
-   "created_at": "2026-11-16T08:13:23Z",
-   "updated_at": "2026-11-16T09:28:52Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T09:08:51Z",
-     "completed_at": "2026-11-16T09:18:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43829504227/job/133177974765"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T09:03:19Z",
-     "completed_at": "2026-11-16T09:26:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43829504227/job/133177974914",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:39:56Z",
-     "completed_at": "2026-11-16T09:11:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43829504227/job/133177975081"
-    }
-   ]
-  },
-  {
-   "run_id": 43827428356,
-   "pr": 1418,
-   "commit": "7bccbbddff79a1e6856f02047918fd05c4a062ce",
-   "branch": "pr/enh-vector-slice",
-   "event": "pull_request",
-   "title": "[Feat] Support static slices in Vector indexing",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827428356",
-   "created_at": "2026-11-16T07:57:05Z",
-   "updated_at": "2026-11-16T09:56:38Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:40:43Z",
-     "completed_at": "2026-11-16T09:03:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827428356/job/133173202203",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:50:10Z",
-     "completed_at": "2026-11-16T08:58:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827428356/job/133173202243"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:35:36Z",
-     "completed_at": "2026-11-16T08:58:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827428356/job/133173202246"
-    }
-   ]
-  },
-  {
-   "run_id": 43827109079,
-   "pr": 1417,
-   "commit": "596f87becf713e4cb40128327da3f1ae95d6c033",
-   "branch": "jli/fix-aot-export-amdhip64-link",
-   "event": "pull_request",
-   "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079",
-   "created_at": "2026-11-16T07:54:29Z",
-   "updated_at": "2026-11-16T09:52:40Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T09:39:24Z",
-     "completed_at": "2026-11-16T09:52:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079/job/133176608586"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:52:30Z",
-     "completed_at": "2026-11-16T09:25:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079/job/133176608609"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T09:01:36Z",
-     "completed_at": "2026-11-16T09:24:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43827109079/job/133176608891",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43826602941,
-   "pr": 1400,
-   "commit": "6f41d6b56b4f620b99e5aaec9749fe7d30b492cf",
-   "branch": "pr/enh-int-divisibility",
-   "event": "pull_request",
-   "title": "[Feat] Honor divisibility info in the Int32/64 type",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941",
-   "created_at": "2026-11-16T07:50:13Z",
-   "updated_at": "2026-11-16T09:01:25Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:38:24Z",
-     "completed_at": "2026-11-16T08:49:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941/job/133171881600"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:38:33Z",
-     "completed_at": "2026-11-16T09:01:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941/job/133171881637",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:15:43Z",
-     "completed_at": "2026-11-16T08:39:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941/job/133171881675"
-    }
-   ]
   }
  ]
 }
