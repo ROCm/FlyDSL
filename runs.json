@@ -1,8 +1,57 @@
 {
  "schema": 1,
- "updated": "2026-11-17T21:24:11Z",
+ "updated": "2026-11-18T00:44:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44207461132,
+   "pr": 1395,
+   "commit": "e865d60adc470e70f54d00a132a0b53a3b5cfcdd",
+   "branch": "pr/layernorm-bwd",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132",
+   "created_at": "2026-11-18T00:23:45Z",
+   "updated_at": "2026-11-18T00:25:42Z",
+   "actor": "Arist12",
+   "jobs": []
+  },
+  {
+   "run_id": 44206940767,
+   "pr": 1397,
+   "commit": "b71dbf3be74c97d4fbc00114c1330664b567898b",
+   "branch": "pr/rmsnorm-smoothquant",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add a persistent-row RMSNorm SmoothQuant kernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767",
+   "created_at": "2026-11-18T00:19:59Z",
+   "updated_at": "2026-11-18T00:42:08Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T00:42:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506046"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T00:42:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506049"
+    }
+   ]
+  },
   {
    "run_id": 44075824377,
    "pr": 1426,
@@ -1823,98 +1872,6 @@
      "started_at": "2026-11-14T13:54:22Z",
      "completed_at": "2026-11-14T14:21:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562922",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43600249517,
-   "pr": 1412,
-   "commit": "cdc030a1388ddc999cb12500c5d3d63d8a9d0e9f",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517",
-   "created_at": "2026-11-14T13:32:11Z",
-   "updated_at": "2026-11-14T16:19:00Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T13:46:46Z",
-     "completed_at": "2026-11-14T14:11:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630656",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T13:46:38Z",
-     "completed_at": "2026-11-14T14:07:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630672"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T15:25:25Z",
-     "completed_at": "2026-11-14T16:18:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600249517/job/132466630684"
-    }
-   ]
-  },
-  {
-   "run_id": 43600024737,
-   "pr": null,
-   "commit": "605d7f5fee6bed9a1ddaf6c3e4f96e79a70484d5",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Find native libraries when the package is split across symli\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737",
-   "created_at": "2026-11-14T13:29:42Z",
-   "updated_at": "2026-11-15T13:57:01Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T16:19:06Z",
-     "completed_at": "2026-11-14T16:49:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827699809"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T13:46:54Z",
-     "completed_at": "2026-11-14T14:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827699891"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T13:47:04Z",
-     "completed_at": "2026-11-14T14:11:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600024737/job/132827700172",
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
