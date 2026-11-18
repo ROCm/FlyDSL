@@ -1,22 +1,71 @@
 {
  "schema": 1,
- "updated": "2026-11-18T09:43:21Z",
+ "updated": "2026-11-18T12:03:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44299424804,
+   "pr": 1438,
+   "commit": "66e7b458c429a30ddf1526cfb2e21b22cf73e799",
+   "branch": "pr/enh-rocdl-fastmath-ops",
+   "event": "pull_request",
+   "title": "[ROCDL] Convert more math ops with afn flag to native rocdl ops",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44299424804",
+   "created_at": "2026-11-18T11:57:52Z",
+   "updated_at": "2026-11-18T11:59:12Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44296804564,
+   "pr": 1437,
+   "commit": "0ef0bc72f884b6cb595c39b9469ded78f33b6ffc",
+   "branch": "pr/enh-rocdl-arch-atoms",
+   "event": "pull_request",
+   "title": "[ROCDL] Add arch atoms with valid check",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44296804564",
+   "created_at": "2026-11-18T11:40:22Z",
+   "updated_at": "2026-11-18T11:42:13Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 44276084936,
    "pr": 1430,
    "commit": "7c9bd59980aca483a9c68b8db9373e2f1713c510",
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
-   "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
-   "status": "queued",
+   "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276084936",
    "created_at": "2026-11-18T09:27:27Z",
-   "updated_at": "2026-11-18T09:28:53Z",
+   "updated_at": "2026-11-18T11:59:23Z",
    "actor": "Arist12",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T11:44:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276084936/job/134771479699"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T11:32:28Z",
+     "completed_at": "2026-11-18T11:33:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276084936/job/134771479868"
+    }
+   ]
   },
   {
    "run_id": 44276079536,
@@ -24,14 +73,33 @@
    "commit": "e1f7a0bbc999104ecddfef91fb141e5cc0203070",
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
-   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave GEMM prologue reads it",
+   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
    "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536",
    "created_at": "2026-11-18T09:27:24Z",
-   "updated_at": "2026-11-18T09:28:56Z",
+   "updated_at": "2026-11-18T11:42:31Z",
    "actor": "Arist12",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T11:42:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536/job/134776941380"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T11:43:00Z",
+     "completed_at": "2026-11-18T11:45:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536/job/134776941501"
+    }
+   ]
   },
   {
    "run_id": 44269156606,
@@ -44,9 +112,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606",
    "created_at": "2026-11-18T08:41:23Z",
-   "updated_at": "2026-11-18T08:42:48Z",
+   "updated_at": "2026-11-18T11:32:23Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T11:32:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134771694145"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T11:32:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134771694273"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T11:34:40Z",
+     "completed_at": "2026-11-18T11:36:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134771694291"
+    }
+   ]
   },
   {
    "run_id": 44269143520,
@@ -55,13 +151,41 @@
    "branch": "phil/fc7-source-ir-cache",
    "event": "pull_request",
    "title": "[Tests] Keep tests that read source_ir off the JIT disk cache",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520",
    "created_at": "2026-11-18T08:41:18Z",
-   "updated_at": "2026-11-18T08:42:40Z",
+   "updated_at": "2026-11-18T11:30:06Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T11:18:13Z",
+     "completed_at": "2026-11-18T11:29:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134764101501"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T11:18:59Z",
+     "completed_at": "2026-11-18T11:20:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134764101642"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T11:19:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134764101706"
+    }
+   ]
   },
   {
    "run_id": 44269129027,
@@ -70,13 +194,41 @@
    "branch": "phil/fc9-fly-build-dir",
    "event": "pull_request",
    "title": "[Tests] Honour FLY_BUILD_DIR in tests/conftest.py",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027",
    "created_at": "2026-11-18T08:41:12Z",
-   "updated_at": "2026-11-18T08:42:31Z",
+   "updated_at": "2026-11-18T12:01:00Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T11:24:23Z",
+     "completed_at": "2026-11-18T11:25:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134767210940"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T11:50:39Z",
+     "completed_at": "2026-11-18T12:00:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134767211017"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T11:24:28Z",
+     "completed_at": "2026-11-18T11:44:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134767211022"
+    }
+   ]
   },
   {
    "run_id": 44262804346,
@@ -310,7 +462,7 @@
    "commit": "2616adca4a39a44e89f071dfea82f1b3a8f3a638",
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
-   "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
+   "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257",
@@ -393,7 +545,7 @@
    "commit": "b23cb87402abf424cbf299c2041189e0484ebb62",
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
-   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave GEMM prologue reads it",
+   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340",
@@ -1758,98 +1910,6 @@
    "updated_at": "2026-11-16T07:31:12Z",
    "actor": "vlluvia",
    "jobs": []
-  },
-  {
-   "run_id": 43824160812,
-   "pr": 1415,
-   "commit": "e9607e32cbcf0990a6981e909d816977f31d91a4",
-   "branch": "pr/feat-float8-e5m2fnuz",
-   "event": "pull_request",
-   "title": "[Feat] Add the Float8E5M2FNUZ numeric type",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812",
-   "created_at": "2026-11-16T07:28:56Z",
-   "updated_at": "2026-11-16T08:42:43Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:09:27Z",
-     "completed_at": "2026-11-16T08:35:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812/job/133169317299"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:09:41Z",
-     "completed_at": "2026-11-16T08:40:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812/job/133169317330",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T08:09:15Z",
-     "completed_at": "2026-11-16T08:16:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824160812/job/133169317338"
-    }
-   ]
-  },
-  {
-   "run_id": 43817849486,
-   "pr": null,
-   "commit": "5db7643638e17b28fe32a2ea81a9540f68257043",
-   "branch": "main",
-   "event": "push",
-   "title": "[compiler][kernel] strict pin agpr feature and kernel example usage t\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486",
-   "created_at": "2026-11-16T06:35:59Z",
-   "updated_at": "2026-11-16T08:38:16Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T07:08:03Z",
-     "completed_at": "2026-11-16T07:31:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133167478634",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T07:19:05Z",
-     "completed_at": "2026-11-16T07:31:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133167517740"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T07:08:17Z",
-     "completed_at": "2026-11-16T07:29:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133167523964"
-    }
-   ]
   }
  ]
 }
