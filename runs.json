@@ -1,8 +1,75 @@
 {
  "schema": 1,
- "updated": "2026-11-18T00:44:16Z",
+ "updated": "2026-11-18T02:22:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44219229488,
+   "pr": null,
+   "commit": "cbbee24223db23529de5ead78f2cdc07856784e9",
+   "branch": "main",
+   "event": "push",
+   "title": "[Runtime] Load HIP through the libamdhip64.so.7 soname (#1425)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488",
+   "created_at": "2026-11-18T01:53:39Z",
+   "updated_at": "2026-11-18T01:55:21Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 44219180340,
+   "pr": 1428,
+   "commit": "b23cb87402abf424cbf299c2041189e0484ebb62",
+   "branch": "pr/fp4-4wave-race",
+   "event": "pull_request",
+   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave GEMM prologue reads it",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340",
+   "created_at": "2026-11-18T01:53:14Z",
+   "updated_at": "2026-11-18T01:54:56Z",
+   "actor": "Arist12",
+   "jobs": []
+  },
+  {
+   "run_id": 44210615103,
+   "pr": 1396,
+   "commit": "076b24e0f434766b619190e26ae8c9583d8b01ae",
+   "branch": "pr/fp8-rowscale-8wave",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add a small-M kernel to the FP8 8-wave GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103",
+   "created_at": "2026-11-18T00:46:50Z",
+   "updated_at": "2026-11-18T01:05:12Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T01:05:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103/job/134495920487"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T01:09:59Z",
+     "completed_at": "2026-11-18T01:33:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103/job/134495920519",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 44207461132,
    "pr": 1395,
@@ -14,9 +81,31 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132",
    "created_at": "2026-11-18T00:23:45Z",
-   "updated_at": "2026-11-18T00:25:42Z",
+   "updated_at": "2026-11-18T01:23:03Z",
    "actor": "Arist12",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T01:18:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132/job/134493025126"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T00:59:00Z",
+     "completed_at": "2026-11-18T01:25:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132/job/134493025159",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 44206940767,
@@ -25,29 +114,32 @@
    "branch": "pr/rmsnorm-smoothquant",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add a persistent-row RMSNorm SmoothQuant kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767",
    "created_at": "2026-11-18T00:19:59Z",
-   "updated_at": "2026-11-18T00:42:08Z",
+   "updated_at": "2026-11-18T01:18:12Z",
    "actor": "Arist12",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-18T00:42:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506046"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T00:42:34Z",
+     "completed_at": "2026-11-18T01:26:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506046",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-18T00:42:08Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T01:18:11Z",
+     "completed_at": "2026-11-18T01:20:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506049"
     }
    ]
@@ -313,24 +405,12 @@
    "event": "pull_request",
    "title": "[Runtime] Fix current_device_id() always returning 0 on ROCm 10 pip installs",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256",
    "created_at": "2026-11-17T07:18:52Z",
-   "updated_at": "2026-11-17T10:21:31Z",
+   "updated_at": "2026-11-18T02:19:36Z",
    "actor": "qiangpan2",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T08:59:25Z",
-     "completed_at": "2026-11-17T09:24:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678529",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -338,7 +418,19 @@
      "conclusion": "success",
      "started_at": "2026-11-17T08:59:20Z",
      "completed_at": "2026-11-17T10:21:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/133929678580"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/134514688890"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-17T08:59:25Z",
+     "completed_at": "2026-11-17T09:24:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44037732256/job/134514689199",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1770,113 +1862,6 @@
    "updated_at": "2026-11-15T05:43:01Z",
    "actor": "miramar-labs",
    "jobs": []
-  },
-  {
-   "run_id": 43660983801,
-   "pr": null,
-   "commit": "471b3a342e60c9023baa2c37064858edfda25e62",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43660983801",
-   "created_at": "2026-11-15T01:00:32Z",
-   "updated_at": "2026-11-15T12:52:57Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-15T01:14:51Z",
-     "completed_at": "2026-11-15T02:00:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43660983801/job/132815088711"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-15T01:23:42Z",
-     "completed_at": "2026-11-15T01:52:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43660983801/job/132815088851"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-15T01:14:53Z",
-     "completed_at": "2026-11-15T01:39:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43660983801/job/132815111230",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43660896176,
-   "pr": null,
-   "commit": "4a71e0a58099c43b8b41722f5737ae1f2cdeda51",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43660896176",
-   "created_at": "2026-11-15T00:59:29Z",
-   "updated_at": "2026-11-15T01:00:48Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 43600314273,
-   "pr": null,
-   "commit": "67d22e195f56f218ec664c3ed07bc9ca9c12a01e",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273",
-   "created_at": "2026-11-14T13:32:56Z",
-   "updated_at": "2026-11-14T17:07:10Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T14:07:56Z",
-     "completed_at": "2026-11-14T14:47:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562889"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T14:25:45Z",
-     "completed_at": "2026-11-14T15:25:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562906"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-14T13:54:22Z",
-     "completed_at": "2026-11-14T14:21:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43600314273/job/132468562922",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
