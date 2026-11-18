@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-18T09:25:43Z",
+ "updated": "2026-11-18T09:31:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44276084936,
+   "pr": 1430,
+   "commit": "7c9bd59980aca483a9c68b8db9373e2f1713c510",
+   "branch": "pr/fp8-8wave-tail-race",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276084936",
+   "created_at": "2026-11-18T09:27:27Z",
+   "updated_at": "2026-11-18T09:28:53Z",
+   "actor": "Arist12",
+   "jobs": []
+  },
+  {
+   "run_id": 44276079536,
+   "pr": 1428,
+   "commit": "e1f7a0bbc999104ecddfef91fb141e5cc0203070",
+   "branch": "pr/fp4-4wave-race",
+   "event": "pull_request",
+   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave GEMM prologue reads it",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536",
+   "created_at": "2026-11-18T09:27:24Z",
+   "updated_at": "2026-11-18T09:28:56Z",
+   "actor": "Arist12",
+   "jobs": []
+  },
   {
    "run_id": 44269156606,
    "pr": 1436,
@@ -55,11 +85,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Misc] Bump version to 0.5.1 (#1433)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346",
    "created_at": "2026-11-18T07:56:33Z",
-   "updated_at": "2026-11-18T08:54:37Z",
+   "updated_at": "2026-11-18T09:29:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -276,7 +306,7 @@
   },
   {
    "run_id": 44239143257,
-   "pr": 1430,
+   "pr": null,
    "commit": "2616adca4a39a44e89f071dfea82f1b3a8f3a638",
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
@@ -359,7 +389,7 @@
   },
   {
    "run_id": 44219180340,
-   "pr": 1428,
+   "pr": null,
    "commit": "b23cb87402abf424cbf299c2041189e0484ebb62",
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
@@ -1820,36 +1850,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43817849486/job/133167523964"
     }
    ]
-  },
-  {
-   "run_id": 43816710400,
-   "pr": null,
-   "commit": "3ed2ca5f68ecc2fd972cb23d4da366364e91d261",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43816710400",
-   "created_at": "2026-11-16T06:26:04Z",
-   "updated_at": "2026-11-16T06:26:04Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 43816185780,
-   "pr": null,
-   "commit": "161830e65b74a95c337ef0f4bc554056b19c718f",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43816185780",
-   "created_at": "2026-11-16T06:21:23Z",
-   "updated_at": "2026-11-16T06:21:23Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
   }
  ]
 }
