@@ -122,6 +122,11 @@ def _run_mxfp8_gemm(
         (1024, 1024, 2048, 4),
         (8192, 8192, 512, 4),
         (2048, 2048, 4096, 0),
+        # One 256-row block against a wide N: the launcher picks the 128x128 tile for
+        # the first and the 64x64 tile for the second (256x256 and 1024x1024 above take
+        # 64x64, 2048x2048 takes 128x128, 8192x8192 keeps 256x256).
+        (256, 16384, 1280, 0),
+        (256, 5120, 4096, 0),
         pytest.param(8192, 8192, 8192, 0, marks=pytest.mark.large_shape),
         pytest.param(8192, 8192, 8192, 4, marks=pytest.mark.large_shape),
     ],
