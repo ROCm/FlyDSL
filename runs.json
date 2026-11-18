@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-18T12:57:10Z",
+ "updated": "2026-11-18T13:07:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44308611453,
+   "pr": 1404,
+   "commit": "07e9c7afbde386a51b86a42158e670231c0b46c7",
+   "branch": "moe/k5p-pr",
+   "event": "pull_request",
+   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44308611453",
+   "created_at": "2026-11-18T12:55:47Z",
+   "updated_at": "2026-11-18T12:57:15Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 44299424804,
    "pr": 1438,
@@ -25,11 +40,11 @@
    "branch": "pr/enh-rocdl-arch-atoms",
    "event": "pull_request",
    "title": "[ROCDL] Add arch atoms with valid check",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44296804564",
    "created_at": "2026-11-18T11:40:22Z",
-   "updated_at": "2026-11-18T11:42:13Z",
+   "updated_at": "2026-11-18T12:58:28Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276084936",
    "created_at": "2026-11-18T09:27:27Z",
-   "updated_at": "2026-11-18T11:59:23Z",
+   "updated_at": "2026-11-18T13:04:11Z",
    "actor": "Arist12",
    "jobs": [
     {
@@ -1895,21 +1910,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43826602941/job/133171881675"
     }
    ]
-  },
-  {
-   "run_id": 43824269325,
-   "pr": null,
-   "commit": "8f05f839267f516c36d5bbe68253a7ea6e9a7d05",
-   "branch": "ci/block-fork-pr-self-hosted",
-   "event": "pull_request",
-   "title": "[CI] Keep forked PRs off linux-flydsl-navi-2",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43824269325",
-   "created_at": "2026-11-16T07:29:51Z",
-   "updated_at": "2026-11-16T07:31:12Z",
-   "actor": "vlluvia",
-   "jobs": []
   }
  ]
 }
