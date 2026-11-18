@@ -6,12 +6,15 @@ include "mlir/Pass/PassBase.td"
 def ConvertROCDLFastMathOpsPass : Pass<"convert-rocdl-fastmath-ops", "gpu::GPUModuleOp"> {
   let summary = "Lower approximate math operations to native ROCDL operations";
   let description = [{
-    Rewrites supported neutral math operations carrying the `afn` fast-math
-    flag to their native ROCDL counterparts. This pass runs immediately before
-    `convert-gpu-to-rocdl`, which would otherwise route those operations
-    through device-library calls.
+    Rewrites neutral math operations carrying the `afn` fast-math flag to the
+    raw hardware transcendental instructions, favoring speed over accuracy (no
+    range reduction or denormal handling)
   }];
-  let dependentDialects = ["ROCDL::ROCDLDialect", "vector::VectorDialect"];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "ROCDL::ROCDLDialect",
+    "vector::VectorDialect"
+  ];
 }
 
 def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
