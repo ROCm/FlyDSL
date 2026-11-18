@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-18T03:57:00Z",
+ "updated": "2026-11-18T05:21:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44243198365,
+   "pr": 1431,
+   "commit": "100bc1b9a3df137296cd151d2b57bad58d1e2171",
+   "branch": "jli/llvm-upgrade-e2ce52c885",
+   "event": "pull_request",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243198365",
+   "created_at": "2026-11-18T05:17:20Z",
+   "updated_at": "2026-11-18T05:18:45Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 44239143257,
+   "pr": 1430,
+   "commit": "2616adca4a39a44e89f071dfea82f1b3a8f3a638",
+   "branch": "pr/fp8-8wave-tail-race",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257",
+   "created_at": "2026-11-18T04:42:11Z",
+   "updated_at": "2026-11-18T05:08:54Z",
+   "actor": "Arist12",
+   "jobs": []
+  },
   {
    "run_id": 44219229488,
    "pr": null,
@@ -1857,64 +1887,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43719751811/job/132836500483"
     }
    ]
-  },
-  {
-   "run_id": 43682163051,
-   "pr": null,
-   "commit": "a6b00f8586f779792d92faa923db5166f40d7367",
-   "branch": "oidc-probe",
-   "event": "pull_request",
-   "title": "CI: add OIDC audience probe",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43682163051",
-   "created_at": "2026-11-15T05:41:33Z",
-   "updated_at": "2026-11-15T06:39:11Z",
-   "actor": "miramar-labs",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-15T06:00:45Z",
-     "completed_at": "2026-11-15T06:39:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43682163051/job/132718895621"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-15T06:16:43Z",
-     "completed_at": "2026-11-15T06:24:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43682163051/job/132718895646"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-15T06:00:41Z",
-     "completed_at": "2026-11-15T06:06:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43682163051/job/132718895684"
-    }
-   ]
-  },
-  {
-   "run_id": 43681498174,
-   "pr": null,
-   "commit": "ee56d5bee3d30728b6a22ddaf9ca000628bd0f29",
-   "branch": "oidc-probe",
-   "event": "pull_request",
-   "title": "CI: add OIDC audience probe",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43681498174",
-   "created_at": "2026-11-15T05:32:14Z",
-   "updated_at": "2026-11-15T05:43:01Z",
-   "actor": "miramar-labs",
-   "jobs": []
   }
  ]
 }
