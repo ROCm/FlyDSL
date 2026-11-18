@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-18T06:33:27Z",
+ "updated": "2026-11-18T07:45:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44260805638,
+   "pr": 1432,
+   "commit": "14bd2f1748e4d1cfd3657e0fdda4eeb530a7e5bc",
+   "branch": "perf/fuse-ast-transformers",
+   "event": "pull_request",
+   "title": "[AST] Apply the structural rewrites in one walk",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638",
+   "created_at": "2026-11-18T07:41:08Z",
+   "updated_at": "2026-11-18T07:42:28Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 44243592768,
    "pr": 1431,
@@ -10,20 +25,20 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768",
    "created_at": "2026-11-18T05:20:41Z",
-   "updated_at": "2026-11-18T06:00:54Z",
+   "updated_at": "2026-11-18T07:43:30Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-18T06:00:54Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-18T07:11:30Z",
+     "completed_at": "2026-11-18T07:31:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768/job/134612243908"
     },
     {
@@ -68,11 +83,11 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257",
    "created_at": "2026-11-18T04:42:11Z",
-   "updated_at": "2026-11-18T05:24:34Z",
+   "updated_at": "2026-11-18T07:11:18Z",
    "actor": "Arist12",
    "jobs": [
     {
@@ -90,9 +105,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-18T05:24:34Z",
+     "started_at": "2026-11-18T07:11:18Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257/job/134598556548"
     }
@@ -1861,49 +1876,6 @@
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 43787819717,
-   "pr": null,
-   "commit": "7ac396bf7e065de0b0d419d503deeba2d4da27fa",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in p\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717",
-   "created_at": "2026-11-16T01:42:33Z",
-   "updated_at": "2026-11-16T08:04:38Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-16T08:03:56Z",
-     "completed_at": "2026-11-16T08:04:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133167197493"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T01:59:28Z",
-     "completed_at": "2026-11-16T02:11:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133167199294"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T01:59:39Z",
-     "completed_at": "2026-11-16T02:35:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43787819717/job/133167245573"
     }
    ]
   }
