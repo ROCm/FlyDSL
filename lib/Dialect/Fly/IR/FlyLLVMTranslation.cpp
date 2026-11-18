@@ -489,7 +489,10 @@ public:
 
 } // namespace
 
-void mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(MLIRContext &context) {
-  ExplicitModuleAttr::attachInterface<ExplicitModuleAttrImpl>(context);
-  AotModuleAttr::attachInterface<AotModuleAttrImpl>(context);
+void mlir::fly::registerOffloadingLLVMTranslationInterfaceExternalModels(
+    DialectRegistry &registry) {
+  registry.addExtension(+[](MLIRContext *ctx, fly::FlyDialect *dialect) {
+    ExplicitModuleAttr::attachInterface<ExplicitModuleAttrImpl>(*ctx);
+    AotModuleAttr::attachInterface<AotModuleAttrImpl>(*ctx);
+  });
 }

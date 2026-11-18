@@ -37,7 +37,7 @@ declare_mlir_dialect_python_bindings(
 )
 
 # NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
-# These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
+# These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFlyRegisterEverything's transitive
 # dependencies in EMBED_CAPI_LINK_LIBS). Statically linking them here creates DUPLICATE
 # TypeID static variables, causing "storage uniquer isn't initialized" errors at runtime.
 # The COMMON_CAPI_LINK_LIBS FlyPythonCAPI in add_mlir_python_modules ensures _mlirDialectsFly.so
@@ -64,6 +64,8 @@ if(FLYDSL_HAS_ROCDL)
       FlyROCDLExtension.cpp
     PRIVATE_LINK_LIBS
       LLVMSupport
+    EMBED_CAPI_LINK_LIBS
+      MLIRCPIFlyROCDL
   )
 endif()
 
@@ -73,13 +75,10 @@ endif()
 # go into that LOCAL registry, while PassManager.parse() queries the GLOBAL
 # registry in FlyPythonCAPI.so → "does not refer to a registered pass".
 #
-# Instead, pass registration is done through CAPI functions
-# (mlirRegisterFlyPasses, mlirRegisterConvertROCDLMathOpsPass,
-# mlirRegisterFlyToROCDLConversionPass) defined in
-# the CAPI libraries (MLIRCPIFly, MLIRCPIFlyROCDL). These are already in
-# FlyPythonCAPI.so, so ::mlir::registerPass() resolves to the correct
-# global instance.
-get_property(_backend_embed_capi_libs GLOBAL PROPERTY FLYDSL_BACKEND_EMBED_CAPI_LIBS)
+# Instead, pass registration is done through the CAPI function
+# flydslRegisterAllPasses, defined in the CAPI library
+# MLIRCPIFlyRegisterEverything. It is already in FlyPythonCAPI.so, so
+# ::mlir::registerPass() resolves to the correct global instance.
 declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   MODULE_NAME _mlirRegisterEverything
   ADD_TO_PARENT FlyPythonSources
@@ -90,8 +89,7 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     LLVMSupport
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
-    MLIRCPIFly
-    ${_backend_embed_capi_libs}
+    MLIRCPIFlyRegisterEverything
     MLIRCPIHostObject
     MLIRCPILLVMOption
     MLIRCAPIArith

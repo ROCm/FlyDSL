@@ -105,4 +105,6 @@ void FlyDialect::initialize() {
 #define GET_OP_LIST
 #include "flydsl/Dialect/Fly/IR/FlyOps.cpp.inc"
       >();
+  declarePromisedInterfaces<gpu::OffloadingLLVMTranslationAttrInterface, ExplicitModuleAttr,
+                            AotModuleAttr>();
 }

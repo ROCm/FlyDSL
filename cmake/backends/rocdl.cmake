@@ -20,11 +20,10 @@ set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "FlyKt
 # CAPI wrapper subdirectory under lib/CAPI/Dialect/
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_CAPI_SUBDIRS "FlyROCDL")
 
-# CAPI link targets for _mlirRegisterEverything (EMBED_CAPI_LINK_LIBS)
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_EMBED_CAPI_LIBS "MLIRCPIFlyROCDL")
-
-# Link targets for fly-opt
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_FLYOPT_LINK_LIBS "MLIRCPIFlyROCDL")
+# Dialect and pass registration hooks under lib/RegisterAll/, and the libraries they use
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_SOURCES "ROCDL.cpp")
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_LIBS
+  MLIRFlyROCDLDialect MLIRFlyToROCDL MLIRFlyKtraceToROCDL)
 
 # Upstream MLIR dialect sources needed by this backend's Python bindings
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_UPSTREAM_DIALECT_SOURCES

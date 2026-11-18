@@ -5,10 +5,12 @@
 #define FLYDSL_DIALECT_FLY_IR_FLYLLVMTRANSLATION_H
 
 namespace mlir {
-class MLIRContext;
+class DialectRegistry;
 
 namespace fly {
-void registerExplicitModuleOffloadingLLVMTranslation(MLIRContext &context);
+/// Register the LLVM IR offloading translation of `#fly.explicit_module` and
+/// `#fly.aot_module`, which the Fly dialect promises.
+void registerOffloadingLLVMTranslationInterfaceExternalModels(DialectRegistry &registry);
 } // namespace fly
 } // namespace mlir
 
