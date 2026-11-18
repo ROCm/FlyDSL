@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-18T03:13:07Z",
+ "updated": "2026-11-18T03:26:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Runtime] Load HIP through the libamdhip64.so.7 soname (#1425)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488",
    "created_at": "2026-11-18T01:53:39Z",
-   "updated_at": "2026-11-18T02:56:11Z",
+   "updated_at": "2026-11-18T03:11:50Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -29,18 +29,21 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T02:56:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488/job/134541903711"
+     "completed_at": "2026-11-18T03:21:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488/job/134541903711",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-18T02:56:11Z",
+     "started_at": "2026-11-18T03:11:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488/job/134541903728"
     }
@@ -63,11 +66,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T02:55:51Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340/job/134541609941"
+     "completed_at": "2026-11-18T03:21:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340/job/134541609941",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
