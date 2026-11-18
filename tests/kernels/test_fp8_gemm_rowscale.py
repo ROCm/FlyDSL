@@ -296,9 +296,9 @@ def test_fp8_gemm_rowscale(use_8w, shape_index, M, N, K, tile_m, tile_n, preshuf
     )
 
 
-# M <= SMALL_M_MAX sends the 8-wave GEMM to its skinny-M kernel: both prefetch depths, partial
-# 16-row tiles, the first M past the threshold, partial last N tiles (N % 32 = 8 and 24), a K
-# shorter than the prefetch depth, and dynamic B and scale tensors.
+# M <= SMALL_M_MAX sends the 8-wave GEMM to its skinny-M kernel: both row tiles (16 rows up to
+# M = 16, 32 rows above) full and partial, a large N, the first M past the threshold, partial last N
+# tiles (N % 32 = 8 and 24), a K shorter than the prefetch depth, and dynamic B and scale tensors.
 _FP8_GEMM_8W_SMALL_M_CASES = (
     # (M, N, K, static_weight_scale)
     (1, 2112, 7168, True),
