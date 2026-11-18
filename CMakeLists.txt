@@ -22,6 +22,8 @@ endif()
 find_package(LLD CONFIG PATHS "${LLD_DIR}" NO_DEFAULT_PATH)
 if(LLD_FOUND)
   message(STATUS "Found LLD: ${LLD_DIR} (in-process GPU binary linking)")
+  # Separate from LLVM_INCLUDE_DIRS when LLVM is used from its build tree.
+  include_directories(SYSTEM ${LLD_INCLUDE_DIRS})
 else()
   message(STATUS "LLD not found under ${LLD_DIR}; GPU binary emission falls back to "
                  "spawning ld.lld from the ROCm toolkit path")
