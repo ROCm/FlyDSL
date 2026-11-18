@@ -214,6 +214,18 @@ static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr ali
 //   * a dialect-qualified attribute (e.g. `#fly_rocdl.buffer_desc`) for
 //     target-specific spaces.
 static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
+  // A bare address-space keyword (`global`, `shared`, `register`, `generic`).
+  // Try it before parseOptionalAttribute: the pinned LLVM makes that reject a
+  // bare keyword, expecting '<' after an attribute mnemonic.
+  StringRef kw;
+  if (succeeded(parser.parseOptionalKeyword(&kw))) {
+    if (std::optional<AddressSpace> space = symbolizeAddressSpace(kw))
+      return AddressSpaceAttr::get(parser.getContext(), *space);
+    return parser.emitError(parser.getCurrentLocation())
+           << "unknown address space '" << kw << "'";
+  }
+
+  // A dialect-qualified attribute, e.g. `#fly_rocdl.buffer_desc`.
   Attribute attr;
   OptionalParseResult opt = parser.parseOptionalAttribute(attr);
   if (opt.has_value()) {
@@ -221,10 +233,8 @@ static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
       return failure();
     return attr;
   }
-  auto enumAttr = FieldParser<AddressSpaceAttr>::parse(parser);
-  if (failed(enumAttr))
-    return failure();
-  return Attribute(*enumAttr);
+  return parser.emitError(parser.getCurrentLocation())
+         << "expected an address space";
 }
 
 static void printAddressSpaceAttribute(AsmPrinter &printer, Attribute attr) {

@@ -138,11 +138,18 @@ void storeToRegion(OpBuilder &b, Location loc, const KernelTraceState &st, Value
   int64_t dwords = vecTy ? vecTy.getNumElements() : 1;
   StringRef op = dwords == 4 ? "s_buffer_store_dwordx4" : "s_buffer_store_dword";
   assert((dwords == 4 || dwords == 1) && "ktrace stores one or four dwords");
-  LLVM::InlineAsmOp::create(b, loc, Type(), ValueRange{data, st.rsrc, byteOffset},
-                            (op + " $0, $1, $2").str(), "s,s,s", /*has_side_effects=*/true,
-                            /*is_align_stack=*/false, LLVM::tailcallkind::TailCallKind::None,
-                            LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
-                            ArrayAttr());
+  // InlineAsmOp::create takes the attribute form and gained a `convergent`
+  // operand in the pinned LLVM, so the raw string/bool overload no longer
+  // matches.
+  LLVM::InlineAsmOp::create(
+      b, loc, Type(), ValueRange{data, st.rsrc, byteOffset},
+      b.getStringAttr((op + " $0, $1, $2").str()), b.getStringAttr("s,s,s"),
+      /*has_side_effects=*/b.getUnitAttr(), /*is_align_stack=*/UnitAttr(),
+      LLVM::TailCallKindAttr::get(b.getContext(),
+                                  LLVM::tailcallkind::TailCallKind::None),
+      /*convergent=*/UnitAttr(),
+      LLVM::AsmDialectAttr::get(b.getContext(), LLVM::AsmDialect::AD_ATT),
+      ArrayAttr());
 }
 
 FailureOr<BufferLayout> bufferLayout(Operation *root, int64_t capacitySlots, int64_t partitions) {

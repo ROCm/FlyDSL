@@ -8,8 +8,8 @@
 // CHECK: %[[POISON:.*]] = ub.poison : vector<4xf16>
 // CHECK: %[[LOAD:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
 // CHECK-SAME: : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>) -> vector<4xf16>
-// CHECK: %[[STATE:.*]] = vector.insert_strided_slice %[[LOAD]], %[[POISON]] {offsets = [0], strides = [1]} : vector<4xf16> into vector<4xf16>
-// CHECK: %[[READ:.*]] = vector.extract_strided_slice %[[STATE]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
+// CHECK: %[[STATE:.*]] = vector.insert_strided_slice %[[LOAD]], %[[POISON]] offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
+// CHECK: %[[READ:.*]] = vector.extract_strided_slice %[[STATE]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[READ]], %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 1, 0>}
 // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, global, 4:1>) -> ()
 
@@ -46,8 +46,8 @@ gpu.module @promote_rmem_to_vector_ssa_copy {
 // CHECK: %{{.*}} = scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[ITER_STATE:.*]] = %[[LOOP_POISON]]) -> (vector<4xf16>) {
 // CHECK:   %[[ITER_SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 0, 0>}
 // CHECK-SAME: : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>) -> vector<4xf16>
-// CHECK:   %[[NEW_STATE:.*]] = vector.insert_strided_slice %[[ITER_SSA]], %[[ITER_STATE]] {offsets = [0], strides = [1]} : vector<4xf16> into vector<4xf16>
-// CHECK:   %[[SLICE:.*]] = vector.extract_strided_slice %[[NEW_STATE]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
+// CHECK:   %[[NEW_STATE:.*]] = vector.insert_strided_slice %[[ITER_SSA]], %[[ITER_STATE]] offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
+// CHECK:   %[[SLICE:.*]] = vector.extract_strided_slice %[[NEW_STATE]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK:   %[[ELEM:.*]] = vector.extract %[[SLICE]][%{{.*}}] : f16 from vector<4xf16>
   gpu.func @promote_loop_local_copy_to_ssa(%src: !fly.ptr<f16, global>, %dst: !fly.ptr<f16, global>) kernel {
     %c0 = arith.constant 0 : index
@@ -97,11 +97,11 @@ gpu.module @promote_rmem_to_vector_ssa_copy {
 // CHECK: %[[PRED_STATE:.*]] = vector.insert %arg2, %[[PRED_POISON]] [0] : i1 into vector<1xi1>
 // CHECK: %[[DST_POISON:.*]] = ub.poison : vector<4xf16>
 // CHECK: %[[PRED_VAL:.*]] = vector.extract %[[PRED_STATE]][0] : i1 from vector<1xi1>
-// CHECK: %[[OLD_DST:.*]] = vector.extract_strided_slice %[[DST_POISON]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
+// CHECK: %[[OLD_DST:.*]] = vector.extract_strided_slice %[[DST_POISON]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK: %[[SSA:.*]] = fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}, %[[OLD_DST]], %[[PRED_VAL]]) {operandSegmentSizes = array<i32: 1, 1, 1, 1>}
 // CHECK-SAME: : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>, vector<4xf16>, i1) -> vector<4xf16>
-// CHECK: %[[UPDATED:.*]] = vector.insert_strided_slice %[[SSA]], %[[DST_POISON]] {offsets = [0], strides = [1]} : vector<4xf16> into vector<4xf16>
-// CHECK: %[[OUT_VEC:.*]] = vector.extract_strided_slice %[[UPDATED]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
+// CHECK: %[[UPDATED:.*]] = vector.insert_strided_slice %[[SSA]], %[[DST_POISON]] offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
+// CHECK: %[[OUT_VEC:.*]] = vector.extract_strided_slice %[[UPDATED]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
 // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %[[OUT_VEC]], %{{.*}}) {operandSegmentSizes = array<i32: 1, 1, 1, 0>}
 // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, vector<4xf16>, !fly.memref<f16, global, 4:1>) -> ()
 gpu.module @promote_rmem_to_vector_ssa_copy_pred {

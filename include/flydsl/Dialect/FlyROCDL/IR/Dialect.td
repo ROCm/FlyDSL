@@ -20,6 +20,10 @@ def FlyROCDL_Dialect : Dialect {
 
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+
+  // The pinned LLVM defaults this to 1, which rejects assembly formats that
+  // leave inherent attributes unbound. Keep the historical format.
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 // Marks a copy-atom op type that moves a whole N-D tile in one copy_atom_call

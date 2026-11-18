@@ -249,11 +249,11 @@ func.func @test_call_static_arg_dropped() {
 // -----
 
 // CHECK-LABEL: func.func @test_call_keeps_attributes(
-// CHECK: call @callee_no_inline(%{{.*}}, %{{.*}}) {keep = 1 : i32, no_inline} : (!llvm.ptr<3>, !llvm.struct<packed (struct<packed (i32)>, struct<packed (i32)>)>) -> ()
+// CHECK: call @callee_no_inline(%{{.*}}, %{{.*}}) <no_inline> {keep = 1 : i32} : (!llvm.ptr<3>, !llvm.struct<packed (struct<packed (i32)>, struct<packed (i32)>)>) -> ()
 // A rewritten call keeps its no_inline and discardable attributes.
 func.func private @callee_no_inline(!fly.memref<f16, shared, (16,?):(1,?)>)
 func.func @test_call_keeps_attributes(%v: !fly.memref<f16, shared, (16,?):(1,?)>) {
-  func.call @callee_no_inline(%v) {no_inline, keep = 1 : i32} : (!fly.memref<f16, shared, (16,?):(1,?)>) -> ()
+  func.call @callee_no_inline(%v) <no_inline> {keep = 1 : i32} : (!fly.memref<f16, shared, (16,?):(1,?)>) -> ()
   return
 }
 
