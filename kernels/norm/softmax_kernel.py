@@ -19,6 +19,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, full
 from kernels.common.kernels_common import LOG2E, dtype_to_elem_type, get_warp_size
+from kernels.norm.softmax_common import _load_vec, _store_vec
 
 KERNEL_NAME = "softmax_kernel"
 
@@ -110,33 +111,13 @@ def build_softmax_module(
             row_a = fx.slice(A_buf, (row_safe, None))
             row_c = fx.slice(C_buf, (row_safe, None))
 
-            a_div = fx.logical_divide(row_a, fx.make_layout(vec_width, 1))
-            c_div = fx.logical_divide(row_c, fx.make_layout(vec_width, 1))
-
-            load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-
-            def _load_vec(div_tensor, idx):
-                r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.copy(load_atom, fx.slice(div_tensor, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
-            def _store_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(vec_width, elem_dtype)
-                fx.memref_store_vec(val, r)
-                if const_expr(ROWS_PER_BLOCK == 1):
-                    fx.copy(store_atom, r, fx.slice(div_tensor, (None, idx)))
-                else:
-                    if row_valid:
-                        fx.copy(store_atom, r, fx.slice(div_tensor, (None, idx)))
-
             # 1. Load + compute local max
             row_buffer = []
             thread_max = c_neg_inf
 
             for tile_i in range_constexpr(num_tiles):
                 idx = lane + tile_i * THREADS_PER_ROW
-                vec = _load_vec(a_div, idx)
+                vec = _load_vec(row_a, idx, vec_width, dtype_str)
                 x = vec.to(fx.Float32)
                 row_buffer.append(x)
                 red_max = x.reduce(ReductionOp.MAX)
@@ -165,7 +146,11 @@ def build_softmax_module(
                 out_e = norm_vec if dtype_str == "f32" else norm_vec.to(elem_dtype)
 
                 out_idx = lane + tile_i * THREADS_PER_ROW
-                _store_vec(out_e, c_div, out_idx)
+                if const_expr(ROWS_PER_BLOCK == 1):
+                    _store_vec(row_c, out_idx, out_e, vec_width, dtype_str)
+                else:
+                    if row_valid:
+                        _store_vec(row_c, out_idx, out_e, vec_width, dtype_str)
 
         else:
             # ==============================================================
