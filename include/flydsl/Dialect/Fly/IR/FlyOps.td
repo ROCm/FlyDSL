@@ -486,7 +486,7 @@ def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
-def Fly_MakePtrOp : Fly_Op<"make_ptr", []> {
+def Fly_MakePtrOp : Fly_Op<"make_ptr", [DeclareOpInterfaceMethods<Fly_ResourceUsageOpInterface>]> {
   let arguments = (ins Variadic<AnyType>:$args, OptionalAttr<DictionaryAttr>:$dictAttrs);
   let results = (outs Fly_Pointer:$result);
 }

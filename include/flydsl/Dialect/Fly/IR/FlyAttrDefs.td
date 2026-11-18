@@ -63,6 +63,14 @@ def Fly_GemmTraversalOrder : Fly_I32EnumAttr<"GemmTraversalOrder", "", [
 ]>;
 def Fly_GemmTraversalOrderAttr : Fly_EnumAttr<Fly_GemmTraversalOrder, "gemm_traversal_order"> {}
 
+// Kernel resources every target may have. A resource only some targets have is an
+// attribute of the backend dialect instead (see KernelResourceAttrInterface).
+def Fly_KernelResource : Fly_I32EnumAttr<"KernelResource", "", [
+  I32EnumAttrCase<"SharedMemory", 0, "shared_memory">
+]>;
+def Fly_KernelResourceAttr : Fly_EnumAttr<Fly_KernelResource, "kernel_resource",
+    [DeclareAttrInterfaceMethods<Fly_KernelResourceAttrInterface>]> {}
+
 // Owning values in storage; callers receive an immutable borrowing reference.
 class Fly_CoreParameter<string type> : AttrParameter<type, "Core algebra value"> {
   let cppAccessorType = "const " # type # " &";

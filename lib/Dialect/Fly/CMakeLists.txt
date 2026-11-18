@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   IR/FlyUniversalOps.cpp
   IR/FlyAttrDefs.cpp
   IR/FlyLLVMTranslation.cpp
+  IR/FlyResourceUsage.cpp
   Utils/AtomUtils.cpp
   Utils/CoreBridge.cpp
   Utils/PointerUtils.cpp
@@ -13,6 +14,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   Transforms/ConvertAtomCallToSSAForm.cpp
   Transforms/PromoteRegMemToVectorSSA.cpp
   Transforms/IntSwizzleSimplify.cpp
+  Transforms/CheckResourceLimits.cpp
 
   DEPENDS
   MLIRFlyIncGen

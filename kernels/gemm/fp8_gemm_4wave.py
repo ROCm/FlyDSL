@@ -19,8 +19,9 @@ Optional B preshuffle uses the same on-disk layout as
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import as_ir_value, const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import rocdl as _rocdl
+from flydsl.expr.rocdl.experimental import sched_agpr
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -39,23 +40,21 @@ from kernels.gemm.fp8_gemm_utils import (
 
 
 class Mfma16x16x128AGPR(Mfma16x16x128):
-    """fp8 16x16x128 MFMA that pins the accumulator in AGPR via inline asm
-    (constraint `=a,v,v,0`), so the f32x4 accumulator accumulates in-place and
-    the compiler does not insert v_accvgpr_mov/read + s_nop to shuffle the
-    accumulator between AGPR slots (the dominant stall in the ssa-lowered path).
+    """fp8 16x16x128 MFMA that pins the accumulator in AGPRs with strict ``sched_agpr``,
+    so the f32x4 accumulator accumulates in-place and the compiler does not insert
+    v_accvgpr_mov/read + s_nop to shuffle the accumulator between AGPR slots (the
+    dominant stall in the ssa-lowered path). The compiler picks the AGPRs.
     scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def _do_mma(self, a, b, c):
         a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
         b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
-        res_ty = _T.vec(4, _T.f32)
-        return _llvm.inline_asm(
-            res_ty,
-            [a_i32x8.ir_value(), b_i32x8.ir_value(), as_ir_value(c)],
-            "v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0",
-            "=a,v,v,0",
-            has_side_effects=True,
-        )
+        result = _rocdl.mfma_scale_f32_16x16x128_f8f6f4(_T.vec(4, _T.f32), [a_i32x8, b_i32x8, c, 0, 0, 0, 0, 0, 0])
+        result = sched_agpr(result)
+        # The MFMA intrinsic has no side effects, so without this the scheduler moves
+        # MFMAs across wait_barrier and bunches the interleaved loads at segment ends.
+        _rocdl.sched_barrier(0)
+        return result
 
 
 def _make_swz_layout():

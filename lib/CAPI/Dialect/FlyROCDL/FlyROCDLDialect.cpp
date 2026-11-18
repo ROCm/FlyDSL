@@ -46,6 +46,7 @@ bool flydsl_link_hsaco(const char *objectPath, const char *hsacoPath, char *erro
 
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
   unwrap(registry)->insert<mlir::fly_rocdl::FlyROCDLDialect>();
+  mlir::fly_rocdl::registerTargetInfoExternalModels(*unwrap(registry));
 }
 
 void flydsl_register_rocdl_passes(void) {

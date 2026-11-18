@@ -689,6 +689,22 @@ class TestElementAccess:
 
         _build_module(build)
 
+    def test_getitem_slice(self):
+        """A static slice selects flat positions (step and negative bounds as in Python)."""
+
+        def build(a):
+            ta = Vector(a, 8, Float32)
+            for sub, n in ((ta[4:8], 4), (ta[1::2], 4), (ta[-3::-2], 3)):
+                assert isinstance(sub, Vector) and sub.shape == (n,) and sub.dtype is Float32
+            with pytest.raises(IndexError):
+                ta[4:4]
+            with pytest.raises(TypeError):
+                ta[ta[0] :]
+
+        ir_text = _build_module(build)
+        for mask in ("[4, 5, 6, 7]", "[1, 3, 5, 7]", "[5, 3, 1]"):
+            assert mask in ir_text
+
 
 # ===========================================================================
 # G. Vector ops

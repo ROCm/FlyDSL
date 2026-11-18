@@ -333,12 +333,17 @@ class RocmBackend(BaseBackend):
         if _ktrace_tracing_enabled(compile_hints):
             ktrace_fragments = ["convert-fly-ktrace-to-rocdl"]
 
+        resource_check_fragments = []
+        if compile_hints.get("check_resource_limits"):
+            resource_check_fragments = ["gpu.module(fly-check-resource-limits)"]
+
         pre_binary_fragments = [
             "fly-canonicalize",
             "fly-rocdl-expand-ops",
             "fly-layout-lowering",
             "fly-int-swizzle-simplify",
             "canonicalize",
+            *resource_check_fragments,
             "fly-convert-atom-call-to-ssa-form",
             "fly-promote-regmem-to-vectorssa",
             *ktrace_fragments,
