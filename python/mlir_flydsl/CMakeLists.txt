@@ -52,6 +52,10 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
     FlyExtension.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
+  EMBED_CAPI_LINK_LIBS
+    MLIRCPIFlyRegisterEverything  # links the Fly dialects this extension calls into
+    MLIRCPIHostObject
+    MLIRCPILLVMOption
 )
 
 if(FLYDSL_HAS_ROCDL)
@@ -71,7 +75,7 @@ endif()
 
 # NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
 # Doing so statically embeds a copy of MLIRPass (and its pass registry) into
-# _mlirRegisterEverything.so. Passes registered via registerFlyPasses() then
+# _site_initialize_0.so. Passes registered via registerFlyPasses() then
 # go into that LOCAL registry, while PassManager.parse() queries the GLOBAL
 # registry in FlyPythonCAPI.so → "does not refer to a registered pass".
 #
@@ -79,27 +83,19 @@ endif()
 # flydslRegisterAllPasses, defined in the CAPI library
 # MLIRCPIFlyRegisterEverything. It is already in FlyPythonCAPI.so, so
 # ::mlir::registerPass() resolves to the correct global instance.
-declare_mlir_python_extension(FlyPythonSources.RegisterEverything
-  MODULE_NAME _mlirRegisterEverything
+#
+# _mlir_libs imports the upstream _mlirRegisterEverything (MLIR dialects,
+# passes and LLVM translations) first, then this site initializer.
+declare_mlir_python_extension(FlyPythonSources.SiteInitialize
+  MODULE_NAME _site_initialize_0
   ADD_TO_PARENT FlyPythonSources
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
-    FlyRegisterEverything.cpp
+    SiteInitialize.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
   EMBED_CAPI_LINK_LIBS
-    MLIRCAPIIR
     MLIRCPIFlyRegisterEverything
-    MLIRCPIHostObject
-    MLIRCPILLVMOption
-    MLIRCAPIArith
-    MLIRCAPIGPU
-    MLIRCAPILLVM
-    MLIRCAPIMath
-    MLIRCAPIVector
-    MLIRCAPIConversion
-    MLIRCAPITransforms
-    MLIRCAPIRegisterEverything
 )
 
 
@@ -107,6 +103,7 @@ get_property(_backend_upstream_dialect_sources GLOBAL PROPERTY FLYDSL_BACKEND_UP
 set(MLIRFlyDSLSources
   FlyPythonSources
   MLIRPythonSources.Core
+  MLIRPythonExtension.RegisterEverything
   MLIRPythonSources.Dialects.builtin
   MLIRPythonSources.Dialects.arith
   MLIRPythonSources.Dialects.math
