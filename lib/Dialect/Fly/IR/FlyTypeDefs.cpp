@@ -221,8 +221,7 @@ static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
   if (succeeded(parser.parseOptionalKeyword(&kw))) {
     if (std::optional<AddressSpace> space = symbolizeAddressSpace(kw))
       return AddressSpaceAttr::get(parser.getContext(), *space);
-    return parser.emitError(parser.getCurrentLocation())
-           << "unknown address space '" << kw << "'";
+    return parser.emitError(parser.getCurrentLocation()) << "unknown address space '" << kw << "'";
   }
 
   // A dialect-qualified attribute, e.g. `#fly_rocdl.buffer_desc`.
@@ -233,8 +232,7 @@ static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
       return failure();
     return attr;
   }
-  return parser.emitError(parser.getCurrentLocation())
-         << "expected an address space";
+  return parser.emitError(parser.getCurrentLocation()) << "expected an address space";
 }
 
 static void printAddressSpaceAttribute(AsmPrinter &printer, Attribute attr) {
