@@ -101,7 +101,7 @@ func.func @test_gfx11_wmma_atom_call_ssa_iu8_mixed_sign(
     %b: vector<16xi8>,
     %c: vector<8xi32>) -> vector<8xi32> {
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = false, clamp = false>>
-  // CHECK: rocdl.wmma.i32.16x16x16.iu8 {{.*}} {signA = true}
+  // CHECK: rocdl.wmma.i32.16x16x16.iu8 {{.*}} <signA = true>
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = false, clamp = false>>, vector<16xi8>, vector<16xi8>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }
@@ -118,7 +118,7 @@ func.func @test_gfx11_wmma_atom_call_ssa_iu8_signed_clamp(
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (si8, si8) -> i32, signA = true, signB = true, clamp = true>>
   // CHECK: llvm.bitcast {{.*}} : vector<16xsi8> to vector<4xi32>
   // CHECK: llvm.bitcast {{.*}} : vector<16xsi8> to vector<4xi32>
-  // CHECK: rocdl.wmma.i32.16x16x16.iu8 {{.*}} {clamp = true, signA = true, signB = true}
+  // CHECK: rocdl.wmma.i32.16x16x16.iu8 {{.*}} <signA = true, signB = true, clamp = true>
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (si8, si8) -> i32, signA = true, signB = true, clamp = true>>, vector<16xsi8>, vector<16xsi8>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }
@@ -146,7 +146,7 @@ func.func @test_gfx11_wmma_atom_call_ssa_iu4_signed_clamp(
     %b: vector<16xi4>,
     %c: vector<8xi32>) -> vector<8xi32> {
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>
-  // CHECK: rocdl.wmma.i32.16x16x16.iu4 {{.*}} {clamp = true, signA = true, signB = true}
+  // CHECK: rocdl.wmma.i32.16x16x16.iu4 {{.*}} <signA = true, signB = true, clamp = true>
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, vector<16xi4>, vector<16xi4>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }

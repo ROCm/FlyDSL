@@ -1,9 +1,8 @@
 diff --git a/mlir/lib/Target/LLVM/ROCDL/Target.cpp b/mlir/lib/Target/LLVM/ROCDL/Target.cpp
+index 56bf2a0307..9d9cb9035b 100644
 --- a/mlir/lib/Target/LLVM/ROCDL/Target.cpp
 +++ b/mlir/lib/Target/LLVM/ROCDL/Target.cpp
-@@ -361,9 +361,9 @@ mlir::ROCDL::linkObjectCode(ArrayRef<char> objectCode, StringRef lldPath,
- 
-   llvm::FileRemover cleanupHsaco(tempHsacoFilename);
+@@ -363,7 +363,7 @@ mlir::ROCDL::linkObjectCode(ArrayRef<char> objectCode, StringRef lldPath,
  
    int lldResult = llvm::sys::ExecuteAndWait(
        lldPath,
