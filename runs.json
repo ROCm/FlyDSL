@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-18T07:58:21Z",
+ "updated": "2026-11-18T08:17:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Misc] Bump version to 0.5.1 (#1433)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346",
    "created_at": "2026-11-18T07:56:33Z",
-   "updated_at": "2026-11-18T07:56:50Z",
+   "updated_at": "2026-11-18T08:14:03Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:14:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965171"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:14:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965244"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:14:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965549"
+    }
+   ]
   },
   {
    "run_id": 44262529742,
@@ -29,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742",
    "created_at": "2026-11-18T07:54:25Z",
-   "updated_at": "2026-11-18T07:56:17Z",
+   "updated_at": "2026-11-18T08:12:35Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:13:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286007"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:12:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286115"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:12:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286257"
+    }
+   ]
   },
   {
    "run_id": 44262402390,
@@ -70,13 +126,41 @@
    "branch": "perf/fuse-ast-transformers",
    "event": "pull_request",
    "title": "[AST] Apply the structural rewrites in one walk",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638",
    "created_at": "2026-11-18T07:41:08Z",
-   "updated_at": "2026-11-18T07:45:45Z",
+   "updated_at": "2026-11-18T08:06:18Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:07:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664347890"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:07:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664347912"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-18T08:06:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664348266"
+    }
+   ]
   },
   {
    "run_id": 44243592768,
@@ -143,11 +227,11 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Fix an LDS race in the FP8 8-wave GEMM tail",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257",
    "created_at": "2026-11-18T04:42:11Z",
-   "updated_at": "2026-11-18T07:11:18Z",
+   "updated_at": "2026-11-18T08:14:46Z",
    "actor": "Arist12",
    "jobs": [
     {
