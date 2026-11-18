@@ -105,6 +105,9 @@ add_definitions(${LLVM_DEFINITIONS})
 
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
+# A nanobind domain of our own keeps the FlyDSL bindings apart from any other
+# MLIR Python package loaded into the same process.
+set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "flydsl" CACHE STRING "" FORCE)
 
 include(cmake/FlyDSLBackends.cmake)
 

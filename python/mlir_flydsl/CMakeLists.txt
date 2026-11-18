@@ -207,9 +207,6 @@ set(FlyPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INST
 add_mlir_python_modules(FlyPythonModules
   ROOT_PREFIX "${FlyPythonModules_ROOT_PREFIX}"
   INSTALL_PREFIX "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}"
-  # Use "mlir" domain so Fly types are compatible with upstream IR types.
-  # The package is self-contained under flydsl._mlir (no upstream mlir loaded).
-  MLIR_BINDINGS_PYTHON_NB_DOMAIN "mlir"
   DECLARED_SOURCES "${MLIRFlyDSLSources}"
   COMMON_CAPI_LINK_LIBS
     FlyPythonCAPI
