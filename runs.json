@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-18T03:01:17Z",
+ "updated": "2026-11-18T03:13:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,10 +20,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T02:56:23Z",
-     "completed_at": null,
+     "completed_at": "2026-11-18T03:07:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488/job/134541903655"
     },
     {
@@ -53,11 +53,11 @@
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave GEMM prologue reads it",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340",
    "created_at": "2026-11-18T01:53:14Z",
-   "updated_at": "2026-11-18T02:55:25Z",
+   "updated_at": "2026-11-18T03:07:25Z",
    "actor": "Arist12",
    "jobs": [
     {
@@ -72,9 +72,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-18T02:55:25Z",
+     "started_at": "2026-11-18T03:07:24Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340/job/134541610006"
     }
@@ -124,20 +124,20 @@
    "branch": "pr/layernorm-bwd",
    "event": "pull_request",
    "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132",
    "created_at": "2026-11-18T00:23:45Z",
-   "updated_at": "2026-11-18T01:23:03Z",
+   "updated_at": "2026-11-18T03:10:56Z",
    "actor": "Arist12",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T01:18:08Z",
-     "completed_at": null,
+     "completed_at": "2026-11-18T03:10:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132/job/134493025126"
     },
     {
