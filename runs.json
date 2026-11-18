@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-18T12:13:12Z",
+ "updated": "2026-11-18T12:25:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -74,19 +74,19 @@
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536",
    "created_at": "2026-11-18T09:27:24Z",
-   "updated_at": "2026-11-18T11:42:31Z",
+   "updated_at": "2026-11-18T12:23:04Z",
    "actor": "Arist12",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-18T11:42:30Z",
+     "started_at": "2026-11-18T12:23:03Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44276079536/job/134776941380"
     },
@@ -108,29 +108,29 @@
    "branch": "phil/fc8-traced-return",
    "event": "pull_request",
    "title": "[Bugfix] Stop dropping a return inside a traced if branch",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606",
    "created_at": "2026-11-18T08:41:23Z",
-   "updated_at": "2026-11-18T11:32:23Z",
+   "updated_at": "2026-11-18T12:23:04Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-18T12:03:09Z",
-     "completed_at": null,
+     "completed_at": "2026-11-18T12:22:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134771694145"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-18T11:32:23Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-18T12:11:11Z",
+     "completed_at": "2026-11-18T12:22:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134771694273"
     },
     {
