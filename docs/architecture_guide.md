@@ -120,7 +120,8 @@ FlyDSL/
 │       └── tensor_shim.py            # GTensor/STensor abstraction
 │
 ├── tests/
-│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
+│   ├── core/                         # Core layout algebra unit tests (C++, gtest)
+│   ├── mlir/                         # MLIR-level tests (Conversion, Dialect, FlyKtrace, Transforms)
 │   ├── kernels/                      # GPU kernel tests + benchmarks
 │   ├── python/                       # Python integration tests and examples
 │   ├── unit/                         # Unit tests (streams, async, etc.)
@@ -345,8 +346,21 @@ rewrites a fresh copy of the already-lowered module for standalone linkage. It:
    system libraries remain as link-time dependencies.
 
 This export path reuses the same GPU binary as the compiled specialization; it
-does not retrace the Python launcher. Backend-specific implementation hooks and
-the `_AOTCompiledFunction` helper remain internal APIs.
+does not retrace the Python launcher.
+
+`flyc.load_module(path)` is the inverse: it reads the embedded metadata from an
+exported object, links the object into the running process with LLVM ORC
+JITLink (`lib/CAPI/HostObject/object_loader.cc`), loads the GPU module on the
+current device (and on another device the first time it is called there), and
+rebuilds a `CompiledFunction` whose argument packing comes from the recorded
+ABI slots and launcher signature. The loader provides no platform runtime: it
+runs no static constructors and services no thread-local storage, and rejects
+objects that need either before linking. The embedded runtime needs neither.
+The exported entry passes the launcher a pointer to an `int32_t` status on its
+own stack, and the kernel launches keep the first error of the call there;
+once a launch fails, the remaining launches of the call are skipped.
+Backend-specific implementation hooks and the `_AOTCompiledFunction` helper
+remain internal APIs.
 
 ---
 
@@ -415,6 +429,7 @@ execution:
 - Supports packed calling convention via `ctypes`.
 - Provides `.dump()`, `.ir`, and `.source_ir` for inspecting compiled or
   original IR.
+- `.source_ir` is not pickled, so it is None after a disk-cache hit.
 
 ### 4.5 `CompiledFunction`
 

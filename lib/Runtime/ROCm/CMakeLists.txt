@@ -38,14 +38,10 @@ if(NOT hip_FOUND)
   find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
 endif()
 
-set(_fly_rocm_runtime_common
-  FlyRocmAotRuntime.cpp
-  FlyRocmRuntimeError.cpp
-)
-
 add_library(FlyJitRuntime SHARED
   FlyRocmRuntimeWrappers.cpp
-  ${_fly_rocm_runtime_common}
+  FlyRocmAotRuntime.cpp
+  FlyRocmRuntimeError.cpp
 )
 target_include_directories(FlyJitRuntime PRIVATE ${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
@@ -64,7 +60,7 @@ if(WIN32)
   # python/mlir_flydsl imports into the LLVM dialect: each export merges in its
   # own internal copy. The static CRT keeps CRT calls free of dllimport, so the
   # code links into /MD and /MT programs alike.
-  add_library(FlyRocmAotRuntimeBitcode OBJECT ${_fly_rocm_runtime_common})
+  add_library(FlyRocmAotRuntimeBitcode OBJECT FlyRocmAotRuntime.cpp)
   target_include_directories(FlyRocmAotRuntimeBitcode PRIVATE windows)
   target_compile_definitions(FlyRocmAotRuntimeBitcode PRIVATE FLYDSL_AOT_RUNTIME_EMBEDDED=1)
   target_compile_features(FlyRocmAotRuntimeBitcode PRIVATE cxx_std_17)
@@ -77,7 +73,7 @@ endif()
 # ROCm AOT exports partially link this PIC archive into the generated host object.
 # Its hidden symbols are localized by the relocatable link, leaving HIP and
 # standard system libraries as the only deployment dependencies.
-add_library(FlyRocmAotRuntime STATIC ${_fly_rocm_runtime_common})
+add_library(FlyRocmAotRuntime STATIC FlyRocmAotRuntime.cpp)
 target_compile_definitions(FlyRocmAotRuntime PRIVATE FLYDSL_AOT_RUNTIME_EMBEDDED=1)
 target_compile_features(FlyRocmAotRuntime PRIVATE cxx_std_17)
 target_link_libraries(FlyRocmAotRuntime PRIVATE hip::host hip::amdhip64 ${CMAKE_DL_LIBS})

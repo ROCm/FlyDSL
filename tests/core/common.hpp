@@ -31,6 +31,9 @@ inline Tup dyn(int64_t value, int32_t div = 1) {
   return Tup::fromLeaf(RT::getDyn(value, LogWidth::I32, div));
 }
 
+/// The static ratio leaf num/den.
+inline Tup ratio(int32_t num, int32_t den) { return Tup::fromLeaf(RT::getRatio(num, den)); }
+
 inline Tup E(const Tup &scale, std::initializer_list<int32_t> modes) {
   return Tup::getBasis(scale, modes);
 }

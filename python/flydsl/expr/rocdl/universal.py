@@ -32,7 +32,6 @@ from ..typing import (
     is_generic_address_space,
     is_target_address_space,
 )
-from . import cdna3, rdna3, rdna4
 from .utils import normalize_s_waitcnt_field, require_lds_dma_support
 
 
@@ -43,6 +42,9 @@ def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
         if vmcnt is not None or lgkmcnt is not None or expcnt is not None:
             raise TypeError("legacy raw s_waitcnt bitfield cannot be combined with non-None keyword arguments")
         return mlir_rocdl.s_waitcnt(normalize_s_waitcnt_field("bitfield", bitfield, 0xFFFF))
+
+    # The architecture modules import this module, so import them here rather than at module scope.
+    from . import cdna3, rdna3, rdna4
 
     arch = get_rocm_arch()
     if arch.startswith(("gfx942", "gfx950")):
@@ -154,14 +156,21 @@ BufferAtomicMin = lambda val_type: BufferAtomic(AtomicOp.Min, val_type)
 BufferAtomicPkAdd = lambda val_type: BufferAtomic(AtomicOp.Add, T.vector(2, val_type.ir_type))
 
 
-def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
-    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+def MFMA(m, n, k, elem_ty_ab, elem_ty_b_or_acc=None, elem_ty_acc=None):
+    """Create a CDNA3 MFMA atom. ``MFMA(m, n, k, ab, acc)`` gives A and B one element type, ``MFMA(m, n, k, a, b,
+    acc)`` gives B its own; the accumulator defaults to f32."""
+    if elem_ty_acc is None:
+        elem_ty_b, elem_ty_acc = elem_ty_ab, elem_ty_b_or_acc
+    else:
+        elem_ty_b = elem_ty_ab if elem_ty_b_or_acc is None else elem_ty_b_or_acc
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    ty_b = elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b
     if elem_ty_acc is None:
         # default to f32
         ty_acc = T.f32()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    return MmaOpCDNA3_MFMAType.get(m, n, k, ty_a, ty_b, ty_acc)
 
 
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):

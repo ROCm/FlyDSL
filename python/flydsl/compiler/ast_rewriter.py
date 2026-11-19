@@ -250,6 +250,86 @@ def _state_value_expr(name):
     )
 
 
+class _RegionReturn:
+    """A ``return`` executed inside a rewritten region: an ``if`` branch or a dynamic loop body.
+
+    The rewriter moves each region into a nested function, where a plain ``return`` would only leave that
+    function. Such a ``return`` gives this marker instead, with the region's carried variables in ``state``.
+    ``scf_if_dispatch`` hands it back when the branch was picked at trace time, and the code after the
+    dispatch assigns ``state`` and returns ``value`` from the enclosing function. A region traced into
+    ``scf.if``, ``scf.for`` or ``scf.while`` cannot return, so its dispatcher raises.
+    """
+
+    __slots__ = ("value", "where", "state")
+
+    def __init__(self, value, where, state):
+        self.value = value
+        self.where = where
+        self.state = state
+
+
+def _reject_region_return(result, region, fix):
+    if isinstance(result, _RegionReturn):
+        raise NotImplementedError(
+            f"{result.where}: `return` inside {region} is not supported: the region is traced into MLIR "
+            f"control flow and cannot return from the enclosing function. {fix}"
+        )
+
+
+# Marks on generated ``return`` nodes: one that passes a nested region's marker on, and one already redirected.
+_REGION_RETURN_ATTR = "_flydsl_region_return"
+_PROPAGATE = "propagate"
+_REDIRECTED = "redirected"
+
+
+def _own_returns(stmts):
+    """The ``return`` statements in *stmts* that return from the function holding *stmts*."""
+    found = []
+    todo = list(stmts)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.Return):
+            found.append(node)
+        elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            todo.extend(
+                c for c in ast.iter_child_nodes(node) if isinstance(c, (ast.stmt, ast.excepthandler, ast.match_case))
+            )
+    return found
+
+
+def _redirect_region_returns(stmts, filename, first_lineno):
+    """Make every ``return`` in the region *stmts* return a ``_RegionReturn``; True if the region has one.
+
+    A ``return`` that passes on a nested region's marker (``return __if_result_N.value``) keeps that marker's
+    location, so an error names the innermost ``return``.
+    """
+    returns = _own_returns(stmts)
+    for node in returns:
+        mark = getattr(node, _REGION_RETURN_ATTR, None)
+        if mark == _REDIRECTED:
+            continue
+        if mark == _PROPAGATE:
+            value = node.value
+            where = ast.Attribute(value=ast.Name(node.value.value.id, ctx=ast.Load()), attr="where", ctx=ast.Load())
+        else:
+            value = node.value if node.value is not None else ast.Constant(value=None)
+            where = ast.Constant(value=f"{filename}:{first_lineno + node.lineno}")
+        state = ast.Call(
+            func=ast.Name("scf_if_collect_results", ctx=ast.Load()),
+            args=[
+                ast.Name("__ret_names", ctx=ast.Load()),
+                ast.Call(func=ast.Name("locals", ctx=ast.Load()), args=[], keywords=[]),
+            ],
+            keywords=[],
+        )
+        node.value = ast.Call(
+            func=ast.Name("scf_region_return", ctx=ast.Load()), args=[value, where, state], keywords=[]
+        )
+        ast.fix_missing_locations(ast.copy_location(node.value, node))
+        setattr(node, _REGION_RETURN_ATTR, _REDIRECTED)
+    return bool(returns)
+
+
 def _rewrite_cache_key(f, code):
     """The key *f*'s rewrite is cached under, or None when the rewrite depends on more than *f*'s code."""
 
@@ -665,6 +745,11 @@ class RewriteBoolOps(Transformer):
 @ASTRewriter.register
 class ReplaceIfWithDispatch(Transformer):
     _counter = 0
+    _DYNAMIC_IF_RETURN = (
+        "an `if` whose condition is a dynamic value (scf.if)",
+        "Assign the value in each branch and return it after the `if`; for an early exit, put the code that "
+        "follows under the opposite condition.",
+    )
 
     @staticmethod
     def _is_dynamic(cond):
@@ -776,6 +861,13 @@ class ReplaceIfWithDispatch(Transformer):
             if taken is None:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
             result = ReplaceIfWithDispatch._call_branch(taken, result_names, result_values)
+            if isinstance(result, _RegionReturn):
+                if result_names:
+                    state = ReplaceIfWithDispatch._normalize_branch_result(
+                        result.state, result_names, result_map, "selected branch"
+                    )
+                    result.state = ReplaceIfWithDispatch._pack_named_values(result_names, state)
+                return result
             if not result_names:
                 return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
             partial_values = ReplaceIfWithDispatch._normalize_branch_result(
@@ -802,13 +894,15 @@ class ReplaceIfWithDispatch(Transformer):
             has_else = else_fn is not None
             if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=capture_user_location())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
-                ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
+                result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
+                _reject_region_return(result, *ReplaceIfWithDispatch._DYNAMIC_IF_RETURN)
                 scf.YieldOp([], loc=capture_user_location())
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
-                    ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
+                    result = ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
+                    _reject_region_return(result, *ReplaceIfWithDispatch._DYNAMIC_IF_RETURN)
                     scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
@@ -823,6 +917,7 @@ class ReplaceIfWithDispatch(Transformer):
             with ir.InsertionPoint(block):
                 branch_inputs = _pack_states(state_raw, exemplar)
                 branch_result = ReplaceIfWithDispatch._call_branch(fn, result_names, branch_inputs)
+                _reject_region_return(branch_result, *ReplaceIfWithDispatch._DYNAMIC_IF_RETURN)
                 branch_map = dict(zip(result_names, branch_inputs))
                 branch_values = ReplaceIfWithDispatch._normalize_branch_result(
                     branch_result, result_names, branch_map, label
@@ -848,6 +943,7 @@ class ReplaceIfWithDispatch(Transformer):
             "scf_if_dispatch": cls.scf_if_dispatch,
             "scf_ifexp_dispatch": cls.scf_ifexp_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
+            "scf_region_return": _RegionReturn,
         }
 
     def visit_If(self, node: ast.If) -> List[ast.AST]:
@@ -870,6 +966,7 @@ class ReplaceIfWithDispatch(Transformer):
 
             then_name = f"__then_{uid}"
             result_names = _collect_assigned_vars(node.body, active_symbols_before_if, node.orelse)
+            has_return = _redirect_region_returns(node.body + node.orelse, self.context.filename, self.first_lineno)
 
             fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [
                 ast.arg(arg=v, annotation=None) for v in result_names
@@ -972,17 +1069,43 @@ class ReplaceIfWithDispatch(Transformer):
                 args=dispatch_args,
                 keywords=dispatch_keywords,
             )
+            target = None
             if result_names and else_name is not None:
                 if len(result_names) == 1:
                     target = ast.Name(id=result_names[0], ctx=ast.Store())
                 else:
                     target = ast.Tuple(elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names], ctx=ast.Store())
-                dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
+            if has_return:
+                # A branch picked at trace time may return a _RegionReturn: assign its carried variables, then
+                # return its value from this function.
+                result_var = f"__if_result_{uid}"
+                propagate = ast.Return(
+                    value=ast.Attribute(value=ast.Name(result_var, ctx=ast.Load()), attr="value", ctx=ast.Load())
+                )
+                setattr(propagate, _REGION_RETURN_ATTR, _PROPAGATE)
+                on_return = [propagate]
+                if target is not None:
+                    state = ast.Attribute(value=ast.Name(result_var, ctx=ast.Load()), attr="state", ctx=ast.Load())
+                    on_return.insert(0, ast.Assign(targets=[copy.deepcopy(target)], value=state))
+                is_return = ast.Call(
+                    func=ast.Name("isinstance", ctx=ast.Load()),
+                    args=[ast.Name(result_var, ctx=ast.Load()), ast.Name("scf_region_return", ctx=ast.Load())],
+                    keywords=[],
+                )
+                dispatch_stmts = [
+                    ast.Assign(targets=[ast.Name(result_var, ctx=ast.Store())], value=dispatch_value),
+                    ast.If(test=is_return, body=on_return, orelse=[]),
+                ]
+                if target is not None:
+                    dispatch_stmts.append(ast.Assign(targets=[target], value=ast.Name(result_var, ctx=ast.Load())))
+            elif target is not None:
+                dispatch_stmts = [ast.Assign(targets=[target], value=dispatch_value)]
             else:
-                dispatch_stmt = ast.Expr(value=dispatch_value)
-            dispatch_stmt = ast.copy_location(dispatch_stmt, node)
-            dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
-            result.append(dispatch_stmt)
+                dispatch_stmts = [ast.Expr(value=dispatch_value)]
+            for dispatch_stmt in dispatch_stmts:
+                dispatch_stmt = ast.copy_location(dispatch_stmt, node)
+                dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
+                result.append(dispatch_stmt)
 
             return result
 
@@ -1044,6 +1167,11 @@ class ReplaceIfWithDispatch(Transformer):
 @ASTRewriter.register
 class InsertEmptyYieldForSCFFor(Transformer):
     _counter = 0
+    _DYNAMIC_FOR_RETURN = (
+        "a dynamic `for` loop body (scf.for)",
+        "Carry the value out of the loop and return it after the loop, or use range_constexpr(...) for a loop "
+        "unrolled at trace time.",
+    )
 
     # Loop directive keywords accepted on ``range(...)`` and forwarded verbatim
     # to the loop builders (``scf_for_dispatch`` / ``scf_range``). These tune how
@@ -1179,7 +1307,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 iv = for_op.induction_variable
-                body_fn(iv, result_names)
+                _reject_region_return(body_fn(iv, result_names), *InsertEmptyYieldForSCFFor._DYNAMIC_FOR_RETURN)
                 scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
@@ -1199,6 +1327,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
             inner_args = _pack_states(for_op.inner_iter_args, exemplar)
 
             body_result = body_fn(iv, result_names, *inner_args)
+            _reject_region_return(body_result, *InsertEmptyYieldForSCFFor._DYNAMIC_FOR_RETURN)
 
             body_values = ReplaceIfWithDispatch._normalize_branch_result(
                 body_result, result_names, result_map, "for-body"
@@ -1296,6 +1425,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         with self.symbol_scopes.control_flow_scope():
             self.symbol_scopes.record_symbol(iv_name)
             node.body = self._visit_stmt_block(node.body)
+        _redirect_region_returns(node.body, self.context.filename, self.first_lineno)
 
         if loop_carried_var_name:
             node.body.append(
@@ -1494,6 +1624,10 @@ class ReplaceYieldWithSCFYield(Transformer):
 @ASTRewriter.register
 class CanonicalizeWhile(Transformer):
     _counter = 0
+    _DYNAMIC_WHILE_RETURN = (
+        "a dynamic `while` loop body (scf.while)",
+        "Carry the value out of the loop and return it after the loop.",
+    )
 
     @staticmethod
     def scf_while_dispatch(before_fn, after_fn, *, result_names=(), result_values=()):
@@ -1536,6 +1670,7 @@ class CanonicalizeWhile(Transformer):
             after_args = list(while_op.regions[1].blocks[0].arguments)
             wrapped_after = _pack_states(after_args, exemplar) if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
+            _reject_region_return(body_result, *CanonicalizeWhile._DYNAMIC_WHILE_RETURN)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(
                     body_result, result_names, result_map, "while-body"
@@ -1575,6 +1710,7 @@ class CanonicalizeWhile(Transformer):
             node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
                 node.body = self._visit_stmt_block(node.body)
+            _redirect_region_returns(node.body, self.context.filename, self.first_lineno)
 
             uid = CanonicalizeWhile._counter
             CanonicalizeWhile._counter += 1

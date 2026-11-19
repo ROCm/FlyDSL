@@ -49,7 +49,7 @@ Current high-traffic mapping:
 - `tests/kernels/*.py`: `l2_device` + `rocm_lower`
 - `tests/unit/*`: mixed by file (`l0_backend_agnostic`, `l1a_compile_no_target_dialect`, `l1b_target_dialect + rocm_lower`, `l2_device + rocm_lower`)
 - `tests/mlir/Conversion/*.mlir`: treated as L1b + ROCm-lowering coverage (selected by FileCheck runner, not pytest markers)
-- `tests/mlir/LayoutAlgebra/*.mlir`: treated as L1a compile-tier coverage where applicable (FileCheck, not pytest markers)
+- `tests/mlir/Dialect/Fly/*.mlir`: treated as L1a compile-tier coverage where applicable (FileCheck, not pytest markers)
 
 ## Environment variables (source of truth: `env.py`)
 

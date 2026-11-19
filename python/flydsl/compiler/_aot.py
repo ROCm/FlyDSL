@@ -5,6 +5,7 @@
 
 import ctypes
 import dataclasses
+import inspect
 import json
 import os
 import re
@@ -39,13 +40,15 @@ from .jit_argument import (
 from .jit_function import FileLock, _create_mlir_context
 from .protocol import c_abi_spec
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _C_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INT_CTYPE = re.compile(r"u?int(8|16|32|64)")
 
 _HOST_OPT_LEVEL = 2
-_AOT_TAKE_ERROR_SYMBOL = "flydslRuntimeTakeError"
+# Names the launcher argument through which its kernel launches report errors;
+# read by the fly.aot_module translation (lib/Dialect/Fly/IR/FlyLLVMTranslation.cpp).
+_AOT_STATUS_ARG_ATTR = "fly.aot_status_arg"
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,8 @@ class _ExportMetadata:
     arch: str
     host_triple: str
     flydsl_version: str
+    # Launcher signature, one dict per parameter in declaration order.
+    params: Tuple[Dict[str, Any], ...] = ()
 
     def _to_dict(self) -> Dict[str, Any]:
         d = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
@@ -251,8 +256,32 @@ def _snapshot_c_abi_types(jit_arg):
     return [ctype for ctype, _fill in c_abi_spec(jit_arg)]
 
 
+_JSON_DEFAULT_TYPES = (type(None), bool, int, float, str)
+
+
+def _snapshot_params(sig) -> Tuple[Dict[str, Any], ...]:
+    """Describe the launcher signature: name, kind, annotation text and JSON-representable default."""
+    params = []
+    for name, param in sig.parameters.items():
+        entry = {"name": name, "kind": param.kind.name.lower()}
+        if param.annotation is not inspect.Parameter.empty:
+            entry["annotation"] = inspect.formatannotation(param.annotation)
+        # Scalar and stream defaults are recorded by value; other defaults are
+        # recorded as absent, so a loaded function requires the argument.
+        default = param.default
+        if isinstance(default, (Numeric, Stream)):
+            default = default.value
+        if default is not inspect.Parameter.empty and type(default) in _JSON_DEFAULT_TYPES:
+            entry["default"] = default
+        params.append(entry)
+    return tuple(params)
+
+
 def _snapshot_abi(sig, resolved_args):
-    """Describe this call's resolved arguments without retaining example buffers."""
+    """Describe this call's resolved arguments without retaining example buffers.
+
+    Returns ``(params, pending)``: the launcher signature and the unvalidated ABI slots.
+    """
     pending = []  # (arg_index, arg_name, semantic slot, ctypes type used by JIT dispatch)
     streams = 0
     for index, (name, param) in enumerate(sig.parameters.items()):
@@ -273,7 +302,7 @@ def _snapshot_abi(sig, resolved_args):
     if not streams:
         pending.append((None, None, {"kind": "stream", "ctype": "pointer"}, ctypes.c_void_p))
 
-    return tuple(pending)
+    return _snapshot_params(sig), tuple(pending)
 
 
 def _build_abi(pending, entry_arg_types: List[ir.Type]) -> Tuple[_AbiSlot, ...]:
@@ -310,11 +339,13 @@ def _make_aot_compiled(module, entry, abi_spec, backend, arch, *, ir_text=None):
     """Build an exportable artifact from an already-lowered module."""
     entry_op = ir.SymbolTable(module.operation)[entry]
     entry_arg_types = [arg.type for arg in entry_op.regions[0].blocks[0].arguments]
-    abi = _build_abi(abi_spec, entry_arg_types)
+    params, pending = abi_spec
+    abi = _build_abi(pending, entry_arg_types)
     return _AOTCompiledFunction(
         ir_text=str(module) if ir_text is None else ir_text,
         entry=entry,
         abi=abi,
+        params=params,
         backend=backend,
         arch=arch,
         host_triple=_host_target_triple(),
@@ -373,32 +404,45 @@ def _namespace_symbols(module: ir.Module, prefix: str) -> Dict[str, str]:
     return renamed
 
 
-def _add_entry_wrapper(module: ir.Module, symbol: str, target: str, abi, take_error: str) -> None:
+def _add_entry_wrapper(module: ir.Module, symbol: str, target: str, abi) -> None:
     """Define ``int32_t symbol(void **args)``: load each slot from its storage,
     call ``target``, and return the first runtime error recorded during the call."""
-    table = ir.SymbolTable(module.operation)
-    arg_types = [arg.type for arg in table[target].regions[0].blocks[0].arguments]
+    launcher = ir.SymbolTable(module.operation)[target].operation
+    launcher_block = launcher.regions[0].blocks[0]
+    arg_types = [arg.type for arg in launcher_block.arguments]
     if len(arg_types) != len(abi):
         raise RuntimeError(f"export_to_c: {target} takes {len(arg_types)} arguments, ABI has {len(abi)} slots")
 
     ptr = llvm.PointerType.get()
     i32 = ir.IntegerType.get_signless(32)
-    with ir.InsertionPoint(module.body), ir.Location.unknown():
-        if take_error not in table:
-            llvm.LLVMFuncOp(take_error, ir.TypeAttr.get(llvm.FunctionType.get(i32, [])))
-        wrapper = llvm.LLVMFuncOp(symbol, ir.TypeAttr.get(llvm.FunctionType.get(i32, [ptr])))
+    with ir.Location.unknown():
+        # The launcher takes a trailing int32_t * where its kernel launches keep
+        # the first error of the call.
+        launcher_type = llvm.FunctionType(ir.TypeAttr(launcher.attributes["function_type"]).value)
+        launcher.attributes["function_type"] = ir.TypeAttr.get(
+            llvm.FunctionType.get(launcher_type.return_type, [*launcher_type.inputs, ptr])
+        )
+        launcher_block.add_argument(ptr, ir.Location.unknown())
+        if "arg_attrs" in launcher.attributes:
+            arg_attrs = list(ir.ArrayAttr(launcher.attributes["arg_attrs"]))
+            launcher.attributes["arg_attrs"] = ir.ArrayAttr.get([*arg_attrs, ir.DictAttr.get({})])
+        launcher.attributes[_AOT_STATUS_ARG_ATTR] = ir.IntegerAttr.get(i32, len(arg_types))
+
+        with ir.InsertionPoint(module.body):
+            wrapper = llvm.LLVMFuncOp(symbol, ir.TypeAttr.get(llvm.FunctionType.get(i32, [ptr])))
         block = wrapper.body.blocks.append(ptr)
         with ir.InsertionPoint(block):
-            # Drop errors left by earlier calls on this thread so the status is ours.
-            llvm.CallOp(i32, [], [], [], callee=take_error)
+            zero = llvm.ConstantOp(i32, ir.IntegerAttr.get(i32, 0)).result
+            one = llvm.ConstantOp(i32, ir.IntegerAttr.get(i32, 1)).result
+            status = llvm.AllocaOp(ptr, one, i32, alignment=4).result
+            llvm.StoreOp(zero, status)
             values = []
             for i, (ty, slot) in enumerate(zip(arg_types, abi)):
                 slot_addr = llvm.GEPOp(ptr, block.arguments[0], [], [i], ptr, None).result
                 storage = llvm.LoadOp(ptr, slot_addr).result
                 values.append(llvm.LoadOp(ty, storage, alignment=slot.alignment).result)
-            llvm.CallOp(None, values, [], [], callee=target)
-            status = llvm.CallOp(i32, [], [], [], callee=take_error).result
-            llvm.ReturnOp(arg=status)
+            llvm.CallOp(None, [*values, status], [], [], callee=target)
+            llvm.ReturnOp(arg=llvm.LoadOp(i32, status).result)
 
 
 def _add_metadata_global(module: ir.Module, symbol: str, metadata: bytes) -> None:
@@ -441,7 +485,7 @@ def _emit_export_object(
                     )
                 handler = ir.Attribute.parse(f'#fly.aot_module<"{function_name}", {object_index}>')
                 op.operation.attributes["offloadingHandler"] = handler
-        _add_entry_wrapper(module, function_name, renamed[entry], abi, _AOT_TAKE_ERROR_SYMBOL)
+        _add_entry_wrapper(module, function_name, renamed[entry], abi)
         _add_metadata_global(module, metadata_symbol, metadata)
         if runtime_ir is not None:
             _merge_aot_runtime(module, runtime_ir)
@@ -819,7 +863,7 @@ def _render_header(metadata: _ExportMetadata) -> str:
             "",
             *types,
             "",
-            "/* Explicit lifecycle API. The packed entry requires init/load first and returns 0 once all launches are submitted. */",
+            "/* Explicit lifecycle API. The packed entry requires init/load first and returns 0 once all launches are submitted, otherwise the first error, skipping the launches after it. */",
             f"int32_t {sym}(void **args);",
             f"int32_t {metadata.module_init_symbol}(void);",
             f"int32_t {metadata.module_load_symbol}(int32_t device);",
@@ -855,11 +899,20 @@ class _AOTCompiledFunction:
     """Lowered export state without references to example arguments."""
 
     def __init__(
-        self, *, ir_text: str, entry: str, abi: Tuple[_AbiSlot, ...], backend: str, arch: str, host_triple: str
+        self,
+        *,
+        ir_text: str,
+        entry: str,
+        abi: Tuple[_AbiSlot, ...],
+        params: Tuple[Dict[str, Any], ...],
+        backend: str,
+        arch: str,
+        host_triple: str,
     ):
         self._ir_text = ir_text
         self._entry = entry
         self._abi = abi
+        self._params = params
         self._backend = backend
         self._arch = arch
         self._host_triple = host_triple
@@ -916,6 +969,7 @@ class _AOTCompiledFunction:
             arch=self._arch,
             host_triple=self._host_triple,
             flydsl_version=flydsl.__version__,
+            params=self._params,
         )
         embedded = export_metadata._to_dict()
         metadata = json.dumps(embedded, sort_keys=True, separators=(",", ":")).encode("utf-8")
