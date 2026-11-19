@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""High-level FlyDSL Flash Attention API for gfx950 / gfx942.
+"""High-level FlyDSL Flash Attention API for gfx1100 / gfx950 / gfx942.
 
-Wraps ``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible,
-dense self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
+Wraps ``flash_attn_gfx1100.build_flash_attn_func_module`` (RDNA3 dense MHA),
+``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible, dense
+self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
 (gfx950 DUALWAVE_SWP, varlen + split-K) behind a single function:
 
     ``flydsl_flash_attn_func(q, k, v, ...)``
@@ -194,6 +195,33 @@ def _build_dense(
         waves_per_eu=waves_per_eu,
         daz=daz,
         return_lse=return_lse,
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_dense_gfx1100(
+    batch: int,
+    num_heads: int,
+    seq_q: int,
+    seq_kv: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    num_cu: int,
+):
+    """Build the dense RDNA3 gfx1100 launcher."""
+    from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        batch=batch,
+        num_heads=num_heads,
+        seq_q=seq_q,
+        seq_kv=seq_kv,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        layout="bshd",
+        num_cu=num_cu,
     )
 
 
@@ -1034,7 +1062,7 @@ def flydsl_flash_attn_func(
     # CUDA/HIP stream; defaults to the current stream for q.device.
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
-    """Run FlyDSL Flash Attention (gfx950 DUALWAVE_SWP / gfx942 generic fallback).
+    """Run FlyDSL Flash Attention (gfx1100 dense / gfx950 DUALWAVE_SWP / gfx942 generic).
 
     Args:
         q: Query tensor. Dense: ``[B, Sq, H, D]`` (BSHD).
@@ -1420,6 +1448,7 @@ def flydsl_flash_attn_func(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
+        _gfx1100 = dtype_str in ("bf16", "f16") and _gpu_arch(q.device).startswith("gfx1100")
 
         if dtype_str == "fp8":
             _arch = _gpu_arch(q.device)
@@ -1443,6 +1472,47 @@ def flydsl_flash_attn_func(
                 num_kv_splits=int(num_kv_splits),
                 block_m=_fp8_block_m,
                 batch_interleave_group=_fp8_batch_interleave_group(B, causal, cross, int(num_kv_splits)),
+            )
+        elif _gfx1100:
+            _supported = (
+                "supported: dense MHA, head_dim 64/128/256, bf16/f16, cross-attention seq_q<=16, "
+                "no varlen/bias/alibi/sink, return_lse=False, split-K disabled"
+            )
+            _mqa = "MQA" if num_kv_heads == 1 else "GQA/MQA"
+            for _bad, _feature in (
+                (varlen, "varlen (cu_seqlens)"),
+                (num_kv_heads != H, f"{_mqa} (num_kv_heads={num_kv_heads}, num_heads={H})"),
+                (D not in (64, 128, 256), f"head_dim {D}"),
+                (splitk, f"split-K num_kv_splits={int(num_kv_splits)}"),
+                (return_lse, "return_lse"),
+                (has_bias, "attention bias"),
+                (has_alibi, "ALiBi slopes"),
+                (has_sink, "attention sink"),
+                (cross and Sq > 16, f"cross-attention with seq_q={Sq} (>16)"),
+            ):
+                if _bad:
+                    raise NotImplementedError(
+                        f"flydsl_flash_attn_func on gfx1100: {_feature} is not supported ({_supported})"
+                    )
+            if out is not None and out.device != q.device:
+                raise ValueError(f"flydsl_flash_attn_func: out must be a CUDA tensor on {q.device}, got {out.device}")
+            if out is not None and not out.is_contiguous():
+                raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
+            # The kernel ABI indexes each batch slice with int32 offsets.
+            if max(t.numel() // max(B, 1) for t in (q, k, v)) >= _FP8_MAX_FLAT_ELEMS:
+                raise ValueError(
+                    f"flydsl_flash_attn_func: gfx1100 per-batch slice must contain fewer than "
+                    f"{_FP8_MAX_FLAT_ELEMS} elements"
+                )
+            exe = _build_dense_gfx1100(
+                batch=B,
+                num_heads=H,
+                seq_q=Sq,
+                seq_kv=Skv,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                num_cu=2 * _dense_light_cu(q.device),
             )
         elif splitk:
             exe = _build_splitk(
@@ -1612,6 +1682,8 @@ def flydsl_flash_attn_func(
             elif cross:
                 kwargs["seq_len_kv"] = Skv
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
+        elif _gfx1100:
+            exe(q_flat, k_flat, v_flat, o_flat, stream=launch_stream)
         elif splitk:
             _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream, **_bias_kw)
