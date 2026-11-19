@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-11-19T07:59:40Z",
+ "updated": "2026-11-19T09:05:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44492545607,
+   "pr": 1451,
+   "commit": "00a6ac9459dca558e4e3bc6e31184e296fcdfcc7",
+   "branch": "aot-load-module",
+   "event": "pull_request",
+   "title": "[AOT] Add flyc.load_module to load export_to_c objects in-process",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44492545607",
+   "created_at": "2026-11-19T09:01:00Z",
+   "updated_at": "2026-11-19T09:02:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44490557186,
+   "pr": 1450,
+   "commit": "285cc0df01ea35f84fc836a89bac361d9aa64a14",
+   "branch": "pr/fix-lds-dma-m0",
+   "event": "pull_request",
+   "title": "[Feat] Model LDS DMA copy atoms at wave granularity",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186",
+   "created_at": "2026-11-19T08:47:07Z",
+   "updated_at": "2026-11-19T08:49:07Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44490248298,
+   "pr": 1449,
+   "commit": "43bde5a45369be3fd474d93cd9ec975cdec6e0fc",
+   "branch": "pr/test-prune-layout",
+   "event": "pull_request",
+   "title": "[Tests] Move layout algebra checks to the Core tests ",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298",
+   "created_at": "2026-11-19T08:45:01Z",
+   "updated_at": "2026-11-19T08:47:08Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44489790809,
+   "pr": 1448,
+   "commit": "8b2291b91702998b30d283766460b5461d83240f",
+   "branch": "pr/flash-fwd-paged",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Pick the paged flash-attention CTA height from the launch shape",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44489790809",
+   "created_at": "2026-11-19T08:41:48Z",
+   "updated_at": "2026-11-19T08:41:48Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44480054376,
    "pr": 1447,
@@ -1884,97 +1944,6 @@
    "updated_at": "2026-11-16T09:47:59Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 43842989214,
-   "pr": null,
-   "commit": "415a4a6e91672abad961923bba96ca9ff3b92a1a",
-   "branch": "pr/softmax-wide-rows",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Split wide softmax rows across blocks",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43842989214",
-   "created_at": "2026-11-16T09:47:54Z",
-   "updated_at": "2026-11-16T09:47:54Z",
-   "actor": "Monstertail",
-   "jobs": []
-  },
-  {
-   "run_id": 43841301622,
-   "pr": 1267,
-   "commit": "0284f121427d02abc4c9940c32275759d53d725d",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43841301622",
-   "created_at": "2026-11-16T09:36:49Z",
-   "updated_at": "2026-11-16T09:36:49Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43840371097,
-   "pr": null,
-   "commit": "f838b9690cb3c799e46343e819837ea509fdee91",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43840371097",
-   "created_at": "2026-11-16T09:30:32Z",
-   "updated_at": "2026-11-16T09:30:32Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43839987181,
-   "pr": null,
-   "commit": "aae155359ddc9b2bb1064ec8d391bc25aa4c0d3e",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Keep forked PRs off linux-flydsl-navi-2 (#1416)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43839987181",
-   "created_at": "2026-11-16T09:28:02Z",
-   "updated_at": "2026-11-16T11:38:22Z",
-   "actor": "gyohuangxin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T10:56:01Z",
-     "completed_at": "2026-11-16T11:20:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43839987181/job/133244730580"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T11:11:40Z",
-     "completed_at": "2026-11-16T11:18:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43839987181/job/133244730679"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T11:04:44Z",
-     "completed_at": "2026-11-16T11:38:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43839987181/job/133244730748",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
