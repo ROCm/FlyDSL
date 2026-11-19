@@ -2506,3 +2506,188 @@ new file mode 100644
 +  store volatile i32 %c2, ptr addrspace(1) %q
 +  ret void
 +}
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
+index 491d8884a3..193bce7b3d 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
+@@ -17,13 +17,15 @@
+ ///      (and source) vreg so the allocator prefers the target bank or register,
+ ///   3. propagates the hint through COPY / REG_SEQUENCE / INSERT_SUBREG /
+ ///      SUBREG_TO_REG so it survives coalescing, and
+-///   4. replaces the pseudo with a plain COPY, except for a strict AGPR pin.
++///   4. replaces a soft pin with a plain COPY. A strict pin stays until
++///      expandPostRAPseudo. By default (-amdgpu-strict-pin-tie-src-dst) that
++///      pseudo ties src to dst so RA assigns one physical register. Passing
++///      -amdgpu-strict-pin-tie-src-dst=0 leaves it untied, and a mismatch
++///      then becomes a copy after RA.
+ ///
+-/// A strict AGPR pseudo is left in place until expandPostRAPseudo. Replacing
+-/// it with a COPY drops the AGPR operand constraint, and the coalescer then
+-/// widens the vreg from AGPR_* to AV_*. vN and aN share a HW index, so the
+-/// allocator can satisfy the hint with a VGPR. Keeping the pseudo holds the
+-/// class at AGPR_* through coalescing.
++/// A strict AGPR pseudo also has to stay until expandPostRAPseudo so the
++/// operand class is not widened from AGPR_* to AV_*. vN and aN share a HW
++/// index, and a COPY would let the allocator satisfy the hint with a VGPR.
+ ///
+ /// A non-strict hint only reorders the allocation candidates, so a full bank
+ /// (or unavailable register) falls back to the default order. A strict hint is
+@@ -45,11 +47,20 @@
+ #include "llvm/CodeGen/MachineInstrBuilder.h"
+ #include "llvm/CodeGen/MachineRegisterInfo.h"
+ #include "llvm/InitializePasses.h"
++#include "llvm/Support/CommandLine.h"
+ 
+ using namespace llvm;
+ 
+ #define DEBUG_TYPE "amdgpu-sched-bank"
+ 
++// On by default. A strict pin ties its source to its result before RA, so the
++// allocator assigns one physical register and expandPostRAPseudo does not
++// emit a copy. Turning this off leaves the pseudo untied, and a mismatch
++// becomes a copy after RA.
++static cl::opt<bool> StrictPinTieSrcDst(
++    "amdgpu-strict-pin-tie-src-dst", cl::Hidden, cl::init(true),
++    cl::desc("Tie strict sched.vgpr/sgpr/agpr src to dst"));
++
+ /// Classification of schedule-hint pseudos.
+ enum ScheduleHintKind { SHK_None, SHK_Bank, SHK_VGPR, SHK_SGPR, SHK_AGPR };
+ 
+@@ -368,9 +379,12 @@ static bool runScheduleBank(MachineFunction &MF) {
+ 
+       // A strict exact-register pin must keep its own def until after RA:
+       // a plain COPY gets coalesced and the hint can be dropped with it. For
+-      // AGPR it also keeps the AGPR operand constraint. expandPostRAPseudo
+-      // turns the pseudo into a physreg copy.
++      // AGPR it also keeps the AGPR operand constraint. With src tied to dst
++      // the allocator uses one register, so expandPostRAPseudo emits no copy.
+       if (Kind != SHK_Bank && Strict) {
++        if (StrictPinTieSrcDst && DstReg.isVirtual() && SrcReg.isVirtual() &&
++            !MI.getOperand(0).getSubReg() && !SrcMO.getSubReg())
++          MI.tieOperands(/*DefIdx=*/0, /*UseIdx=*/1);
+         Changed = true;
+         continue;
+       }
+diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+index 74f9dc9ef6..174a26ee19 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+@@ -2566,7 +2566,8 @@ bool SIInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
+   case AMDGPU::S_SCHEDULE_SGPR_B256:
+   case AMDGPU::S_SCHEDULE_SGPR_B512: {
+     // Strict exact-register pins are kept through RA so the pinned value keeps
+-    // its own def and hint (and, for AGPR, its operand class).
++    // its own def and hint (and, for AGPR, its operand class). If src was tied
++    // to dst, the physical registers match and this emits no copy.
+     // The immediates have already been consumed as allocation hints.
+     Register Dst = MI.getOperand(0).getReg();
+     Register Src = MI.getOperand(1).getReg();
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll b/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll
+index 127d8d33df..a2e73f4c73 100644
+--- a/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll
++++ b/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll
+@@ -8,8 +8,8 @@ declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
+ declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half>, <4 x half>, <4 x float>, i32, i32, i32)
+ 
+ ; CHECK-LABEL: name: two_chains
+-; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
+-; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 4, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}(tied-def 0), 0, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}(tied-def 0), 4, 1
+ define amdgpu_kernel void @two_chains(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) #0 {
+ entry:
+   br label %loop
+@@ -38,7 +38,7 @@ exit:
+ ; One chain from the MFMA before the loop, through the loop PHI and the
+ ; accumulator input of the MFMA after the loop.
+ ; CHECK-LABEL: name: loop_chain
+-; CHECK-COUNT-3: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
++; CHECK-COUNT-3: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}(tied-def 0), 0, 1
+ ; CHECK-NOT: A_SCHEDULE_AGPR_B128
+ ; GCN-LABEL: {{^}}loop_chain:
+ ; GCN-NOT: v_accvgpr_mov
+@@ -77,8 +77,8 @@ exit:
+ 
+ ; An exact pin takes a0..a3, so the chain starts at a4.
+ ; CHECK-LABEL: name: after_exact
+-; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
+-; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 4, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}(tied-def 0), 0, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}(tied-def 0), 4, 1
+ define amdgpu_kernel void @after_exact(ptr addrspace(1) %out, <4 x half> %a, <4 x float> %c, <4 x float> %d) #0 {
+   %x = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 0, i32 1)
+   %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %d, i32 0, i32 0, i32 0)
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
+index ad264e732e..13c2cae5e5 100644
+--- a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
+@@ -2,11 +2,11 @@
+ 
+ # The AMDGPUSchedBank pass attaches exact register allocation hints (not
+ # printed in MIR). Soft pins are lowered to a plain COPY; strict pins keep the
+-# pseudo until expandPostRAPseudo.
++# pseudo until expandPostRAPseudo and, by default, tie src to dst.
+ 
+ ---
+ # CHECK-LABEL: name: lower_sched_vgpr_b32
+-# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 42, 1
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0(tied-def 0), 42, 1
+ name: lower_sched_vgpr_b32
+ tracksRegLiveness: true
+ body: |
+@@ -36,7 +36,7 @@ body: |
+ 
+ ---
+ # CHECK-LABEL: name: lower_sched_sgpr_b32
+-# CHECK: %1:sgpr_32 = S_SCHEDULE_SGPR_B32 %0, 10, 1
++# CHECK: %1:sgpr_32 = S_SCHEDULE_SGPR_B32 %0(tied-def 0), 10, 1
+ name: lower_sched_sgpr_b32
+ tracksRegLiveness: true
+ body: |
+@@ -68,7 +68,7 @@ body: |
+ # regnum -1 (any register of the file): a strict pin keeps the pseudo, a soft
+ # pin is a plain COPY.
+ # CHECK-LABEL: name: lower_sched_vgpr_any
+-# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0(tied-def 0), -1, 1
+ # CHECK: %2:vgpr_32 = COPY %0
+ # CHECK-NOT: V_SCHEDULE_VGPR_B32
+ name: lower_sched_vgpr_any
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-tied.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr-tied.ll
+new file mode 100644
+index 0000000000..dd77db084a
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-tied.ll
+@@ -0,0 +1,32 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -stop-after=amdgpu-sched-bank < %s | FileCheck -check-prefix=TIED %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -stop-after=amdgpu-sched-bank -amdgpu-strict-pin-tie-src-dst=0 < %s | FileCheck -check-prefix=UNTIED %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
++
++; -amdgpu-strict-pin-tie-src-dst (default) ties a strict sched.vgpr pin's
++; source to its result before RA. The defining instruction then writes the
++; pinned register, and later uses read that register with no copy in between.
++; -amdgpu-strict-pin-tie-src-dst=0 leaves the pseudo untied.
++
++declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
++declare i32 @llvm.amdgcn.workitem.id.x()
++
++; TIED: V_SCHEDULE_VGPR_B32 killed %{{[0-9]+}}(tied-def 0), 40, 1
++; UNTIED: V_SCHEDULE_VGPR_B32 killed %{{[0-9]+}}, 40, 1
++; UNTIED-NOT: tied-def
++; GCN-LABEL: {{^}}vgpr40_tied:
++; GCN: v_dual_add_nc_u32 v40,
++; GCN-NOT: v_mov
++; GCN: v_dual_add_nc_u32 v{{[0-9]+}}, {{[^,]+}}, v40
++define amdgpu_kernel void @vgpr40_tied(ptr addrspace(1) %out, i32 %x, i32 %y) #0 {
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %sum = add i32 %tid, %x
++  %pinned = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %sum, i32 40, i32 1)
++  %a = add i32 %pinned, %y
++  %b = xor i32 %pinned, %y
++  store i32 %a, ptr addrspace(1) %out
++  %out2 = getelementptr i32, ptr addrspace(1) %out, i32 1
++  store i32 %b, ptr addrspace(1) %out2
++  ret void
++}
++
++attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
