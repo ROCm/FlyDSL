@@ -3,6 +3,8 @@
 
 """gfx950 paged FP8 flash attention with independent value dimensions."""
 
+import torch
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
@@ -15,8 +17,11 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8KvLdsToVgprLoader,
     DualwaveFp8SoftmaxHelper,
     DualwaveFp8StoreHelper,
+    DualwaveSplitKCombineContext,
+    DualwaveSplitKCombineHelper,
     _make_paged_dualwave_swp_fp8_traits,
     daz_denormal_attr,
+    dualwave_splitk_workspace_elems,
 )
 from kernels.common.tensor_shim import _run_compiled
 
@@ -28,6 +33,17 @@ def _query_bound_is_safe(ctx, upper_bound, maximum):
     unsafe = safe == fx.Boolean(False)
     unsafe_lanes = fx.Int64(rocdl.ballot(fx.Int64.ir_type, unsafe.ir_value()))
     return unsafe_lanes == 0
+
+
+def _launch_torch_stream(stream, device):
+    """The torch stream that a launch on ``stream`` runs on, read as ``fx.Stream`` reads it:
+    ``None`` is the default queue and an ``int`` is a raw queue handle."""
+    if stream is None:
+        return torch.cuda.default_stream(device)
+    if isinstance(stream, torch.cuda.Stream):
+        return stream
+    raw = stream if isinstance(stream, int) else stream.cuda_stream
+    return torch.cuda.ExternalStream(raw, device=device)
 
 
 def build_flash_attn_paged_fp8_module(
@@ -79,13 +95,13 @@ def build_flash_attn_paged_fp8_module(
         or not cross_seqlen
         or (head_dim, value_head_dim) not in ((128, 128), (192, 128), (192, 192))
         or not native_cache_layout
-        or int(num_kv_splits) != 1
+        or int(num_kv_splits) < 1
     ):
         raise RuntimeError(
             "paged FP8 flash_attn requires gfx950, causal packed-varlen cross-attention, "
             "page-16/64/1024 vectorized or page-1 linear/linear3d KV, (head_dim,value_head_dim) in "
             "{(128,128),(192,128),(192,192)}, "
-            "and num_kv_splits=1"
+            "and num_kv_splits >= 1"
         )
 
     if num_kv_heads is None:
@@ -99,6 +115,11 @@ def build_flash_attn_paged_fp8_module(
     batch_interleave_group = int(batch_interleave_group)
     if batch_interleave_group < 1:
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
+    num_kv_splits = int(num_kv_splits)
+    if num_kv_splits > 1:
+        # Split-K indexes batches and splits on one grid axis, so it cannot also
+        # carry the interleaved batch mapping.
+        batch_interleave_group = 1
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
         num_kv_heads,
@@ -113,16 +134,25 @@ def build_flash_attn_paged_fp8_module(
         page_size=page_size,
         kv_cache_layout=kv_cache_layout,
         cache_buffered=cache_buffered,
+        num_kv_splits=num_kv_splits,
     )
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
+    HEAD_DIM_V = traits.HEAD_DIM_V
     NUM_HEADS_Q = traits.NUM_HEADS_Q
+    NUM_KV_SPLITS = traits.NUM_KV_SPLITS
     PAIRED_PAGE_IDS = bool(paged_bn128)
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.HEAD_DIM_V
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
+    # Schedule choice, made at build time: the split-K builds already widen the
+    # grid until it fills the GPU, so they keep the historical prologue order and
+    # epilogue. Every other build runs one launch per call on a narrow grid, where
+    # a call is a single dependent latency chain and the epilogue is mostly
+    # out-of-range rows -- those get the decode schedule.
+    DECODE_SCHEDULE = not traits.SPLITK
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
 
     @fx.struct
@@ -137,6 +167,7 @@ def build_flash_attn_paged_fp8_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        Workspace: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -156,6 +187,7 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
+            DebugCounts=Workspace,
             CuSeqQ=CuSeqQ,
             CuSeqKv=CuSeqKv,
             QDescale=QDescale,
@@ -181,6 +213,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_dma_thread_offsets()
         ctx.init_descale()
         ctx.init_tile_bounds()
+        ctx.init_workspace_io()
 
         gemm_helper = DualwaveFp8GemmHelper(ctx)
         softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
@@ -239,15 +272,24 @@ def build_flash_attn_paged_fp8_module(
             return softmax_helper.floor_masked_max(m_tile)
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
+        if const_expr(DECODE_SCHEDULE):
+            # Issue the Q operand read before the first K DMA: the wait below then
+            # covers both, so the Q read's global latency hides under the DMA
+            # instead of following it. Measured with the guarded epilogue below at
+            # 1.01-1.06x per decode-sized shape (2.8% geomean over eight of them).
+            ctx.init_q_row()
+            q_row = ctx.q_row
+            q_wide = gemm_helper.load_q_wide()
         kv_gmem_to_lds.load_k(t0 * BN, t0 % NPF, page_id=page_t0)
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
-        ctx.init_q_row()
-        q_row = ctx.q_row
+        if const_expr(not DECODE_SCHEDULE):
+            ctx.init_q_row()
+            q_row = ctx.q_row
 
-        q_wide = gemm_helper.load_q_wide()
+            q_wide = gemm_helper.load_q_wide()
 
         upper_bound = ctx.c_zero_f
         if const_expr(BOUNDED_MAX):
@@ -375,6 +417,36 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
             return next_args
 
+        def _tail_tile(j, tail_args):
+            """Close an odd tile count with one lone tile: no prefetch, one subtile.
+
+            Its K/V were staged by the prologue (single-tile sequences) or by the
+            pair that prefetched this tile, so this only drains the pipeline.
+            """
+            m_row = tail_args[0]
+            l_row = tail_args[1]
+            v_o = [tail_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            a_buf = fx.Int64(j) % NPF_I
+
+            v_k = kv_lds_to_regs.load_k(a_buf)
+            v_s = gemm_helper.qk(v_k, q_wide)
+            v_s = softmax_helper.causal_mask_tail_if_needed(v_s, j)
+            m_tile = softmax_helper.floor_masked_max(softmax_helper.reduce_max(v_s))
+            v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
+            v_o = softmax_helper.anchor_v_o(v_o)
+            v_p, l_row = _softmax_part(v_s, l_row, m_new)
+            # One 32-channel V fragment at a time: this body runs once, so the
+            # narrower operand only trims liveness where the wide load would spill.
+            for dc in range_constexpr(D_CHUNKS):
+                fragment = kv_lds_to_regs.load_v_fragment(a_buf, dc)
+                v_o[dc] = gemm_helper.pv_fragment(fx.Vector(fragment).bitcast(fx.Int64), v_p, v_o[dc])
+
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+            rocdl.sched_barrier(0)
+            rocdl.s_barrier()
+            rocdl.sched_barrier(0)
+            return [m_new, l_row] + v_o
+
         # V128 stores packets j+2/j+3; segmented V stores j+4/j+5. Keep
         # byte masking out of iterations whose furthest packet is fully valid.
         if const_expr(traits.PAGE_SIZE == 1):
@@ -426,6 +498,16 @@ def build_flash_attn_paged_fp8_module(
             for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
+
+        # Odd tile counts close on one lone tile: the pair loop above stops at the
+        # even bound, so this runs zero or one time. Its K/V are already staged by
+        # the pair that prefetched them (or by the prologue for a single tile).
+        if const_expr(traits.ODD_TILE_TAIL):
+            tail_args = [loop_results[0], loop_results[1]] + [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
+            for j, tail_args in range(fx.Int64(t_end), fx.Int64(ctx.split_tail_end), fx.Int64(1), init=tail_args):
+                next_args = _tail_tile(j, tail_args)
+                tail_args = yield next_args
+            loop_results = tail_args
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -435,7 +517,44 @@ def build_flash_attn_paged_fp8_module(
         inv_l = inv_l * value_descale
         softmax_helper.scale_o(v_o, inv_l)
         rocdl.s_barrier()
-        output_store.store_final_o(v_o, q_row)
+        if const_expr(traits.SPLITK):
+            # The combine re-weights each split by exp2(m_s - m_max) * l_s against
+            # this split's normalised partial, so both rows travel with the output.
+            output_store.store_splitk_partial_o(v_o, m_row, l_row, q_row)
+            output_store.store_empty_split()
+        elif const_expr(DECODE_SCHEDULE):
+            output_store.store_final_o_if_active(v_o, q_row)
+        else:
+            output_store.store_final_o(v_o, q_row)
+
+    # Combine kernel: out = sum_s w_s * O_s / sum_s w_s * l_s, w_s = exp2(m_s - m_max).
+    # One wave row of 32 lanes covers a (b, h, s) row, 4 contiguous cols/lane.
+    COMBINE_BLOCK = 256
+    COMBINE_LANES_PER_ROW = traits.HEAD_DIM_V // 4
+    COMBINE_ROWS_PER_BLOCK = COMBINE_BLOCK // COMBINE_LANES_PER_ROW
+
+    @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
+    def flash_attn_paged_splitk_combine_kernel(
+        O: fx.Tensor,  # noqa: E741
+        WS: fx.Tensor,
+        CuSeqQ: fx.Tensor,
+        batch_size: fx.Int32,
+        seq_len: fx.Int32,
+        stride_o_n: fx.Int32,
+    ):
+        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_o_n, CuSeqQ=CuSeqQ)
+        ctx.init_types_and_constants()
+        ctx.init_runtime_indices()
+        ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
+        ctx.init_workspace()
+        ctx.init_descriptors()
+
+        combine = DualwaveSplitKCombineHelper(ctx)
+        m_s, l_s = combine.load_ml_rows()
+        m_max = combine.reduce_m_max(m_s)
+        acc, den = combine.accumulate_splits(m_s, l_s, m_max)
+        o_pack = combine.pack_output(acc, den)
+        combine.store_output(o_pack)
 
     @flyc.jit
     def launch_flash_attn_dualwave_swp(
@@ -443,6 +562,7 @@ def build_flash_attn_paged_fp8_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        Workspace: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -464,6 +584,8 @@ def build_flash_attn_paged_fp8_module(
         sl_idx = fx.Int64(seq_len)
         num_q_blocks = (sl_idx + BLOCK_M - 1) // BLOCK_M
         grid_z = bs_idx
+        if const_expr(traits.SPLITK):
+            grid_z = bs_idx * NUM_KV_SPLITS
 
         passthrough_entries = (
             [
@@ -484,6 +606,7 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
+            Workspace,
             CuSeqQ,
             CuSeqKv,
             BlockTable,
@@ -506,6 +629,16 @@ def build_flash_attn_paged_fp8_module(
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,
         )
+        if const_expr(traits.SPLITK):
+            # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
+            combine_rows = NUM_HEADS_Q * sl_idx
+            combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
+            combine_stride = fx.Int32(DEFAULT_STRIDE_O_N) if PAIRED_PAGE_IDS else stride_o_n
+            flash_attn_paged_splitk_combine_kernel(O, Workspace, CuSeqQ, batch_size, seq_len, combine_stride).launch(
+                grid=(combine_blocks, bs_idx, 1),
+                block=(COMBINE_BLOCK, 1, 1),
+                stream=stream,
+            )
 
     launch_flash_attn_dualwave_swp.compile_hints = {
         "fast_fp_math": True,
@@ -540,6 +673,90 @@ def build_flash_attn_paged_fp8_module(
                 "paged FP8 batch size must be divisible by its interleave group: "
                 f"batch_size={int(batch_size)}, group={BATCH_INTERLEAVE_GROUP}"
             )
+
+    # Split-KV is chosen per call: a call whose workgroup grid leaves the GPU mostly
+    # idle trades one combine kernel for a shorter per-workgroup KV range. Both
+    # numbers are in 64-key tiles: what a workgroup pays before its loop and what
+    # the combine kernel costs a caller that would otherwise run one split.
+    _SPLITK_FIXED_TILES = 6.0
+    _SPLITK_COMBINE_TILES = 4.0
+    _SPLITK_MIN_TILES = 4
+    _SPLITK_CANDIDATES = (1, 2, 3, 4, 6, 8, 12, 16)
+    # A split must model at least 20% faster: the model ignores that two workgroups can
+    # share a CU, and a 4-way split of a grid that already covers 3/4 of the CUs (B4 x
+    # M1024 x H12) models 12% faster but measures 3% slower.
+    _SPLITK_MARGIN = 0.8
+
+    _splitk_cu_cache = {}
+
+    def _splitk_cu_count(device):
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        if index not in _splitk_cu_cache:
+            _splitk_cu_cache[index] = int(torch.cuda.get_device_properties(index).multi_processor_count)
+        return _splitk_cu_cache[index]
+
+    def _choose_num_kv_splits(batch_size, seq_len, seq_len_kv, device):
+        """Pick the KV split count that minimises modelled makespan, or 1.
+
+        Only split-KV shapes with few workgroups and a long KV range can win: the
+        partial-output combine is a second launch, so the model charges for it and
+        requires a clear margin over the unsplit schedule.
+        """
+        seq_len = int(seq_len)
+        seq_len_kv = int(seq_len_kv)
+        batch_size = int(batch_size)
+        if seq_len <= 0 or seq_len_kv <= 0 or batch_size <= 0:
+            return 1
+        if device.type != "cuda":
+            # Compiling without a device (tensors off the GPU) builds the unsplit kernel.
+            return 1
+        kv_tiles = -(-seq_len_kv // traits.BLOCK_N)
+        workgroups = NUM_HEADS_Q * (-(-seq_len // BLOCK_M)) * batch_size
+        num_cu = _splitk_cu_count(device)
+        if kv_tiles < 2 * _SPLITK_MIN_TILES or workgroups >= num_cu:
+            return 1
+
+        def makespan(splits):
+            rounds = -(-(workgroups * splits) // num_cu)
+            cost = rounds * (_SPLITK_FIXED_TILES + -(-kv_tiles // splits))
+            return cost + (_SPLITK_COMBINE_TILES if splits > 1 else 0.0)
+
+        usable = [s for s in _SPLITK_CANDIDATES if s == 1 or kv_tiles // s >= _SPLITK_MIN_TILES]
+        best = min(usable, key=makespan)
+        if best == 1:
+            return 1
+        return best if makespan(best) <= _SPLITK_MARGIN * makespan(1) else 1
+
+    _splitk_launchers = {}
+
+    def _splitk_launcher(splits):
+        build = _splitk_launchers.get(splits)
+        if build is None:
+            build = build_flash_attn_paged_fp8_module(
+                num_heads,
+                head_dim,
+                value_head_dim=value_head_dim,
+                causal=causal,
+                dtype_str=dtype_str,
+                num_kv_heads=num_kv_heads,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+                rescale_threshold=rescale_threshold,
+                dualwave_swp_setprio=dualwave_swp_setprio,
+                dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+                num_kv_splits=splits,
+                varlen=varlen,
+                cross_seqlen=cross_seqlen,
+                paged=paged,
+                kv_cache_layout=kv_cache_layout,
+                paged_bn128=paged_bn128,
+                batch_interleave_group=batch_interleave_group,
+                page_size=page_size,
+                cache_buffered=cache_buffered,
+            )
+            _splitk_launchers[splits] = build
+        return build
 
     def _launch(
         Q,
@@ -593,6 +810,39 @@ def build_flash_attn_paged_fp8_module(
             seq_len_kv = seq_len
         _validate_paged_bn128_launch(seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
+        if NUM_KV_SPLITS == 1:
+            splits = _choose_num_kv_splits(batch_size, seq_len, seq_len_kv, O.device)
+            if splits > 1:
+                return _splitk_launcher(splits)(
+                    Q,
+                    K,
+                    V,
+                    O,
+                    batch_size,
+                    seq_len,
+                    stride_q_n=stride_q_n,
+                    stride_o_n=stride_o_n,
+                    head_dim_runtime=head_dim_runtime,
+                    seq_len_kv=seq_len_kv,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    block_table=block_table,
+                    block_table_stride=block_table_stride,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                    stream=stream,
+                    _compile_only=_compile_only,
+                )
+            workspace = O
+        else:
+            ws_elems = dualwave_splitk_workspace_elems(
+                int(batch_size), NUM_HEADS_Q, int(seq_len), NUM_KV_SPLITS, head_dim=HEAD_DIM_V
+            )
+            # The caching allocator recycles a freed block on the stream it was allocated on,
+            # so the workspace must belong to the stream the kernels run on, not torch's current one.
+            with torch.cuda.stream(_launch_torch_stream(stream, O.device)):
+                workspace = torch.empty(ws_elems, dtype=torch.float32, device=O.device)
         dispatch = flyc.compile if _compile_only else _run_compiled
         return dispatch(
             launch_flash_attn_dualwave_swp,
@@ -600,6 +850,7 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
+            workspace,
             cu_seqlens_q,
             cu_seqlens_kv,
             block_table,
