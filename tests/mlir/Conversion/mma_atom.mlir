@@ -50,6 +50,34 @@ func.func @test_mma_atom_call_ssa_fp8(
   return %res : vector<4xf32>
 }
 
+// CHECK-LABEL: @test_mma_atom_call_ssa_fp8_bf8_ocp
+// CHECK-SAME: (%[[A:.*]]: vector<8xi8>, %[[B:.*]]: vector<8xi8>, %[[C:.*]]: vector<4xf32>)
+func.func @test_mma_atom_call_ssa_fp8_bf8_ocp(
+    %a: vector<8xi8>,
+    %b: vector<8xi8>,
+    %c: vector<4xf32>) -> vector<4xf32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FN, f8E5M2) -> f32>>
+  // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<8xi8> to i64
+  // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<8xi8> to i64
+  // CHECK: %[[RES:.*]] = rocdl.mfma.f32.16x16x32.fp8.bf8 %[[A_CAST]], %[[B_CAST]], %[[C]]
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FN, f8E5M2) -> f32>>, vector<8xi8>, vector<8xi8>, vector<4xf32>) -> vector<4xf32>
+  return %res : vector<4xf32>
+}
+
+// CHECK-LABEL: @test_mma_atom_call_ssa_i8_16x16x64
+// CHECK-SAME: (%[[A:.*]]: vector<16xi8>, %[[B:.*]]: vector<16xi8>, %[[C:.*]]: vector<4xi32>)
+func.func @test_mma_atom_call_ssa_i8_16x16x64(
+    %a: vector<16xi8>,
+    %b: vector<16xi8>,
+    %c: vector<4xi32>) -> vector<4xi32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x64, (i8, i8) -> i32>>
+  // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<16xi8> to vector<4xi32>
+  // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<16xi8> to vector<4xi32>
+  // CHECK: %[[RES:.*]] = rocdl.mfma.i32.16x16x64.i8 %[[A_CAST]], %[[B_CAST]], %[[C]]
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x64, (i8, i8) -> i32>>, vector<16xi8>, vector<16xi8>, vector<4xi32>) -> vector<4xi32>
+  return %res : vector<4xi32>
+}
+
 // CHECK-LABEL: @test_mma_atom_call_ssa_bf16_32x32x8
 // CHECK-SAME: (%[[A:.*]]: vector<4xbf16>, %[[B:.*]]: vector<4xbf16>, %[[C:.*]]: vector<16xf32>)
 func.func @test_mma_atom_call_ssa_bf16_32x32x8(
