@@ -6113,6 +6113,120 @@ def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
 
 
+def _paged_fp8_split_kv_build(num_kv_splits):
+    """A ``_build_paged_fp8`` stand-in that pins the paged FP8 builder to ``num_kv_splits``."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+
+    def build(**kwargs):
+        return build_flash_attn_paged_fp8_module(
+            num_heads=kwargs["num_heads"],
+            num_kv_heads=kwargs["num_kv_heads"],
+            head_dim=kwargs["head_dim"],
+            value_head_dim=kwargs["value_head_dim"],
+            causal=True,
+            dtype_str="fp8",
+            waves_per_eu=kwargs["waves_per_eu"],
+            daz=kwargs["daz"],
+            dualwave_swp_lazy_rescale=kwargs["lazy_rescale"],
+            num_kv_splits=num_kv_splits,
+            varlen=True,
+            cross_seqlen=True,
+            paged=True,
+            kv_cache_layout=kwargs["kv_cache_layout"],
+            paged_bn128=kwargs["use_bn128"],
+            batch_interleave_group=kwargs["batch_interleave_group"],
+            page_size=kwargs["page_size"],
+            cache_buffered=kwargs["cache_buffered"],
+        )
+
+    return build
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_kv_splits", [2, 3, 16])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128)])
+def test_paged_fp8_split_kv_matches_torch(
+    monkeypatch, num_kv_splits, page_size, kv_cache_layout, head_dim, value_head_dim
+):
+    """Every split count combines to the unsplit result, including the splits that
+    short and empty sequences leave without a tile."""
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", _paged_fp8_split_kv_build(num_kv_splits))
+    kv_lengths = [33, 0, 2049, 65]
+    counts = [(n + page_size - 1) // page_size for n in kv_lengths]
+    pages = list(reversed(range(max(counts))))
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[0, 65, 63, 17],
+        kv_lengths=kv_lengths,
+        block_table_rows=[pages[:n] + [-1] * (max(counts) - n) for n in counts],
+        num_query_heads=6,
+        num_kv_heads=2,
+        page_size=page_size,
+        kv_cache_layout=kv_cache_layout,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "page_size,kv_cache_layout,head_dim,value_head_dim,num_query_heads,num_kv_heads,query_lengths,kv_lengths",
+    [
+        (64, "vectorized", 128, 128, 16, 1, [1], [8192]),
+        (64, "vectorized", 192, 128, 8, 1, [8, 8], [4096, 3001]),
+        (1024, "vectorized", 192, 192, 8, 2, [4, 1, 7], [4096, 2048, 4097]),
+        (16, "vectorized", 128, 128, 8, 1, [1, 1], [2049, 4096]),
+        (1, "linear", 128, 128, 4, 4, [8], [2048]),
+        (1, "linear3d", 192, 128, 8, 1, [1], [4097]),
+    ],
+)
+def test_paged_fp8_low_occupancy_launch_splits_kv(
+    monkeypatch,
+    page_size,
+    kv_cache_layout,
+    head_dim,
+    value_head_dim,
+    num_query_heads,
+    num_kv_heads,
+    query_lengths,
+    kv_lengths,
+):
+    """A decode-sized call over a long KV range picks a split-KV launch on its own."""
+    from kernels.attention import flash_attn_fp8_paged_gfx950 as paged_module
+
+    builds = []
+    build = paged_module.build_flash_attn_paged_fp8_module
+
+    def recording_build(*args, **kwargs):
+        builds.append(int(kwargs.get("num_kv_splits", 1)))
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(paged_module, "build_flash_attn_paged_fp8_module", recording_build)
+    # Uncached, so this test's launcher is built (and records its split builds) here.
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", flash_attn_interface._build_paged_fp8.__wrapped__)
+    counts = [(n + page_size - 1) // page_size for n in kv_lengths]
+    rows, start = [], 0
+    for count in counts:
+        rows.append(list(range(start, start + count)) + [-1] * (max(counts) - count))
+        start += count
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=query_lengths,
+        kv_lengths=kv_lengths,
+        block_table_rows=rows,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        page_size=page_size,
+        kv_cache_layout=kv_cache_layout,
+    )
+    assert max(builds) > 1, f"expected a split-KV launch, built {builds}"
+
+
 @_requires_gfx950
 @pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize(
