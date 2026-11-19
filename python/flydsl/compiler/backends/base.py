@@ -140,10 +140,13 @@ class BaseBackend(metaclass=ABCMeta):
         """
         return ""
 
-    @classmethod
     @abstractmethod
-    def jit_runtime_lib_basenames(cls) -> List[str]:
-        """Basenames of shared libraries passed to ``ExecutionEngine``."""
+    def jit_runtime_lib_basenames(self) -> List[str]:
+        """Basenames of shared libraries passed to ``ExecutionEngine``.
+
+        A backend may define this as a classmethod, so resolving its runtime
+        libraries detects no GPU target.
+        """
         ...
 
     @classmethod

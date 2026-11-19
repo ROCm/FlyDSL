@@ -274,8 +274,8 @@ struct PyHostObject {
 
   uint64_t lookup(const std::string &name) {
     std::string error;
-    uint64_t address = flydslHostObjectLookup(
-        handle, mlirStringRefCreate(name.data(), name.size()), appendString, &error);
+    uint64_t address = flydslHostObjectLookup(handle, mlirStringRefCreate(name.data(), name.size()),
+                                              appendString, &error);
     if (!address)
       throw std::runtime_error("cannot resolve '" + name + "' in the host object: " + error);
     return address;
@@ -1282,8 +1282,7 @@ NB_MODULE(_mlirDialectsFly, m) {
       "module"_a, "opt_level"_a = 2,
       "Emit a position-independent host object for an LLVM-dialect module; returns its bytes.");
 
-  nb::class_<PyHostObject>(m, "_HostObject",
-                           "An export_to_c object JIT-linked into this process.")
+  nb::class_<PyHostObject>(m, "_HostObject", "An export_to_c object JIT-linked into this process.")
       .def(nb::init<nb::bytes, nb::list>(), "object"_a, "shared_libs"_a,
            "Load `shared_libs` globally, then JIT-link the object bytes.")
       .def("lookup", &PyHostObject::lookup, "name"_a, "Address of a symbol the object defines.");

@@ -91,8 +91,7 @@ def test_target_provider_owns_trace_config_buffer_and_records(monkeypatch):
         def gpu_module_targets(self, *, compile_hints, link_libs=()):
             return []
 
-        @classmethod
-        def jit_runtime_lib_basenames(cls):
+        def jit_runtime_lib_basenames(self):
             return []
 
         @classmethod

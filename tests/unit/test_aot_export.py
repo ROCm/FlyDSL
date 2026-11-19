@@ -16,6 +16,7 @@ import gc
 import json
 import os
 import pickle
+import re
 import shutil
 import struct
 import subprocess
@@ -33,6 +34,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsFly import _emit_host_object
+from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
 from flydsl._mlir.dialects import gpu, llvm
 from flydsl.compiler import _aot as aot
 from flydsl.compiler.backends import _get_backend_class
@@ -1020,6 +1022,31 @@ def test_aot_translation_requires_a_status_argument(capfd):
         with pytest.raises(RuntimeError, match="failed to translate"):
             _emit_host_object(module.operation, 2)
     assert "'fly.aot_status_arg' attribute names a pointer argument" in capfd.readouterr().err
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("cluster", [False, True])
+def test_aot_translation_passes_the_status_argument(cluster):
+    # Both launch forms must report into the launcher's own status argument (its last parameter).
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    ir_text = compiled._ir_text
+    if cluster:
+        ir_text, count = re.subn(r"blocks in \((%\w+), (%\w+)", r"clusters in (\2, \2, \2) \g<0>", ir_text)
+        assert count == 1
+    with aot._create_mlir_context():
+        module = ir.Module.parse(ir_text)
+        renamed = aot._namespace_symbols(module, "status_arg")
+        for op in module.body.operations:
+            if op.operation.name == "gpu.binary":
+                op.attributes["offloadingHandler"] = ir.Attribute.parse('#fly.aot_module<"status_arg", 0>')
+        aot._add_entry_wrapper(module, "status_arg", renamed[compiled._entry], compiled._abi)
+        llvm_ir = translate_module_to_llvmir(module.operation)
+    launcher = re.search(rf"define internal void @{renamed[compiled._entry]}\(.*, ptr (%\d+)\)", llvm_ir)
+    assert launcher is not None
+    callee = "flydslAotModuleLaunchClusterKernel" if cluster else "flydslAotModuleLaunchKernel"
+    calls = re.findall(rf"call void @{callee}\(.*, ptr (%\d+)\)", llvm_ir)
+    assert calls == [launcher.group(1)]
 
 
 @pytest.mark.l1b_target_dialect

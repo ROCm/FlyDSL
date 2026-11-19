@@ -256,7 +256,7 @@ class TestLoadModule:
         torch.testing.assert_close(y, expected)
 
     def test_concurrent_threads(self, tmp_path):
-        # Each thread has its own error slot in the embedded runtime.
+        # Each call reports through its own status argument, so concurrent calls do not share one.
         fn = flyc.load_module(_export(tmp_path, "axpy", axpy, _ptr(), _ptr(), 8, 1.0, fx.Stream(None)))
         xs = [torch.randn(512, device="cuda") for _ in range(8)]
         ys = [torch.randn(512, device="cuda") for _ in range(8)]
