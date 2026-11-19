@@ -45,6 +45,23 @@ TEST(ComposedLayoutParity, Construction) {
             2);
 }
 
+// The text is the Fly type syntax: a composed inner function continues the chain and a composed
+// outer layout is bracketed. Each text parses back to its own tree.
+TEST(ComposedLayoutParity, Text) {
+  using Composed = ComposedLayout<Runtime>;
+  auto chain =
+      make_composed_layout(make_composed_layout(Swz(3, 4, 3), 0_ct, make_layout(64_ct, 1_ct)), 2_ct,
+                           make_layout(32_ct, 1_ct));
+  auto bracketed = make_composed_layout(
+      Swz(3, 4, 3), 0_ct,
+      make_composed_layout(make_layout(64_ct, 1_ct), 2_ct, make_layout(32_ct, 1_ct)));
+  EXPECT_EQ(toString(chain), "S<3,4,3> o 0 o 64:1 o 2 o 32:1");
+  EXPECT_EQ(toString(bracketed), "S<3,4,3> o 0 o [64:1 o 2 o 32:1]");
+  EXPECT_TRUE(Composed::fromString(toString(chain)) == chain);
+  EXPECT_TRUE(Composed::fromString(toString(bracketed)) == bracketed);
+  EXPECT_FALSE(Composed::fromString("[S<3,4,3> o 0 o 64:1] o 2 o 32:1").has_value());
+}
+
 // The outer layout maps the coordinate, the offset is added and the inner function is applied
 // last.
 TEST(ComposedLayoutParity, Evaluation) {
@@ -164,13 +181,11 @@ TEST(ComposedLayoutParity, Algebra) {
                                                           make_tuple(64_c, make_tuple(1_c, 4_c)))),
                          1)),
             "S<3,4,3> o 0 o (4,16):(1,4)");
-  // The outer layout here is itself composed: 32:2 o 5 o [32:1 o 7 o (4,8):(1,4)].
   auto nested = make_composed_layout(
       make_layout(32_ct, 2_ct), 5_ct,
       make_composed_layout(make_layout(32_ct, 1_ct), 7_ct,
                            make_layout(make_tuple(4_c, 8_c), make_tuple(1_c, 4_c))));
-  EXPECT_EQ(toString(get(nested, 1)), "32:2 o 5 o 32:1 o 7 o 8:4");
-  EXPECT_TRUE(std::holds_alternative<ComposedLayout<Runtime>>(get(nested, 1).outer()));
+  EXPECT_EQ(toString(get(nested, 1)), "32:2 o 5 o [32:1 o 7 o 8:4]");
   EXPECT_EQ(toString(shape(nested)), "(4,8)");
   // A slice moves its offset into the composition rather than the pointer, into the nearest
   // composition when the outer layout is composed.
@@ -179,9 +194,7 @@ TEST(ComposedLayoutParity, Algebra) {
                                                               make_layout(make_tuple(4_c, 3_c),
                                                                           make_tuple(1_c, 4_c))))),
       "128:2 o 2 o (3):(4)");
-  EXPECT_EQ(toString(slice(make_tuple(1_c, _), nested)), "32:2 o 5 o 32:1 o 8 o (8):(4)");
-  EXPECT_TRUE(
-      std::holds_alternative<ComposedLayout<Runtime>>(slice(make_tuple(1_c, _), nested).outer()));
+  EXPECT_EQ(toString(slice(make_tuple(1_c, _), nested)), "32:2 o 5 o [32:1 o 8 o (8):(4)]");
   EXPECT_EQ(toString(slice(
                 make_tuple(_, dyn(2, 2)),
                 make_composed_layout(make_layout(128_ct, 2_ct), 0_ct,
