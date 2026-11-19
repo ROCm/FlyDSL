@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-19T00:43:47Z",
+ "updated": "2026-11-19T03:05:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44439072195,
+   "pr": 1431,
+   "commit": "3535e8cf77bdb693b740e7ee9178ca7b96f6561d",
+   "branch": "jli/llvm-upgrade-e2ce52c885",
+   "event": "pull_request",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195",
+   "created_at": "2026-11-19T01:43:41Z",
+   "updated_at": "2026-11-19T03:02:58Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-19T02:08:21Z",
+     "completed_at": "2026-11-19T02:24:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705030"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-19T02:08:33Z",
+     "completed_at": "2026-11-19T02:50:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705053"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T02:18:26Z",
+     "completed_at": "2026-11-19T02:28:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705063"
+    }
+   ]
+  },
   {
    "run_id": 44352053921,
    "pr": 1421,
@@ -1859,21 +1902,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43835305615",
    "created_at": "2026-11-16T08:56:05Z",
    "updated_at": "2026-11-16T08:56:05Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43833129491,
-   "pr": null,
-   "commit": "5ef277cdfe763cda2910e55d6a51cbec19ef25a0",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43833129491",
-   "created_at": "2026-11-16T08:40:21Z",
-   "updated_at": "2026-11-16T08:40:21Z",
    "actor": "qiangpan2",
    "jobs": []
   }
