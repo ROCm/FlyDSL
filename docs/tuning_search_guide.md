@@ -20,6 +20,7 @@ rocKE dispatcher. FlyDSL owns this copy.
 |---|---|
 | `params` | `Param` (ordinal, categorical, bool, gated) and `SearchSpace`: validity, repair, canonical keys |
 | `strategy`, `de`, `halving`, `surrogate`, `local`, `portfolio` | random, exhaustive, differential evolution, successive halving / Hyperband, TPE, GP with expected improvement, hill climbing with lookback, a bandit portfolio |
+| `precompile` | `ProcessCompilePool`: builds a round of configs in worker processes ahead of the evaluator |
 | `measure` | The `Backend` protocol and the `Evaluator` that enforces the measurement rules |
 | `flybackend` | `FlyBackend`: the `Backend` for a `@flyc.jit` launcher |
 | `resources` | VGPR, SGPR, spill, scratch and LDS counts read from the compiled code object |
@@ -109,6 +110,20 @@ print(result.best_config, result.confirmed["speedup"], result.confirmed["p_value
 
 `strategy="auto"` enumerates a space no larger than the budget and otherwise
 runs the default portfolio (hill climbing, GP and DE).
+
+## Compiling a round in parallel
+
+Compiling dominates the wall time of a live search (34-91% in the pilots) and is
+CPU bound. A backend may define `precompile(items)`
+(`CallableBackend(..., precompile=...)`); with `batch > 1` the evaluator offers it
+every fresh compile of a round before it compiles, checks and times the configs one
+at a time on its own thread. `ProcessCompilePool` builds a round in spawned worker
+processes (a picklable `worker(config) -> payload`, no GPU state in the workers),
+and the backend's `compile` loads the payload on the evaluator's thread. The hook
+changes when compiles happen, not what the search decides at a given `batch`, and it
+is skipped for a backend whose `compile` takes a fidelity. `FlyBackend` does not
+use it yet: it compiles in-process, and FlyDSL has no way to load a built code
+object outside the process that built it.
 
 ## Strategy by space size
 

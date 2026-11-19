@@ -156,6 +156,60 @@ fraction of roofline, not just the speedup over the baseline.
 - Write `result.summary()` and the trace (`trace=` path) next to the kernel's
   notes so the search can be resumed or replayed.
 
+## Running efficiently
+
+The goal is the best performance the space can give, not the fastest search. Use
+these to run more configs in the same wall time, not to shrink the space. In the
+pilots compiling was 34% (RMSNorm) to 91% (`random` on the 4096^3 GEMM) of search
+wall time, so the levers that matter are about compile cost, not timed launches.
+
+- **Do not trim the space to save time.** Remove a config only when it is
+  structurally unable to run: the builder rejects it, or its accumulators cannot
+  fit the register file or LDS. Never remove a lever because it looks unlikely to
+  win; the strategy spends little on a lever that does not pay, and a lever that
+  lost on one base can win on the next.
+- **One process, many configs.** Build the inputs, the reference and the
+  `FlyBackend` once and keep them across every strategy and seed. A fresh process
+  per config belongs in the final confirmation only.
+- **Compile each config once.** Leave the FlyDSL disk cache on for repeat searches
+  (`FLYDSL_RUNTIME_ENABLE_CACHE=0` only when you want honest compile times). Reuse
+  `cache_path=` for recorded measurements.
+- **Compile in parallel, measure on one thread.** The evaluator runs backend calls
+  on one worker thread, which is right for GPU state. A backend may define
+  `precompile(items)` (`CallableBackend(..., precompile=...)`); with `batch > 1`
+  the evaluator offers it every fresh compile of a round before compiling,
+  checking and timing them one at a time. `ProcessCompilePool(worker, workers=N)`
+  builds a round in spawned processes (`worker(config) -> picklable payload`, no
+  GPU state in the workers) and the backend's `compile` loads the payload with
+  `pool.take(key)` on the evaluator's thread. Choose `workers` no larger than the
+  CPU cores you were allocated, and compare strategies at the same `batch`.
+  `FlyBackend` does not use this hook yet: it compiles in-process, one config at a
+  time. Wiring it to a pool needs a way to load a built code object outside the
+  process that compiled it, which FlyDSL does not expose.
+- **Spend the budget where it finds gains.** Cut repetitions, not configs. A few
+  reps per config at search time is enough; spend the interleaved confirmation
+  rounds on the finalists.
+- **Do not enumerate a space that is too large.** `exhaustive` only when the space
+  is no larger than the budget; otherwise warm start and search.
+- **Resume instead of restarting.** `checkpoint=` and `resume=` continue a split run.
+- **Time on an idle device.** A shared or busy GPU raises both the noise and the
+  number of rounds a paired confirmation needs.
+- **Price the compile before you search.** Time a ten-config sample first. In the
+  pilots a config compiled in 0.16-0.7 s on average and up to about 2 s for large
+  tiles; a space of builder-heavy kernels can cost far more.
+- **Run a cold `random` search as a control, not as the main strategy.** It costs
+  the most per evaluation and spent about a fifth of its evaluations on numeric
+  failures, but it can find a basin a climb does not, so keep a modest run next to
+  the warm-started strategies.
+- **Search the variant axis in the first round, then ablate the winner.** When
+  tile geometry or kernel variants are separate candidates, compare them up front
+  and deepen only the best. After the first confirmed winner, ablate it (which
+  knobs carry the gain) before adding seeds or budget.
+- **Keep job turnaround short.** Run a compile-only or one-config smoke and
+  confirm the baseline passes the oracle before submitting long jobs. Check each
+  job's log in its first minute. Run independent searches (strategy, seed, shape)
+  as parallel jobs, not one after another in a single job.
+
 ## Shipping
 
 `artifacts.export_winner(tuner, config, *args, **kwargs)` writes the winner as

@@ -21,6 +21,8 @@ ROCm/rocm-libraries) and detached from the rocKE dispatcher.
 - :mod:`.surrogate` -- priors (selector, LightGBM), TPE, GP + EI;
 - :mod:`.local` -- hill climbing with lookback and combination re-sweeps;
 - :mod:`.portfolio` -- the bandit portfolio and warm starts;
+- :mod:`.precompile` -- :class:`ProcessCompilePool`, a parallel compile ahead of
+  the evaluator;
 - :mod:`.measure` -- the backend protocol and the measurement rules;
 - :mod:`.db` -- tuned records and search traces;
 - :mod:`.driver` -- the ask/tell loop with checkpoint/resume;
@@ -62,6 +64,7 @@ from .measure import (
 )
 from .params import BOOL, CATEGORICAL, ORDINAL, Param, SearchSpace, flatten_spec
 from .portfolio import Portfolio, WarmStart
+from .precompile import Precompiled, ProcessCompilePool
 from .stats import NoiseModel, Race
 from .strategy import Exhaustive, RandomSearch, Strategy
 from .surrogate import (
@@ -102,8 +105,10 @@ __all__ = [
     "Observation",
     "Param",
     "Portfolio",
+    "Precompiled",
     "Prior",
     "PriorScale",
+    "ProcessCompilePool",
     "Race",
     "RandomSearch",
     "SearchResult",
