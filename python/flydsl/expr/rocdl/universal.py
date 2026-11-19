@@ -94,7 +94,7 @@ BufferCopy64b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(64, cache
 BufferCopy128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(128, cache_modifier)
 
 
-def BufferCopyLDS(bit_size):
+def BufferCopyLDS(bit_size, wave=False):
     """Create a CDNA3 buffer-to-LDS copy atom.
 
     ``bit_size`` must be 32 or 128. Only supports BufferDesc -> Shared address space direction.
@@ -105,12 +105,18 @@ def BufferCopyLDS(bit_size):
     :func:`flydsl.expr.rocdl.cdna4.GlobalLoadAsyncLDS` (Global -> Shared). Those require explicit
     ``fx.rocdl.asyncmark()`` / ``fx.rocdl.wait_asyncmark(n)`` tracking.
 
+    The hardware writes lane ``i``'s data to ``M0 + i * bit_size / 8``: one LDS address per wave.
+    ``wave=True`` models the instruction at that granularity, as a 64-thread atom whose lanes each
+    source their own ``bit_size`` bits and whose destination is the wave's contiguous block. With
+    ``wave=False`` (the default) the atom is per thread and the destination passed for the first
+    active lane is used, so the LDS layout must still keep each wave's block contiguous.
+
     Current atom state:
     - `soffset` (`i32`), default zero
     - `imm_offset` (`i32`), default zero
     """
     require_lds_dma_support(f"BufferCopyLDS({bit_size})")
-    return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
+    return CopyOpCDNA3BufferCopyLDSType.get(bit_size, wave=wave)
 
 
 BufferCopyLDS32b = lambda: BufferCopyLDS(32)

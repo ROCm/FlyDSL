@@ -183,12 +183,12 @@ struct PyCopyOpCDNA3BufferCopyLDSType : PyConcreteType<PyCopyOpCDNA3BufferCopyLD
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t bitSize, DefaultingPyMlirContext context) {
+        [](int32_t bitSize, bool wave, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpCDNA3BufferCopyLDSType(
-              context->getRef(), wrap(CopyOpCDNA3BufferCopyLDSType::get(ctx, bitSize)));
+              context->getRef(), wrap(CopyOpCDNA3BufferCopyLDSType::get(ctx, bitSize, wave)));
         },
-        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "bit_size"_a, nb::kw_only(), "wave"_a = false, "context"_a = nb::none(),
         "Create a CopyOpCDNA3BufferCopyLDSType with the given bit size");
   }
 };
@@ -260,12 +260,12 @@ struct PyCopyOpCDNA4BufferLoadAsyncLDSType : PyConcreteType<PyCopyOpCDNA4BufferL
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t bitSize, DefaultingPyMlirContext context) {
+        [](int32_t bitSize, bool wave, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpCDNA4BufferLoadAsyncLDSType(
-              context->getRef(), wrap(CopyOpCDNA4BufferLoadAsyncLDSType::get(ctx, bitSize)));
+              context->getRef(), wrap(CopyOpCDNA4BufferLoadAsyncLDSType::get(ctx, bitSize, wave)));
         },
-        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "bit_size"_a, nb::kw_only(), "wave"_a = false, "context"_a = nb::none(),
         "Create a CopyOpCDNA4BufferLoadAsyncLDSType with the given bit size "
         "(async BufferDesc -> Shared DMA; completion must be tracked with "
         "rocdl.asyncmark / rocdl.wait.asyncmark)");
@@ -279,12 +279,12 @@ struct PyCopyOpCDNA4GlobalLoadAsyncLDSType : PyConcreteType<PyCopyOpCDNA4GlobalL
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t bitSize, DefaultingPyMlirContext context) {
+        [](int32_t bitSize, bool wave, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpCDNA4GlobalLoadAsyncLDSType(
-              context->getRef(), wrap(CopyOpCDNA4GlobalLoadAsyncLDSType::get(ctx, bitSize)));
+              context->getRef(), wrap(CopyOpCDNA4GlobalLoadAsyncLDSType::get(ctx, bitSize, wave)));
         },
-        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
+        "bit_size"_a, nb::kw_only(), "wave"_a = false, "context"_a = nb::none(),
         "Create a CopyOpCDNA4GlobalLoadAsyncLDSType with the given bit size "
         "(async Global -> Shared DMA; completion must be tracked with "
         "rocdl.asyncmark / rocdl.wait.asyncmark)");

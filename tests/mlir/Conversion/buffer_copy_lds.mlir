@@ -138,3 +138,18 @@ func.func @test_buffer_copy_lds_const_both(
   fly.copy_atom_call(%a2, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
+
+// -----
+
+// `wave = true` models one wave's DMA: the destination is the wave's 64 x 16 bytes, written
+// contiguously from M0. The lowering is the same intrinsic.
+
+// CHECK-LABEL: @test_buffer_copy_lds_wave
+func.func @test_buffer_copy_lds_wave(
+    %src: !fly.memref<i8, #fly_rocdl.buffer_desc, 16:1>,
+    %dst: !fly.memref<i8, shared, 1024:1>) {
+  %atom = fly.make_copy_atom {valBits = 8 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128, wave = true>, 8>
+  // CHECK: rocdl.raw.ptr.buffer.load.lds
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<128, wave = true>, 8>, !fly.memref<i8, #fly_rocdl.buffer_desc, 16:1>, !fly.memref<i8, shared, 1024:1>) -> ()
+  return
+}

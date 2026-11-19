@@ -17,9 +17,10 @@ def FlyROCDL_CopyOpBufferCopy : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopy",
 
 def FlyROCDL_CopyOpBufferCopyLDS : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopyLDS", "cdna3.buffer_copy_lds",[]> {
   let parameters = (ins
-    "int32_t":$bitSize
+    "int32_t":$bitSize,
+    DefaultValuedParameter<"bool", "false">:$wave
   );
-  let assemblyFormat = "`<` $bitSize `>`";
+  let assemblyFormat = "`<` $bitSize (`,` `wave` `=` $wave^)? `>`";
   let genVerifyDecl = 1;
 }
 
@@ -59,9 +60,10 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 def FlyROCDL_CopyOpBufferLoadAsyncLDS
     : FlyROCDL_StatefulCopyOp<"CopyOpCDNA4BufferLoadAsyncLDS", "cdna4.buffer_load_async_lds",[]> {
   let parameters = (ins
-    "int32_t":$bitSize
+    "int32_t":$bitSize,
+    DefaultValuedParameter<"bool", "false">:$wave
   );
-  let assemblyFormat = "`<` $bitSize `>`";
+  let assemblyFormat = "`<` $bitSize (`,` `wave` `=` $wave^)? `>`";
   let genVerifyDecl = 1;
 }
 
@@ -69,9 +71,10 @@ def FlyROCDL_CopyOpBufferLoadAsyncLDS
 def FlyROCDL_CopyOpGlobalLoadAsyncLDS
     : FlyROCDL_CopyOp<"CopyOpCDNA4GlobalLoadAsyncLDS", "cdna4.global_load_async_lds",[]> {
   let parameters = (ins
-    "int32_t":$bitSize
+    "int32_t":$bitSize,
+    DefaultValuedParameter<"bool", "false">:$wave
   );
-  let assemblyFormat = "`<` $bitSize `>`";
+  let assemblyFormat = "`<` $bitSize (`,` `wave` `=` $wave^)? `>`";
   let genVerifyDecl = 1;
 }
 

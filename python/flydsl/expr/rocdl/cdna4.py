@@ -39,7 +39,7 @@ LDSReadTrans6_96b = lambda: CopyOpCDNA4LdsReadTransposeType.get(6, 96)
 LDSReadTrans16_64b = lambda: CopyOpCDNA4LdsReadTransposeType.get(16, 64)
 
 
-def BufferLoadAsyncLDS(bit_size):
+def BufferLoadAsyncLDS(bit_size, wave=False):
     """Create a CDNA4 async buffer-to-LDS copy atom.
 
     Same BufferDesc -> Shared direction and state as the synchronous
@@ -50,11 +50,17 @@ def BufferLoadAsyncLDS(bit_size):
 
     ``bit_size`` must be 32, 96 or 128.
 
+    The hardware writes lane ``i``'s data to ``M0 + i * bit_size / 8``: one LDS address per wave.
+    ``wave=True`` models the instruction at that granularity, as a 64-thread atom whose lanes each
+    source their own ``bit_size`` bits and whose destination is the wave's contiguous block. With
+    ``wave=False`` (the default) the atom is per thread and the destination passed for the first
+    active lane is used, so the LDS layout must still keep each wave's block contiguous.
+
     Current atom state:
     - `soffset` (`i32`), default zero
     - `imm_offset` (const `i32`), default zero
     """
-    return CopyOpCDNA4BufferLoadAsyncLDSType.get(bit_size)
+    return CopyOpCDNA4BufferLoadAsyncLDSType.get(bit_size, wave=wave)
 
 
 BufferLoadAsyncLDS32b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(32)
@@ -62,14 +68,14 @@ BufferLoadAsyncLDS96b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(96)
 BufferLoadAsyncLDS128b = lambda: CopyOpCDNA4BufferLoadAsyncLDSType.get(128)
 
 
-def GlobalLoadAsyncLDS(bit_size):
+def GlobalLoadAsyncLDS(bit_size, wave=False):
     """Create a CDNA4 async global-to-LDS copy atom.
 
     Completion tracking is the same: ``fx.rocdl.asyncmark()`` / ``fx.rocdl.wait_asyncmark(n)``.
 
-    ``bit_size`` must be 32, 96 or 128, same as :func:`BufferLoadAsyncLDS`.
+    ``bit_size`` must be 32, 96 or 128, and ``wave`` is the same as for :func:`BufferLoadAsyncLDS`.
     """
-    return CopyOpCDNA4GlobalLoadAsyncLDSType.get(bit_size)
+    return CopyOpCDNA4GlobalLoadAsyncLDSType.get(bit_size, wave=wave)
 
 
 GlobalLoadAsyncLDS32b = lambda: CopyOpCDNA4GlobalLoadAsyncLDSType.get(32)

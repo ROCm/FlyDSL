@@ -203,7 +203,7 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
 // --- CopyOpCDNA3BufferCopyLDS ---
 
 LogicalResult CopyOpCDNA3BufferCopyLDSType::verify(function_ref<InFlightDiagnostic()> emitError,
-                                                   int32_t bitSize) {
+                                                   int32_t bitSize, bool wave) {
   // LDS DMA transfer widths are 1/2/4 bytes, plus 12/16 bytes on gfx950
   // (hasLDSLoadB96_B128). There is no 8-byte form on any target, so 64 is
   // rejected here rather than silently failing instruction selection. The
@@ -257,17 +257,25 @@ Value CopyOpCDNA3BufferCopyLDSType::setAtomState(OpBuilder &builder, Location lo
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
 }
 
-Attribute CopyOpCDNA3BufferCopyLDSType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+// With `wave`, each of the 64 lanes sources its own bits, and every lane's destination is
+// the wave's whole contiguous block (thread stride 0).
+Attribute CopyOpCDNA3BufferCopyLDSType::getThrLayout() const {
+  if (getWave())
+    return FxLayout(FxC(64), FxC(1));
+  return FxLayout(FxC(1), FxC(1));
+}
 
 Attribute CopyOpCDNA3BufferCopyLDSType::getThrBitLayoutSrc() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(getBitSize())), FxStride(FxC(getBitSize()), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA3BufferCopyLDSType::getThrBitLayoutDst() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(64 * getBitSize())), FxStride(FxC(0), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOpCDNA3BufferCopyLDSType::getThrBitLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
-}
+Attribute CopyOpCDNA3BufferCopyLDSType::getThrBitLayoutRef() const { return getThrBitLayoutSrc(); }
 
 FailureOr<Value> CopyOpCDNA3BufferCopyLDSType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                                Type resultTy, Type copyAtomTyArg,

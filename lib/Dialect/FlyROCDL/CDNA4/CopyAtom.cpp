@@ -156,7 +156,7 @@ LogicalResult CopyOpCDNA4LdsReadTransposeType::verify(function_ref<InFlightDiagn
 
 LogicalResult
 CopyOpCDNA4BufferLoadAsyncLDSType::verify(function_ref<InFlightDiagnostic()> emitError,
-                                          int32_t bitSize) {
+                                          int32_t bitSize, bool wave) {
   // LDS DMA transfer widths are 1/2/4 bytes everywhere, plus 12/16 bytes on
   // gfx950 (hasLDSLoadB96_B128), which CDNA4 is. There is no 8-byte form.
   if (bitSize != 32 && bitSize != 96 && bitSize != 128)
@@ -208,18 +208,26 @@ Value CopyOpCDNA4BufferLoadAsyncLDSType::setAtomState(OpBuilder &builder, Locati
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
 }
 
+// With `wave`, each of the 64 lanes sources its own bits, and every lane's destination is
+// the wave's whole contiguous block (thread stride 0).
 Attribute CopyOpCDNA4BufferLoadAsyncLDSType::getThrLayout() const {
+  if (getWave())
+    return FxLayout(FxC(64), FxC(1));
   return FxLayout(FxC(1), FxC(1));
 }
 
 Attribute CopyOpCDNA4BufferLoadAsyncLDSType::getThrBitLayoutSrc() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(getBitSize())), FxStride(FxC(getBitSize()), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA4BufferLoadAsyncLDSType::getThrBitLayoutDst() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(64 * getBitSize())), FxStride(FxC(0), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA4BufferLoadAsyncLDSType::getThrBitLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+  return getThrBitLayoutSrc();
 }
 
 FailureOr<Value>
@@ -311,7 +319,7 @@ LogicalResult CopyOpCDNA4BufferLoadAsyncLDSType::emitAtomCall(OpBuilder &builder
 
 LogicalResult
 CopyOpCDNA4GlobalLoadAsyncLDSType::verify(function_ref<InFlightDiagnostic()> emitError,
-                                          int32_t bitSize) {
+                                          int32_t bitSize, bool wave) {
   // Same transfer widths as the buffer variant: 1/2/4 bytes everywhere, 12/16
   // bytes on gfx950. No 8-byte form.
   if (bitSize != 32 && bitSize != 96 && bitSize != 128)
@@ -323,18 +331,26 @@ CopyOpCDNA4GlobalLoadAsyncLDSType::verify(function_ref<InFlightDiagnostic()> emi
 
 bool CopyOpCDNA4GlobalLoadAsyncLDSType::isStatic() const { return true; }
 
+// With `wave`, each of the 64 lanes sources its own bits, and every lane's destination is
+// the wave's whole contiguous block (thread stride 0).
 Attribute CopyOpCDNA4GlobalLoadAsyncLDSType::getThrLayout() const {
+  if (getWave())
+    return FxLayout(FxC(64), FxC(1));
   return FxLayout(FxC(1), FxC(1));
 }
 
 Attribute CopyOpCDNA4GlobalLoadAsyncLDSType::getThrBitLayoutSrc() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(getBitSize())), FxStride(FxC(getBitSize()), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA4GlobalLoadAsyncLDSType::getThrBitLayoutDst() const {
+  if (getWave())
+    return FxLayout(FxShape(FxC(64), FxC(64 * getBitSize())), FxStride(FxC(0), FxC(1)));
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA4GlobalLoadAsyncLDSType::getThrBitLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+  return getThrBitLayoutSrc();
 }
 
 FailureOr<Value>

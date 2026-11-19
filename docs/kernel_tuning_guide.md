@@ -301,6 +301,28 @@ into LDS (`raw_ptr_buffer_load_lds`), bypassing VGPR. This saves arch_vgpr and
 suits large `tile_m` (≥ 128) where there is enough compute to hide the DMA.
 gfx950 moves 16 B/DMA vs gfx942's 4 B/DMA.
 
+**Keep the DMA addresses out of the loop.** Two things keep the hot loop down to
+one `s_mov m0` and one DMA per copy plus a single scalar add per iteration:
+
+- Use a wave-level atom (`wave=True`) for the tiled copy and partition both operands with it. Its
+  destination partition is the same in every lane of a wave, so the LDS address is sliced once,
+  before the loop, and stays in SGPRs; a per-thread atom may re-read it from the first lane at
+  every copy.
+- Advance the source by the `soffset` atom state rather than by slicing it with the loop index, so
+  the per-lane `voffset`s stay loop invariant. `soffset` is range-checked like `voffset` (verified
+  on gfx942), so a tail that reads as zero through the buffer descriptor keeps doing so.
+
+```python
+dma_atom = fx.make_copy_atom(rocdl.BufferCopyLDS(128, wave=True), fx.Uint8)
+dma = fx.make_tiled_copy(dma_atom, tv_layout, tile).get_slice(fx.thread_idx.x)
+src = dma.partition_S(a_tiles)[None, None, None, 0]  # tile 0; the loop adds the step
+dst = dma.partition_D(a_lds)
+for k in range(num_k_tiles):
+    fx.copy(dma_atom, src, dst, soffset=k * TILE_K)
+    rocdl.s_waitcnt(vmcnt=0)
+    rocdl.s_barrier()
+```
+
 **Don't prefetch** a loop that is already memory-bound, or when occupancy is
 already 1 wave and adding buffers would spill — profile both ways.
 

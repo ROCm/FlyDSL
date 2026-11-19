@@ -141,3 +141,30 @@ func.func @test_global_load_async_lds_96b(
   fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna4.global_load_async_lds<96>, 96>, !fly.memref<f32, global, 1:1>, !fly.memref<f32, shared, 1:1>) -> ()
   return
 }
+
+// -----
+
+// `wave = true` models one wave's DMA: the destination is the wave's 64 transfers, written
+// contiguously from M0. The lowering is the same intrinsic.
+
+// CHECK-LABEL: @test_buffer_load_async_lds_wave
+func.func @test_buffer_load_async_lds_wave(
+    %src: !fly.memref<f32, #fly_rocdl.buffer_desc, 4:1>,
+    %dst: !fly.memref<f32, shared, 256:1>) {
+  %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna4.buffer_load_async_lds<128, wave = true>, 32>
+  // CHECK: rocdl.raw.ptr.buffer.load.async.lds
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna4.buffer_load_async_lds<128, wave = true>, 32>, !fly.memref<f32, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f32, shared, 256:1>) -> ()
+  return
+}
+
+// -----
+
+// CHECK-LABEL: @test_global_load_async_lds_wave
+func.func @test_global_load_async_lds_wave(
+    %src: !fly.memref<f32, global, 1:1>,
+    %dst: !fly.memref<f32, shared, 64:1>) {
+  %atom = fly.make_copy_atom {valBits = 32 : i32} : !fly.copy_atom<!fly_rocdl.cdna4.global_load_async_lds<32, wave = true>, 32>
+  // CHECK: rocdl.global.load.async.lds %{{.*}}, %{{.*}}, 4, 0, 0 : !llvm.ptr<1>, !llvm.ptr<3>
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.cdna4.global_load_async_lds<32, wave = true>, 32>, !fly.memref<f32, global, 1:1>, !fly.memref<f32, shared, 64:1>) -> ()
+  return
+}
