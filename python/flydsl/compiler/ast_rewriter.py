@@ -560,32 +560,27 @@ class RewriteBoolOps(Transformer):
 
     @staticmethod
     @thunk_runner
-    def dsl_bool_op_(is_or, result, *thunks):
-        # Fold left like Python, stopping once a plain bool short-circuits. Later operands
-        # arrive as thunks so each one is evaluated at most once.
+    def dsl_bool_op_(is_or, *thunks):
+        # Fold left like Python, stopping once the chain is decided. Every operand arrives as a
+        # thunk, so each is evaluated at most once and only if the fold reaches it. Seeding with
+        # the identity lets the first operand take the same step as the rest.
         # `and` and `or` each have an identity (True / False) and an absorbing element
-        # (False / True). A plain bool on either side of a step is one of the two, so the step
-        # needs no op: the identity leaves the accumulator alone, the absorbing element fixes
-        # the chain and stops the walk. Only two non-bool operands reach `combine`.
+        # (False / True). An operand already known to be one of them needs no op: the identity
+        # leaves the accumulator alone, the absorbing element decides the chain.
         combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
         identity = not is_or
+        result = identity
         for thunk in thunks:
-            if isinstance(result, bool) and result == is_or:
-                break
             value = thunk()
+            # A DSL value holds an ir.Value only while it is dynamic, so one that does not is
+            # just a compile-time bool, and folds like one.
+            if isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+                value = bool(value.value)
             if isinstance(value, bool):
-                # `0 and False` is `0` in Python, so an arbitrary accumulator still folds below.
-                folds = isinstance(result, bool) or hasattr(result, "__dsl_bool__")
-                if value == is_or:
-                    if folds:
-                        result = value
-                        break
-                elif folds:
+                if value is identity:
                     continue
-            if isinstance(result, bool) and result == identity:
-                result = value
-                continue
-            result = combine(result, value)
+                return is_or
+            result = value if isinstance(result, bool) else combine(result, value)
         return result
 
     @staticmethod
@@ -627,17 +622,18 @@ class RewriteBoolOps(Transformer):
 
         if not isinstance(node.op, (ast.And, ast.Or)):
             return node
-        # A walrus in a later operand would bind inside its thunk, so leave such chains to plain Python.
-        if any(isinstance(sub, ast.NamedExpr) for rhs in node.values[1:] for sub in ast.walk(rhs)):
+        # Every operand is a thunk, so a walrus anywhere would bind inside one. Leave such
+        # chains to plain Python.
+        if any(isinstance(sub, ast.NamedExpr) for rhs in node.values for sub in ast.walk(rhs)):
             return node
 
-        # One call per chain, later operands as thunks: keeps short-circuiting, evaluates each operand
-        # once, and stays linear in the operand count.
+        # One call per chain, every operand a thunk: keeps short-circuiting, evaluates each
+        # operand once, and stays linear in the operand count.
         no_args = ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], defaults=[])
         result = ast.Call(
             func=ast.Name("dsl_bool_op_", ctx=ast.Load()),
-            args=[ast.Constant(isinstance(node.op, ast.Or)), node.values[0]]
-            + [ast.Lambda(args=no_args, body=rhs) for rhs in node.values[1:]],
+            args=[ast.Constant(isinstance(node.op, ast.Or))]
+            + [ast.Lambda(args=no_args, body=rhs) for rhs in node.values],
             keywords=[],
         )
 
