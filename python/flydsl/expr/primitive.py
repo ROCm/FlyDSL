@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import inspect
 from enum import IntEnum
 from fractions import Fraction
@@ -8,7 +9,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, ParamSpec
+    from typing import Any, Callable, Iterator, ParamSpec
 
     _P = ParamSpec("_P")
 
@@ -91,6 +92,7 @@ __all__ = [
     # Constexpr functions
     "const_expr",
     "range_constexpr",
+    "range",
     "rank",
     "depth",
     "has_none",
@@ -332,7 +334,27 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    return range(*args)
+    return builtins.range(*args)
+
+
+def range(*args, unroll=-1, unroll_full=False) -> "Iterator[Any]":
+    """Runtime loop over ``range([start,] stop[, step])``.
+
+    Write it as the iterable of a ``for`` statement in a ``@flyc.kernel`` or
+    ``@flyc.jit`` function.
+
+    - ``unroll=N``: unroll by ``N`` (``N >= 2``); ``unroll=1`` disables unrolling.
+    - ``unroll_full=True``: unroll completely. Needs a trip count that is a
+      compile-time constant after lowering, such as Python int bounds.
+
+    Unlike ``range_constexpr``, the body is traced once, so trace time does not
+    grow with the trip count. The loop index is a runtime value, so the body
+    cannot branch on it with ``const_expr`` or use it to index a Python list.
+    """
+    raise RuntimeError(
+        "fx.range() is only valid as the iterable of a `for` statement in a @flyc.kernel or @flyc.jit "
+        "function; use range_constexpr for a static loop that runs while tracing"
+    )
 
 
 def rank(int_or_tuple):
@@ -595,7 +617,7 @@ def get_leaves(input, dynamic_only=False):
         if ty.is_leaf:
             yield ty
             return
-        for i in range(ty.rank):
+        for i in range_constexpr(ty.rank):
             yield from _walk_int_tuple_leaves(ty.at(i))
 
     ty = IntTupleType(input.type)

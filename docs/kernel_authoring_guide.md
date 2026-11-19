@@ -493,6 +493,15 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
         ...
 ```
 
+`fx.range` is the runtime loop with keyword-only directives:
+
+```python
+for i in fx.range(runtime_value, unroll=4):  # LLVM unrolls by 4
+    ...
+for k in fx.range(N, unroll_full=True):  # LLVM unrolls completely
+    ...
+```
+
 ### 5.2 `const_expr()`
 
 Mark a value as compile-time constant:

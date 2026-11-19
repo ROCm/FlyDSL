@@ -131,3 +131,11 @@ def test_pipeline_lowers_vector_row_indexing(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
     null = flyc.from_c_void_p(fx.Float32, 0)
     flyc.compile(_swap_vector_rows, null, null, compile_only=True)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_resource_limit_check_runs_only_with_its_hint(enabled):
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    hints = {"check_resource_limits": True} if enabled else {}
+    fragments = backend.pipeline_fragments(compile_hints=hints)
+    assert ("gpu.module(fly-check-resource-limits)" in fragments) == enabled

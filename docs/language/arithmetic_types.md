@@ -20,7 +20,7 @@ casts to) a `Float32`.
   `Uint16` `Uint32` `Uint64` `Uint128`. Signedness and width are fixed per type.
 - **Floats** — `Float16` `BFloat16` `Float32` `Float64`.
 - **Narrow floats** — `Float8E5M2` `Float8E4M3FN` `Float8E4M3FNUZ`
-  `Float8E4M3B11FNUZ` `Float8E4M3`, `Float6E2M3FN` `Float6E3M2FN`,
+  `Float8E5M2FNUZ` `Float8E4M3B11FNUZ` `Float8E4M3`, `Float6E2M3FN` `Float6E3M2FN`,
   `Float8E8M0FNU`, `Float4E2M1FN`. These are storage/transport types, not meant
   for direct arithmetic, and native support is architecture-restricted.
 - **`Boolean`** — the `i1` type; the result of comparisons and predicates.

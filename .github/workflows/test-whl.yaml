@@ -75,6 +75,8 @@ jobs:
 
       - name: Run tests
         id: tests
+        # Explicit bash adds pipefail, so a failing run is not masked by tee's exit status.
+        shell: bash
         run: |
           docker exec flydsl_test bash -c "cd /flydsl && RUN_TESTS_FULL=1 bash scripts/run_tests.sh" 2>&1 | tee /tmp/test_output.log
 
@@ -90,6 +92,8 @@ jobs:
 
       - name: Run benchmarks
         id: benchmarks
+        # Explicit bash adds pipefail, so a failing run is not masked by tee's exit status.
+        shell: bash
         run: |
           docker exec flydsl_test bash -c "cd /flydsl && bash scripts/run_benchmark.sh" 2>&1 | tee /tmp/bench_output.log
 

@@ -209,6 +209,12 @@ def _is_native_library(name: str) -> bool:
     return name.endswith((".so", ".a", ".pyd", ".dll")) or ".so." in name
 
 
+def _is_build_alias(entry: os.DirEntry, real_dir: str) -> bool:
+    # A build tree's ``libFoo.so -> libFoo.so.1``. The links of a symlink-tree
+    # install point into other directories and are kept.
+    return entry.is_symlink() and os.path.dirname(os.path.realpath(entry.path)) == real_dir
+
+
 @lru_cache(maxsize=64)
 def _file_sha256_at(path: str, mtime_ns: int, size: int) -> str:
     # mtime_ns and size only key the memo: a rewritten file is hashed again.
@@ -234,10 +240,11 @@ def _native_library_digests(libs_dir: Path) -> List[str]:
     wheel after the build, so contents and sizes cannot be checked. A partial
     build (``--target`` without ``FlyNativeDigest``) leaves it stale.
     """
+    real_dir = os.path.realpath(libs_dir)
     names = sorted(
         entry.name
         for entry in os.scandir(libs_dir)
-        if _is_native_library(entry.name) and entry.is_file(follow_symlinks=False)
+        if _is_native_library(entry.name) and entry.is_file() and not _is_build_alias(entry, real_dir)
     )
     try:
         from .._mlir._mlir_libs._native_digest import NATIVE_SHA256
@@ -273,7 +280,7 @@ def _flydsl_key_cached(
 
     contents = []
 
-    flydsl_root = Path(flydsl.__file__).resolve().parent
+    flydsl_root = Path(flydsl.__file__).parent
 
     # 1) Hash all Python source files in key sub-packages.
     for package_name in ("compiler", "expr", "extension", "runtime", "utils"):
@@ -399,8 +406,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        from .backends.rocm import rocm_toolkit_path
+
+        # Same toolkit as the compile, or kernels calling __ocml_* find no bitcode.
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit="{rocm_toolkit_path()}"}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -483,7 +493,7 @@ def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineCon
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
-        binary_fragment=None,
+        binary_fragment=fragments[-1],
         llvm_opts=llvm_opts,
         external=False,
     )
@@ -623,7 +633,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag == binary_fragment:
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx

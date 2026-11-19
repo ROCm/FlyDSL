@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import ctypes
 import enum
 import operator
@@ -711,14 +712,14 @@ class IntTuple(BuiltinDslType):
     def _static_to_py_value(ty):
         if ty.is_leaf:
             return IntTuple._static_leaf_to_py(ty)
-        return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range(ty.rank))
+        return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range_constexpr(ty.rank))
 
     def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
             if self.is_static:
                 return IntTuple._static_leaf_to_py(self.type)
             return next(leaf_iter)
-        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range_constexpr(self.rank))
 
     @dsl_loc_tracing
     def to_py_value(self):
@@ -760,7 +761,7 @@ class Tile(BuiltinDslType):
         def dynamic_leaf_count(ty):
             if ty.is_leaf:
                 return 0 if ty.is_static else 1
-            return sum(dynamic_leaf_count(ty.at(i)) for i in range(ty.rank))
+            return sum(dynamic_leaf_count(ty.at(i)) for i in range_constexpr(ty.rank))
 
         def int_tuple(ty):
             nonlocal leaves
@@ -768,7 +769,7 @@ class Tile(BuiltinDslType):
                 return static(ty)
             if leaves is None:
                 leaves = iter(fly.GetLeavesOp(self).results)
-            return fly.make_int_tuple(ty, [next(leaves) for _ in range(dynamic_leaf_count(ty))])
+            return fly.make_int_tuple(ty, [next(leaves) for _ in range_constexpr(dynamic_leaf_count(ty))])
 
         def to_py_value(ty):
             ty = ty.maybe_downcast()
@@ -780,7 +781,7 @@ class Tile(BuiltinDslType):
                 return IntTuple._static_to_py_value(ty)
             if ty.is_leaf:
                 return to_py_value(ty.at(0))
-            return tuple(to_py_value(ty.at(i)) for i in range(ty.rank))
+            return tuple(to_py_value(ty.at(i)) for i in range_constexpr(ty.rank))
 
         return to_py_value(self.type)
 
@@ -2113,6 +2114,14 @@ class Vector(ArithValue):
                 dynamic_position=[dyn_idx],
             ).result
             return self._dtype(res)
+        if isinstance(idx, builtins.slice):  # `slice` here is the layout primitive from .primitive
+            # Like an int index, a slice addresses the flat (row-major) element positions.
+            if not all(bound is None or isinstance(bound, int) for bound in (idx.start, idx.stop, idx.step)):
+                raise TypeError(f"vector slice bounds must be Python ints, got {idx}")
+            positions = list(range_constexpr(*idx.indices(self.numel)))
+            if not positions:
+                raise IndexError(f"vector slice {idx} is empty for numel {self.numel}")
+            return self.shuffle(self, positions)
         if isinstance(idx, tuple):
             coord = self._canonical_shape(idx)
             if not any(part is None for part in self._flatten_static(coord)):
@@ -2147,7 +2156,7 @@ class Vector(ArithValue):
         # Without this, list()/unpacking falls back to the legacy sequence
         # protocol (self[0], self[1], ...), which spins forever because the
         # int branch of __getitem__ used to never raise IndexError (see #793).
-        for i in range(self.numel):
+        for i in range_constexpr(self.numel):
             yield self[i]
 
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":

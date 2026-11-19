@@ -287,7 +287,8 @@ def make_buffer_tensor(
     """Construct a new buffer-resource-backed tensor from a global-pointer
     tensor, for hardware OOB-checked loads / stores and buffer_copy atoms
     (CDNA buffer copy); layout is unchanged. For the gfx1250 TDM DMA use
-    :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
+    :func:`flydsl.expr.rocdl.cdna5.make_tiled_tdm_atom` instead — TDM needs a raw
+    VA, not a buffer resource.
 
     ``max_size=True`` (default) leaves RDNA bounds checking disabled and sets
     the descriptor size to ``0xFFFFFFFF``. Pass ``num_records_bytes`` to enable

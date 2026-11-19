@@ -27,6 +27,12 @@ def _ods(name):
     return op
 
 
+def _check_regnum(regnum):
+    if regnum is not None and regnum < 0:
+        raise ValueError(f"regnum must be a non-negative register number or None, got {regnum}")
+    return regnum
+
+
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
     from ..._mlir import ir as _ir
@@ -54,40 +60,46 @@ def sched_bank(value, bank, soft=False, **kw):
 
 
 @dsl_loc_tracing
-def sched_vgpr(value, regnum, soft=False, **kw):
+def sched_vgpr(value, regnum=None, soft=False, **kw):
     """VGPR exact-register scheduling hint.
 
     Returns *value* unchanged (identity at IR level).  Guides the register
     allocator to place *value* in the specified VGPR number (0-1023).
     For wide values (64/128/256-bit), *regnum* is the starting register.
+    With ``regnum=None`` *value* only has to stay in the VGPR file, in any
+    register.
     Default is strict; pass ``soft=True`` for an advisory hint.
     """
     val_ir = _to_ir(value)
-    return _ods("sched_vgpr")(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
+    return _ods("sched_vgpr")(res=val_ir.type, value=val_ir, regnum=_check_regnum(regnum), soft=soft or None, **kw)
 
 
 @dsl_loc_tracing
-def sched_sgpr(value, regnum, soft=False, **kw):
+def sched_sgpr(value, regnum=None, soft=False, **kw):
     """SGPR exact-register scheduling hint.
 
     Returns *value* unchanged (identity at IR level).  Guides the register
     allocator to place *value* in the specified SGPR number (0-105).
     For wide values (64/128/256-bit), *regnum* is the starting register.
+    With ``regnum=None`` *value* only has to stay in the SGPR file, in any
+    register.
     Default is strict; pass ``soft=True`` for an advisory hint.
     """
     val_ir = _to_ir(value)
-    return _ods("sched_sgpr")(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
+    return _ods("sched_sgpr")(res=val_ir.type, value=val_ir, regnum=_check_regnum(regnum), soft=soft or None, **kw)
 
 
 @dsl_loc_tracing
-def sched_agpr(value, regnum, soft=False, **kw):
+def sched_agpr(value, regnum=None, soft=False, **kw):
     """AGPR exact-register scheduling hint (gfx90a/gfx940).
 
     Returns *value* unchanged (identity at IR level).  Guides the register
     allocator to place *value* in the specified AGPR number (0-255).
     For wide values (64/128/256-bit), *regnum* is the starting register.
+    With ``regnum=None`` *value* only has to stay in the AGPR file, in any
+    register.
     Default is strict; pass ``soft=True`` for an advisory hint.
     Only valid on targets with MAI instructions.
     """
     val_ir = _to_ir(value)
-    return _ods("sched_agpr")(res=val_ir.type, value=val_ir, regnum=regnum, soft=soft or None, **kw)
+    return _ods("sched_agpr")(res=val_ir.type, value=val_ir, regnum=_check_regnum(regnum), soft=soft or None, **kw)

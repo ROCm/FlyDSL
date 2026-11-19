@@ -24,7 +24,7 @@ _HIP_LIB_TRIED = False
 
 def _hip_library_names() -> tuple:
     if os.name != "nt":
-        return ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5")
+        return ("libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6", "libamdhip64.so.5")
     # No sonames on Windows: open the HIP DLL the JIT runtime binds to.
     try:
         return (_load_hip_runtime(),)
