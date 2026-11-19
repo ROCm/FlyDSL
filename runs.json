@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-19T09:05:46Z",
+ "updated": "2026-11-19T09:25:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44495807157,
+   "pr": 1451,
+   "commit": "4840daea0fc2c2e4e8f8abc907bd83f5948cdd28",
+   "branch": "aot-load-module",
+   "event": "pull_request",
+   "title": "[AOT] Add flyc.load_module to load export_to_c objects in-process",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157",
+   "created_at": "2026-11-19T09:22:24Z",
+   "updated_at": "2026-11-19T09:22:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44494980309,
+   "pr": null,
+   "commit": "bbb0fb4a59b2e0a20aa4f0a6ff29f9cca85aa070",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Add arch atoms with valid check (#1437)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44494980309",
+   "created_at": "2026-11-19T09:17:02Z",
+   "updated_at": "2026-11-19T09:18:36Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 44492545607,
    "pr": 1451,
@@ -25,11 +55,11 @@
    "branch": "pr/fix-lds-dma-m0",
    "event": "pull_request",
    "title": "[Feat] Model LDS DMA copy atoms at wave granularity",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186",
    "created_at": "2026-11-19T08:47:07Z",
-   "updated_at": "2026-11-19T08:49:07Z",
+   "updated_at": "2026-11-19T09:06:35Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -44,9 +74,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298",
    "created_at": "2026-11-19T08:45:01Z",
-   "updated_at": "2026-11-19T08:47:08Z",
+   "updated_at": "2026-11-19T09:14:18Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T09:05:31Z",
+     "completed_at": "2026-11-19T09:13:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565418"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T09:06:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565509"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T09:05:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565510"
+    }
+   ]
   },
   {
    "run_id": 44489790809,
@@ -1914,36 +1972,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43869426498/job/133333649889"
     }
    ]
-  },
-  {
-   "run_id": 43846655147,
-   "pr": null,
-   "commit": "495bb86d30e3d5062444b867f4a5c9348dfea151",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43846655147",
-   "created_at": "2026-11-16T10:11:56Z",
-   "updated_at": "2026-11-16T10:11:56Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 43843002796,
-   "pr": null,
-   "commit": "36f2fd812fc37759a99bb92cd4bef070be2abe0a",
-   "branch": "pr/mxfp8-small-tiles",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add 128x128 and 64x64 tiles to the MXFP8 8-wave GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43843002796",
-   "created_at": "2026-11-16T09:47:59Z",
-   "updated_at": "2026-11-16T09:47:59Z",
-   "actor": "Monstertail",
-   "jobs": []
   }
  ]
 }
