@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-11-19T19:00:28Z",
+ "updated": "2026-11-19T21:23:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44617713253,
+   "pr": 1452,
+   "commit": "24e1aa3ebbb4ac263df4d533fe3dbba453a38626",
+   "branch": "pr/paged-fp8-split-kv",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Split the KV range of under-filled paged FP8 attention calls",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44617713253",
+   "created_at": "2026-11-19T21:20:10Z",
+   "updated_at": "2026-11-19T21:20:10Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
+  {
+   "run_id": 44597956894,
+   "pr": 1412,
+   "commit": "fe24bc7f8919b47801dcb32621b2a0f2cb5520f5",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894",
+   "created_at": "2026-11-19T19:24:18Z",
+   "updated_at": "2026-11-19T20:00:35Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T20:00:34Z",
+     "completed_at": "2026-11-19T20:38:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508333",
+     "machine": "smci355-ccs-aus-n11-05",
+     "host_model": "MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T19:56:24Z",
+     "completed_at": "2026-11-19T20:05:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508466"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T19:53:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508757"
+    }
+   ]
+  },
   {
    "run_id": 44582599858,
    "pr": 1412,
@@ -172,7 +232,7 @@
   },
   {
    "run_id": 44518539134,
-   "pr": 1452,
+   "pr": null,
    "commit": "d28eb15eaa4d59f18a80bb4774d1283ff8324ec9",
    "branch": "pr/paged-fp8-split-kv",
    "event": "pull_request",
@@ -1833,64 +1893,6 @@
    "updated_at": "2026-11-17T09:11:27Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 44051142590,
-   "pr": null,
-   "commit": "48c9df9f4e811bb2eca50808472c7bdecf008e9a",
-   "branch": "main",
-   "event": "push",
-   "title": "[Tests] Make the location, perftest and arch-detection tests pass on \u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44051142590",
-   "created_at": "2026-11-17T08:57:19Z",
-   "updated_at": "2026-11-17T09:03:42Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44049374188,
-   "pr": null,
-   "commit": "3ad4e6a92e83591f8d90cb681a30cbebe75cc827",
-   "branch": "pr/feat-fx-range",
-   "event": "pull_request",
-   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188",
-   "created_at": "2026-11-17T08:44:55Z",
-   "updated_at": "2026-11-17T10:59:25Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T09:16:53Z",
-     "completed_at": "2026-11-17T10:37:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201784"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-17T09:14:33Z",
-     "completed_at": "2026-11-17T09:16:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201806"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T09:14:54Z",
-     "completed_at": "2026-11-17T09:23:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201830"
-    }
-   ]
   }
  ]
 }
