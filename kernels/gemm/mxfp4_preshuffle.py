@@ -99,8 +99,8 @@ def _emit_gemm(
     assert blockscale in ("none", "ab"), f"blockscale must be 'none' or 'ab', got {blockscale!r}"
     assert BK in (128, 256), f"tile_k must be 128 or 256 (tiles_per_chunk = 256 // tile_k), got {BK}"
     assert BM % 32 == 0 or (
-        BM == 16 and b_dtype == "fp4" and blockscale == "none"
-    ), f"tile_m must be a multiple of 32 (or a 16-row MXFP4 tile), got {BM}"
+        BM == 16 and a_dtype == "fp4" and b_dtype == "fp4" and blockscale == "none"
+    ), f"tile_m must be a multiple of 32 (or a 16-row fp4 x fp4 tile), got {BM}"
     assert BN % 16 == 0, f"tile_n must be a multiple of 16, got {BN}"
     if const_expr(out_dtype == "bf16"):
         out_elem = BFloat16
@@ -158,8 +158,11 @@ def _emit_gemm(
     )
     n_pairs = max(1, num_acc_n // 2)
     m_pairs = max(1, m_chunks // 2)
+    # The paired loop's prefetch list holds, per N fragment, that fragment of the next two
+    # tiles; splitting it into two whole tiles is only right with one N fragment per wave.
     pair_k = (
         BM <= 32
+        and num_acc_n == 1
         and k_tiles_local >= 2
         and a_dtype == "fp4"
         and b_dtype == "fp4"
