@@ -76,6 +76,10 @@ def build_flash_attn_dualwave_swp_module(
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
     dualwave_swp_enable_stagger=True,
+    dualwave_swp_num_waves=8,
+    dualwave_swp_preload_q=None,
+    dualwave_swp_skip_nop=None,
+    dualwave_swp_post_misched=False,
     num_kv_splits=1,
     varlen=False,
     cross_seqlen=False,
@@ -86,6 +90,7 @@ def build_flash_attn_dualwave_swp_module(
     has_alibi=False,
     has_sink=False,
     _xcd_swizzle=False,
+    _single_variant=False,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
@@ -99,6 +104,7 @@ def build_flash_attn_dualwave_swp_module(
     slope table; see the HAS_ALIBI block below.
     has_sink adds a per-head attention sink logit to the softmax denominator; see
     the HAS_SINK block below. The three are independent and may be combined."""
+    _dispatch_args = dict(locals())
     gpu_arch = get_hip_arch()
 
     if not gpu_arch.startswith("gfx950"):
@@ -127,6 +133,96 @@ def build_flash_attn_dualwave_swp_module(
     HAS_ALIBI = bool(has_alibi)
     HAS_SINK = bool(has_sink)
 
+    if (
+        not _single_variant
+        and PAGED
+        and not (HAS_BIAS or HAS_ALIBI or HAS_SINK or VARLEN or return_lse)
+        and NUM_KV_SPLITS == 1
+    ):
+        # Paged: pick the CTA height from the launch's shape. Short sequences (and
+        # tiny grids) want more, smaller CTAs for parallelism and less diagonal MMA
+        # waste; long ones keep the 256-row CTA and its lower K/V traffic.
+        # Variants compile lazily, so only the one a shape runs is built.
+        _kw = dict(_dispatch_args)
+        _kw.pop("_single_variant", None)
+        _kw.update(dualwave_swp_num_waves=8, waves_per_eu=2, _single_variant=True)
+        _launch_long = build_flash_attn_dualwave_swp_module(**_kw)
+        # The two-wave-group stagger only pays off for the long 256-row CTA;
+        # on the short/tiny CTAs its extra barrier is pure overhead.
+        # D64 vectorized-layout short CTAs run faster with more VGPRs per wave.
+        _short_wpe = 2 if (head_dim == 64 and KV_VECTORIZED) else 3
+        _kw.update(
+            dualwave_swp_num_waves=4,
+            waves_per_eu=_short_wpe,
+            dualwave_swp_enable_stagger=False,
+            dualwave_swp_setprio=not (
+                head_dim == 128
+                and not causal
+                and KV_VECTORIZED
+                and num_kv_heads is not None
+                and int(num_kv_heads) >= 64
+            ),
+            dualwave_swp_post_misched=(head_dim == 128),
+        )
+        _launch_short = build_flash_attn_dualwave_swp_module(**_kw)
+        _kw.update(
+            dualwave_swp_num_waves=2,
+            waves_per_eu=(3 if head_dim == 64 else 4),
+            dualwave_swp_setprio=True,
+            dualwave_swp_post_misched=(head_dim == 128),
+        )
+        _launch_tiny = build_flash_attn_dualwave_swp_module(**_kw)
+        # Small-grid D128 non-causal vectorized kernels spend relatively more on
+        # s_setprio toggles; a hint-free long build is faster there.
+        _kw_nsp = dict(_dispatch_args)
+        _kw_nsp.pop("_single_variant", None)
+        _kw_nsp.update(
+            dualwave_swp_num_waves=8,
+            waves_per_eu=2,
+            dualwave_swp_setprio=False,
+            _single_variant=True,
+        )
+        _launch_long_nsp = build_flash_attn_dualwave_swp_module(**_kw_nsp)
+
+        def _dispatch_launch(*args, **kwargs):
+            _sq = args[5] if len(args) > 5 else kwargs.get("seq_len")
+            _skv = kwargs.get("seq_len_kv")
+            if _skv is None:
+                _skv = _sq
+            _bs = args[4] if len(args) > 4 else kwargs.get("batch_size", 1)
+            if not (isinstance(_sq, int) and isinstance(_skv, int) and isinstance(_bs, int)):
+                return _launch_long(*args, **kwargs)
+            _ctas = _bs * num_heads * ((_sq + 255) // 256)
+            if (
+                not causal
+                and head_dim == 128
+                and KV_VECTORIZED
+                and num_kv_heads is not None
+                and int(num_kv_heads) >= 64
+                and 512 < _skv <= 1024
+                and _ctas > 160
+            ):
+                return _launch_long_nsp(*args, **kwargs)
+            if causal:
+                if _skv <= 4096 and _ctas <= 32:
+                    return _launch_tiny(*args, **kwargs)
+                # D128 short CTAs lose to the long one once the causal KV passes 2048.
+                if _skv <= (2048 if head_dim == 128 else 4096):
+                    return _launch_short(*args, **kwargs)
+                return _launch_long(*args, **kwargs)
+            if _skv <= 1024 and _ctas <= 32:
+                return _launch_tiny(*args, **kwargs)
+            # Short non-causal KV: the 128-row CTA wins even on large grids.
+            if _skv <= 512:
+                return _launch_short(*args, **kwargs)
+            if _skv <= 4096 and _ctas <= 160:
+                return _launch_short(*args, **kwargs)
+            return _launch_long(*args, **kwargs)
+
+        return _dispatch_launch
+
+    _preload_q = (int(dualwave_swp_num_waves) < 8) if dualwave_swp_preload_q is None else bool(dualwave_swp_preload_q)
+    _skip_nop = _preload_q if dualwave_swp_skip_nop is None else bool(dualwave_swp_skip_nop)
     traits = _make_dualwave_swp_traits(
         num_heads,
         num_kv_heads,
@@ -139,6 +235,9 @@ def build_flash_attn_dualwave_swp_module(
         dualwave_swp_setprio=dualwave_swp_setprio,
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
         dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+        dualwave_swp_num_waves=dualwave_swp_num_waves,
+        dualwave_swp_preload_q=_preload_q,
+        dualwave_swp_skip_nop=_skip_nop,
         num_kv_splits=num_kv_splits,
         varlen=varlen,
         cross_seqlen=cross_seqlen,
@@ -389,6 +488,11 @@ def build_flash_attn_dualwave_swp_module(
             return scored
 
         def _main_body():
+            # Short/tiny CTAs: issue this wave's Q loads first so their global
+            # latency overlaps the block-table staging and the first K DMA.
+            if const_expr(traits.DUALWAVE_SWP_PRELOAD_Q):
+                q_all_bf16 = q_loader.load_all()
+
             # Paged: stage the block-table row into LDS before any page-id ds_read.
             if const_expr(traits.PAGED):
                 page_ids.load_block_table_to_lds()
@@ -402,6 +506,10 @@ def build_flash_attn_dualwave_swp_module(
                 kv_gmem_to_lds.load_k_split(0, 0, page_id=pro_pageid_0)
             else:
                 kv_gmem_to_lds.load_k_split(0, 0)
+            # Paged preload path: Q is already resident after the block-table
+            # barrier, so use the K0 DMA window for the Q scale.
+            if const_expr(traits.DUALWAVE_SWP_PRELOAD_Q and traits.PAGED):
+                q_all_scaled_bf16 = q_loader.scale_all(q_all_bf16)
             _s_waitcnt(0)
             _sched_barrier(0)
             _s_barrier()
@@ -409,9 +517,10 @@ def build_flash_attn_dualwave_swp_module(
             if const_expr(HAS_BIAS):
                 _issue_bias_dma(ctx.split_tile(0), 0)
 
-            # Load this wave's Q rows and pre-scale by the 1/sqrt(D) softmax
-            q_all_bf16 = q_loader.load_all()
-            q_all_scaled_bf16 = q_loader.scale_all(q_all_bf16)
+            if const_expr(not traits.DUALWAVE_SWP_PRELOAD_Q):
+                q_all_bf16 = q_loader.load_all()
+            if const_expr(not (traits.DUALWAVE_SWP_PRELOAD_Q and traits.PAGED)):
+                q_all_scaled_bf16 = q_loader.scale_all(q_all_bf16)
 
             # Pipeline ahead: prefetch K tile1 (buf1) + V tile0 (buf0) as background
             if const_expr(traits.PAGED):
@@ -501,7 +610,8 @@ def build_flash_attn_dualwave_swp_module(
                 j_idx = j
 
                 # Cluster 0: prefetch V buf1, read resident K for MMA0, and use carried page ids.
-                _s_nop(7)
+                if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                    _s_nop(7)
                 _sched_barrier(0)
                 if const_expr(traits.PAGED):
                     kv_gmem_to_lds.load_v_tile(j_idx - 2, 1, page_id=cur_pageid)
@@ -527,7 +637,8 @@ def build_flash_attn_dualwave_swp_module(
                 _dualwave_sync_barrier()
 
                 # Cluster 2 prefetches next K, reads this tile's V for P*V, then waits and syncs.
-                _s_nop(7)
+                if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                    _s_nop(7)
                 _sched_barrier(0)
                 if const_expr(traits.PAGED):
                     kv_gmem_to_lds.load_k_tile(j_idx, 1, page_id=c2_pageid)
@@ -576,7 +687,8 @@ def build_flash_attn_dualwave_swp_module(
                 _dualwave_sync_barrier()
 
                 # Cluster 4 mirrors C0: prefetch V, read K into v_k, wait, and sync.
-                _s_nop(7)
+                if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                    _s_nop(7)
                 _sched_barrier(0)
                 if const_expr(traits.PAGED):
                     kv_gmem_to_lds.load_v_tile(j_idx - 1, 0, page_id=c4_pageid)
@@ -602,7 +714,8 @@ def build_flash_attn_dualwave_swp_module(
                 _dualwave_sync_barrier()
 
                 # Cluster 6 prefetches next K, reads V packs, optionally masks v_s_0, waits, and syncs.
-                _s_nop(7)
+                if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                    _s_nop(7)
                 _sched_barrier(0)
                 if const_expr(traits.PAGED):
                     kv_gmem_to_lds.load_k_tile(j_idx + 1, 0, page_id=_c6_kpid)
@@ -667,7 +780,8 @@ def build_flash_attn_dualwave_swp_module(
             max_m1 = split_t_end - 1
 
             # Epilogue C0 prefetches V, reads K, and reuses the carried vectorized page id.
-            _s_nop(7)
+            if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                _s_nop(7)
             _sched_barrier(0)
             if const_expr(traits.PAGED):
                 kv_gmem_to_lds.load_v_tile(max_m3, 1, page_id=_ec0_v_pid)
@@ -693,7 +807,8 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C2 (memory): prefetch K max_m1, read V packs (buf0), causal mask v_s_1, sync.
-            _s_nop(7)
+            if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                _s_nop(7)
             _sched_barrier(0)
             if const_expr(traits.PAGED):
                 kv_gmem_to_lds.load_k_tile(max_m1, 1, page_id=ec2_pageid)
@@ -736,7 +851,8 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C4 (memory): prefetch V max_m2 (buf0), read K from buf0, sync.
-            _s_nop(7)
+            if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                _s_nop(7)
             _sched_barrier(0)
             if const_expr(traits.PAGED):
                 kv_gmem_to_lds.load_v_tile(max_m2, 0, page_id=ec4_pageid)
@@ -795,7 +911,8 @@ def build_flash_attn_dualwave_swp_module(
             _dualwave_sync_barrier()
 
             # Epilogue C8 (memory): prefetch V max_m1 (buf1), read K from buf1, sync.
-            _s_nop(7)
+            if const_expr(not traits.DUALWAVE_SWP_SKIP_NOP):
+                _s_nop(7)
             _sched_barrier(0)
             if const_expr(traits.PAGED):
                 kv_gmem_to_lds.load_v_tile(max_m1, 1, page_id=ec8_pageid)
@@ -1024,7 +1141,7 @@ def build_flash_attn_dualwave_swp_module(
         "fast_fp_math": True,
         "unsafe_fp_math": True,
         "llvm_options": {
-            "enable-post-misched": False,
+            "enable-post-misched": bool(dualwave_swp_post_misched),
             "lsr-drop-solution": True,
         },
     }
