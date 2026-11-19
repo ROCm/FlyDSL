@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-19T12:33:16Z",
+ "updated": "2026-11-19T13:23:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44530386920,
+   "pr": 1453,
+   "commit": "e5e616e27b85e21585e3c1d8e68642e16a1d74cb",
+   "branch": "pr/mx-preshuffle-w4-v2",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Pick the MXFP4 GEMM geometry from M and pipeline its fp4 K loop",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44530386920",
+   "created_at": "2026-11-19T13:07:43Z",
+   "updated_at": "2026-11-19T13:07:43Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44523471852,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Keep tests that read source_ir off the JIT disk cache (#1435)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852",
    "created_at": "2026-11-19T12:23:43Z",
-   "updated_at": "2026-11-19T12:25:22Z",
+   "updated_at": "2026-11-19T13:21:54Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-19T12:55:10Z",
+     "completed_at": "2026-11-19T12:56:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499637"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T13:04:05Z",
+     "completed_at": "2026-11-19T13:16:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499735"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T12:55:15Z",
+     "completed_at": "2026-11-19T13:21:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499773"
+    }
+   ]
   },
   {
    "run_id": 44523324698,
@@ -223,9 +266,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676",
    "created_at": "2026-11-19T11:21:12Z",
-   "updated_at": "2026-11-19T11:23:18Z",
+   "updated_at": "2026-11-19T13:00:27Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T13:16:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671421"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T13:01:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671523"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T13:02:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671561"
+    }
+   ]
   },
   {
    "run_id": 44497951306,
@@ -1809,52 +1880,6 @@
      "started_at": "2026-11-17T08:50:10Z",
      "completed_at": "2026-11-17T08:56:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975/job/133925280385"
-    }
-   ]
-  },
-  {
-   "run_id": 44042130575,
-   "pr": null,
-   "commit": "5f6a76e097326b0c7c95bea0288ca5be5adac9bd",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Support static slices in Vector indexing (#1418)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575",
-   "created_at": "2026-11-17T07:53:04Z",
-   "updated_at": "2026-11-17T08:57:37Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-17T08:25:20Z",
-     "completed_at": "2026-11-17T08:57:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186770"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T08:24:34Z",
-     "completed_at": "2026-11-17T08:43:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186848"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T08:24:51Z",
-     "completed_at": "2026-11-17T08:50:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44042130575/job/133913186870",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
