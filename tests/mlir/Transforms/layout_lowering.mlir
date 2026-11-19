@@ -2,32 +2,14 @@
 // Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s --fly-layout-lowering | FileCheck %s
 
-// Tests for fly-layout-lowering pass:
-//   - Lowers layout algebra operations to simpler make_int_tuple/make_layout/arith forms
-//   - Static operations fully resolved at compile time
+// fly-layout-lowering replaces each layout operation by its Core value. A static value becomes
+// fly.static, or an arith.constant for a scalar; a dynamic value is rebuilt from its leaves, which
+// bind to the operands of their constructor or to fly.get_leaves of an opaque value. The algebra
+// is tested in tests/core, and Dialect/Fly/ops.mlir lowers one use of every operation.
 
 // -----
 
-// A packed buffer atomic has a vector value type. Its atom layout covers all
-// vector elements, so layout lowering must use the aggregate bit width rather
-// than querying the scalar-only Type::getIntOrFloatBitWidth API on the vector.
-// CHECK-LABEL: @test_vector_buffer_atomic_copy
-// CHECK-NOT: fly.copy(
-// CHECK: fly.copy_atom_call
-func.func @test_vector_buffer_atomic_copy(
-    %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
-    %src: !fly.memref<bf16, register, 2:1>,
-    %dst: !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) {
-  fly.copy(%atom, %src, %dst)
-      : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
-         !fly.memref<bf16, register, 2:1>,
-         !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) -> ()
-  return
-}
-
-// -----
-
-// === Extractor Lowering: get_shape, get_stride ===
+// === Static values ===
 
 // A fully static get_shape folds to fly.static.
 // CHECK-LABEL: @test_get_shape
@@ -43,23 +25,9 @@ func.func @test_get_shape() -> !fly.int_tuple<(4, 8)> {
   return %shape : !fly.int_tuple<(4, 8)>
 }
 
-// A fully static get_stride folds to fly.static.
-// CHECK-LABEL: @test_get_stride
-func.func @test_get_stride() -> !fly.int_tuple<(1, 4)> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // CHECK-NOT: fly.get_stride
-  // CHECK-NOT: fly.make_layout
-  // CHECK: %[[D:.*]] = fly.static : !fly.int_tuple<(1,4)>
-  // CHECK: return %[[D]]
-  %stride = fly.get_stride(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(1, 4)>
-  return %stride : !fly.int_tuple<(1, 4)>
-}
-
 // -----
 
-// === Extractor Lowering: get_layout, get_iter (from make_view) ===
+// === Tensors ===
 
 // A fully static get_layout folds to fly.static; make_view is DCE'd.
 // CHECK-LABEL: @test_get_layout
@@ -113,138 +81,6 @@ func.func @test_coord_tensor_static_base_get_iter(%t: !fly.coord_tensor<0,(?,4):
   return %result : !fly.int_tuple<0>
 }
 
-// -----
-
-
-// Static get_scalar lowers to arith.constant.
-// CHECK-LABEL: @test_get_scalar_static
-func.func @test_get_scalar_static() -> i32 {
-  %t = fly.make_int_tuple() : () -> !fly.int_tuple<42>
-  // CHECK-NOT: fly.get_scalar
-  // CHECK-NOT: fly.make_int_tuple
-  // CHECK: %[[C:.*]] = arith.constant 42 : i32
-  // CHECK: return %[[C]]
-  %s = fly.get_scalar(%t) : (!fly.int_tuple<42>) -> i32
-  return %s : i32
-}
-
-// Dynamic get_scalar forwards the original dynamic operand.
-// CHECK-LABEL: @test_get_scalar_dynamic
-// CHECK-SAME: (%[[ARG:.*]]: i32)
-func.func @test_get_scalar_dynamic(%x: i32) -> i32 {
-  %t = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  // CHECK-NOT: fly.get_scalar
-  // CHECK: return %[[ARG]]
-  %s = fly.get_scalar(%t) : (!fly.int_tuple<?>) -> i32
-  return %s : i32
-}
-
-// Static get_scalar unwraps nested singleton tuples.
-// CHECK-LABEL: @test_get_scalar_nested_static
-func.func @test_get_scalar_nested_static() -> i32 {
-  %t = fly.make_int_tuple() : () -> !fly.int_tuple<((((42))))>
-  // CHECK-NOT: fly.get_scalar
-  // CHECK-NOT: fly.make_int_tuple
-  // CHECK: %[[C:.*]] = arith.constant 42 : i32
-  // CHECK: return %[[C]]
-  %s = fly.get_scalar(%t) : (!fly.int_tuple<((((42))))>) -> i32
-  return %s : i32
-}
-
-// Dynamic get_scalar unwraps nested singleton tuples to the leaf SSA value.
-// CHECK-LABEL: @test_get_scalar_nested_dynamic
-// CHECK-SAME: (%[[ARG:.*]]: i32)
-func.func @test_get_scalar_nested_dynamic(%x: i32) -> i32 {
-  %t = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<((((?))))>
-  // CHECK-NOT: fly.get_scalar
-  // CHECK: return %[[ARG]]
-  %s = fly.get_scalar(%t) : (!fly.int_tuple<((((?))))>) -> i32
-  return %s : i32
-}
-
-// -----
-
-// === SizeOp Lowering ===
-
-// Size of IntTuple computes product of all elements.
-// CHECK-LABEL: @test_size_int_tuple
-func.func @test_size_int_tuple() -> !fly.int_tuple<32> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  // 4 * 8 = 32
-  // CHECK-NOT: fly.size
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<32>
-  // CHECK: return %[[R]]
-  %size = fly.size(%s) : (!fly.int_tuple<(4, 8)>) -> !fly.int_tuple<32>
-  return %size : !fly.int_tuple<32>
-}
-
-// Size of Layout computes product of shape elements.
-// CHECK-LABEL: @test_size_layout
-func.func @test_size_layout() -> !fly.int_tuple<32> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // CHECK-NOT: fly.size
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<32>
-  // CHECK: return %[[R]]
-  %size = fly.size(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<32>
-  return %size : !fly.int_tuple<32>
-}
-
-// -----
-
-// === Crd2Idx Lowering ===
-
-// Static crd2idx: coord dot stride = 2*1 + 3*4 = 14
-// CHECK-LABEL: @test_crd2idx_static
-func.func @test_crd2idx_static() -> !fly.int_tuple<14> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  %coord = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
-  // CHECK-NOT: fly.crd2idx
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<14>
-  // CHECK: return %[[R]]
-  %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(2, 3)>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<14>
-  return %idx : !fly.int_tuple<14>
-}
-
-// Static crd2idx through a composed layout whose outer is another composed layout:
-// ((32:2) o ((32:1) o ((4,8):(1,4)))) maps (2,3) to 28.
-// CHECK-LABEL: @test_crd2idx_composed_outer
-func.func @test_crd2idx_composed_outer() -> !fly.int_tuple<28> {
-  %off = fly.make_int_tuple() : () -> !fly.int_tuple<0>
-
-  %sa = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  %da = fly.make_int_tuple() : () -> !fly.int_tuple<2>
-  %inner = fly.make_layout(%sa, %da) : (!fly.int_tuple<32>, !fly.int_tuple<2>) -> !fly.layout<32:2>
-
-  %sb = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  %db = fly.make_int_tuple() : () -> !fly.int_tuple<1>
-  %mid = fly.make_layout(%sb, %db) : (!fly.int_tuple<32>, !fly.int_tuple<1>) -> !fly.layout<32:1>
-
-  %sc = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  %dc = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
-  %outer = fly.make_layout(%sc, %dc) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-
-  %cl1 = fly.make_composed_layout(%mid, %off, %outer)
-      : (!fly.layout<32:1>, !fly.int_tuple<0>, !fly.layout<(4, 8) : (1, 4)>)
-      -> !fly.composed_layout<32:1 o 0 o (4, 8) : (1, 4)>
-  %cl2 = fly.make_composed_layout(%inner, %off, %cl1)
-      : (!fly.layout<32:2>, !fly.int_tuple<0>,
-         !fly.composed_layout<32:1 o 0 o (4, 8) : (1, 4)>)
-      -> !fly.composed_layout<32:2 o 0 o [32:1 o 0 o (4, 8) : (1, 4)]>
-  %coord = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
-  // CHECK-NOT: fly.crd2idx
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<28>
-  // CHECK: return %[[R]]
-  %idx = fly.crd2idx(%coord, %cl2)
-      : (!fly.int_tuple<(2, 3)>,
-         !fly.composed_layout<32:2 o 0 o [32:1 o 0 o (4, 8) : (1, 4)]>)
-      -> !fly.int_tuple<28>
-  return %idx : !fly.int_tuple<28>
-}
-
 // Decomposition recursively peels composed outers until only a linear LayoutAttr
 // remains in the resulting tensor type.
 // CHECK-LABEL: @test_decomposition_composed_outer
@@ -285,6 +121,37 @@ func.func @test_decomposition_composed_outer(%ptr: !fly.ptr<f32, global>)
   return %decomp : !fly.memref<f32, global, (4, 8) : (1, 4)>
 }
 
+// -----
+
+// === Scalars ===
+
+// Static get_scalar lowers to arith.constant, through nested singleton tuples.
+// CHECK-LABEL: @test_get_scalar_static
+func.func @test_get_scalar_static() -> i32 {
+  %t = fly.make_int_tuple() : () -> !fly.int_tuple<((42))>
+  // CHECK-NOT: fly.get_scalar
+  // CHECK-NOT: fly.make_int_tuple
+  // CHECK: %[[C:.*]] = arith.constant 42 : i32
+  // CHECK: return %[[C]]
+  %s = fly.get_scalar(%t) : (!fly.int_tuple<((42))>) -> i32
+  return %s : i32
+}
+
+// Dynamic get_scalar forwards the original dynamic operand.
+// CHECK-LABEL: @test_get_scalar_dynamic
+// CHECK-SAME: (%[[ARG:.*]]: i32)
+func.func @test_get_scalar_dynamic(%x: i32) -> i32 {
+  %t = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
+  // CHECK-NOT: fly.get_scalar
+  // CHECK: return %[[ARG]]
+  %s = fly.get_scalar(%t) : (!fly.int_tuple<?>) -> i32
+  return %s : i32
+}
+
+// -----
+
+// === Dynamic values ===
+
 // Dynamic crd2idx: c0*1 + c1*4 lowered to arith.muli + arith.addi
 // CHECK-LABEL: @test_crd2idx_dynamic
 // CHECK-SAME: (%[[C0:.*]]: i32, %[[C1:.*]]: i32)
@@ -302,113 +169,9 @@ func.func @test_crd2idx_dynamic(%c0: i32, %c1: i32) -> i32 {
   return %scalar : i32
 }
 
-// Dynamic crd2idx onto scaled basis strides: the 48 scale of 48E1 must survive lowering,
-// i.e. mode 1 of the result is c0*1 + c1*48, not c0 + c1.
-// CHECK-LABEL: @test_crd2idx_dynamic_scaled_basis
-// CHECK-SAME: (%[[C0:.*]]: i32, %[[C1:.*]]: i32)
-func.func @test_crd2idx_dynamic_scaled_basis(%c0: i32, %c1: i32) -> i32 {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(48, 21)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1, 48E1)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(48, 21)>, !fly.int_tuple<(1E1, 48E1)>) -> !fly.layout<(48, 21) : (1E1, 48E1)>
-  %coord = fly.make_int_tuple(%c0, %c1) : (i32, i32) -> !fly.int_tuple<(?, ?)>
-  %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(?, ?)>, !fly.layout<(48, 21) : (1E1, 48E1)>) -> !fly.int_tuple<(0, ?)>
-  // CHECK: %[[C48:.*]] = arith.constant 48 : i32
-  // CHECK: %[[MUL:.*]] = arith.muli %[[C1]], %[[C48]] : i32
-  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] overflow<nsw> : i32
-  // CHECK: return %[[ADD]]
-  %elem = fly.select(%idx) {indices = array<i32: 1>} : (!fly.int_tuple<(0, ?)>) -> !fly.int_tuple<?>
-  %scalar = fly.get_scalar(%elem) : (!fly.int_tuple<?>) -> i32
-  return %scalar : i32
-}
-
 // -----
 
-// === IntTuple Binary Ops Lowering ===
-
-// Static int_tuple_add: (2,3) + (3,8) = (5,11)
-// CHECK-LABEL: @test_int_tuple_add
-func.func @test_int_tuple_add() -> !fly.int_tuple<(5, 11)> {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(3, 8)>
-  // CHECK-NOT: fly.int_tuple_add
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<(5,11)>
-  // CHECK: return %[[R]]
-  %result = fly.int_tuple_add(%a, %b) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(3, 8)>) -> !fly.int_tuple<(5, 11)>
-  return %result : !fly.int_tuple<(5, 11)>
-}
-
-// Static int_tuple_mul: (2,3) * (3,8) = (6,24)
-// CHECK-LABEL: @test_int_tuple_mul
-func.func @test_int_tuple_mul() -> !fly.int_tuple<(6, 24)> {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(3, 8)>
-  // CHECK-NOT: fly.int_tuple_mul
-  // CHECK: %[[R:.*]] = fly.static : !fly.int_tuple<(6,24)>
-  // CHECK: return %[[R]]
-  %result = fly.int_tuple_mul(%a, %b) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(3, 8)>) -> !fly.int_tuple<(6, 24)>
-  return %result : !fly.int_tuple<(6, 24)>
-}
-
-// -----
-
-// === Layout Algebra: logical_divide ===
-
-// logical_divide expands a layout by a divisor layout.
-// CHECK-LABEL: @test_logical_divide
-func.func @test_logical_divide() -> !fly.layout<((2,4),1):((1,2),0)> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<8>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<1>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<8>, !fly.int_tuple<1>) -> !fly.layout<8:1>
-  %ds = fly.make_int_tuple() : () -> !fly.int_tuple<(2,4)>
-  %dd = fly.make_int_tuple() : () -> !fly.int_tuple<(1,2)>
-  %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(1,2)>) -> !fly.layout<(2,4):(1,2)>
-  // CHECK-NOT: fly.logical_divide
-  // CHECK: %[[R:.*]] = fly.static : !fly.layout<((2,4),1):((1,2),0)>
-  // CHECK: return %[[R]]
-  %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<8:1>, !fly.layout<(2,4):(1,2)>) -> !fly.layout<((2,4),1):((1,2),0)>
-  return %result : !fly.layout<((2,4),1):((1,2),0)>
-}
-
-// -----
-
-// === Layout Algebra: logical_product ===
-
-// logical_product combines layout with a tile.
-// CHECK-LABEL: @test_logical_product
-func.func @test_logical_product() -> !fly.layout<((4,8),(2,2)):((1,4),(32,64))> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4,8)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1,4)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4,8)>, !fly.int_tuple<(1,4)>) -> !fly.layout<(4,8):(1,4)>
-  %ts = fly.make_int_tuple() : () -> !fly.int_tuple<(2,2)>
-  %td = fly.make_int_tuple() : () -> !fly.int_tuple<(1,2)>
-  %tile = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2,2)>, !fly.int_tuple<(1,2)>) -> !fly.layout<(2,2):(1,2)>
-  // CHECK-NOT: fly.logical_product
-  // CHECK: %[[R:.*]] = fly.static : !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
-  // CHECK: return %[[R]]
-  %result = fly.logical_product(%layout, %tile) : (!fly.layout<(4,8):(1,4)>, !fly.layout<(2,2):(1,2)>) -> !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
-  return %result : !fly.layout<((4,8),(2,2)):((1,4),(32,64))>
-}
-
-// -----
-
-// === Layout Algebra: right_inverse ===
-
-// right_inverse computes the inverse mapping of a layout.
-// CHECK-LABEL: @test_right_inverse
-func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(2,4)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(4,1)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(4,1)>) -> !fly.layout<(2,4):(4,1)>
-  // CHECK-NOT: fly.right_inverse
-  // CHECK: %[[R:.*]] = fly.static : !fly.layout<(4,2):(2,1)>
-  // CHECK: return %[[R]]
-  %result = fly.right_inverse(%layout) : (!fly.layout<(2,4):(4,1)>) -> !fly.layout<(4,2):(2,1)>
-  return %result : !fly.layout<(4,2):(2,1)>
-}
-
-// -----
-
-// === GetLeavesOp Lowering ===
+// === Leaf bindings ===
 
 // Only dynamic leaves are returned; static leaves stay in the type.
 // Mixed i32/i64 dynamic leaves.
@@ -465,245 +228,4 @@ func.func @test_logical_divide_dynamic_tile_arg(%t: !fly.tile<[?:1|*]>, %l: !fly
   // CHECK: fly.make_int_tuple(%[[N]]) : (i32) -> !fly.int_tuple<((1,?),8)>
   %r = fly.logical_divide(%l, %t) : (!fly.layout<(8,16):(1,8)>, !fly.tile<[?:1|*]>) -> !fly.layout<((?,?),16):((1,?),8)>
   return %r : !fly.layout<((?,?),16):((1,?),8)>
-}
-
-// -----
-
-// === EqualOp Lowering: basis (scaled-basis / E<I>) leaves ===
-
-// equal on identical basis strides folds to true.
-// CHECK-LABEL: @test_equal_basis_same
-func.func @test_equal_basis_same() -> i1 {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0, 1E1)>
-  // CHECK: %[[T:.*]] = arith.constant true
-  // CHECK: return %[[T]]
-  %r = fly.equal(%a, %a) : (!fly.int_tuple<(1E0, 1E1)>, !fly.int_tuple<(1E0, 1E1)>) -> i1
-  return %r : i1
-}
-
-// -----
-
-// equal on basis leaves with different modes folds to false (E0 != E1).
-// CHECK-LABEL: @test_equal_basis_diff_modes
-func.func @test_equal_basis_diff_modes() -> i1 {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0)>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1)>
-  // CHECK: %[[F:.*]] = arith.constant false
-  // CHECK: return %[[F]]
-  %r = fly.equal(%a, %b) : (!fly.int_tuple<(1E0)>, !fly.int_tuple<(1E1)>) -> i1
-  return %r : i1
-}
-
-// -----
-
-// a basis monomial never equals a plain integer leaf.
-// CHECK-LABEL: @test_equal_int_vs_basis
-func.func @test_equal_int_vs_basis() -> i1 {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1)>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0)>
-  // CHECK: %[[F:.*]] = arith.constant false
-  // CHECK: return %[[F]]
-  %r = fly.equal(%a, %b) : (!fly.int_tuple<(1)>, !fly.int_tuple<(1E0)>) -> i1
-  return %r : i1
-}
-
-// -----
-
-// === load_vec on a CoordTensor (leaf-int base) ===
-
-// fly.memref.load_vec on a CoordTensor evaluates base + layout(i) for i in [0, size) into a
-// vector<size x i32>; each element is materialized via crd2idx (no memory load). Here base=0
-// and the row stride is 0, so column-major element i carries its column index.
-// CHECK-LABEL: @test_load_vec_coord_tensor
-func.func @test_load_vec_coord_tensor() -> vector<6xi32> {
-  %base = fly.make_int_tuple() : () -> !fly.int_tuple<0>
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(0, 1)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(0, 1)>) -> !fly.layout<(2, 3) : (0, 1)>
-  %ct = fly.make_view(%base, %layout) : (!fly.int_tuple<0>, !fly.layout<(2, 3) : (0, 1)>) -> !fly.coord_tensor<0, (2, 3) : (0, 1)>
-  // All elements are static, so the per-element constants fold into one dense vector.
-  // CHECK-NOT: fly.memref.load_vec
-  // CHECK: %[[CST:.*]] = arith.constant dense<[0, 0, 1, 1, 2, 2]> : vector<6xi32>
-  // CHECK: return %[[CST]] : vector<6xi32>
-  %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (2, 3) : (0, 1)>) -> vector<6xi32>
-  return %vec : vector<6xi32>
-}
-
-// -----
-
-// === add_offset canonicalization (issue #898) ===
-//
-// Normal form is `add_offset(add_offset(ptr, dyn), static)`: at most one dynamic
-// layer plus one static tail.  Fusing a runtime offset with a compile-time
-// constant would give every access its own base register instead of sharing one.
-
-// dynamic -> static is already canonical: the two levels must stay split so
-// many accesses share one runtime base instead of each computing its own.
-// CHECK-LABEL: @test_add_offset_dyn_static_kept
-func.func @test_add_offset_dyn_static_kept(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %c = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  // The runtime offset must never be merged into an arith.addi with the constant.
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %c) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// static -> dynamic is reordered into the canonical dynamic -> static form.
-// CHECK-LABEL: @test_add_offset_static_dyn_swapped
-func.func @test_add_offset_static_dyn_swapped(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %c = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %c) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// static -> static still fuses: no runtime value is merged with a constant.
-// CHECK-LABEL: @test_add_offset_static_static_fused
-func.func @test_add_offset_static_static_fused(%ptr: !fly.ptr<f32, shared>) -> f32 {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%{{.*}}, %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
-  // CHECK-NOT: fly.add_offset
-  %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// dynamic -> dynamic still fuses: no constant is lost into a runtime value.
-// CHECK-LABEL: @test_add_offset_dyn_dyn_fused
-func.func @test_add_offset_dyn_dyn_fused(%ptr: !fly.ptr<f32, shared>, %x: i32, %y: i32) -> f32 {
-  %a = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %b = fly.make_int_tuple(%y) : (i32) -> !fly.int_tuple<?>
-  // CHECK: %[[SUM:.*]] = arith.addi
-  // CHECK: %[[T:.*]] = fly.make_int_tuple(%[[SUM]])
-  // CHECK: fly.add_offset(%{{.*}}, %[[T]])
-  // CHECK-NOT: fly.add_offset
-  %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// Two constants behind one runtime offset collapse into a single static tail.
-// CHECK-LABEL: @test_add_offset_dyn_c1_c2
-func.func @test_add_offset_dyn_c1_c2(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p3 = fly.add_offset(%p2, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p3) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// A three-level static -> dynamic -> static chain converges to the normal form
-// with both constants merged; the pattern must not ping-pong (pass must not fail).
-// CHECK-LABEL: @test_add_offset_static_dyn_static
-func.func @test_add_offset_static_dyn_static(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %p3 = fly.add_offset(%p2, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p3) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// One runtime base shared by two different static tails: the base must stay a
-// single add_offset, which is what collapses the ds_read base registers.
-// CHECK-LABEL: @test_add_offset_shared_runtime_base
-func.func @test_add_offset_shared_runtime_base(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %c2 = fly.make_int_tuple() : () -> !fly.int_tuple<128>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.add_offset(%[[BASE]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<128>) -> !fly.ptr<f32, shared>
-  %p0 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %pa = fly.add_offset(%p0, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %pb = fly.add_offset(%p0, %c2) : (!fly.ptr<f32, shared>, !fly.int_tuple<128>) -> !fly.ptr<f32, shared>
-  %a = fly.ptr.load(%pa) : (!fly.ptr<f32, shared>) -> f32
-  %b = fly.ptr.load(%pb) : (!fly.ptr<f32, shared>) -> f32
-  %s = arith.addf %a, %b : f32
-  return %s : f32
-}
-
-// A multi-use inner add_offset is left alone: swapping it would keep the old op
-// alive and add a second add_offset instead of replacing one.  The form stays
-// non-canonical but must still never fuse a runtime offset with a constant.
-// CHECK-LABEL: @test_add_offset_multi_use_inner_kept
-func.func @test_add_offset_multi_use_inner_kept(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %c1 = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[P1:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[P2:.*]] = fly.add_offset(%[[P1]], %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: fly.ptr.load(%[[P1]])
-  // CHECK: fly.ptr.load(%[[P2]])
-  %p1 = fly.add_offset(%ptr, %c1) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %a = fly.ptr.load(%p1) : (!fly.ptr<f32, shared>) -> f32
-  %b = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  %s = arith.addf %a, %b : f32
-  return %s : f32
-}
-
-// Zero and negative static offsets: 0 + (-32) merges to a single -32 tail.
-// Guards the offsetDiv == 0 branch in AddOffsetOp type inference.
-// CHECK-LABEL: @test_add_offset_zero_and_negative
-func.func @test_add_offset_zero_and_negative(%ptr: !fly.ptr<f32, shared>, %x: i32) -> f32 {
-  %d = fly.make_int_tuple(%x) : (i32) -> !fly.int_tuple<?>
-  %z = fly.make_int_tuple() : () -> !fly.int_tuple<0>
-  %n = fly.make_int_tuple() : () -> !fly.int_tuple<-32>
-  // CHECK-NOT: arith.addi
-  // CHECK: %[[BASE:.*]] = fly.add_offset(%{{.*}}, %{{.*}}) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  // CHECK: %[[C:.*]] = fly.static : !fly.int_tuple<-32>
-  // CHECK: fly.add_offset(%[[BASE]], %[[C]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<-32>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %d) : (!fly.ptr<f32, shared>, !fly.int_tuple<?>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %z) : (!fly.ptr<f32, shared>, !fly.int_tuple<0>) -> !fly.ptr<f32, shared>
-  %p3 = fly.add_offset(%p2, %n) : (!fly.ptr<f32, shared>, !fly.int_tuple<-32>) -> !fly.ptr<f32, shared>
-  %v = fly.ptr.load(%p3) : (!fly.ptr<f32, shared>) -> f32
-  return %v : f32
-}
-
-// A multi-use inner op still fuses when neither offset is dynamic: fusion
-// rewrites only the outer op, so the inner one stays valid for its other
-// users.  Only the swap needs a single-use inner op.
-// CHECK-LABEL: @test_add_offset_multi_use_inner_still_fuses
-func.func @test_add_offset_multi_use_inner_still_fuses(%ptr: !fly.ptr<f32, shared>) -> f32 {
-  %a = fly.make_int_tuple() : () -> !fly.int_tuple<64>
-  %b = fly.make_int_tuple() : () -> !fly.int_tuple<32>
-  // The outer offset is folded into a single static tail off the base pointer,
-  // even though %p1 is also loaded from directly.
-  // CHECK: %[[C96:.*]] = fly.static : !fly.int_tuple<96>
-  // CHECK: fly.add_offset(%{{.*}}, %[[C96]]) : (!fly.ptr<f32, shared>, !fly.int_tuple<96>) -> !fly.ptr<f32, shared>
-  %p1 = fly.add_offset(%ptr, %a) : (!fly.ptr<f32, shared>, !fly.int_tuple<64>) -> !fly.ptr<f32, shared>
-  %p2 = fly.add_offset(%p1, %b) : (!fly.ptr<f32, shared>, !fly.int_tuple<32>) -> !fly.ptr<f32, shared>
-  %x = fly.ptr.load(%p1) : (!fly.ptr<f32, shared>) -> f32
-  %y = fly.ptr.load(%p2) : (!fly.ptr<f32, shared>) -> f32
-  %s = arith.addf %x, %y : f32
-  return %s : f32
 }

@@ -6,7 +6,8 @@ This guide covers the FlyDSL test infrastructure, how to run tests and benchmark
 
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
-| **MLIR lit tests** | `tests/mlir/LayoutAlgebra/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | No | Verify Fly dialect lowering |
+| **Core unit tests** | `tests/core/` | No | Layout algebra of the Core library (`scripts/run_core_tests.sh`) |
+| **MLIR lit tests** | `tests/mlir/Dialect/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | No | Verify Fly dialect syntax, type inference and lowering |
 | **Python tests** | `tests/python/examples/` | Varies | Python integration and JIT-cache examples |
 | **GPU kernel tests** | `tests/kernels/test_*.py` | Yes | Full compilation → GPU execution |
 | **Cache pre-warming examples** | `tests/python/examples/` | Varies | Populate the normal JIT cache before workload execution |
@@ -29,11 +30,13 @@ bash scripts/run_benchmark.sh
 
 MLIR-based tests organized by category, verified using the `fly-opt` tool. These tests confirm that Fly dialect operations lower correctly to standard MLIR dialects without requiring a GPU.
 
+The layout algebra itself is computed by the Core library and tested by its C++ unit tests in `tests/core/` (`bash scripts/run_core_tests.sh`). The MLIR tests only check how Fly represents the values and reaches the Core functions; add an algebra case to `tests/core/`, not to `tests/mlir/`.
+
 **Directories:**
 
 | Directory | Tests | Description |
 |---|---|---|
-| `LayoutAlgebra/` | `coalesce.mlir`, `composition.mlir`, `construction.mlir`, `coordinate.mlir`, `divide.mlir`, `int_tuple.mlir`, `product.mlir`, `size_cosize.mlir` | Layout algebra operations |
+| `Dialect/Fly/` | `types.mlir`, `invalid_types.mlir`, `ops.mlir`, `invalid_ops.mlir` | Type syntax, and the type inference and diagnostics of each operation |
 | `Conversion/` | `gpu_ops.mlir`, `memref_alloca.mlir`, `memref_ops.mlir`, `mma_atom.mlir`, `pointer_ops.mlir`, `type_conversion.mlir` | Dialect conversion passes |
 | `Transforms/` | `canonicalize.mlir`, `layout_lowering.mlir` | Transformation passes |
 
@@ -43,7 +46,7 @@ MLIR-based tests organized by category, verified using the `fly-opt` tool. These
 cmake --build build-fly --target fly-opt -j$(nproc)
 
 # Run a single test
-build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
+build-fly/bin/fly-opt --fly-layout-lowering tests/mlir/Transforms/layout_lowering.mlir
 ```
 
 **Editor support (MLIR LSP):** `build-fly/bin/flydsl-lsp-server` is a thin
@@ -447,7 +450,8 @@ to every later run.
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |
 | `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
-| `tests/mlir/LayoutAlgebra/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | MLIR lit tests |
+| `tests/core/` | Core layout algebra unit tests |
+| `tests/mlir/Dialect/`, `tests/mlir/Conversion/`, `tests/mlir/Transforms/` | MLIR lit tests |
 | `tests/python/examples/` | Python integration and cache pre-warming examples |
 | `tests/kernels/test_*.py` | GPU kernel test modules |
 | `tests/python/examples/aot_example.py` | Compile-only JIT cache pre-warming example |

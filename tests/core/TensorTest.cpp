@@ -114,6 +114,18 @@ TEST(TensorParity, DomainOffset) {
             "S<3,4,3> o ?131 o (8,64):(64,1)");
 }
 
+// decompose moves the data by the image of the origin under the whole composition and keeps the
+// innermost outer layout.
+TEST(TensorParity, Decompose) {
+  auto t = tensor(make_composed_layout(
+      make_layout(128_ct, 2_ct), 5_ct,
+      make_composed_layout(make_layout(128_ct, 3_ct), 7_ct,
+                           make_layout(make_tuple(4_c, 8_c), make_tuple(1_c, 4_c)))));
+  EXPECT_EQ(toString(decompose(t).layout()), "(4,8):(1,4)");
+  EXPECT_EQ(offset(decompose(t)), 52);
+  EXPECT_EQ(offset(decompose(tensor(rowMajor()))), 0);
+}
+
 TEST(TensorParity, CoordinateTensor) {
   // The data is the coordinate the partition starts at.
   auto c = make_identity_tensor(make_tuple(8_c, 16_d));

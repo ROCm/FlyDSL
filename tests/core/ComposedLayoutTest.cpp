@@ -158,12 +158,30 @@ TEST(ComposedLayoutParity, Algebra) {
   EXPECT_EQ(
       toString(downcast(2, make_composed_layout(Swz(3, 4, 3), 3_ct, make_layout(64_ct, 1_ct)))),
       "S<3,5,3> o 6 o 128:1");
-  // A slice moves its offset into the composition rather than the pointer.
+  // A mode keeps the inner function and the offset; a composed outer is indexed in turn.
+  EXPECT_EQ(toString(get(make_composed_layout(Swz(3, 4, 3), 0_ct,
+                                              make_layout(make_tuple(8_c, make_tuple(4_c, 16_c)),
+                                                          make_tuple(64_c, make_tuple(1_c, 4_c)))),
+                         1)),
+            "S<3,4,3> o 0 o (4,16):(1,4)");
+  // The outer layout here is itself composed: 32:2 o 5 o [32:1 o 7 o (4,8):(1,4)].
+  auto nested = make_composed_layout(
+      make_layout(32_ct, 2_ct), 5_ct,
+      make_composed_layout(make_layout(32_ct, 1_ct), 7_ct,
+                           make_layout(make_tuple(4_c, 8_c), make_tuple(1_c, 4_c))));
+  EXPECT_EQ(toString(get(nested, 1)), "32:2 o 5 o 32:1 o 7 o 8:4");
+  EXPECT_TRUE(std::holds_alternative<ComposedLayout<Runtime>>(get(nested, 1).outer()));
+  EXPECT_EQ(toString(shape(nested)), "(4,8)");
+  // A slice moves its offset into the composition rather than the pointer, into the nearest
+  // composition when the outer layout is composed.
   EXPECT_EQ(
       toString(slice(make_tuple(1_c, _), make_composed_layout(make_layout(128_ct, 2_ct), 1_ct,
                                                               make_layout(make_tuple(4_c, 3_c),
                                                                           make_tuple(1_c, 4_c))))),
       "128:2 o 2 o (3):(4)");
+  EXPECT_EQ(toString(slice(make_tuple(1_c, _), nested)), "32:2 o 5 o 32:1 o 8 o (8):(4)");
+  EXPECT_TRUE(
+      std::holds_alternative<ComposedLayout<Runtime>>(slice(make_tuple(1_c, _), nested).outer()));
   EXPECT_EQ(toString(slice(
                 make_tuple(_, dyn(2, 2)),
                 make_composed_layout(make_layout(128_ct, 2_ct), 0_ct,

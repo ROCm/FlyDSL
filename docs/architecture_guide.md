@@ -120,7 +120,8 @@ FlyDSL/
 │       └── tensor_shim.py            # GTensor/STensor abstraction
 │
 ├── tests/
-│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
+│   ├── core/                         # Core layout algebra unit tests (C++, gtest)
+│   ├── mlir/                         # MLIR-level tests (Conversion, Dialect, FlyKtrace, Transforms)
 │   ├── kernels/                      # GPU kernel tests + benchmarks
 │   ├── python/                       # Python integration tests and examples
 │   ├── unit/                         # Unit tests (streams, async, etc.)
