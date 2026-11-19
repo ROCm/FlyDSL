@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-11-19T11:39:30Z",
+ "updated": "2026-11-19T12:22:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44522953130,
+   "pr": null,
+   "commit": "88f7231c38f576c2c25826a6fc2c596f49be4cad",
+   "branch": "main",
+   "event": "push",
+   "title": "[Tests] Honour FLY_BUILD_DIR in tests/conftest.py (#1434)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44522953130",
+   "created_at": "2026-11-19T12:20:22Z",
+   "updated_at": "2026-11-19T12:20:41Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44522695548,
+   "pr": null,
+   "commit": "d2e7143cd71214a2937cd924f4dfc30bc56dfbb8",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Stop dropping a return inside a traced if branch (#1436)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44522695548",
+   "created_at": "2026-11-19T12:18:42Z",
+   "updated_at": "2026-11-19T12:20:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 44518539134,
+   "pr": 1452,
+   "commit": "d28eb15eaa4d59f18a80bb4774d1283ff8324ec9",
+   "branch": "pr/paged-fp8-split-kv",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Split the KV range of under-filled paged FP8 attention calls",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44518539134",
+   "created_at": "2026-11-19T11:51:29Z",
+   "updated_at": "2026-11-19T11:51:29Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44515911508,
    "pr": null,
@@ -124,7 +169,7 @@
   },
   {
    "run_id": 44514436591,
-   "pr": 1452,
+   "pr": null,
    "commit": "eb394140e4038f6de16ee1a5260ff077e1f3bd58",
    "branch": "pr/paged-fp8-split-kv",
    "event": "pull_request",
@@ -215,10 +260,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-19T11:26:19Z",
-     "completed_at": null,
+     "completed_at": "2026-11-19T12:14:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135526105201"
     },
     {
@@ -1832,144 +1877,6 @@
      "machine": "gbt350-odcdh1-b10-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44036166359,
-   "pr": 1417,
-   "commit": "539cbe434103506beb755b66baccac4eef9a9982",
-   "branch": "jli/fix-aot-export-amdhip64-link",
-   "event": "pull_request",
-   "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359",
-   "created_at": "2026-11-17T07:06:37Z",
-   "updated_at": "2026-11-17T08:08:47Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T07:30:56Z",
-     "completed_at": "2026-11-17T08:08:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357543"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T07:30:35Z",
-     "completed_at": "2026-11-17T07:53:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357600",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T07:30:27Z",
-     "completed_at": "2026-11-17T07:40:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44036166359/job/133889357623"
-    }
-   ]
-  },
-  {
-   "run_id": 44024503282,
-   "pr": 1424,
-   "commit": "d4807cc01320286b58f8b1b22179a99c53d37333",
-   "branch": "docs/tdm-atom-point-at-tiled-form",
-   "event": "pull_request",
-   "title": "[Docs] Point the TDM docstrings at the tiled atom",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282",
-   "created_at": "2026-11-17T05:29:49Z",
-   "updated_at": "2026-11-17T09:37:46Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T09:04:13Z",
-     "completed_at": "2026-11-17T09:28:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931860652",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T06:26:31Z",
-     "completed_at": "2026-11-17T07:06:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931862117"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T05:48:36Z",
-     "completed_at": "2026-11-17T05:56:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44024503282/job/133931863426"
-    }
-   ]
-  },
-  {
-   "run_id": 44014467114,
-   "pr": 1417,
-   "commit": "a5bb627f71a5c75c797dd3f90764d6731d65e80f",
-   "branch": "jli/fix-aot-export-amdhip64-link",
-   "event": "pull_request",
-   "title": "[test] Locate libamdhip64 for AOT export links on TheRock pip-ROCm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114",
-   "created_at": "2026-11-17T04:03:24Z",
-   "updated_at": "2026-11-17T07:07:00Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T04:22:30Z",
-     "completed_at": "2026-11-17T04:47:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816138998",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-17T06:26:30Z",
-     "completed_at": "2026-11-17T07:06:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816139009"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T04:37:33Z",
-     "completed_at": "2026-11-17T04:48:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44014467114/job/133816139061"
     }
    ]
   }
