@@ -35,6 +35,17 @@ def _query_bound_is_safe(ctx, upper_bound, maximum):
     return unsafe_lanes == 0
 
 
+def _launch_torch_stream(stream, device):
+    """The torch stream that a launch on ``stream`` runs on, read as ``fx.Stream`` reads it:
+    ``None`` is the default queue and an ``int`` is a raw queue handle."""
+    if stream is None:
+        return torch.cuda.default_stream(device)
+    if isinstance(stream, torch.cuda.Stream):
+        return stream
+    raw = stream if isinstance(stream, int) else stream.cuda_stream
+    return torch.cuda.ExternalStream(raw, device=device)
+
+
 def build_flash_attn_paged_fp8_module(
     num_heads,
     head_dim,
@@ -676,16 +687,15 @@ def build_flash_attn_paged_fp8_module(
     # M1024 x H12) models 12% faster but measures 3% slower.
     _SPLITK_MARGIN = 0.8
 
-    _splitk_cu_cache = []
+    _splitk_cu_cache = {}
 
-    def _splitk_cu_count():
-        if not _splitk_cu_cache:
-            _splitk_cu_cache.append(
-                int(torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count)
-            )
-        return _splitk_cu_cache[0]
+    def _splitk_cu_count(device):
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        if index not in _splitk_cu_cache:
+            _splitk_cu_cache[index] = int(torch.cuda.get_device_properties(index).multi_processor_count)
+        return _splitk_cu_cache[index]
 
-    def _choose_num_kv_splits(batch_size, seq_len, seq_len_kv):
+    def _choose_num_kv_splits(batch_size, seq_len, seq_len_kv, device):
         """Pick the KV split count that minimises modelled makespan, or 1.
 
         Only split-KV shapes with few workgroups and a long KV range can win: the
@@ -697,9 +707,12 @@ def build_flash_attn_paged_fp8_module(
         batch_size = int(batch_size)
         if seq_len <= 0 or seq_len_kv <= 0 or batch_size <= 0:
             return 1
+        if device.type != "cuda":
+            # Compiling without a device (tensors off the GPU) builds the unsplit kernel.
+            return 1
         kv_tiles = -(-seq_len_kv // traits.BLOCK_N)
         workgroups = NUM_HEADS_Q * (-(-seq_len // BLOCK_M)) * batch_size
-        num_cu = _splitk_cu_count()
+        num_cu = _splitk_cu_count(device)
         if kv_tiles < 2 * _SPLITK_MIN_TILES or workgroups >= num_cu:
             return 1
 
@@ -798,7 +811,7 @@ def build_flash_attn_paged_fp8_module(
         _validate_paged_bn128_launch(seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
         if NUM_KV_SPLITS == 1:
-            splits = _choose_num_kv_splits(batch_size, seq_len, seq_len_kv)
+            splits = _choose_num_kv_splits(batch_size, seq_len, seq_len_kv, O.device)
             if splits > 1:
                 return _splitk_launcher(splits)(
                     Q,
@@ -826,7 +839,10 @@ def build_flash_attn_paged_fp8_module(
             ws_elems = dualwave_splitk_workspace_elems(
                 int(batch_size), NUM_HEADS_Q, int(seq_len), NUM_KV_SPLITS, head_dim=HEAD_DIM_V
             )
-            workspace = torch.empty(ws_elems, dtype=torch.float32, device=O.device)
+            # The caching allocator recycles a freed block on the stream it was allocated on,
+            # so the workspace must belong to the stream the kernels run on, not torch's current one.
+            with torch.cuda.stream(_launch_torch_stream(stream, O.device)):
+                workspace = torch.empty(ws_elems, dtype=torch.float32, device=O.device)
         dispatch = flyc.compile if _compile_only else _run_compiled
         return dispatch(
             launch_flash_attn_dualwave_swp,

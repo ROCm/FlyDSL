@@ -6228,6 +6228,98 @@ def test_paged_fp8_low_occupancy_launch_splits_kv(
 
 
 @_requires_gfx950
+def test_paged_fp8_split_kv_workspace_lives_on_the_launch_stream(monkeypatch):
+    """A direct split launch allocates its workspace on the stream it launches on, so the
+    caching allocator cannot hand the block to work on torch's current stream while the
+    split kernels are still queued behind it."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+    from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
+
+    torch.manual_seed(29)
+    num_heads, head_dim, value_head_dim, splits = 8, 128, 128, 4
+    query_length, kv_length, page_size = 4, 4096, 64
+    num_pages = kv_length // page_size
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, num_heads, head_dim, device="cuda") * 0.2)
+    key_shape, value_shape = _paged_fp8_cache_shapes(num_pages, 1, head_dim, value_head_dim, page_size, "vectorized")
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(key_shape, device="cuda") * 0.2)
+    value, value_descale = quantize_per_tensor_fp8(torch.randn(value_shape, device="cuda") * 0.2)
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(1, num_pages)
+    q_indptr = torch.tensor([0, query_length], device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor([0, kv_length], device="cuda", dtype=torch.int32)
+    launch = build_flash_attn_paged_fp8_module(
+        num_heads,
+        head_dim,
+        value_head_dim=value_head_dim,
+        causal=True,
+        dtype_str="fp8",
+        num_kv_heads=1,
+        num_kv_splits=splits,
+        varlen=True,
+        cross_seqlen=True,
+        paged=True,
+        kv_cache_layout="vectorized",
+        paged_bn128=True,
+        page_size=page_size,
+    )
+    workspace_elems = dualwave_splitk_workspace_elems(1, num_heads, query_length, splits, head_dim=value_head_dim)
+    workspace_streams = []
+    empty = torch.empty
+
+    def recording_empty(*args, **kwargs):
+        tensor = empty(*args, **kwargs)
+        if tensor.dtype == torch.float32 and tensor.numel() == workspace_elems:
+            workspace_streams.append(torch.cuda.current_stream(tensor.device))
+        return tensor
+
+    monkeypatch.setattr(torch, "empty", recording_empty)
+
+    def run(stream):
+        out = torch.full((query_length, num_heads, value_head_dim), float("nan"), device="cuda", dtype=torch.bfloat16)
+        torch.cuda.synchronize()
+        launch(
+            query.view(-1),
+            key,
+            value,
+            out.view(-1),
+            1,
+            query_length,
+            seq_len_kv=kv_length,
+            cu_seqlens_q=q_indptr,
+            cu_seqlens_kv=kv_indptr,
+            block_table=block_table.view(-1),
+            block_table_stride=num_pages,
+            q_descale=query_descale,
+            k_descale=key_descale,
+            v_descale=value_descale,
+            stream=stream,
+        )
+        return out
+
+    side = torch.cuda.Stream()
+    actual = run(side)
+    side.synchronize()
+    assert workspace_streams == [side]
+
+    workspace_streams.clear()
+    with torch.cuda.stream(torch.cuda.Stream()):
+        run(None)
+    torch.cuda.synchronize()
+    assert workspace_streams == [torch.cuda.default_stream()]
+
+    expected = _paged_fp8_torch_reference(
+        query,
+        key,
+        value,
+        block_table,
+        [query_length],
+        [kv_length],
+        (query_descale, key_descale, value_descale),
+    )
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize(
     "page_size,kv_cache_layout,kv_length",
