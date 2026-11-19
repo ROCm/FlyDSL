@@ -321,6 +321,7 @@ pushes MFMA results through arch_vgpr via `v_accvgpr_read` spills, measured at a
 - Overlap next iteration's loads with current iteration's MFMA compute
 
 **CANNOT do:**
+- Guarantee the issue order in the ISA: the machine scheduler reorders instructions within a basic block and can sink an early load back next to its consumer (see "Source Order Is Not Issue Order")
 - Directly control `s_waitcnt vmcnt(N)` counter values
 - Force the compiler to use `vmcnt(N>0)` instead of `vmcnt(0)`
 - Eliminate barriers (`s_barrier`) — these come from explicit `gpu.barrier()` or cross-wave reduce primitives
@@ -352,6 +353,34 @@ This works because:
 - By the time barriers complete (~96K cycles), the V-value load (~17K cycles)
   has long since arrived
 
+### Source Order Is Not Issue Order
+
+Writing a load early in the Python source does not mean it is issued early.
+LLVM's machine scheduler reorders instructions within each basic block, and it
+may move a load down next to the instruction that consumes it, for example to
+lower register pressure. Basic-block boundaries limit it: a runtime `if` in the
+loop body (lowered to `scf.if`) is a boundary, and loads above it stay above it.
+A kernel can depend on such a branch without anyone noticing. Removing or
+peeling the branch then moves the loads, even though no load code changed.
+
+Observed on aiter's FlyDSL `pa_decode` (gfx950): peeling a per-tile validity
+`if` out of the KV loop let the scheduler sink the V loads down to the PV MFMAs,
+and bf16 cases with page size 64/128 got 17% slower. Putting an explicit
+fence where the branch used to be restored the early issue, and the change then
+cut geomean kernel time by 3.4%:
+
+```python
+v_next = load_v_tile(...)   # meant to be in flight during QK + softmax
+rocdl.sched_barrier(0)      # nothing is scheduled across this point
+qk = compute_qk(...)
+```
+
+Whenever you add or remove a runtime branch in a hot loop, or move loads, diff
+the final ISA (`FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=<dir>`, then `*_final_isa.s`).
+Check where the `buffer_load`/`global_load` instructions sit relative to the
+MFMAs and to the `s_waitcnt vmcnt` that guards their use. Add
+`rocdl.sched_barrier(0)` only where the dump shows that a load moved.
+
 ## Rules and Pitfalls
 
 ### Do
@@ -382,11 +411,11 @@ This works because:
 After applying prefetch:
 
 1. **Correctness**: Run the existing test suite. Output must match bit-for-bit (fp32 accumulation) or within tolerance (fp8/bf16).
-2. **Performance**: Profile with `rocprofv3 --kernel-trace`. Look for:
+2. **Issue order**: Check in the final ISA dump that the prefetch loads are still issued where you put them (see "Source Order Is Not Issue Order").
+3. **Performance**: Time the kernel with HIP events or graph replay. Do not use `rocprofv3 --kernel-trace` for this: profiler overhead dominates kernels of a few microseconds. For stalls, capture ATT (`/kernel-trace-analysis`) and look for:
    - Reduced `VMEM` stall cycles in the loop body
    - Higher MFMA utilization percentage
-   - Overall kernel duration reduction
-3. **Register pressure**: Check that `waves_per_eu` (occupancy) didn't drop. If it did, consider prefetching fewer buffers (e.g., only keys, not values).
+4. **Register pressure**: Check that `waves_per_eu` (occupancy) didn't drop. If it did, consider prefetching fewer buffers (e.g., only keys, not values).
 
 ## When NOT To Use
 
