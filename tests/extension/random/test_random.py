@@ -129,7 +129,10 @@ def test_philox_4x64_matches_triton_reference():
 
 
 @pytest.mark.l1a_compile_no_target_dialect
-def test_philox_4x64_dynamic_path_builds_widening_ir():
+def test_philox_4x64_dynamic_path_builds_widening_ir(monkeypatch):
+    # source_ir is None for an artifact loaded from the disk cache.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
     @flyc.jit
     def body(seed: fx.Uint64, c0: fx.Uint64):
         zero = fx.Uint64(0)

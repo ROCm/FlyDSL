@@ -429,6 +429,7 @@ execution:
 - Supports packed calling convention via `ctypes`.
 - Provides `.dump()`, `.ir`, and `.source_ir` for inspecting compiled or
   original IR.
+- `.source_ir` is not pickled, so it is None after a disk-cache hit.
 
 ### 4.5 `CompiledFunction`
 

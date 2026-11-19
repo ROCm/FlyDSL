@@ -214,6 +214,13 @@ def _fm_launch_fast_fp_explicit_fastmath(stream: fx.Stream = fx.Stream(None)):
     _fm_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
 
 
+@pytest.fixture(autouse=True)
+def _no_disk_cache(monkeypatch):
+    # These tests read CompiledArtifact.source_ir, which an artifact loaded from
+    # the disk cache does not carry, so a warm cache would turn it into None.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
+
 def _source_ir(launch_fn):
     launch_fn(stream=torch.cuda.current_stream())
     assert launch_fn._mem_cache, "expected at least one cached compilation"
