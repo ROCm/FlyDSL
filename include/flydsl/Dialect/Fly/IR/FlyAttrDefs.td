@@ -355,7 +355,10 @@ def Fly_AotModuleAttr : Fly_Attr<"AotModule", "aot_module", [
   let description = [{
     Selects and embeds a GPU binary with internal linkage and emits prefixed
     module init, load, and unload functions. Kernel launches use the common
-    FlyDSL AOT runtime ABI and runtime-managed per-device state. The optional
+    FlyDSL AOT runtime ABI and runtime-managed per-device state. Each launch
+    must be in an `llvm.func` whose `fly.aot_status_arg` integer attribute
+    names an `!llvm.ptr` argument; the runtime keeps the first error of the
+    call in the `int32_t` it points to and skips the launches after it. The optional
     target follows `gpu.select_object`: an integer selects by index, another
     attribute selects the object with an equal target, and omission selects
     the first object.

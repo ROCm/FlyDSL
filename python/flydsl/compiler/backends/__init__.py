@@ -15,8 +15,9 @@ Usage::
 
 from __future__ import annotations
 
+import inspect
 from functools import lru_cache
-from typing import Dict, Optional, Type
+from typing import Dict, List, Optional, Type
 
 from ...utils import env
 from .base import AOTRuntimeConfig as AOTRuntimeConfig
@@ -116,6 +117,18 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
             raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
         arch = backend_cls.detect_target().arch
     return _make_backend(name, arch)
+
+
+def _runtime_lib_basenames(name: Optional[str] = None) -> List[str]:
+    """JIT runtime library basenames of backend *name*.
+
+    Detects a GPU target only for a backend that defines
+    ``jit_runtime_lib_basenames`` as an instance method.
+    """
+    backend_cls = _get_backend_class(name)
+    if isinstance(inspect.getattr_static(backend_cls, "jit_runtime_lib_basenames"), (classmethod, staticmethod)):
+        return backend_cls.jit_runtime_lib_basenames()
+    return get_backend(name).jit_runtime_lib_basenames()
 
 
 def get_ktrace_backend(name: Optional[str] = None) -> KtraceBackend:
