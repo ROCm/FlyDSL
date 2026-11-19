@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-19T13:23:59Z",
+ "updated": "2026-11-19T13:43:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,21 +25,21 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Keep tests that read source_ir off the JIT disk cache (#1435)",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852",
    "created_at": "2026-11-19T12:23:43Z",
-   "updated_at": "2026-11-19T13:21:54Z",
+   "updated_at": "2026-11-19T13:35:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-19T12:55:10Z",
-     "completed_at": "2026-11-19T12:56:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499637"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T13:35:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595763118"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -48,7 +48,7 @@
      "conclusion": "success",
      "started_at": "2026-11-19T13:04:05Z",
      "completed_at": "2026-11-19T13:16:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499735"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595764804"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -57,7 +57,7 @@
      "conclusion": "success",
      "started_at": "2026-11-19T12:55:15Z",
      "completed_at": "2026-11-19T13:21:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135574499773"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595765864"
     }
    ]
   },
@@ -262,38 +262,41 @@
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
    "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676",
    "created_at": "2026-11-19T11:21:12Z",
-   "updated_at": "2026-11-19T13:00:27Z",
+   "updated_at": "2026-11-19T13:41:19Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-19T13:16:36Z",
-     "completed_at": null,
+     "completed_at": "2026-11-19T13:29:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671421"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-19T13:01:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671523"
+     "completed_at": "2026-11-19T13:37:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671523",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-19T13:02:09Z",
-     "completed_at": null,
+     "completed_at": "2026-11-19T13:37:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671561"
     }
    ]
