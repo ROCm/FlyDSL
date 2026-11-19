@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-19T11:26:51Z",
+ "updated": "2026-11-19T11:31:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44515162886,
+   "pr": null,
+   "commit": "8c2e71b694591460dba46955158008e89f0e09d1",
+   "branch": "main",
+   "event": "push",
+   "title": "[Tests] Move layout algebra checks to the Core tests  (#1449)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44515162886",
+   "created_at": "2026-11-19T11:28:41Z",
+   "updated_at": "2026-11-19T11:29:20Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 44514436591,
    "pr": 1452,
@@ -86,19 +101,19 @@
    "branch": "aot-load-module",
    "event": "pull_request",
    "title": "[AOT] Add flyc.load_module to load export_to_c objects in-process",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157",
    "created_at": "2026-11-19T09:22:24Z",
-   "updated_at": "2026-11-19T11:22:43Z",
+   "updated_at": "2026-11-19T11:26:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-19T11:22:44Z",
+     "started_at": "2026-11-19T11:26:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135526105201"
     },
@@ -129,11 +144,11 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Add arch atoms with valid check (#1437)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44494980309",
    "created_at": "2026-11-19T09:17:02Z",
-   "updated_at": "2026-11-19T10:43:55Z",
+   "updated_at": "2026-11-19T11:28:59Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -1986,52 +2001,6 @@
      "started_at": "2026-11-17T00:06:21Z",
      "completed_at": "2026-11-17T00:17:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760055424"
-    }
-   ]
-  },
-  {
-   "run_id": 43968197137,
-   "pr": 1423,
-   "commit": "39f31bcf4c3960c9d520fd69f71464d6d1ade38c",
-   "branch": "llvm-reassociate-uniformity",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix nondeterministic codegen with an LLVM backport ",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137",
-   "created_at": "2026-11-16T22:15:01Z",
-   "updated_at": "2026-11-17T08:09:56Z",
-   "actor": "RElbers",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T22:47:36Z",
-     "completed_at": "2026-11-16T23:10:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892315114",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T22:47:27Z",
-     "completed_at": "2026-11-16T22:56:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892315209"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T22:47:42Z",
-     "completed_at": "2026-11-16T23:18:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892355248"
     }
    ]
   }
