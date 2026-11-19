@@ -563,11 +563,29 @@ class RewriteBoolOps(Transformer):
     def dsl_bool_op_(is_or, result, *thunks):
         # Fold left like Python, stopping once a plain bool short-circuits. Later operands
         # arrive as thunks so each one is evaluated at most once.
+        # `and` and `or` each have an identity (True / False) and an absorbing element
+        # (False / True). A plain bool on either side of a step is one of the two, so the step
+        # needs no op: the identity leaves the accumulator alone, the absorbing element fixes
+        # the chain and stops the walk. Only two non-bool operands reach `combine`.
         combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
+        identity = not is_or
         for thunk in thunks:
             if isinstance(result, bool) and result == is_or:
                 break
-            result = combine(result, thunk())
+            value = thunk()
+            if isinstance(value, bool):
+                # `0 and False` is `0` in Python, so an arbitrary accumulator still folds below.
+                folds = isinstance(result, bool) or hasattr(result, "__dsl_bool__")
+                if value == is_or:
+                    if folds:
+                        result = value
+                        break
+                elif folds:
+                    continue
+            if isinstance(result, bool) and result == identity:
+                result = value
+                continue
+            result = combine(result, value)
         return result
 
     @staticmethod
