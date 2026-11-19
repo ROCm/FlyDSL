@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-19T11:24:16Z",
+ "updated": "2026-11-19T11:26:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44514436591,
+   "pr": 1452,
+   "commit": "eb394140e4038f6de16ee1a5260ff077e1f3bd58",
+   "branch": "pr/paged-fp8-split-kv",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Split the KV range of under-filled paged FP8 attention calls",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514436591",
+   "created_at": "2026-11-19T11:23:46Z",
+   "updated_at": "2026-11-19T11:23:46Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44514047676,
    "pr": 1412,
@@ -10,11 +25,11 @@
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
    "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676",
    "created_at": "2026-11-19T11:21:12Z",
-   "updated_at": "2026-11-19T11:21:39Z",
+   "updated_at": "2026-11-19T11:23:18Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -71,21 +86,30 @@
    "branch": "aot-load-module",
    "event": "pull_request",
    "title": "[AOT] Add flyc.load_module to load export_to_c objects in-process",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157",
    "created_at": "2026-11-19T09:22:24Z",
-   "updated_at": "2026-11-19T10:59:33Z",
+   "updated_at": "2026-11-19T11:22:43Z",
    "actor": "coderfeli",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-19T11:22:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135526105201"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-19T10:44:10Z",
+     "started_at": "2026-11-19T11:23:02Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135488564124"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135526105225"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -94,16 +118,7 @@
      "conclusion": "success",
      "started_at": "2026-11-19T10:55:14Z",
      "completed_at": "2026-11-19T11:05:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135488564132"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-19T10:12:53Z",
-     "completed_at": "2026-11-19T10:17:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135488564226"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44495807157/job/135526151730"
     }
    ]
   },
@@ -2019,21 +2034,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43968197137/job/133892355248"
     }
    ]
-  },
-  {
-   "run_id": 43965326626,
-   "pr": 1423,
-   "commit": "a46de79ed4e2bd31972067b8d7066bc043ef4958",
-   "branch": "llvm-reassociate-uniformity",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix nondeterministic codegen with an LLVM backport ",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43965326626",
-   "created_at": "2026-11-16T21:57:52Z",
-   "updated_at": "2026-11-16T22:15:25Z",
-   "actor": "RElbers",
-   "jobs": []
   }
  ]
 }
