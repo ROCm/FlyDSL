@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-19T15:24:54Z",
+ "updated": "2026-11-19T17:59:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44582599858,
+   "pr": 1412,
+   "commit": "338ede956956116678c8647557faeaa4d1167722",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582599858",
+   "created_at": "2026-11-19T17:57:01Z",
+   "updated_at": "2026-11-19T17:57:37Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 44582354281,
+   "pr": 1412,
+   "commit": "abdcef9e119adc1e55bf4c9dd774f7233adb7657",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582354281",
+   "created_at": "2026-11-19T17:55:35Z",
+   "updated_at": "2026-11-19T17:57:16Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 44530386920,
    "pr": 1453,
@@ -1828,64 +1858,6 @@
      "started_at": "2026-11-17T09:14:54Z",
      "completed_at": "2026-11-17T09:23:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44049374188/job/133937201830"
-    }
-   ]
-  },
-  {
-   "run_id": 44048329122,
-   "pr": null,
-   "commit": "4b209f486f66da87e72cb2a669046de269bfe0df",
-   "branch": "pr/feat-fx-range",
-   "event": "pull_request",
-   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44048329122",
-   "created_at": "2026-11-17T08:37:27Z",
-   "updated_at": "2026-11-17T08:45:13Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 44046211975,
-   "pr": 1350,
-   "commit": "c7b673d80af9c8d9e4594232356e87db3498e714",
-   "branch": "enh-cdna5-tdm-gather-scatter",
-   "event": "pull_request",
-   "title": "[CDNA5] Add indexed-addressing plumbing to the TDM atom",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975",
-   "created_at": "2026-11-17T08:22:42Z",
-   "updated_at": "2026-11-17T10:03:09Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T08:50:02Z",
-     "completed_at": "2026-11-17T10:03:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975/job/133925280323"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T09:07:32Z",
-     "completed_at": "2026-11-17T09:14:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975/job/133925280332"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-17T08:50:10Z",
-     "completed_at": "2026-11-17T08:56:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44046211975/job/133925280385"
     }
    ]
   }
