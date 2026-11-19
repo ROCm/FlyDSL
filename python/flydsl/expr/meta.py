@@ -116,7 +116,8 @@ def tracing_context(func=None, **options):
     owns_cache = func is not None and getattr(_tls, "source_position_cache", None) is None
     if owns_cache:
         _tls.source_position_cache = {}
-        # Read once per trace: capture_user_location runs for every op.
+        # Read once per trace: capture_user_location runs for every op. A change to the env
+        # var therefore takes effect from the next trace, not part way through this one.
         _tls.max_loc_depth = env.debug.max_loc_depth
         _tls.frame_location_cache = {}
     boundary = getattr(func, "__code__", None)

@@ -721,9 +721,20 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _call_branch(fn, result_names, state_values):
-        # Read the arity off the code object: inspect.signature costs more than most branches it dispatches.
-        code = fn.__code__
-        if code.co_flags & inspect.CO_VARARGS or code.co_argcount >= len(state_values) + 1:
+        # Read the arity off the code object: inspect.signature costs more than most branches it
+        # dispatches. A bound method counts `self` in co_argcount but does not take it in the
+        # call, and a partial has no code object at all, so both fall back to signature.
+        code = getattr(fn, "__code__", None)
+        if code is None:
+            params = list(inspect.signature(fn).parameters.values())
+            varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            argcount = sum(
+                p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) for p in params
+            )
+        else:
+            varargs = bool(code.co_flags & inspect.CO_VARARGS)
+            argcount = code.co_argcount - inspect.ismethod(fn)
+        if varargs or argcount >= len(state_values) + 1:
             return fn(result_names, *state_values)
         return fn(*state_values)
 
