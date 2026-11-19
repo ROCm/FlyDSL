@@ -59,6 +59,7 @@ def _mxfp4_launcher(
     xcd_swizzle=0,
     k_batch=1,
     blockscale="none",
+    batch=1,
 ):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. This closure fixes every Constexpr, so it reuses one compiled handle:
@@ -84,7 +85,7 @@ def _mxfp4_launcher(
             a_dtype,
             out_dtype,
             b_dtype,
-            1,
+            batch,
             -1,
             -1,
             -1,
@@ -544,6 +545,79 @@ def test_mfma_w4_flyc_preshuffle(
         tflops = flops / (us / 1e6) / 1e12
         tbps = bytes_moved / 1e12 / (us / 1e6)
         print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+def _w4_bytes(t):
+    return (t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)).contiguous().view(-1)
+
+
+@pytest.mark.parametrize(
+    "batch, M, N, K, tile_m, tile_n, tile_k",
+    [
+        # A caller tile with several 16-column N fragments per wave on the two-K-tile loop.
+        (1, 32, 2048, 1024, 32, 256, 256),
+        (1, 32, 2048, 1024, 32, 128, 128),
+        (2, 32, 1024, 1024, 32, 128, 256),
+        # Geometries picked from M for the 32x128 hint (16x64, 32x32, 32x64), 1-5 K tiles.
+        *[(1, m, 2048, 768, 32, 128, 256) for m in (1, 6, 16, 17, 33, 64, 65, 97)],
+        *[(1, 6, 2048, k, 32, 128, 256) for k in (256, 512, 1280)],
+        # Geometries picked for the 64x256 hint: 128x128 below N 2048, 128x128 / 128x256 /
+        # the caller's 64x256 by the 128x128 grid's size, with the 128-row tail peel.
+        *[(1, 200, 1280, k, 64, 256, 256) for k in (256, 512, 1280)],
+        (1, 1024, 8192, 1024, 64, 256, 256),
+        (1, 1100, 8192, 1024, 64, 256, 256),
+        (1, 1100, 8192, 4096, 64, 256, 256),
+        (1, 2200, 8192, 1024, 64, 256, 256),
+    ],
+)
+def test_mfma_w4_geometry_and_k_loop(batch, M, N, K, tile_m, tile_n, tile_k):
+    """Every geometry and K-loop shape of the fp4 x fp4 launcher against an fp32 reference,
+    with 32-element block scales spread over 2^-4..2^4 so a scale or fragment taken from the
+    wrong row, column or K tile changes the output, and C prefilled with NaN."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+    device = torch.device("cuda")
+    torch.manual_seed(M * 131 + N + K + tile_n + batch)
+    M32 = (M + 31) // 32 * 32
+
+    def blocks(rows):
+        return torch.exp2(torch.randint(-4, 5, (rows, K // 32), device=device).float()).repeat_interleave(32, dim=1)
+
+    a_bytes, b_bytes, sa_bytes, sb_bytes, refs = [], [], [], [], []
+    for _ in range(batch):
+        a = torch.zeros(M32, K, device=device)
+        a[:M] = torch.randn(M, K, device=device) * blocks(M)
+        b = torch.randn(N, K, device=device) * blocks(N)
+        a_q, sa, _ = gemm_common_utils.per_1x32_f4_quant(a)
+        b_q, sb, _ = gemm_common_utils.per_1x32_f4_quant(b)
+        a_f32 = gemm_common_utils.mxfp4_to_f32(a_q[:M]) * gemm_common_utils.e8m0_to_f32(
+            sa[:M].repeat_interleave(32, dim=1)
+        )
+        b_f32 = gemm_common_utils.mxfp4_to_f32(b_q) * gemm_common_utils.e8m0_to_f32(sb.repeat_interleave(32, dim=1))
+        refs.append(torch.mm(a_f32, b_f32.T))
+        a_bytes.append(_w4_bytes(a_q[:M]))
+        b_bytes.append(_w4_bytes(gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)))
+        sa_bytes.append(_w4_bytes(gemm_common_utils.shuffle_scale_w4(sa, 1, False)))
+        sb_bytes.append(_w4_bytes(gemm_common_utils.shuffle_scale_w4(sb, 1, False)))
+
+    c = torch.full((batch, M, N), float("nan"), dtype=torch.bfloat16, device=device)
+    launch = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, "bf16", "fp4", batch=batch)
+    launch(
+        c.view(-1),
+        torch.cat(a_bytes),
+        torch.cat(b_bytes),
+        torch.cat(sa_bytes),
+        torch.cat(sb_bytes),
+        torch.empty(0, dtype=torch.bfloat16, device=device),
+        M,
+        N,
+        torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+    for i, ref in enumerate(refs):
+        out = c[i].float()
+        assert bool(torch.isfinite(out).all().item()), f"batch {i}: unwritten or non-finite outputs"
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2 * ref.abs().max().item())
 
 
 # ── W4A6: MXFP6 (E2M3) A × MXFP4 (E2M1) B ─────────────────────────────────
