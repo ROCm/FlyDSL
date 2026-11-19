@@ -161,6 +161,9 @@ TEST(LayoutParity, ModeAccess) {
   EXPECT_EQ(toString(get<0>(make_layout(make_tuple(make_tuple(2_c, 3_c), 4_d),
                                         make_tuple(make_tuple(1_c, 2_c), 6_c)))),
             "(2,3):(1,2)");
+  EXPECT_EQ(toString(stride(make_layout(make_tuple(make_tuple(2_c, 3_c), 4_d),
+                                        make_tuple(make_tuple(1_c, 2_c), 6_c)))),
+            "((1,2),6)");
   EXPECT_EQ(toString(take<1, 3>(
                 make_layout(make_tuple(2_c, 3_d, 4_c, 5_c), make_tuple(1_c, 2_c, 6_d, 24_c)))),
             "(?3,4):(2,?6)");
@@ -700,6 +703,29 @@ TEST(LayoutParity, Recast) {
   EXPECT_EQ(
       toString(downcast(2, make_layout(make_tuple(dyn(8, 4), 4_c), make_tuple(1_c, dyn(8, 4))))),
       "(?16{div=8},4):(1,?16{div=8})");
+}
+
+// No reference has a ratio stride.  A coordinate maps to a fraction of an element and an integral
+// result is an integer; a dynamic coordinate must be a multiple of the denominator.
+TEST(LayoutParity, RatioStride) {
+  auto layout = make_layout(make_tuple(4_c, 8_c), make_tuple(ratio(1, 2), 2_c));
+  EXPECT_EQ(toString(layout), "(4,8):(1/2,2)");
+  EXPECT_EQ(toString(cosize(layout)), "33/2");
+  EXPECT_EQ(toString(crd2idx(make_tuple(1_c, 0_c), layout)), "1/2");
+  EXPECT_EQ(toString(crd2idx(make_tuple(2_c, 1_c), layout)), "3");
+  EXPECT_EQ(toString(crd2idx(5_ct, layout)), "5/2");
+  EXPECT_EQ(toString(coalesce(layout)), "32:1/2");
+  EXPECT_EQ(toString(composition(layout, make_layout(4_ct, 1_ct))), "4:1/2");
+  EXPECT_EQ(toString(logical_divide(layout, make_tile(make_layout(2_ct, 1_ct), _))),
+            "((2,2),8):((1/2,1),2)");
+  // Half a 16-bit element is one 8-bit element.
+  EXPECT_EQ(toString(recast_layout(8, 16, layout)), "(4,8):(1,4)");
+  EXPECT_EQ(toString(crd2idx(dyn(4, 2), make_layout(8_ct, ratio(1, 2)))), "?2");
+  EXPECT_EQ(toString(crd2idx(dyn(4, 2), make_layout(8_ct, ratio(3, 2)))), "?6{div=3}");
+  EXPECT_EQ(toString(crd2idx(dyn(5), make_layout(8_ct, ratio(1, 2)))),
+            "!dynamic-ratio-unsupported");
+  EXPECT_EQ(toString(complement(make_layout(4_ct, ratio(1, 2)), 64_ct)),
+            "!unsupported-ratio-operation:!unsupported-ratio-operation");
 }
 
 TEST(LayoutParity, CommonVectors) {

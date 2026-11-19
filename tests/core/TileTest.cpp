@@ -9,6 +9,17 @@
 
 using namespace core_test;
 
+// Tilers are equal when their modes are: an underscore only equals an underscore, and tuples
+// compare mode by mode.
+TEST(TileParity, Equality) {
+  auto tiler = make_tile(make_layout(2_ct, 1_ct), _);
+  EXPECT_TRUE(tiler == make_tile(make_layout(2_ct, 1_ct), _));
+  EXPECT_FALSE(tiler == make_tile(make_layout(2_ct, 1_ct), make_layout(2_ct, 1_ct)));
+  EXPECT_FALSE(tiler == make_tile(make_layout(2_ct, 1_ct)));
+  EXPECT_FALSE(Til(RT::getSInt(4)) == Til(make_layout(4_ct, 1_ct)));
+  EXPECT_EQ(tiler.children().size(), 2u);
+}
+
 // The size of a tiler is the product of its modes.
 TEST(TileParity, Size) {
   EXPECT_EQ(toString(size(make_tile(make_layout(2_ct, 3_ct),
@@ -81,6 +92,10 @@ TEST(TileParity, Divide) {
   EXPECT_EQ(toString(logical_divide(make_layout(make_tuple(8_c, 6_c), make_tuple(1_c, 8_c)),
                                     make_tuple(4_c, 3_c))),
             "((4,2),(3,2)):((1,4),(8,24))");
+  // A scalar tiler mode divides like the compact layout of that size.
+  EXPECT_EQ(toString(logical_divide(make_layout(make_tuple(8_c, 6_c), make_tuple(1_c, 8_c)),
+                                    Til::getTuple({Til(RT::getSInt(4)), Til::getNone()}))),
+            "((4,2),6):((1,4),8)");
   EXPECT_EQ(toString(zipped_divide(make_layout(make_tuple(8_c, 32_c), make_tuple(1_c, 8_c)),
                                    make_tuple(4_c, 2_c))),
             "((4,2),(2,16)):((1,8),(4,16))");

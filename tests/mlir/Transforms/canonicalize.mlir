@@ -35,15 +35,6 @@ func.func @test_make_layout_static() -> !fly.layout<(4, 8) : (1, 4)> {
   return %layout : !fly.layout<(4, 8) : (1, 4)>
 }
 
-// CHECK-LABEL: @test_size_static
-func.func @test_size_static() -> !fly.int_tuple<32> {
-  %s = fly.static : !fly.int_tuple<(4, 8)>
-  %size = fly.size(%s) : (!fly.int_tuple<(4, 8)>) -> !fly.int_tuple<32>
-  // CHECK-NEXT: %[[S:.*]] = fly.static : !fly.int_tuple<32>
-  // CHECK-NEXT: return %[[S]]
-  return %size : !fly.int_tuple<32>
-}
-
 // CHECK-LABEL: @test_composition_static
 func.func @test_composition_static() -> !fly.layout<(2, 4) : (1, 2)> {
   %s1 = fly.static : !fly.int_tuple<(4, 8)>

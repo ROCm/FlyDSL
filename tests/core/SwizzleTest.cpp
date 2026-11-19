@@ -52,3 +52,18 @@ TEST(SwizzleParity, Algebra) {
   EXPECT_FALSE(composition(Swz(1, 0, 4), Swz(1, 0, 3)).has_value());
   EXPECT_FALSE(composition(Swz(1, 0, 4), Swz(1, 2, 4)).has_value());
 }
+
+// A coordinate swizzle is its mask and the base and basis modes of its row and column; a zero
+// mask is the identity.
+TEST(SwizzleParity, CoordSwizzle) {
+  using CSwz = CoordSwizzle<Runtime>;
+  auto swizzle = CSwz(3, 0, {1}, 0, {2});
+  EXPECT_EQ(toString(swizzle), "CS<3,0,[1],0,[2]>");
+  EXPECT_FALSE(swizzle.isIdentity());
+  EXPECT_TRUE(CSwz(0, 0, {}, 0, {}).isIdentity());
+  EXPECT_TRUE(swizzle == CSwz(3, 0, {1}, 0, {2}));
+  EXPECT_TRUE(swizzle != CSwz(3, 1, {1}, 0, {2}));
+  EXPECT_TRUE(swizzle != CSwz(3, 0, {1}, 0, {1, 2}));
+  EXPECT_FALSE(CSwz::isValid(-1, 0, {}, 0, {}));
+  EXPECT_FALSE(CSwz::isValid(3, 0, {0, 1, 2, 3, 4, 5, 6, 7}, 0, {}));
+}
