@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-19T11:31:36Z",
+ "updated": "2026-11-19T11:34:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44515722623,
+   "pr": null,
+   "commit": "8122dd502a4498a457ed9b3576efe609a2e0ad01",
+   "branch": "main",
+   "event": "push",
+   "title": "[Skills] isa-resource-diff: compile-only runs still see the local GPU\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44515722623",
+   "created_at": "2026-11-19T11:32:24Z",
+   "updated_at": "2026-11-19T11:32:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 44515162886,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Move layout algebra checks to the Core tests  (#1449)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44515162886",
    "created_at": "2026-11-19T11:28:41Z",
-   "updated_at": "2026-11-19T11:29:20Z",
+   "updated_at": "2026-11-19T11:32:25Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -1955,52 +1970,6 @@
      "started_at": "2026-11-17T00:27:02Z",
      "completed_at": "2026-11-17T00:36:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/43984216405/job/133819153911"
-    }
-   ]
-  },
-  {
-   "run_id": 43982375238,
-   "pr": 1399,
-   "commit": "411e6516f0ac2a9bb900866f886ca002b37518ad",
-   "branch": "fix/windows-test-portability",
-   "event": "pull_request",
-   "title": "[Tests] Make the location, perftest and arch-detection tests pass on Windows",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238",
-   "created_at": "2026-11-16T23:48:05Z",
-   "updated_at": "2026-11-17T02:24:45Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T01:59:22Z",
-     "completed_at": "2026-11-17T02:24:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760008150",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T00:06:33Z",
-     "completed_at": "2026-11-17T00:26:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760008954"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T00:06:21Z",
-     "completed_at": "2026-11-17T00:17:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43982375238/job/133760055424"
     }
    ]
   }
