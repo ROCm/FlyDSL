@@ -98,6 +98,11 @@ cat /tmp/discover_kernel_stats.csv
 Present the kernel list and let the user pick, or auto-select the FlyDSL/target kernel
 (typically contains `pa_decode`, `kernel_0`, or the function name from the test script).
 
+Use these durations to find names, not to time kernels. Profiler overhead per
+dispatch dominates short kernels: paged-attention decode kernels of a few
+microseconds all read about 4.1-4.3 us here on gfx950. Time them with HIP events
+or graph replay.
+
 ---
 
 ## Step 3: Configure input.yaml
@@ -131,16 +136,26 @@ Key configuration:
 
 ## Step 4: Run rocprofv3 with ATT
 
+Before running, check two things:
+
+- **Launch the kernel eagerly.** ATT captures under HIP graph replay have been
+  observed to hang. If the script times its kernel by replaying a graph, add an
+  eager mode (a plain launch loop) and trace that.
+- **Pin one GPU with `ROCR_VISIBLE_DEVICES`.** `HIP_VISIBLE_DEVICES` only filters
+  devices inside HIP. rocprofv3 works at the ROCr level, and with only the HIP
+  filter set it has been observed to set up ATT on every GPU in the node,
+  including GPUs that other jobs are timing on.
+
 ```bash
 # Remote
 ssh $USER@$HOST \
   "docker exec -e PYTHONPATH=<flydsl_root>/python:<flydsl_root>/tests \
-   -e FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 \
+   -e FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 -e ROCR_VISIBLE_DEVICES=<gpu> \
    $CONTAINER bash -c \
    'cd /tmp && rm -rf /tmp/kernel_trace_output && rocprofv3 -i /tmp/input_trace.yaml -- python $TEST_SCRIPT 2>&1'"
 
 # Local
-FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=./ \
+ROCR_VISIBLE_DEVICES=<gpu> FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=./ \
   rocprofv3 -i /tmp/input_trace.yaml -- python $TEST_SCRIPT 2>&1
 ```
 
@@ -274,7 +289,8 @@ Quick interpretation:
 After capture, report:
 
 1. **Trace location**: Local path to the downloaded trace directory
-2. **Kernel info**: Name, VGPR/AGPR counts, grid size, duration (from out_kernel_trace.csv)
+2. **Kernel info**: Name, VGPR/AGPR counts, grid size, duration (from out_kernel_trace.csv;
+   the profiler inflates the duration of short kernels, see Step 2)
 3. **Source mapping**: Whether debug info is present (% of instructions with source annotations)
 4. **Instruction count**: Total instructions in code.json
 5. **Next step**: Suggest running `/kernel-trace-analysis` on the downloaded trace for bottleneck analysis
@@ -304,4 +320,6 @@ Run /kernel-trace-analysis to analyze bottlenecks.
 | SSH timeout | Increase timeout, check host connectivity |
 | `kernel_iteration_range` mismatch | Test runs fewer iterations than expected -- use `"[0, [1-2]]"` |
 | GPU Hang / HW Exception during PMC capture | Counter list forced multi-pass — split into single-pass jobs of ≤ ~4 TCC counters |
+| ATT capture hangs and the process never exits | The script replays a HIP graph — trace an eager launch loop instead (Step 4) |
+| Profiler activity or memory on GPUs you did not select | Only `HIP_VISIBLE_DEVICES` was set — pin with `ROCR_VISIBLE_DEVICES` (Step 4) |
 | PMC CSV empty / wrong kernel row | Match `Kernel_Name` substring; the first row may be a torch/elementwise kernel |
