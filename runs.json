@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-19T07:36:29Z",
+ "updated": "2026-11-19T07:59:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -148,11 +148,11 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206",
    "created_at": "2026-11-19T05:15:06Z",
-   "updated_at": "2026-11-19T06:26:08Z",
+   "updated_at": "2026-11-19T07:57:13Z",
    "actor": "jli-melchior",
    "jobs": [
     {
