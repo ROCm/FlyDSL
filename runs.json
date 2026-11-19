@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-11-19T03:26:50Z",
+ "updated": "2026-11-19T06:34:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44463861206,
+   "pr": 1444,
+   "commit": "c876ec25c4c92dddce53e9308aacd743d8a1a16d",
+   "branch": "jli/sched-vgpr-tied",
+   "event": "pull_request",
+   "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206",
+   "created_at": "2026-11-19T05:15:06Z",
+   "updated_at": "2026-11-19T06:26:08Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-19T06:26:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206/job/135370681410"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T05:53:06Z",
+     "completed_at": "2026-11-19T06:17:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206/job/135370681419",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T06:02:34Z",
+     "completed_at": "2026-11-19T06:14:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206/job/135370681471"
+    }
+   ]
+  },
+  {
+   "run_id": 44454013744,
+   "pr": 1374,
+   "commit": "0556505ab5877ba66b794f73bf1a8cbd4f36a1a3",
+   "branch": "rdna4-mxfp4-upstream",
+   "event": "pull_request",
+   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44454013744",
+   "created_at": "2026-11-19T03:48:42Z",
+   "updated_at": "2026-11-19T03:48:42Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 44439072195,
    "pr": 1431,
@@ -592,7 +653,7 @@
   },
   {
    "run_id": 44261767281,
-   "pr": 1374,
+   "pr": null,
    "commit": "b8d25cfcea13eee9a195f2ffec79fa3975eba1f0",
    "branch": "rdna4-mxfp4-upstream",
    "event": "pull_request",
@@ -1850,58 +1911,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/43836952303",
    "created_at": "2026-11-16T09:07:40Z",
    "updated_at": "2026-11-16T09:07:40Z",
-   "actor": "qiangpan2",
-   "jobs": []
-  },
-  {
-   "run_id": 43836777539,
-   "pr": 1416,
-   "commit": "a97dfae47c61c8e32d59fbb99b7198454e4bc67a",
-   "branch": "ci/block-fork-pr-self-hosted",
-   "event": "pull_request",
-   "title": "[CI] Keep forked PRs off linux-flydsl-navi-2",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43836777539",
-   "created_at": "2026-11-16T09:06:26Z",
-   "updated_at": "2026-11-16T11:10:19Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T10:36:01Z",
-     "completed_at": "2026-11-16T11:04:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43836777539/job/133240532333",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-16T10:35:51Z",
-     "completed_at": "2026-11-16T10:55:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/43836777539/job/133240532405"
-    }
-   ]
-  },
-  {
-   "run_id": 43835305615,
-   "pr": null,
-   "commit": "e5fc289a9d05df7322cf40638bcc084e8073ac0b",
-   "branch": "qiangpan/sageattn2_2",
-   "event": "pull_request",
-   "title": "[Runtime] Report GPU last-level cache size from KFD",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/43835305615",
-   "created_at": "2026-11-16T08:56:05Z",
-   "updated_at": "2026-11-16T08:56:05Z",
    "actor": "qiangpan2",
    "jobs": []
   }
