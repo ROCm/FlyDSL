@@ -947,7 +947,7 @@ def test_find_aot_runtime_archive():
 
         runtime_object, symbols = aot._materialize_aot_runtime(archive)
         assert runtime_object.startswith(b"\x7fELF")
-    assert {"flydslRuntimeTakeError", "hipModuleLoadData", "malloc"} <= symbols
+    assert {"flydslAotModuleLaunchKernel", "hipModuleLoadData", "malloc"} <= symbols
 
 
 @pytest.mark.l1b_target_dialect
@@ -1005,6 +1005,42 @@ def test_aot_translation_selects_target_instead_of_first_object():
     )
     assert b"WRONG_GPU_OBJECT" not in host_object
     assert b"\x7fELF" in host_object
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_translation_requires_a_status_argument(capfd):
+    # Launches report errors through the launcher's status argument; without one there is nowhere to.
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    with aot._create_mlir_context():
+        module = ir.Module.parse(compiled._ir_text)
+        for op in module.body.operations:
+            if op.operation.name == "gpu.binary":
+                op.attributes["offloadingHandler"] = ir.Attribute.parse('#fly.aot_module<"no_status", 0>')
+        with pytest.raises(RuntimeError, match="failed to translate"):
+            _emit_host_object(module.operation, 2)
+    assert "'fly.aot_status_arg' attribute names a pointer argument" in capfd.readouterr().err
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_translation_rejects_a_mismatched_runtime(capfd):
+    # A runtime merged into the module (as on Windows) must take what the launches pass.
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    stale = "module { llvm.func @flydslAotModuleLaunchKernel(%slot: !llvm.ptr) { llvm.return } }"
+    with pytest.raises(RuntimeError, match="failed to translate"):
+        aot._emit_export_object(
+            compiled._ir_text,
+            compiled._entry,
+            compiled._abi,
+            "stale_runtime",
+            "stale_runtime__metadata",
+            b"{}",
+            _get_backend_class("rocm"),
+            "gfx950",
+            runtime_ir=stale,
+        )
+    assert "does not match the AOT launch signature" in capfd.readouterr().err
 
 
 @pytest.mark.l0_backend_agnostic
@@ -1094,7 +1130,7 @@ class TestExport:
         for bad in ("not-a-c-symbol", "1abc", "a b", "int", "class", "__private", "_Reserved"):
             with pytest.raises(ValueError, match="C identifier"):
                 compiled._export_to_c(tmp_path, "k", bad)
-        for runtime_name in ("flydslRuntimeTakeError", "hipModuleLoadData", "malloc"):
+        for runtime_name in ("flydslAotModuleLaunchKernel", "hipModuleLoadData", "malloc"):
             with pytest.raises(ValueError, match="collide.*backend AOT runtime"):
                 compiled._export_to_c(tmp_path, "k", runtime_name)
         with pytest.raises(FileNotFoundError):
@@ -1112,7 +1148,7 @@ class TestExport:
         assert (out / "axpy_file.h").is_file()
         assert sorted(path.name for path in out.iterdir()) == sorted([*OUTPUT_LOCK, "axpy_file.h", f"axpy_file{OBJ}"])
         assert "aoti_axpy" in _object_symbols(out / f"axpy_file{OBJ}")
-        assert b'"schema_version":2' in (out / f"axpy_file{OBJ}").read_bytes()
+        assert b'"schema_version":3' in (out / f"axpy_file{OBJ}").read_bytes()
         assert LINK_METADATA[0] in (out / f"axpy_file{OBJ}").read_bytes()
         assert LINK_METADATA[1] in (out / f"axpy_file{OBJ}").read_bytes()
 

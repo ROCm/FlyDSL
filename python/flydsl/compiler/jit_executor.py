@@ -62,13 +62,13 @@ def _resolve_qualname(ref: str) -> Optional[Callable]:
         return None
 
 
-@lru_cache(maxsize=1)
-def _resolve_runtime_libs() -> List[str]:
-    from .backends import get_backend
+@lru_cache(maxsize=4)
+def _resolve_runtime_libs(backend: Optional[str] = None) -> List[str]:
+    """Runtime libraries of *backend* (default: the compile backend); detects no GPU target."""
+    from .backends import _get_backend_class
 
-    backend = get_backend()
     mlir_libs_dir = Path(__file__).parent.parent / "_mlir" / "_mlir_libs"
-    libs = [mlir_libs_dir / name for name in backend.jit_runtime_lib_basenames()]
+    libs = [mlir_libs_dir / name for name in _get_backend_class(backend).jit_runtime_lib_basenames()]
     for lib in libs:
         if not lib.exists():
             raise FileNotFoundError(f"Required JIT runtime library not found: {lib}\nPlease rebuild the project.")

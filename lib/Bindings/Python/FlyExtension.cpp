@@ -247,6 +247,41 @@ Attribute getAddressSpaceFromObj(MLIRContext *ctx, nb::object obj, AddressSpace 
       "address_space must be int (Fly_AddressSpace case) or an MLIR Attribute");
 }
 
+void appendString(MlirStringRef str, void *userData) {
+  static_cast<std::string *>(userData)->append(str.data, str.length);
+}
+
+// An export_to_c object JIT-linked into this process.
+struct PyHostObject {
+  void *handle = nullptr;
+
+  PyHostObject(nb::bytes object, nb::list libs) {
+    std::vector<std::string> paths;
+    for (nb::handle lib : libs)
+      paths.push_back(nb::cast<std::string>(lib));
+    std::vector<MlirStringRef> refs;
+    for (const std::string &path : paths)
+      refs.push_back(mlirStringRefCreate(path.data(), path.size()));
+    std::string error;
+    handle = flydslLoadHostObject(
+        mlirStringRefCreate(static_cast<const char *>(object.data()), object.size()), refs.data(),
+        static_cast<intptr_t>(refs.size()), appendString, &error);
+    if (!handle)
+      throw std::runtime_error("cannot load the host object: " + error);
+  }
+  PyHostObject(const PyHostObject &) = delete;
+  ~PyHostObject() { flydslDestroyHostObject(handle); }
+
+  uint64_t lookup(const std::string &name) {
+    std::string error;
+    uint64_t address = flydslHostObjectLookup(
+        handle, mlirStringRefCreate(name.data(), name.size()), appendString, &error);
+    if (!address)
+      throw std::runtime_error("cannot resolve '" + name + "' in the host object: " + error);
+    return address;
+  }
+};
+
 } // namespace
 
 // =============================================================================
@@ -1246,4 +1281,10 @@ NB_MODULE(_mlirDialectsFly, m) {
       },
       "module"_a, "opt_level"_a = 2,
       "Emit a position-independent host object for an LLVM-dialect module; returns its bytes.");
+
+  nb::class_<PyHostObject>(m, "_HostObject",
+                           "An export_to_c object JIT-linked into this process.")
+      .def(nb::init<nb::bytes, nb::list>(), "object"_a, "shared_libs"_a,
+           "Load `shared_libs` globally, then JIT-link the object bytes.")
+      .def("lookup", &PyHostObject::lookup, "name"_a, "Address of a symbol the object defines.");
 }

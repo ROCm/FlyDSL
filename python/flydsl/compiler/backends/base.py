@@ -140,8 +140,9 @@ class BaseBackend(metaclass=ABCMeta):
         """
         return ""
 
+    @classmethod
     @abstractmethod
-    def jit_runtime_lib_basenames(self) -> List[str]:
+    def jit_runtime_lib_basenames(cls) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""
         ...
 
