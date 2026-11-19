@@ -540,6 +540,21 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
+def _operand_generator(expr: ast.expr) -> ast.GeneratorExp:
+    """Wrap *expr* as ``(expr for _ in (0,))``: evaluated only when the fold asks for it."""
+    return ast.GeneratorExp(
+        elt=expr,
+        generators=[
+            ast.comprehension(
+                target=ast.Name(id="__fly_once", ctx=ast.Store()),
+                iter=ast.Tuple(elts=[ast.Constant(0)], ctx=ast.Load()),
+                ifs=[],
+                is_async=0,
+            )
+        ],
+    )
+
+
 @ASTRewriter.register
 class RewriteBoolOps(Transformer):
     @staticmethod
@@ -560,18 +575,18 @@ class RewriteBoolOps(Transformer):
 
     @staticmethod
     @thunk_runner
-    def dsl_bool_op_(is_or, *thunks):
+    def dsl_bool_op_(is_or, *operands):
         # Fold left like Python, stopping once the chain is decided. Every operand arrives as a
-        # thunk, so each is evaluated at most once and only if the fold reaches it. Seeding with
-        # the identity lets the first operand take the same step as the rest.
+        # one-shot generator, so each is evaluated at most once and only if the fold reaches it.
+        # Seeding with the identity lets the first operand take the same step as the rest.
         # `and` and `or` each have an identity (True / False) and an absorbing element
         # (False / True). An operand already known to be one of them needs no op: the identity
         # leaves the accumulator alone, the absorbing element decides the chain.
         combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
         identity = not is_or
         result = identity
-        for thunk in thunks:
-            value = thunk()
+        for operand in operands:
+            value = next(operand)
             # A DSL value holds an ir.Value only while it is dynamic, so one that does not is
             # just a compile-time bool, and folds like one.
             if isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
@@ -622,18 +637,14 @@ class RewriteBoolOps(Transformer):
 
         if not isinstance(node.op, (ast.And, ast.Or)):
             return node
-        # Every operand is a thunk, so a walrus anywhere would bind inside one. Leave such
-        # chains to plain Python.
-        if any(isinstance(sub, ast.NamedExpr) for rhs in node.values for sub in ast.walk(rhs)):
-            return node
 
-        # One call per chain, every operand a thunk: keeps short-circuiting, evaluates each
-        # operand once, and stays linear in the operand count.
-        no_args = ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[], defaults=[])
+        # One call per chain, every operand a one-shot generator: keeps short-circuiting,
+        # evaluates each operand once, and stays linear in the operand count. A generator is
+        # what makes the rewrite transparent to a walrus, which binds in the enclosing function
+        # rather than in the generator (PEP 572), unlike the lambda a thunk would otherwise need.
         result = ast.Call(
             func=ast.Name("dsl_bool_op_", ctx=ast.Load()),
-            args=[ast.Constant(isinstance(node.op, ast.Or))]
-            + [ast.Lambda(args=no_args, body=rhs) for rhs in node.values],
+            args=[ast.Constant(isinstance(node.op, ast.Or))] + [_operand_generator(rhs) for rhs in node.values],
             keywords=[],
         )
 

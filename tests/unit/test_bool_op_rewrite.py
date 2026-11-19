@@ -62,6 +62,22 @@ def test_walrus_in_later_operand_binds_in_the_function():
     assert ASTRewriter.transform(f)(2) == (3, 3)
 
 
+def _walrus_in_a_dynamic_chain(a, b):
+    return (a and (c := b)), c
+
+
+def test_walrus_binds_in_the_function_even_when_the_chain_is_dynamic():
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            a, b = (Boolean(arith_const(1, ir.IntegerType.get_signless(1))) for _ in range(2))
+            chain, bound = ASTRewriter.transform(_walrus_in_a_dynamic_chain)(a, b)
+        names = [op.operation.name for op in module.body.operations]
+    assert bound is b
+    assert isinstance(chain, Boolean)
+    assert names.count("arith.andi") == 1
+
+
 def _dynamic_chains(a, b, c, d):
     return (a and b and c and d), (a or b or c or d)
 
