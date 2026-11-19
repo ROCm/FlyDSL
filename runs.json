@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-19T07:33:54Z",
+ "updated": "2026-11-19T07:36:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -102,39 +102,42 @@
    "branch": "skills/capture-kernel-trace-eager-pinning",
    "event": "pull_request",
    "title": "[Skills] capture-kernel-trace: trace eager launches, pin the GPU with ROCR_VISIBLE_DEVICES",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480042119",
    "created_at": "2026-11-19T07:29:47Z",
-   "updated_at": "2026-11-19T07:31:48Z",
+   "updated_at": "2026-11-19T07:32:09Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-19T07:31:48Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T07:32:05Z",
+     "completed_at": "2026-11-19T07:32:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480042119/job/135410663851"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-19T07:31:48Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T07:32:05Z",
+     "completed_at": "2026-11-19T07:32:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480042119/job/135410663898"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-19T07:31:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480042119/job/135410663903"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-19T07:32:05Z",
+     "completed_at": "2026-11-19T07:32:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480042119/job/135410663903",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
     }
    ]
   },
