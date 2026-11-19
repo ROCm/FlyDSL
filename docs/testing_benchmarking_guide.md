@@ -206,7 +206,7 @@ def insert_point(ctx):
 ```
 
 **Build discovery:** The configuration supports multiple build layouts:
-- `build-fly/python_packages` (preferred)
+- `$FLY_BUILD_DIR/python_packages` when `FLY_BUILD_DIR` is set (relative to the repo root), else `build-fly/python_packages` (preferred)
 - `build/python_packages/flydsl` (fallback)
 
 **Session hook:** Prevents pytest exit code 5 (no tests collected) from being treated as failure.
