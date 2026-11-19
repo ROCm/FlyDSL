@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-19T13:43:59Z",
+ "updated": "2026-11-19T14:36:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,21 +25,24 @@
    "branch": "main",
    "event": "push",
    "title": "[Tests] Keep tests that read source_ir off the JIT disk cache (#1435)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852",
    "created_at": "2026-11-19T12:23:43Z",
-   "updated_at": "2026-11-19T13:35:53Z",
+   "updated_at": "2026-11-19T14:34:05Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-19T13:35:53Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595763118"
+     "completed_at": "2026-11-19T14:34:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595763118",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
