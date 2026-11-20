@@ -126,7 +126,7 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
       │    fly-promote-regmem-to-vectorssa →                     │
       │    convert-fly-to-rocdl → canonicalize →                 │
       │    gpu.module(convert-scf-to-cf, cse,                    │
-      │       convert-rocdl-fastmath-ops,                       │
+      │       convert-rocdl-math-ops,                            │
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │

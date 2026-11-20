@@ -70,7 +70,7 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     assert full[:-1] == pre_binary
     assert pre_binary[-1] == "reconcile-unrealized-casts"
     gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
-    assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
+    assert "convert-rocdl-math-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     # Embedded codegen links through the in-process LLD library; the external
     # toolchain drives an upstream mlir-opt that only knows the upstream pass.
     assert full[-1].startswith(FLY_GPU_BINARY_PASS)
