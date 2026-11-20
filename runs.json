@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-20T02:38:39Z",
+ "updated": "2026-11-20T03:27:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44666027169,
+   "pr": 1454,
+   "commit": "7c41b4123f68eb48d7dfbf52a1a1941c928a0b59",
+   "branch": "fix/get-iter-fold",
+   "event": "pull_request",
+   "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169",
+   "created_at": "2026-11-20T03:11:35Z",
+   "updated_at": "2026-11-20T03:12:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 44648896330,
    "pr": 1326,
@@ -1876,52 +1891,6 @@
      "started_at": "2026-11-18T01:18:11Z",
      "completed_at": "2026-11-18T01:20:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506049"
-    }
-   ]
-  },
-  {
-   "run_id": 44075824377,
-   "pr": 1426,
-   "commit": "466a14bc2bbb08723bb3f7829150771dc75922e3",
-   "branch": "pr/feat-fx-range",
-   "event": "pull_request",
-   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44075824377",
-   "created_at": "2026-11-17T11:38:22Z",
-   "updated_at": "2026-11-18T02:51:14Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T14:27:52Z",
-     "completed_at": "2026-11-17T14:54:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44075824377/job/134529063842",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T14:36:56Z",
-     "completed_at": "2026-11-17T14:47:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44075824377/job/134529065035"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-17T14:28:13Z",
-     "completed_at": "2026-11-17T15:00:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44075824377/job/134529124285"
     }
    ]
   }
