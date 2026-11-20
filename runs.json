@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-20T03:54:21Z",
+ "updated": "2026-11-20T06:33:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44671774123,
+   "pr": null,
+   "commit": "304d441202a30e524971a0de49233121e5d17a51",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Fold fly.get_iter of fly.make_view (#1454)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123",
+   "created_at": "2026-11-20T04:03:04Z",
+   "updated_at": "2026-11-20T05:07:28Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T05:02:58Z",
+     "completed_at": "2026-11-20T05:51:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666585",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T04:47:18Z",
+     "completed_at": "2026-11-20T04:55:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666607"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-20T05:07:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666617"
+    }
+   ]
+  },
   {
    "run_id": 44670570441,
    "pr": 1454,
@@ -10,17 +56,48 @@
    "branch": "fix/get-iter-fold",
    "event": "pull_request",
    "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441",
    "created_at": "2026-11-20T03:51:57Z",
-   "updated_at": "2026-11-20T03:52:22Z",
+   "updated_at": "2026-11-20T06:31:33Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T05:07:22Z",
+     "completed_at": "2026-11-20T06:31:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082091"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T04:06:10Z",
+     "completed_at": "2026-11-20T04:33:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082118",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T04:20:47Z",
+     "completed_at": "2026-11-20T04:46:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082175"
+    }
+   ]
   },
   {
    "run_id": 44666027169,
-   "pr": 1454,
+   "pr": null,
    "commit": "7c41b4123f68eb48d7dfbf52a1a1941c928a0b59",
    "branch": "fix/get-iter-fold",
    "event": "pull_request",
@@ -114,13 +191,35 @@
    "branch": "pr/mx-preshuffle-w4-v2",
    "event": "pull_request",
    "title": "[Kernel][Perf] Pick the MXFP4 GEMM geometry from M and pipeline its fp4 K loop",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762",
    "created_at": "2026-11-19T22:09:52Z",
-   "updated_at": "2026-11-19T22:09:52Z",
+   "updated_at": "2026-11-20T06:29:19Z",
    "actor": "Monstertail",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-20T06:29:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762/job/136093481668"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T05:08:21Z",
+     "completed_at": "2026-11-20T05:33:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762/job/136093481693",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
   },
   {
    "run_id": 44617713253,
@@ -1858,43 +1957,6 @@
      "completed_at": "2026-11-18T01:33:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103/job/134495920519",
      "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44207461132,
-   "pr": 1395,
-   "commit": "e865d60adc470e70f54d00a132a0b53a3b5cfcdd",
-   "branch": "pr/layernorm-bwd",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Vectorize LayerNorm backward and reduce dgamma/dbias by column",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132",
-   "created_at": "2026-11-18T00:23:45Z",
-   "updated_at": "2026-11-18T03:10:56Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T01:18:08Z",
-     "completed_at": "2026-11-18T03:10:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132/job/134493025126"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T00:59:00Z",
-     "completed_at": "2026-11-18T01:25:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44207461132/job/134493025159",
-     "machine": "smci350-rck-g03-f12-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
     }
