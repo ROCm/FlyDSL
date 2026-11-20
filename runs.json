@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-20T12:29:55Z",
+ "updated": "2026-11-20T12:58:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "pr/fix-rocdl-math-ocml",
    "event": "pull_request",
    "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778",
    "created_at": "2026-11-20T10:48:33Z",
-   "updated_at": "2026-11-20T11:48:38Z",
+   "updated_at": "2026-11-20T12:56:17Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -87,10 +87,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-20T11:39:19Z",
-     "completed_at": null,
+     "completed_at": "2026-11-20T12:56:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778/job/136264681915"
     }
    ]
