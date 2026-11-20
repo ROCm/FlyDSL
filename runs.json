@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-20T03:27:09Z",
+ "updated": "2026-11-20T03:54:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44670570441,
+   "pr": 1454,
+   "commit": "34dfe1a6e459daf3ff57cad0afe2ff76890e874e",
+   "branch": "fix/get-iter-fold",
+   "event": "pull_request",
+   "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441",
+   "created_at": "2026-11-20T03:51:57Z",
+   "updated_at": "2026-11-20T03:52:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 44666027169,
    "pr": 1454,
@@ -10,13 +25,41 @@
    "branch": "fix/get-iter-fold",
    "event": "pull_request",
    "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169",
    "created_at": "2026-11-20T03:11:35Z",
-   "updated_at": "2026-11-20T03:12:56Z",
+   "updated_at": "2026-11-20T03:52:09Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-20T03:47:03Z",
+     "completed_at": "2026-11-20T03:51:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528467"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-20T03:50:02Z",
+     "completed_at": "2026-11-20T03:52:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528498"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-20T03:47:23Z",
+     "completed_at": "2026-11-20T03:52:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528537"
+    }
+   ]
   },
   {
    "run_id": 44648896330,
@@ -1854,43 +1897,6 @@
      "machine": "smci350-rck-g03-f12-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44206940767,
-   "pr": 1397,
-   "commit": "b71dbf3be74c97d4fbc00114c1330664b567898b",
-   "branch": "pr/rmsnorm-smoothquant",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add a persistent-row RMSNorm SmoothQuant kernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767",
-   "created_at": "2026-11-18T00:19:59Z",
-   "updated_at": "2026-11-18T02:33:58Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T00:42:34Z",
-     "completed_at": "2026-11-18T01:26:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506046",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-18T01:18:11Z",
-     "completed_at": "2026-11-18T01:20:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44206940767/job/134485506049"
     }
    ]
   }
