@@ -139,6 +139,48 @@ def test_fp4_gemm_4wave(M, N, K):
     _bench_fp4_gemm(M=M, N=N, K=K)
 
 
+def test_fp4_gemm_4wave_lds_reads_wait_for_their_loads(monkeypatch):
+    """Every LDS read must follow a wait_barrier that leaves none of its buffer's loads in flight.
+
+    The global->LDS copies are inline asm, so only these waits order them, and a read they miss fails only now
+    and then (ROCm/FlyDSL#1409). This replays the traced schedule: loads complete in issue order.
+    """
+    if ARCH != "gfx950":
+        pytest.skip(f"FP4 4-wave GEMM requires gfx950, got {ARCH}")
+    from kernels.gemm import fp4_gemm_4wave as k4
+
+    events = []
+
+    def record(owner, name, event):
+        original = getattr(owner, name)
+
+        def hook(*args):
+            events.append(event(*args))
+            return original(*args)
+
+        monkeypatch.setattr(owner, name, hook)
+
+    record(k4, "wait_barrier", lambda count: ("wait", count))
+    record(k4.G2SLoaderAsm, "_emit", lambda self, dst, *_: ("load", dst.byte_off // k4._LDS_BUF_BYTES))
+    record(k4.ScaleGatherLDS, "gather", lambda *_: ("load", "scales"))
+    record(k4.S2RLoaderFp4, "_vec_load_16xf8", lambda self, src, *_: ("read", src.byte_off // k4._LDS_BUF_BYTES))
+    M = N = 256
+    K = 1536  # prologue, two peeled K-steps, one loop iteration (traced once) and the tail
+    u8 = torch.uint8
+    args = (torch.empty(M * K // 2, dtype=u8), torch.empty(N * K // 2, dtype=u8), torch.empty(M * N, dtype=OUT_DTYPE))
+    args += (torch.empty(M * K // 32, dtype=u8), torch.empty(N * K // 32, dtype=u8), M, N, torch.cuda.current_stream())
+    flyc.compile(compile_fp4_gemm_4w(K=K, MN=(M, N)), *args, compile_only=True)
+    assert {kind for kind, _ in events} == {"wait", "load", "read"}
+    in_flight = []
+    for kind, value in events:
+        if kind == "wait":
+            in_flight = in_flight[max(len(in_flight) - value, 0) :]
+        elif kind == "load":
+            in_flight.append(value)
+        else:
+            assert value not in in_flight, f"LDS buffer {value} is read with {in_flight.count(value)} loads in flight"
+
+
 # ---------------------------------------------------------------------------
 # Steady-state benchmark vs aiter
 # ---------------------------------------------------------------------------

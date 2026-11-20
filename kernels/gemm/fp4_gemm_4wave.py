@@ -759,7 +759,8 @@ def compile_fp4_gemm_4w(
 
         wait_barrier((3 * N_TILES_A) + (4 * N_TILES_B))
         a0_frag = a_s2r.load(a_cur0)
-        wait_barrier((3 * N_TILES_A) + (3 * N_TILES_B))
+        # b_cur0 and b_cur1 are both read below, so only a_cur1 and the next K-step may stay in flight.
+        wait_barrier((3 * N_TILES_A) + (2 * N_TILES_B))
         b0_frag = b_s2r.load(b_cur0, preshuffled=True)
         # b1 is carried across steps (see _one_step); seed the carry here.
         b1_frag = b_s2r.load(b_cur1, preshuffled=True)
