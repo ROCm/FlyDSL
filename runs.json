@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-20T00:41:15Z",
+ "updated": "2026-11-20T01:39:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44648896330,
+   "pr": 1326,
+   "commit": "73e56d4f94efafdec269c8ebead17c8b75fa89e4",
+   "branch": "phil/compile-hints-copy",
+   "event": "pull_request",
+   "title": "[JIT] flyc.compile[hints] no longer leaves its hints on the function",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330",
+   "created_at": "2026-11-20T00:49:25Z",
+   "updated_at": "2026-11-20T01:37:13Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T01:04:32Z",
+     "completed_at": "2026-11-20T01:34:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860859",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T01:04:23Z",
+     "completed_at": "2026-11-20T01:15:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860944"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-20T01:04:50Z",
+     "completed_at": "2026-11-20T01:06:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860951"
+    }
+   ]
+  },
   {
    "run_id": 44625929762,
    "pr": 1453,
@@ -1878,21 +1924,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44075824377/job/134529124285"
     }
    ]
-  },
-  {
-   "run_id": 44053225099,
-   "pr": null,
-   "commit": "e2a2b1fcd8e1889ba8f31c31cb497869d0591994",
-   "branch": "main",
-   "event": "push",
-   "title": "[Docs] Point the TDM docstrings at the tiled atom (#1424)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44053225099",
-   "created_at": "2026-11-17T09:11:09Z",
-   "updated_at": "2026-11-17T09:12:45Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
