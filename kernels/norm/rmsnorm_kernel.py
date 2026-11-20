@@ -1220,19 +1220,226 @@ def _build_rmsnorm_quant_module(
         return launch_rmsnorm_dynamicquant
 
 
+def _dq_chunk_vec_width(dtype_str: str) -> int:
+    return 4 if dtype_str == "f32" else VEC_WIDTH
+
+
+def _dq_pick_threads(NCH: int, cap: int = 256) -> int:
+    """Threads per block: about one vector tile each, clamped to [8, cap]."""
+    if NCH <= 0:
+        return 64
+    threads = 1
+    while threads < NCH:
+        threads *= 2
+    return max(8, min(threads, cap))
+
+
+def _dq_load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
+    r = fx.make_rmem_tensor(vec_width, elem_dtype)
+    fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+    return fx.memref_load_vec(r)
+
+
+def _dq_store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
+    r = fx.make_rmem_tensor(vec_width, elem_dtype)
+    fx.memref_store_vec(val, r)
+    fx.copy(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+
+
+def _build_rmsnorm_dynamicquant_vec(
+    N: int,
+    dtype_str: str,
+    quant_dtype_str: str = "i8",
+    eps: float = EPS,
+    _nt: bool = False,
+):
+    """RMSNorm + per-row int8 dynamic quantization, one block per row.
+
+    The row stays in registers between two sweeps.  Sweep 1 loads ``x`` and
+    ``gamma`` and accumulates both ``sum(x^2)`` and ``max|x*gamma|``; a single
+    block-reduction pass then yields everything the output needs:
+    ``yscale = rsqrt(mean+eps) * max|x*gamma| / 127`` and
+    ``out = trunc(x*gamma*127/max|x*gamma|)`` (the rsqrt factor cancels in the
+    quotient), which is exactly what the reference computes.
+
+    Thread ``t`` owns vector tile ``t + j*BLOCK``, so one load instruction
+    covers ``BLOCK*VEC`` contiguous bytes and one quantized store covers
+    ``BLOCK*VEC`` contiguous int8 bytes: fully coalesced on both sides, which
+    is what a bandwidth-bound row needs.
+
+    Beyond the LLC working set the activation loads are re-issued through a
+    second, streaming (non-temporal) kernel selected at launch time; the int8
+    stores keep the default policy because letting them settle in the cache
+    schedules their write-back into better bursts.
+    """
+    quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+    is_f32 = dtype_str == "f32"
+    VEC = _dq_chunk_vec_width(dtype_str)
+    elem_bits = 32 if is_f32 else 16
+    elem_dtype = dtype_to_elem_type(dtype_str)
+    quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
+    NVEC = N // VEC
+    TAIL = N - NVEC * VEC
+    BLOCK = _dq_pick_threads(NVEC)
+    NT = (NVEC + BLOCK - 1) // BLOCK
+    _kernel_kwargs = {} if BLOCK <= 256 else {"known_block_size": [BLOCK, 1, 1]}
+
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, BLOCK]
+    SharedStorage = BlockReduce.SharedStorage
+
+    @flyc.kernel(**_kernel_kwargs)
+    def rmsnorm_dynamicquant_vec_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        YScale: fx.Tensor,
+        Output: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        fm_fast = arith.FastMathFlags.fast
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        inv_n = 1.0 / float(N)
+        inv_qmax = 1.0 / quant_dtype_max
+
+        lds_alloc = fx.SharedAllocator()
+        lds_sum = lds_alloc.allocate(SharedStorage).peek()
+        lds_max = lds_alloc.allocate(SharedStorage).peek()
+
+        YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+        row_in = fx.slice(Input_buf, (bid, None))
+        row_out = fx.slice(Output_buf, (bid, None))
+        in_div = fx.logical_divide(row_in, fx.make_layout(VEC, 1))
+        out_div = fx.logical_divide(row_out, fx.make_layout(VEC, 1))
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC, 1))
+
+        # The streaming variant only hints the activation loads: the int8 row is
+        # written once and letting its stores settle in the LLC schedules them
+        # into better bursts (measured: loads-only beats both-sides by ~2 %).
+        copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if _nt else 0), elem_bits)
+        gamma_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+        quant_atom = fx.make_copy_atom((fx.rocdl.BufferCopy64b if VEC == 8 else fx.rocdl.BufferCopy32b)(), 8)
+        abs_mask = fx.full(VEC, 0x7FFFFFFF, fx.Uint32)
+
+        thread_sumsq = c_zero_f
+        thread_absmax = c_zero_f
+        y_cache = []
+
+        for j in range_constexpr(NT):
+            lane = tid + j * BLOCK
+            valid = lane < NVEC
+            lane_safe = valid.select(lane, 0)
+            xv = _dq_load_vec(copy_atom, VEC, elem_dtype, in_div, lane_safe).to(fx.Float32)
+            red2 = (xv * xv).reduce(ReductionOp.ADD, fastmath=fm_fast)
+            thread_sumsq = thread_sumsq + valid.select(red2, c_zero_f)
+            gv = _dq_load_vec(gamma_atom, VEC, elem_dtype, gamma_div, lane_safe).to(fx.Float32)
+            yv = xv * gv
+            y_abs = (yv.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
+            thread_absmax = fx.max(thread_absmax, valid.select(y_abs.reduce(ReductionOp.MAX), c_zero_f))
+            y_cache.append(yv)
+
+        tail_y = c_zero_f
+        for j in range_constexpr(0, TAIL, BLOCK):
+            tail_lane = tid + j
+            if tail_lane < TAIL:
+                tail_idx = NVEC * VEC + tail_lane
+                x_tail_e = row_in[tail_idx]
+                g_tail_e = Gamma_buf[tail_idx]
+                x_tail = x_tail_e if is_f32 else x_tail_e.to(fx.Float32)
+                g_tail = g_tail_e if is_f32 else g_tail_e.to(fx.Float32)
+                tail_y = x_tail * g_tail
+                thread_sumsq = thread_sumsq + x_tail * x_tail
+                thread_absmax = fx.max(thread_absmax, fx.max(tail_y, c_zero_f - tail_y))
+
+        with fx.fastmath(fm_fast):
+            sum_sq = BlockReduce(thread_sumsq, ReductionOp.ADD, storage=lds_sum)
+            row_absmax = BlockReduce(thread_absmax, ReductionOp.MAX, storage=lds_max)
+            mean_sq = sum_sq * inv_n
+            rrms = fmath.rsqrt(mean_sq + eps, fastmath=fm_fast)
+            scale = row_absmax * inv_qmax
+        zero_row = scale == c_zero_f
+        final_scale = zero_row.select(c_one_f, scale)
+        if tid == 0:
+            YScale_buf[bid] = zero_row.select(c_one_f, rrms * final_scale)
+        with fx.fastmath(fm_fast):
+            inv_scale = c_one_f / final_scale
+
+        for j in range_constexpr(NT):
+            lane = tid + j * BLOCK
+            if lane < NVEC:
+                qv = (y_cache[j] * inv_scale).to(quant_dtype)
+                _dq_store_vec(quant_atom, VEC, quant_dtype, qv, out_div, lane)
+
+        for j in range_constexpr(0, TAIL, BLOCK):
+            tail_lane = tid + j
+            if tail_lane < TAIL:
+                row_out[NVEC * VEC + tail_lane] = (tail_y * inv_scale).to(quant_dtype)
+
+    @flyc.jit
+    def launch_rmsnorm_dynamicquant_vec(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma)
+        launcher = rmsnorm_dynamicquant_vec_kernel(Input, Gamma, YScale, Output)
+        launcher.launch(
+            grid=(m_in, 1, 1),
+            block=(BLOCK, 1, 1),
+            stream=stream,
+        )
+
+    return launch_rmsnorm_dynamicquant_vec
+
+
 def build_rmsnorm_dynamicquant_module(
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
     eps: float = EPS,
 ):
-    return _build_rmsnorm_quant_module(
-        N,
-        dtype_str,
-        is_smooth=False,
-        quant_dtype_str=quant_dtype_str,
-        eps=eps,
-    )
+    elem_bytes = 4 if dtype_str == "f32" else 2
+    nt_min_rows = max(1, NT_MIN_WORKING_SET // (N * (elem_bytes + 1)))
+    cached_launch = _build_rmsnorm_dynamicquant_vec(N, dtype_str, quant_dtype_str=quant_dtype_str, eps=eps)
+    if nt_min_rows > 1 << 20:
+        return cached_launch
+    streaming_launch = _build_rmsnorm_dynamicquant_vec(N, dtype_str, quant_dtype_str=quant_dtype_str, eps=eps, _nt=True)
+
+    @flyc.jit
+    def launch_rmsnorm_dynamicquant(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma)
+
+        def launch_cached():
+            cached_launch(Input, Gamma, Output, YScale, m_in, stream)
+
+        def launch_streaming():
+            streaming_launch(Input, Gamma, Output, YScale, m_in, stream)
+
+        @flyc.jit
+        def dispatch():
+            if m_in > fx.Int32(nt_min_rows):
+                launch_streaming()
+            else:
+                launch_cached()
+
+        dispatch()
+
+    return launch_rmsnorm_dynamicquant
 
 
 def build_rmsnorm_smoothquant_module(

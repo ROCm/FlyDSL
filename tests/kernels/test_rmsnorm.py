@@ -1975,6 +1975,12 @@ def test_rmsnorm_dynamicquant():
     print("=" * 80)
 
     configs = _get_rmsnorm_configs()
+    if _get_rmsnorm_shape_override() is None:
+        configs += [
+            (5, 13, "f16"),  # one vector plus a scalar tail
+            (3, 2049, "f32"),  # f32 vector row with a one-element tail
+            (16384, 8192, "bf16"),  # past the last-level cache: streaming variant
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
