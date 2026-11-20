@@ -91,7 +91,16 @@ def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
   let summary = "Promote register memory to vector SSA values";
   let description = [{
     Promotes fly.make_ptr(register) memory semantics to vector SSA values.
-    Requires fly-convert-atom-call-to-ssa-form to have run first. 
+    Requires fly-convert-atom-call-to-ssa-form to have run first.
+
+    Addresses are resolved in bits through make_view, get_iter, recast_iter,
+    static add_offset, arith.select and the results and arguments of scf.if,
+    scf.for and scf.while. An allocation is promoted when every used address
+    of it resolves to one static offset; its storage is packed, in lanes that
+    every access covers whole. Otherwise it stays in memory.
+
+    Register memory is lexically scoped. Accessing it outside the region that
+    allocates it, or out of bounds of a promoted allocation, is an error.
   }];
 
   let dependentDialects = [

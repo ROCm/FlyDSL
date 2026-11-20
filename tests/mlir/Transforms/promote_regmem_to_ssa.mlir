@@ -6,6 +6,9 @@
 //   - register state is threaded across scf.for / scf.if / scf.while
 //   - tail mma_atom_call after the loop is rewritten to SSA form
 //   - final register ptr.load is replaced by vector extract ops
+//   - addresses resolve in bits through views, recasts, offsets, selects and
+//     SCF results/arguments; storage is packed in lanes every access covers
+//   - an allocation whose used address is not one static offset stays in memory
 
 // CHECK-LABEL: gpu.func @promote_accumulator_to_vector_ssa
 // CHECK-SAME: (%[[OUT:.*]]: !fly.ptr<f32, global>)
@@ -377,6 +380,241 @@ gpu.module @promote_rmem_to_vector_ssa {
       %val = fly.ptr.load(%local) : (!fly.ptr<i32, register>) -> i32
       fly.ptr.store(%val, %out) : (i32, !fly.ptr<i32, global>) -> ()
     }
+    gpu.return
+  }
+}
+
+gpu.module @promote_rmem_addresses {
+  // CHECK-LABEL: gpu.func @if_result
+  // CHECK-NOT: register
+  // CHECK: %[[STATE:.*]] = scf.if %{{.*}} -> (vector<4xi32>)
+  // CHECK: vector.extract_strided_slice %[[STATE]] {offsets = [0], sizes = [4], strides = [1]}
+  // CHECK-NOT: register
+  gpu.func @if_result(%out: !fly.ptr<i32, global>, %cond: i1) kernel {
+    %a = arith.constant dense<1> : vector<4xi32>
+    %b = arith.constant dense<2> : vector<4xi32>
+    %layout = fly.static : !fly.layout<4:1>
+    %ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+    %frag = fly.make_view(%ptr, %layout) : (!fly.ptr<i32, register>, !fly.layout<4:1>) -> !fly.memref<i32, register, 4:1>
+    %res = scf.if %cond -> (!fly.memref<i32, register, 4:1>) {
+      fly.ptr.store(%a, %ptr) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+      scf.yield %frag : !fly.memref<i32, register, 4:1>
+    } else {
+      fly.ptr.store(%b, %ptr) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+      scf.yield %frag : !fly.memref<i32, register, 4:1>
+    }
+    %iter = fly.get_iter(%res) : (!fly.memref<i32, register, 4:1>) -> !fly.ptr<i32, register>
+    %v = fly.ptr.load(%iter) : (!fly.ptr<i32, register>) -> vector<4xi32>
+    fly.ptr.store(%v, %out) : (vector<4xi32>, !fly.ptr<i32, global>) -> ()
+    gpu.return
+  }
+
+  // CHECK-LABEL: gpu.func @for_iter_arg
+  // CHECK-NOT: register
+  // CHECK: %[[LOOP:.*]] = scf.for {{.*}} iter_args(%{{.*}} = %{{.*}}) -> (vector<4xi32>)
+  // CHECK: scf.yield %{{.*}} : vector<4xi32>
+  // CHECK: vector.extract_strided_slice %[[LOOP]] {offsets = [0], sizes = [4], strides = [1]}
+  // CHECK-NOT: register
+  gpu.func @for_iter_arg(%out: !fly.ptr<i32, global>, %n: index) kernel {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %one = arith.constant dense<1> : vector<4xi32>
+    %layout = fly.static : !fly.layout<4:1>
+    %ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+    %frag = fly.make_view(%ptr, %layout) : (!fly.ptr<i32, register>, !fly.layout<4:1>) -> !fly.memref<i32, register, 4:1>
+    fly.ptr.store(%one, %ptr) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+    %res = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %frag) -> (!fly.memref<i32, register, 4:1>) {
+      %it = fly.get_iter(%acc) : (!fly.memref<i32, register, 4:1>) -> !fly.ptr<i32, register>
+      %cur = fly.ptr.load(%it) : (!fly.ptr<i32, register>) -> vector<4xi32>
+      %next = arith.addi %cur, %one : vector<4xi32>
+      fly.ptr.store(%next, %it) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+      scf.yield %acc : !fly.memref<i32, register, 4:1>
+    }
+    %iter = fly.get_iter(%res) : (!fly.memref<i32, register, 4:1>) -> !fly.ptr<i32, register>
+    %v = fly.ptr.load(%iter) : (!fly.ptr<i32, register>) -> vector<4xi32>
+    fly.ptr.store(%v, %out) : (vector<4xi32>, !fly.ptr<i32, global>) -> ()
+    gpu.return
+  }
+
+  // CHECK-LABEL: gpu.func @while_carried
+  // CHECK-NOT: register
+  // CHECK: %[[LOOP:.*]]:2 = scf.while (%{{.*}} = %{{.*}}, %{{.*}} = %{{.*}}) : (i32, vector<4xi32>) -> (i32, vector<4xi32>)
+  // CHECK: vector.extract_strided_slice %[[LOOP]]#1 {offsets = [0], sizes = [4], strides = [1]}
+  // CHECK-NOT: register
+  gpu.func @while_carried(%out: !fly.ptr<i32, global>, %n: i32) kernel {
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %one = arith.constant dense<1> : vector<4xi32>
+    %layout = fly.static : !fly.layout<4:1>
+    %ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+    %frag = fly.make_view(%ptr, %layout) : (!fly.ptr<i32, register>, !fly.layout<4:1>) -> !fly.memref<i32, register, 4:1>
+    fly.ptr.store(%one, %ptr) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+    %res:2 = scf.while (%k = %c0_i32, %f = %frag) : (i32, !fly.memref<i32, register, 4:1>) -> (i32, !fly.memref<i32, register, 4:1>) {
+      %cond = arith.cmpi slt, %k, %n : i32
+      scf.condition(%cond) %k, %f : i32, !fly.memref<i32, register, 4:1>
+    } do {
+    ^bb0(%k2: i32, %f2: !fly.memref<i32, register, 4:1>):
+      %it = fly.get_iter(%f2) : (!fly.memref<i32, register, 4:1>) -> !fly.ptr<i32, register>
+      %cur = fly.ptr.load(%it) : (!fly.ptr<i32, register>) -> vector<4xi32>
+      %next = arith.addi %cur, %one : vector<4xi32>
+      fly.ptr.store(%next, %it) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+      %k3 = arith.addi %k2, %c1_i32 : i32
+      scf.yield %k3, %f2 : i32, !fly.memref<i32, register, 4:1>
+    }
+    %iter = fly.get_iter(%res#1) : (!fly.memref<i32, register, 4:1>) -> !fly.ptr<i32, register>
+    %v = fly.ptr.load(%iter) : (!fly.ptr<i32, register>) -> vector<4xi32>
+    fly.ptr.store(%v, %out) : (vector<4xi32>, !fly.ptr<i32, global>) -> ()
+    gpu.return
+  }
+
+  // CHECK-LABEL: gpu.func @select_same_slot
+  // CHECK-NOT: register
+  // CHECK: vector.extract_strided_slice %{{.*}} {offsets = [4], sizes = [4], strides = [1]}
+  // CHECK-NOT: register
+  gpu.func @select_same_slot(%out: !fly.ptr<i32, global>, %cond: i1) kernel {
+    %val = arith.constant dense<3> : vector<4xi32>
+    %c4 = fly.static : !fly.int_tuple<4>
+    %ptr = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<i32, register>
+    %p1 = fly.add_offset(%ptr, %c4) : (!fly.ptr<i32, register>, !fly.int_tuple<4>) -> !fly.ptr<i32, register>
+    %p2 = fly.add_offset(%ptr, %c4) : (!fly.ptr<i32, register>, !fly.int_tuple<4>) -> !fly.ptr<i32, register>
+    fly.ptr.store(%val, %p1) : (vector<4xi32>, !fly.ptr<i32, register>) -> ()
+    %p = arith.select %cond, %p1, %p2 : !fly.ptr<i32, register>
+    %v = fly.ptr.load(%p) : (!fly.ptr<i32, register>) -> vector<4xi32>
+    fly.ptr.store(%v, %out) : (vector<4xi32>, !fly.ptr<i32, global>) -> ()
+    gpu.return
+  }
+
+  // Same-width views keep the storage element as the lane.
+  // CHECK-LABEL: gpu.func @same_width_view
+  // CHECK-NOT: register
+  // CHECK: %[[INIT:.*]] = ub.poison : vector<1xf32>
+  // CHECK: %[[LANE:.*]] = vector.extract %{{.*}}[0] : f32 from vector<1xf32>
+  // CHECK: vector.insert %[[LANE]], %[[INIT]] [0] : f32 into vector<1xf32>
+  // CHECK-NOT: register
+  gpu.func @same_width_view(%out: !fly.ptr<f32, global>, %v: i32) kernel {
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
+    %as_i32 = fly.recast_iter(%reg) : (!fly.ptr<f32, register>) -> !fly.ptr<i32, register>
+    fly.ptr.store(%v, %as_i32) : (i32, !fly.ptr<i32, register>) -> ()
+    %f = fly.ptr.load(%reg) : (!fly.ptr<f32, register>) -> f32
+    fly.ptr.store(%f, %out) : (f32, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
+
+  // Byte storage written through an f32 view at f32 offset 1 (byte 4) and read
+  // back as two floats: the f32 store covers four byte lanes.
+  // CHECK-LABEL: gpu.func @wide_view_of_byte_storage
+  // CHECK-NOT: register
+  // CHECK: %[[INIT:.*]] = ub.poison : vector<8xi8>
+  // CHECK: %[[LO:.*]] = vector.insert_strided_slice %{{.*}}, %[[INIT]] {offsets = [0], strides = [1]} : vector<4xi8> into vector<8xi8>
+  // CHECK: %[[F:.*]] = vector.from_elements %{{.*}} : vector<1xf32>
+  // CHECK: %[[FB:.*]] = vector.bitcast %[[F]] : vector<1xf32> to vector<4xi8>
+  // CHECK: %[[ALL:.*]] = vector.insert_strided_slice %[[FB]], %[[LO]] {offsets = [4], strides = [1]} : vector<4xi8> into vector<8xi8>
+  // CHECK: %[[BYTES:.*]] = vector.extract_strided_slice %[[ALL]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
+  // CHECK: vector.bitcast %[[BYTES]] : vector<8xi8> to vector<2xf32>
+  // CHECK-NOT: register
+  gpu.func @wide_view_of_byte_storage(%out: !fly.ptr<f32, global>, %lo: vector<4xi8>, %hi: f32) kernel {
+    %c1 = fly.static : !fly.int_tuple<1>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<i8, register>
+    fly.ptr.store(%lo, %reg) : (vector<4xi8>, !fly.ptr<i8, register>) -> ()
+    %as_f32 = fly.recast_iter(%reg) : (!fly.ptr<i8, register>) -> !fly.ptr<f32, register>
+    %second = fly.add_offset(%as_f32, %c1) : (!fly.ptr<f32, register>, !fly.int_tuple<1>) -> !fly.ptr<f32, register>
+    fly.ptr.store(%hi, %second) : (f32, !fly.ptr<f32, register>) -> ()
+    %v = fly.ptr.load(%as_f32) : (!fly.ptr<f32, register>) -> vector<2xf32>
+    fly.ptr.store(%v, %out) : (vector<2xf32>, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
+
+  // An f16 view narrows f32 storage to 16-bit lanes.
+  // CHECK-LABEL: gpu.func @narrow_view_of_wide_storage
+  // CHECK-NOT: register
+  // CHECK: %[[INIT:.*]] = ub.poison : vector<4xi16>
+  // CHECK: %[[H:.*]] = vector.extract %{{.*}}[0] : i16 from vector<1xi16>
+  // CHECK: %[[STATE:.*]] = vector.insert %[[H]], %[[INIT]] [1] : i16 into vector<4xi16>
+  // CHECK: %[[LANES:.*]] = vector.extract_strided_slice %[[STATE]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xi16> to vector<4xi16>
+  // CHECK: vector.bitcast %[[LANES]] : vector<4xi16> to vector<2xf32>
+  // CHECK-NOT: register
+  gpu.func @narrow_view_of_wide_storage(%out: !fly.ptr<f32, global>, %h: f16) kernel {
+    %c1 = fly.static : !fly.int_tuple<1>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 2 : i64}} : () -> !fly.ptr<f32, register>
+    %as_f16 = fly.recast_iter(%reg) : (!fly.ptr<f32, register>) -> !fly.ptr<f16, register>
+    %high = fly.add_offset(%as_f16, %c1) : (!fly.ptr<f16, register>, !fly.int_tuple<1>) -> !fly.ptr<f16, register>
+    fly.ptr.store(%h, %high) : (f16, !fly.ptr<f16, register>) -> ()
+    %v = fly.ptr.load(%reg) : (!fly.ptr<f32, register>) -> vector<2xf32>
+    fly.ptr.store(%v, %out) : (vector<2xf32>, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
+
+  // Storage is packed: two i4 elements read back through an i8 view form one
+  // byte, as MFMA takes packed sub-byte operands.
+  // CHECK-LABEL: gpu.func @packed_sub_byte_storage
+  // CHECK-NOT: register
+  // CHECK: %[[INIT:.*]] = ub.poison : vector<4xi4>
+  // CHECK: %[[STATE:.*]] = vector.insert_strided_slice %{{.*}}, %[[INIT]] {offsets = [0], strides = [1]} : vector<4xi4> into vector<4xi4>
+  // CHECK: %[[LO:.*]] = vector.extract_strided_slice %[[STATE]] {offsets = [0], sizes = [2], strides = [1]} : vector<4xi4> to vector<2xi4>
+  // CHECK: vector.bitcast %[[LO]] : vector<2xi4> to vector<1xi8>
+  // CHECK-NOT: register
+  gpu.func @packed_sub_byte_storage(%out: !fly.ptr<i8, global>, %v: vector<4xi4>) kernel {
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i4, register>
+    fly.ptr.store(%v, %reg) : (vector<4xi4>, !fly.ptr<i4, register>) -> ()
+    %as_i8 = fly.recast_iter(%reg) : (!fly.ptr<i4, register>) -> !fly.ptr<i8, register>
+    %b = fly.ptr.load(%as_i8) : (!fly.ptr<i8, register>) -> i8
+    fly.ptr.store(%b, %out) : (i8, !fly.ptr<i8, global>) -> ()
+    gpu.return
+  }
+
+  // A sub-byte view of byte storage narrows the lanes to 4 bits.
+  // CHECK-LABEL: gpu.func @sub_byte_view_of_byte_storage
+  // CHECK-NOT: register
+  // CHECK: %[[INIT:.*]] = ub.poison : vector<4xi4>
+  // CHECK: vector.insert %{{.*}}, %[[INIT]] [1] : i4 into vector<4xi4>
+  // CHECK-NOT: register
+  gpu.func @sub_byte_view_of_byte_storage(%out: !fly.ptr<i8, global>, %h: f4E2M1FN) kernel {
+    %c1 = fly.static : !fly.int_tuple<1>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 2 : i64}} : () -> !fly.ptr<i8, register>
+    %as_f4 = fly.recast_iter(%reg) : (!fly.ptr<i8, register>) -> !fly.ptr<f4E2M1FN, register>
+    %high = fly.add_offset(%as_f4, %c1) : (!fly.ptr<f4E2M1FN, register>, !fly.int_tuple<1>) -> !fly.ptr<f4E2M1FN, register>
+    fly.ptr.store(%h, %high) : (f4E2M1FN, !fly.ptr<f4E2M1FN, register>) -> ()
+    %b = fly.ptr.load(%reg) : (!fly.ptr<i8, register>) -> i8
+    fly.ptr.store(%b, %out) : (i8, !fly.ptr<i8, global>) -> ()
+    gpu.return
+  }
+
+  // A dynamic offset yields no concrete slot index, so the access must stay in
+  // memory form.  Promoting it would silently read slot 0, because a dynamic
+  // LeafAttr carries value == 0.
+  // CHECK-LABEL: gpu.func @skip_register_dynamic_offset
+  // CHECK: fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}}
+  // CHECK: fly.add_offset
+  // CHECK: fly.ptr.load
+  // CHECK-NOT: vector.extract
+  gpu.func @skip_register_dynamic_offset(%out: !fly.ptr<f32, global>, %idx: i32) kernel {
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f32, register>
+    %dyn = fly.make_int_tuple(%idx) : (i32) -> !fly.int_tuple<?>
+    %slot = fly.add_offset(%reg, %dyn) : (!fly.ptr<f32, register>, !fly.int_tuple<?>) -> !fly.ptr<f32, register>
+    %val = fly.ptr.load(%slot) : (!fly.ptr<f32, register>) -> f32
+    fly.ptr.store(%val, %out) : (f32, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
+
+  // Different allocations on different paths keep both in memory, while an
+  // allocation addressed statically in the same function is promoted.
+  // CHECK-LABEL: gpu.func @skip_register_chosen_by_control_flow
+  // CHECK: %[[A:.*]] = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+  // CHECK: %[[B:.*]] = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+  // CHECK-NOT: allocSize = 1
+  // CHECK: %[[P:.*]] = arith.select %{{.*}}, %[[A]], %[[B]] : !fly.ptr<i32, register>
+  // CHECK: fly.ptr.load(%[[P]])
+  // CHECK: vector.extract %{{.*}}[0] : i32 from vector<1xi32>
+  gpu.func @skip_register_chosen_by_control_flow(%out: !fly.ptr<i32, global>, %cond: i1, %x: i32) kernel {
+    %a = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+    %b = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<i32, register>
+    %c = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+    fly.ptr.store(%x, %c) : (i32, !fly.ptr<i32, register>) -> ()
+    %p = arith.select %cond, %a, %b : !fly.ptr<i32, register>
+    %v = fly.ptr.load(%p) : (!fly.ptr<i32, register>) -> vector<4xi32>
+    fly.ptr.store(%v, %out) : (vector<4xi32>, !fly.ptr<i32, global>) -> ()
+    %y = fly.ptr.load(%c) : (!fly.ptr<i32, register>) -> i32
+    fly.ptr.store(%y, %out) : (i32, !fly.ptr<i32, global>) -> ()
     gpu.return
   }
 }

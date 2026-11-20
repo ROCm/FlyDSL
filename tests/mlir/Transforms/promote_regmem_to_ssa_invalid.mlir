@@ -1,60 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-promote-regmem-to-vectorssa | FileCheck %s
+// RUN: %fly-opt %s --fly-promote-regmem-to-vectorssa --split-input-file --verify-diagnostics
 
-// CHECK-LABEL: gpu.func @skip_register_recast_iter
-// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
-// CHECK: fly.recast_iter
-// CHECK: fly.ptr.load
-// CHECK: fly.ptr.store
-gpu.module @promote_regmem_to_ssa_recast_skip {
-  gpu.func @skip_register_recast_iter(%out: !fly.ptr<i32, global>) kernel {
-    %reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
-    %recast = "fly.recast_iter"(%reg) : (!fly.ptr<f32, register>) -> !fly.ptr<i32, register>
-    %val = fly.ptr.load(%recast) : (!fly.ptr<i32, register>) -> i32
-    fly.ptr.store(%val, %out) : (i32, !fly.ptr<i32, global>) -> ()
-    gpu.return
-  }
+// Errors: a static access outside a promoted allocation, an access outside the
+// region that allocates the register memory, and a register address that is
+// still in use after promotion.
 
-// CHECK-LABEL: gpu.func @mixed_recast_and_normal
-// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
-// CHECK: fly.recast_iter
-// CHECK: fly.ptr.load(%{{.*}}) : (!fly.ptr<i32, register>) -> i32
-// CHECK-NOT: !fly.ptr<i32, register, 1 : i64>
-// CHECK: ub.poison : vector<1xi32>
-// CHECK: %[[STATE:.*]] = vector.insert %{{.*}}, %{{.*}} [0] : i32 into vector<1xi32>
-// CHECK: %[[FINAL:.*]] = vector.extract %[[STATE]][0] : i32 from vector<1xi32>
-  gpu.func @mixed_recast_and_normal(%out: !fly.ptr<i32, global>) kernel {
-    %c0_i32 = arith.constant 0 : i32
-    %c1_i32 = arith.constant 1 : i32
-
-    %recast_reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
-    %recast = "fly.recast_iter"(%recast_reg) : (!fly.ptr<f32, register>) -> !fly.ptr<i32, register>
-    %recast_val = fly.ptr.load(%recast) : (!fly.ptr<i32, register>) -> i32
-
-    %normal_reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
-    fly.ptr.store(%c1_i32, %normal_reg) : (i32, !fly.ptr<i32, register>) -> ()
-    %normal_val = fly.ptr.load(%normal_reg) : (!fly.ptr<i32, register>) -> i32
-
-    %sum = arith.addi %recast_val, %normal_val : i32
-    fly.ptr.store(%sum, %out) : (i32, !fly.ptr<i32, global>) -> ()
-    gpu.return
-  }
-
-// A dynamic offset yields no concrete slot index, so the access must stay in
-// memory form.  Promoting it would silently read slot 0, because a dynamic
-// LeafAttr carries value == 0.
-// CHECK-LABEL: gpu.func @skip_register_dynamic_offset
-// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}}
-// CHECK: fly.add_offset
-// CHECK: fly.ptr.load
-// CHECK-NOT: vector.extract
-  gpu.func @skip_register_dynamic_offset(%out: !fly.ptr<f32, global>, %idx: i32) kernel {
+gpu.module @out_of_bounds {
+  gpu.func @out_of_bounds(%out: !fly.ptr<f32, global>) kernel {
+    %c2 = fly.static : !fly.int_tuple<2>
     %reg = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f32, register>
-    %dyn = fly.make_int_tuple(%idx) : (i32) -> !fly.int_tuple<?>
-    %slot = fly.add_offset(%reg, %dyn) : (!fly.ptr<f32, register>, !fly.int_tuple<?>) -> !fly.ptr<f32, register>
-    %val = fly.ptr.load(%slot) : (!fly.ptr<f32, register>) -> f32
-    fly.ptr.store(%val, %out) : (f32, !fly.ptr<f32, global>) -> ()
+    %slot = fly.add_offset(%reg, %c2) : (!fly.ptr<f32, register>, !fly.int_tuple<2>) -> !fly.ptr<f32, register>
+    // expected-error@+1 {{out-of-bounds register access: bits [64, 192) of a 128-bit allocation}}
+    %val = fly.ptr.load(%slot) : (!fly.ptr<f32, register>) -> vector<4xf32>
+    fly.ptr.store(%val, %out) : (vector<4xf32>, !fly.ptr<f32, global>) -> ()
+    gpu.return
+  }
+}
+
+// -----
+
+gpu.module @outside_allocating_region {
+  gpu.func @outside_allocating_region(%out: !fly.ptr<i32, global>, %x: i32) kernel {
+    %false = arith.constant false
+    %r = scf.while : () -> !fly.ptr<i32, register> {
+      %p = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+      fly.ptr.store(%x, %p) : (i32, !fly.ptr<i32, register>) -> ()
+      scf.condition(%false) %p : !fly.ptr<i32, register>
+    } do {
+    ^bb0(%p: !fly.ptr<i32, register>):
+      scf.yield
+    }
+    // expected-error@+1 {{register memory accessed outside the region that allocates it}}
+    %v = fly.ptr.load(%r) : (!fly.ptr<i32, register>) -> i32
+    fly.ptr.store(%v, %out) : (i32, !fly.ptr<i32, global>) -> ()
+    gpu.return
+  }
+}
+
+// -----
+
+gpu.module @register_poison_in_input {
+  gpu.func @register_poison_in_input(%out: !fly.ptr<i32, global>, %x: i32) kernel {
+    %r = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+    fly.ptr.store(%x, %r) : (i32, !fly.ptr<i32, register>) -> ()
+    %p = ub.poison : !fly.ptr<i32, register>
+    // expected-error@+1 {{register operand/result remain after rmem SSA promotion}}
+    %v = fly.ptr.load(%p) : (!fly.ptr<i32, register>) -> i32
+    fly.ptr.store(%v, %out) : (i32, !fly.ptr<i32, global>) -> ()
     gpu.return
   }
 }
