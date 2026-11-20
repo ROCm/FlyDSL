@@ -151,6 +151,7 @@ def Fly_GetLayoutOp : Fly_Op<"get_layout", [Pure, DeclareOpInterfaceMethods<Infe
 def Fly_GetIterOp : Fly_Op<"get_iter", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_TensorLikeType:$memref);
   let results = (outs Fly_IteratorLikeType:$result);
+  let hasFolder = 1;
 }
 
 
