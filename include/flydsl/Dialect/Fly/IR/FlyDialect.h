@@ -18,10 +18,26 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "flydsl/Core/Trait.hpp"
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyEnums.h.inc"
 
+namespace mlir::fly {
+
+struct ResourceUsage {
+  enum Kind { Allocate, Free };
+
+  Kind kind;
+  Attribute resource;
+  int64_t amount;
+  Value allocation;
+};
+
+} // namespace mlir::fly
+
 #include "flydsl/Dialect/Fly/IR/FlyAttrInterfaces.h.inc"
+#include "flydsl/Dialect/Fly/IR/FlyOpInterfaces.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeInterfaces.h.inc"
 
 #define GET_ATTRDEF_CLASSES

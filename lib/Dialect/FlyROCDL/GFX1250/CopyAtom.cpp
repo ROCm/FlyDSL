@@ -280,7 +280,7 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
 
   SmallVector<int32_t> tileShape(rank);
   for (int32_t i = 0; i < rank; ++i)
-    tileShape[i] = layout.getShape().at(i).getLeafAsInt().getValue();
+    tileShape[i] = layout.getShape().at(i).getLeaf().getValue();
   bool hasStaticStride = layout.isStaticStride();
 
   int32_t elemBits = glbMemTy.getElemTy().getIntOrFloatBitWidth();
@@ -318,7 +318,7 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
   for (int32_t i = 0; i < rank - 1; ++i) {
     Value st = slotField(kStrideSlot0 + i);
     if (hasStaticStride) {
-      int64_t s = layout.getStride().at(i).getLeafAsInt().getValue();
+      int64_t s = layout.getStride().at(i).getLeaf().getValue();
       Value unset =
           arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, st,
                                 arith::ConstantIntOp::create(builder, loc, kOuterStrideUnset, 64));

@@ -128,7 +128,7 @@ Attribute MmaOpGFX1250_WMMAScaleType::getThrLayout() const {
 }
 
 Attribute MmaOpGFX1250_WMMAScaleType::getShapeMNK() const {
-  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+  return FxT(FxC(getM()), FxC(getN()), FxC(getK()));
 }
 
 Type MmaOpGFX1250_WMMAScaleType::getValTypeA() const { return getElemTyA(); }

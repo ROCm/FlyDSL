@@ -145,8 +145,8 @@ def make_tiled_copy_A(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_A_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [0]), 1),
-        make_layout(select(tile_size, [2]), 1),
+        make_layout(tile_size[0], 1),
+        make_layout(tile_size[2], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -157,8 +157,8 @@ def make_tiled_copy_B(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_B_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [1]), 1),
-        make_layout(select(tile_size, [2]), 1),
+        make_layout(tile_size[1], 1),
+        make_layout(tile_size[2], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -169,8 +169,8 @@ def make_tiled_copy_C(copy_atom, tiled_mma):
     layout_tv = tiled_mma.tv_layout_C_tiled
     tile_size = tiled_mma.tile_size_mnk
     tile_mn = make_tile(
-        make_layout(select(tile_size, [0]), 1),
-        make_layout(select(tile_size, [1]), 1),
+        make_layout(tile_size[0], 1),
+        make_layout(tile_size[1], 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
@@ -184,7 +184,7 @@ def _gather_scatter_expand(offset_tensor, operand, pred):
 
     tv = offset_tensor.shape[0].unpack()
     if offset_rank == 1:
-        for v in range(tv):
+        for v in range_constexpr(tv):
             operand_v = operand[None, v]
             pred_v = None if pred is None else pred[None, v]
             yield offset_tensor[v], operand_v, pred_v
@@ -197,8 +197,8 @@ def _gather_scatter_expand(offset_tensor, operand, pred):
 
     rest = size(offset_tensor.shape[1]).unpack()
 
-    for v in range(tv):
-        for i in range(rest):
+    for v in range_constexpr(tv):
+        for i in range_constexpr(rest):
             operand_v = operand[(None, v), i]
             pred_v = None if pred is None else pred[None, v, i]
             yield offset_tensor[v, i], operand_v, pred_v

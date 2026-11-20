@@ -3,15 +3,15 @@
 
 """Minimal read-only ELF64 little-endian parser.
 
-Covers exactly what AOT export needs -- a shared library's ``DT_SONAME`` /
-``DT_NEEDED`` entries and an object's global symbols -- so export does not
-depend on ``readelf``, ``ldd`` or ``nm`` being installed. Malformed input raises
-``ValueError``.
+Covers exactly what AOT export and loading need -- a shared library's
+``DT_SONAME`` / ``DT_NEEDED`` entries and an object's global symbols and their
+contents -- so neither depends on ``readelf``, ``ldd`` or ``nm`` being
+installed. Malformed input raises ``ValueError``.
 """
 
 import struct
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple, Union
+from typing import Iterator, List, NamedTuple, Optional, Tuple, Union
 
 _EHDR = struct.Struct("<16sHHIQQQIHHHHHH")
 _PHDR = struct.Struct("<IIQQQQQQ")
@@ -22,6 +22,7 @@ _DYN = struct.Struct("<qQ")
 _PT_LOAD = 1
 _PT_DYNAMIC = 2
 _SHT_SYMTAB = 2
+_SHT_NOBITS = 8
 _SHT_DYNSYM = 11
 _DT_NULL = 0
 _DT_NEEDED = 1
@@ -120,6 +121,25 @@ def _dynamic_info(source: Union[str, Path, bytes]) -> _DynamicInfo:
     return _DynamicInfo(soname, tuple(needed))
 
 
+def _sections(data: bytes) -> List[tuple]:
+    hdr = _header(data)
+    # (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize)
+    return [_unpack(_SHDR, data, hdr.shoff + i * _SHDR.size) for i in range(hdr.shnum)]
+
+
+def _symbols(data: bytes, sections: List[tuple], dynamic: bool) -> Iterator[Tuple[str, tuple]]:
+    """Yield ``(name, (st_name, st_info, st_other, st_shndx, st_value, st_size))`` per symbol."""
+    for _name, sh_type, _flags, _addr, offset, size, link, _info, _align, _entsize in sections:
+        if sh_type != (_SHT_DYNSYM if dynamic else _SHT_SYMTAB):
+            continue
+        if link >= len(sections):
+            raise ValueError("symbol table links to a missing string table")
+        strtab = sections[link][4]
+        for off in range(offset, offset + size, _SYM.size):
+            sym = _unpack(_SYM, data, off)
+            yield _cstr(data, strtab + sym[0]), sym
+
+
 def _global_symbols(
     source: Union[str, Path, bytes],
     *,
@@ -129,26 +149,16 @@ def _global_symbols(
 ) -> List[str]:
     """Return selected global and weak symbols from an ELF symbol table."""
     data = _read(source)
-    hdr = _header(data)
-    sections = [_unpack(_SHDR, data, hdr.shoff + i * _SHDR.size) for i in range(hdr.shnum)]
     names = []
-    # (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize)
-    for _name, sh_type, _flags, _addr, offset, size, link, _info, _align, _entsize in sections:
-        if sh_type != (_SHT_DYNSYM if dynamic else _SHT_SYMTAB):
+    for name, (_st_name, st_info, st_other, st_shndx, _value, _size) in _symbols(data, _sections(data), dynamic):
+        if st_info >> 4 not in (_STB_GLOBAL, _STB_WEAK):
             continue
-        if link >= len(sections):
-            raise ValueError("symbol table links to a missing string table")
-        strtab = sections[link][4]
-        for off in range(offset, offset + size, _SYM.size):
-            st_name, st_info, st_other, st_shndx, _value, _size = _unpack(_SYM, data, off)
-            if st_info >> 4 not in (_STB_GLOBAL, _STB_WEAK):
-                continue
-            is_defined = st_shndx != _SHN_UNDEF
-            if defined is not None and is_defined != defined:
-                continue
-            if externally_visible and st_other & 0x3 not in (_STV_DEFAULT, _STV_PROTECTED):
-                continue
-            names.append(_cstr(data, strtab + st_name))
+        is_defined = st_shndx != _SHN_UNDEF
+        if defined is not None and is_defined != defined:
+            continue
+        if externally_visible and st_other & 0x3 not in (_STV_DEFAULT, _STV_PROTECTED):
+            continue
+        names.append(name)
     return names
 
 
@@ -159,3 +169,19 @@ def _defined_global_symbols(source: Union[str, Path, bytes], *, dynamic: bool = 
     shared library exports -- when ``dynamic`` is true.
     """
     return _global_symbols(source, dynamic=dynamic, defined=True, externally_visible=True)
+
+
+def _symbol_contents(source: Union[str, Path, bytes], name: str) -> bytes:
+    """Return the bytes a relocatable object's defined symbol ``name`` covers, as stored in the file."""
+    data = _read(source)
+    sections = _sections(data)
+    for sym_name, (_st_name, _info, _other, st_shndx, value, size) in _symbols(data, sections, dynamic=False):
+        if sym_name != name or st_shndx == _SHN_UNDEF:
+            continue
+        if st_shndx >= len(sections) or sections[st_shndx][1] == _SHT_NOBITS:
+            raise ValueError(f"symbol {name} has no contents in the file")
+        start = sections[st_shndx][4] + value
+        if value + size > sections[st_shndx][5] or start + size > len(data):
+            raise ValueError(f"symbol {name} is out of file bounds")
+        return data[start : start + size]
+    raise ValueError(f"symbol {name} is not defined")

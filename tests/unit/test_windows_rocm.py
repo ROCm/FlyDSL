@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -82,7 +81,6 @@ def test_toolkit_root_uses_a_ready_rocm_path_or_says_what_to_install(tmp_path, m
 
 
 def test_detect_target_without_an_arch_names_flydsl_gpu_arch(monkeypatch):
-    monkeypatch.delenv("ARCH", raising=False)
     monkeypatch.setattr("flydsl.compiler.backends.rocm.get_rocm_arch", lambda: "")
     with pytest.raises(RuntimeError, match="FLYDSL_GPU_ARCH"):
         RocmBackend.detect_target()
@@ -130,7 +128,7 @@ class _FakeHip:
 @pytest.mark.parametrize("hip, expected", [(_FakeHip(2), 2), (_FakeHip(0, status=100), 0), (None, 0)])
 def test_windows_device_count_comes_from_hip(monkeypatch, hip, expected):
     # Windows has no rocm_agent_enumerator; status 100 is hipErrorNoDevice, None is no HIP at all.
-    monkeypatch.setattr(device, "os", SimpleNamespace(name="nt", environ=os.environ))
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(rw, "_HIP_LIB", hip)
     monkeypatch.setattr(rw, "_HIP_LIB_TRIED", True)
     device.get_rocm_device_count.cache_clear()

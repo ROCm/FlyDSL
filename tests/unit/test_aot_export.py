@@ -16,6 +16,7 @@ import gc
 import json
 import os
 import pickle
+import re
 import shutil
 import struct
 import subprocess
@@ -33,6 +34,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsFly import _emit_host_object
+from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
 from flydsl._mlir.dialects import gpu, llvm
 from flydsl.compiler import _aot as aot
 from flydsl.compiler.backends import _get_backend_class
@@ -96,6 +98,17 @@ def _axpy_kernel(X: fx.Pointer, Y: fx.Pointer, n: fx.Int32, alpha: fx.Float32):
 
 @flyc.jit
 def axpy(X: fx.Pointer, Y: fx.Pointer, n: fx.Int32, alpha: fx.Float32, stream: fx.Stream = fx.Stream(None)):
+    _axpy_kernel(X, Y, n, alpha).launch(grid=((n + 255) // 256, 1, 1), block=(256, 1, 1), stream=stream)
+
+
+@flyc.jit
+def axpy_defaults(
+    X: fx.Pointer,
+    Y: fx.Pointer,
+    n: fx.Int32 = fx.Int32(8),
+    alpha: fx.Float32 = 2.5,
+    stream: fx.Stream = fx.Stream(None),
+):
     _axpy_kernel(X, Y, n, alpha).launch(grid=((n + 255) // 256, 1, 1), block=(256, 1, 1), stream=stream)
 
 
@@ -437,13 +450,12 @@ assert (out / "cpu_only.h").stat().st_size > 0
     child_env = os.environ.copy()
     child_env.update(
         {
-            "ARCH": "gfx950",
+            "FLYDSL_GPU_ARCH": "gfx950",
             "FLYDSL_RUNTIME_ENABLE_CACHE": "0",
         }
     )
     child_env.pop("HIP_VISIBLE_DEVICES", None)
     child_env.pop("ROCR_VISIBLE_DEVICES", None)
-    child_env.pop("FLYDSL_GPU_ARCH", None)
     child_env.pop("HSA_OVERRIDE_GFX_VERSION", None)
     subprocess.run([sys.executable, "-c", script, str(tmp_path)], env=child_env, check=True)
 
@@ -621,6 +633,25 @@ class TestExportCompile:
         # A non-null pointer cannot make a CPU tensor safe to execute, even
         # when another test has changed PyTorch's default device to CUDA.
         _aot_view(tensor_add_one_optional, torch.empty(1, device="cpu"), _ptr(1), fx.Stream(None))
+
+    def test_compiled_call_fills_omitted_defaults(self, monkeypatch):
+        from flydsl.compiler import jit_executor
+
+        seen = []
+        slots = ((2, ctypes.c_int32), (3, ctypes.c_float), (4, ctypes.c_void_p))
+
+        def func_exe(packed):
+            seen.append(tuple(ctype.from_address(packed[i]).value for i, ctype in slots))
+
+        monkeypatch.setattr(jit_executor.CompiledArtifact, "_get_func_exe", lambda self: func_exe)
+        # Null pointers defer the dispatch state; live ones build it while compiling.
+        lazy = flyc.compile(axpy_defaults, _ptr(), _ptr(), 4, 0.5)
+        eager = flyc.compile(axpy_defaults, _ptr(1), _ptr(2), 4, 0.5)
+        for compiled in (lazy, eager):
+            compiled(_ptr(1), _ptr(2), 4, 0.5, 5)
+            compiled(_ptr(1), _ptr(2))
+        explicit, omitted = (4, 0.5, 5), (8, 2.5, None)
+        assert seen == [(4, 0.5, None), explicit, omitted, explicit, omitted]
 
     def test_placeholder_detection_does_not_duck_type_user_arguments(self):
         from flydsl.compiler.jit_function import _is_compile_placeholder
@@ -918,7 +949,7 @@ def test_find_aot_runtime_archive():
 
         runtime_object, symbols = aot._materialize_aot_runtime(archive)
         assert runtime_object.startswith(b"\x7fELF")
-    assert {"flydslRuntimeTakeError", "hipModuleLoadData", "malloc"} <= symbols
+    assert {"flydslAotModuleLaunchKernel", "hipModuleLoadData", "malloc"} <= symbols
 
 
 @pytest.mark.l1b_target_dialect
@@ -976,6 +1007,67 @@ def test_aot_translation_selects_target_instead_of_first_object():
     )
     assert b"WRONG_GPU_OBJECT" not in host_object
     assert b"\x7fELF" in host_object
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_translation_requires_a_status_argument(capfd):
+    # Launches report errors through the launcher's status argument; without one there is nowhere to.
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    with aot._create_mlir_context():
+        module = ir.Module.parse(compiled._ir_text)
+        for op in module.body.operations:
+            if op.operation.name == "gpu.binary":
+                op.attributes["offloadingHandler"] = ir.Attribute.parse('#fly.aot_module<"no_status", 0>')
+        with pytest.raises(RuntimeError, match="failed to translate"):
+            _emit_host_object(module.operation, 2)
+    assert "'fly.aot_status_arg' attribute names a pointer argument" in capfd.readouterr().err
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("cluster", [False, True])
+def test_aot_translation_passes_the_status_argument(cluster):
+    # Both launch forms must report into the launcher's own status argument (its last parameter).
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    ir_text = compiled._ir_text
+    if cluster:
+        ir_text, count = re.subn(r"blocks in \((%\w+), (%\w+)", r"clusters in (\2, \2, \2) \g<0>", ir_text)
+        assert count == 1
+    with aot._create_mlir_context():
+        module = ir.Module.parse(ir_text)
+        renamed = aot._namespace_symbols(module, "status_arg")
+        for op in module.body.operations:
+            if op.operation.name == "gpu.binary":
+                op.attributes["offloadingHandler"] = ir.Attribute.parse('#fly.aot_module<"status_arg", 0>')
+        aot._add_entry_wrapper(module, "status_arg", renamed[compiled._entry], compiled._abi)
+        llvm_ir = translate_module_to_llvmir(module.operation)
+    launcher = re.search(rf"define internal void @{renamed[compiled._entry]}\(.*, ptr (%\d+)\)", llvm_ir)
+    assert launcher is not None
+    callee = "flydslAotModuleLaunchClusterKernel" if cluster else "flydslAotModuleLaunchKernel"
+    calls = re.findall(rf"call void @{callee}\(.*, ptr (%\d+)\)", llvm_ir)
+    assert calls == [launcher.group(1)]
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_translation_rejects_a_mismatched_runtime(capfd):
+    # A runtime merged into the module (as on Windows) must take what the launches pass.
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    stale = "module { llvm.func @flydslAotModuleLaunchKernel(%slot: !llvm.ptr) { llvm.return } }"
+    with pytest.raises(RuntimeError, match="failed to translate"):
+        aot._emit_export_object(
+            compiled._ir_text,
+            compiled._entry,
+            compiled._abi,
+            "stale_runtime",
+            "stale_runtime__metadata",
+            b"{}",
+            _get_backend_class("rocm"),
+            "gfx950",
+            runtime_ir=stale,
+        )
+    assert "does not match the AOT launch signature" in capfd.readouterr().err
 
 
 @pytest.mark.l0_backend_agnostic
@@ -1065,7 +1157,7 @@ class TestExport:
         for bad in ("not-a-c-symbol", "1abc", "a b", "int", "class", "__private", "_Reserved"):
             with pytest.raises(ValueError, match="C identifier"):
                 compiled._export_to_c(tmp_path, "k", bad)
-        for runtime_name in ("flydslRuntimeTakeError", "hipModuleLoadData", "malloc"):
+        for runtime_name in ("flydslAotModuleLaunchKernel", "hipModuleLoadData", "malloc"):
             with pytest.raises(ValueError, match="collide.*backend AOT runtime"):
                 compiled._export_to_c(tmp_path, "k", runtime_name)
         with pytest.raises(FileNotFoundError):
@@ -1083,7 +1175,7 @@ class TestExport:
         assert (out / "axpy_file.h").is_file()
         assert sorted(path.name for path in out.iterdir()) == sorted([*OUTPUT_LOCK, "axpy_file.h", f"axpy_file{OBJ}"])
         assert "aoti_axpy" in _object_symbols(out / f"axpy_file{OBJ}")
-        assert b'"schema_version":2' in (out / f"axpy_file{OBJ}").read_bytes()
+        assert b'"schema_version":3' in (out / f"axpy_file{OBJ}").read_bytes()
         assert LINK_METADATA[0] in (out / f"axpy_file{OBJ}").read_bytes()
         assert LINK_METADATA[1] in (out / f"axpy_file{OBJ}").read_bytes()
 

@@ -5,23 +5,23 @@ add_mlir_dialect_library(MLIRFlyDialect
   IR/FlyUniversalOps.cpp
   IR/FlyAttrDefs.cpp
   IR/FlyLLVMTranslation.cpp
-  Utils/IntUtils.cpp
-  Utils/IntTupleUtils.cpp
-  Utils/NormalForm.cpp
+  IR/FlyResourceUsage.cpp
+  Utils/AtomUtils.cpp
+  Utils/CoreBridge.cpp
   Utils/PointerUtils.cpp
   Transforms/LayoutLowering.cpp
   Transforms/Canonicalize.cpp
-  Transforms/RewriteFuncSignature.cpp
   Transforms/ConvertAtomCallToSSAForm.cpp
   Transforms/PromoteRegMemToVectorSSA.cpp
   Transforms/IntSwizzleSimplify.cpp
+  Transforms/CheckResourceLimits.cpp
 
   DEPENDS
   MLIRFlyIncGen
   FlyTransformPassIncGen
-  FlyRewritePatternsIncGen
 
   LINK_LIBS
+  FlyCore
   MLIRFuncDialect
   MLIRFuncTransforms
   MLIRGPUDialect

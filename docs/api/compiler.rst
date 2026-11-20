@@ -51,8 +51,8 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    A. ``pre_binary_fragments`` (Fly → ROCDL):
 
-      - ``fly-rewrite-func-signature``
       - ``fly-canonicalize``
+      - ``fly-rocdl-expand-ops``
       - ``fly-layout-lowering``
       - ``fly-int-swizzle-simplify``
       - ``canonicalize``
@@ -64,13 +64,9 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 
    B. ``binary_prep_fragments`` (→ LLVM):
 
-      - ``rocdl-attach-target{chip=gfxNNN ...}``
-      - ``convert-scf-to-cf``
-      - ``convert-cf-to-llvm``
-      - ``gpu-to-llvm{use-bare-pointers-...=true}``
+      - ``func.func(convert-scf-to-cf)``
       - ``convert-vector-to-llvm``
-      - ``convert-arith-to-llvm``
-      - ``convert-func-to-llvm``
+      - ``gpu-to-llvm{use-bare-pointers-...=true}``
       - ``reconcile-unrealized-casts``
       - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
 
@@ -110,6 +106,12 @@ The header exposes two calling styles:
 * ``<symbol>_call_auto`` is the simple path. It idempotently initializes the
   module and loads it on the current device before each call. It intentionally
   does not unload automatically, so asynchronous launches remain safe.
+
+The packed entry returns 0 once all its launches are submitted. Otherwise it
+returns the first error: a HIP error code, -1 if the module is not
+initialized, or -2 if it is not loaded on the current device. A call stops at
+its first failed launch and skips the remaining ones; launches it already
+submitted still run.
 
 The current exporter targets 64-bit little-endian Linux ELF hosts and uses
 GNU-compatible relocatable linking and ``objcopy`` tools. The ROCm adapter
@@ -193,11 +195,18 @@ The lowered IR is parsed and its export ABI validated on the first
 ``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
 
+``flyc.compile(launcher, *args, compile_only=True)`` compiles without executing
+the launcher for any arguments, including live device arguments, and always
+returns a ``CompiledFunction``, also under ``COMPILE_ONLY=1``. Call the returned
+function to execute it. ``compile_only`` is reserved by ``flyc.compile`` and is
+not forwarded to the launcher. Without it, ``flyc.compile`` behaves as described
+below.
+
 Passing live device arguments to ``flyc.compile`` preserves its normal initial
 launch, including when other pointer arguments are null to disable optional
 inputs. For an offline or CPU-only build host, use null pointer wrappers created
 with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
-set the target architecture explicitly, for example with ``ARCH=gfx950``.
+set the target architecture explicitly, for example with ``FLYDSL_GPU_ARCH=gfx950``.
 Null pointers suppress the initial launch only when no live device buffers are
 present. Non-device tensor placeholders still suppress execution even alongside
 device buffers. ``COMPILE_ONLY=1`` explicitly disables execution for all argument
@@ -205,6 +214,40 @@ combinations and returns ``None`` instead of a callable.
 Export currently supports tensor, pointer, scalar, structure, and stream
 arguments whose lowered types have a supported C ABI. Unsupported launchers
 report the export error when ``export_to_c`` is called.
+
+Loading an exported object
+--------------------------
+
+``flyc.load_module(path)`` loads an object written by ``export_to_c`` back into
+the current process and returns a ``CompiledFunction``:
+
+.. code-block:: python
+
+   fn = flyc.load_module(output / "vector_add.o")
+   fn(A, B, A.numel())
+
+The object is linked in memory by the in-process JIT linker, so no system
+linker, compiler, or shared library on disk is involved. Loading runs the
+object's module initialization and loads its GPU module on the current device.
+The function loads the module on any other device the first time it is called
+there, so only devices it runs on hold a copy. The module is unloaded from every
+device when the returned function is garbage collected. Each load is
+independent, so loading the same file twice links it twice.
+
+The returned function is called like the one ``flyc.compile`` returns. It
+takes the launcher's arguments positionally, ignores ``Constexpr`` arguments
+(their values are part of the object), and fills omitted trailing arguments
+from the launcher's defaults, which the export records with each parameter's
+name, kind, and annotation. Tensors are passed as framework tensors or DLPack
+objects, pointers as integers or pointer wrappers, and streams as stream
+objects or ``None``. A launch uses the current HIP device. A failed call
+raises ``RuntimeError`` with the error code; as with the packed entry, its
+remaining launches are skipped.
+
+``load_module`` supports Linux x86-64 objects only. It rejects an object from
+a different metadata schema version, so objects must be exported again after
+a FlyDSL upgrade that changes the schema. The loaded function cannot be
+exported again, and ``max_blocks_per_cu()`` is not available on it.
 
 ROCDL operations
 -----------------

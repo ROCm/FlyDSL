@@ -42,10 +42,10 @@ Python (@flyc.kernel/@flyc.jit)
 
 ### Key Passes
 Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages — see `docs/architecture_guide.md` §3 for the per-pass table. Highlights:
-1. `fly-rewrite-func-signature` - Rewrite DSL types at function / SCF boundaries to packed LLVM structs
+1. `fly-canonicalize` + `fly-rocdl-expand-ops` - Canonicalize Fly ops and expand target-specific operations
 2. `fly-layout-lowering` - Lower layout algebra (`fly.crd2idx`, partitions, divides) to arithmetic
 3. `fly-convert-atom-call-to-ssa-form` + `fly-promote-regmem-to-vectorssa` - Lift copy/MMA atom calls and register memory to vector SSA
-4. `convert-fly-to-rocdl` - Fly ops -> ROCDL intrinsics
+4. `convert-fly-to-rocdl` - Convert Fly values (signatures, calls, launches and control flow alike) to the nested packed ABI, and Fly ops to ROCDL intrinsics
 5. `gpu-module-to-binary{format=fatbin}` - Emit HSACO binary via LLVM AMDGPU backend
 
 ### Key Source Paths
@@ -172,6 +172,10 @@ for i in range_constexpr(N):
 # Runtime loop (lowered by AST rewriting)
 for i in range(runtime_value):
     ...
+
+# Runtime loop with an optional LLVM unroll hint.
+for k in fx.range(N, unroll_full=True):  # or unroll=4; unroll=1 disables
+    ...
 ```
 
 ### Runtime vs Compile-Time Conditions (Current Style)
@@ -248,7 +252,7 @@ When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid t
        acc = helper(acc)
    ```
 
-3. **Avoid early `return`, and do not place `return` / `yield` inside `if/else` branches.** Prefer a single explicit exit so the frontend can determine result types.
+3. **Avoid early `return`, and do not place `return` / `yield` inside `if/else` branches.** Prefer a single explicit exit so the frontend can determine result types. A branch `return` behaves as in Python only when the condition is a Python value at trace time; under a dynamic condition, or inside a `range(...)` / dynamic `while` loop body, tracing raises `NotImplementedError`.
    ```python
    if cond:
        out = v0

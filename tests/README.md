@@ -49,7 +49,7 @@ Current high-traffic mapping:
 - `tests/kernels/*.py`: `l2_device` + `rocm_lower`
 - `tests/unit/*`: mixed by file (`l0_backend_agnostic`, `l1a_compile_no_target_dialect`, `l1b_target_dialect + rocm_lower`, `l2_device + rocm_lower`)
 - `tests/mlir/Conversion/*.mlir`: treated as L1b + ROCm-lowering coverage (selected by FileCheck runner, not pytest markers)
-- `tests/mlir/LayoutAlgebra/*.mlir`: treated as L1a compile-tier coverage where applicable (FileCheck, not pytest markers)
+- `tests/mlir/Dialect/Fly/*.mlir`: treated as L1a compile-tier coverage where applicable (FileCheck, not pytest markers)
 
 ## Environment variables (source of truth: `env.py`)
 
@@ -58,7 +58,6 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Purpose | Variable |
 |---------|----------|
 | Compile backend id | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
-| Override GPU arch for compile | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` to disable; in-memory cache remains active) |
@@ -66,12 +65,12 @@ Use the same names as [`python/flydsl/utils/env.py`](../python/flydsl/utils/env.
 | Autotune result cache directory | `FLYDSL_AUTOTUNE_CACHE_DIR` |
 | IR dump | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Device runtime kind | `FLYDSL_RUNTIME_KIND` |
-| ROCm arch hints (detection helpers) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| Override GPU arch (compile target and arch checks) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 
 Session-level pytest options are supported in `tests/conftest.py`:
 
 - `--flydsl-compile-backend` -> sets `FLYDSL_COMPILE_BACKEND`
-- `--flydsl-compile-arch` -> sets `ARCH`
+- `--flydsl-compile-arch` -> sets `FLYDSL_GPU_ARCH`
 
 When these options are unset, default environment behavior remains unchanged.
 

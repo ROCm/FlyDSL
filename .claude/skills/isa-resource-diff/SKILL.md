@@ -55,10 +55,10 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
 
 `FLYDSL_RUNTIME_ENABLE_CACHE=0` is **required, not optional** — see Pitfalls.
 
-For a target without local hardware, add `ARCH=<gfx> COMPILE_ONLY=1`:
+For a target without local hardware, add `FLYDSL_GPU_ARCH=<gfx> COMPILE_ONLY=1`:
 
 ```bash
-ARCH=gfx950 COMPILE_ONLY=1 \
+FLYDSL_GPU_ARCH=gfx950 COMPILE_ONLY=1 \
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
     python3 -m pytest tests/kernels/test_softmax.py -q
 ```
@@ -203,5 +203,19 @@ These silently produce a *confident wrong answer* if ignored:
   features. A target the tool cannot name is refused for the same reason. The
   triple's environment field is normalized, so `amdgcn-amd-amdhsa--gfx942` and
   `amdgcn-amd-amdhsa-unknown-gfx942` are the same target.
+- **`COMPILE_ONLY` retargets the compiler, not your host code.**
+  `FLYDSL_GPU_ARCH` changes what `get_rocm_arch()` returns. Launcher code that
+  queries the device while tracing still sees the local GPU: for example
+  `torch.cuda.get_device_properties(...).gcnArchName` used for an arch dispatch,
+  or `multi_processor_count` used to size splits or grids (as
+  `kernels/attention/pa_decode_fp8.py` does). If such a value picks a code path
+  or becomes a compile-time constant, the dump holds the local GPU's variant
+  compiled to the target ISA. Then both sides of the diff can describe a kernel
+  the target never runs, and before/after differences can appear or vanish
+  for the wrong reason. Observed: a compile-only check on a gfx942 host
+  reported 12 changed planner kernels per target in an aiter kernel that
+  dispatched on `gcnArchName`. With the query returning the target arch, all
+  of them were identical. Dispatch on `get_rocm_arch()` in launcher code;
+  otherwise confirm on the target hardware.
 - **Warnings on stderr never change the exit code.** They describe the input tree
   and are worth reading before trusting a clean result.

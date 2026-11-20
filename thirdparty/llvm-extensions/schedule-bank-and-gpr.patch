@@ -69,7 +69,7 @@ diff --git a/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp b/clang/lib/CodeGen/Tar
 diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 --- a/clang/lib/Sema/SemaAMDGPU.cpp
 +++ b/clang/lib/Sema/SemaAMDGPU.cpp
-@@ -444,6 +444,53 @@
+@@ -444,6 +444,54 @@
                                             /*High=*/0) ||
             SemaRef.BuiltinConstantArgRange(TheCall, /*ArgNum=*/2, /*Low=*/0,
                                             /*High=*/0);
@@ -118,7 +118,8 @@ diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 +    case AMDGPU::BI__builtin_amdgcn_sched_agpr: MaxReg = 255;  break;
 +    default: llvm_unreachable("unexpected builtin");
 +    }
-+    return SemaRef.BuiltinConstantArgRange(TheCall, 1, 0, MaxReg);
++    // -1 asks for any register of the file.
++    return SemaRef.BuiltinConstantArgRange(TheCall, 1, -1, MaxReg);
 +  }
    default:
      return false;
@@ -126,7 +127,7 @@ diff --git a/clang/lib/Sema/SemaAMDGPU.cpp b/clang/lib/Sema/SemaAMDGPU.cpp
 diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 --- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 +++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-@@ -4362,4 +4362,38 @@
+@@ -4362,4 +4362,40 @@
  /// incoming block.
  def int_amdgcn_dead: DefaultAttrsIntrinsic<[llvm_any_ty], [],
      [IntrNoMem]>;
@@ -147,7 +148,9 @@ diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/Int
 +// register number. These are identity functions at the IR level; the register
 +// number and strict flag arguments are consumed by the pre-RA AMDGPUSchedBank
 +// pass which attaches a register allocation hint.
-+//   regnum: the target HW register index (e.g., 42 means v42/s42/a42).
++//   regnum: the target HW register index (e.g., 42 means v42/s42/a42), or -1
++//           for any register of that file. With -1 a strict pin only keeps
++//           the value in the file and a soft pin has no effect.
 +//   strict: 1 = allocator must obey if possible, 0 = advisory hint.
 +// For wide values (64/128/256 bit), regnum is the starting register index.
 +def int_amdgcn_sched_vgpr : DefaultAttrsIntrinsic<
@@ -270,6 +273,51 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.cpp b/llvm/lib/Target/AMD
    case Intrinsic::amdgcn_permlane16_swap:
    case Intrinsic::amdgcn_permlane32_swap: {
      if ((IntrID == Intrinsic::amdgcn_permlane16_swap &&
+@@ -4701,6 +4783,44 @@ SDValue AMDGPUDAGToDAGISel::getHi16Elt(SDValue In) const {
+   return SDValue();
+ }
+ 
++/// Return true if \p N is a strict llvm.amdgcn.sched.agpr, either still as the
++/// intrinsic or already selected to A_SCHEDULE_AGPR_B*.
++static bool isStrictSchedAGPR(const SDNode *N) {
++  if (N->isMachineOpcode()) {
++    switch (N->getMachineOpcode()) {
++    case AMDGPU::A_SCHEDULE_AGPR_B32:
++    case AMDGPU::A_SCHEDULE_AGPR_B64:
++    case AMDGPU::A_SCHEDULE_AGPR_B128:
++    case AMDGPU::A_SCHEDULE_AGPR_B256:
++    case AMDGPU::A_SCHEDULE_AGPR_B512:
++      // Operands: src, regnum, strict.
++      return N->getConstantOperandVal(2) != 0;
++    default:
++      return false;
++    }
++  }
++  if (N->getOpcode() != ISD::INTRINSIC_WO_CHAIN ||
++      N->getConstantOperandVal(0) != Intrinsic::amdgcn_sched_agpr)
++    return false;
++  // Operands: intrinsic id, src, regnum, strict.
++  auto *StrictC = dyn_cast<ConstantSDNode>(N->getOperand(3));
++  return StrictC && !StrictC->isZero();
++}
++
++/// An MFMA whose src2 or result is strictly pinned to AGPRs gains nothing from
++/// the VGPR form: selecting it would only add AGPR<->VGPR copies around the
++/// MFMA for AMDGPURewriteAGPRCopyMFMA to undo after RA, and that rewrite may
++/// leave src2 in a different AGPR than dst.
++bool AMDGPUDAGToDAGISel::isStrictAGPRPinnedMFMA(const SDNode *N) const {
++  // MFMA intrinsic operands: intrinsic id, src0, src1, src2, ...
++  if (N->getNumOperands() > 3 && isStrictSchedAGPR(N->getOperand(3).getNode()))
++    return true;
++  for (const SDNode *U : N->users())
++    if (isStrictSchedAGPR(U))
++      return true;
++  return false;
++}
++
+ bool AMDGPUDAGToDAGISel::isVGPRImm(const SDNode * N) const {
+   assert(CurDAG->getTarget().getTargetTriple().isAMDGCN());
+ 
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
 --- a/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUPassRegistry.def
@@ -330,7 +378,7 @@ diff --git a/llvm/lib/Target/AMDGPU/CMakeLists.txt b/llvm/lib/Target/AMDGPU/CMak
 diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/SIInstructions.td
 --- a/llvm/lib/Target/AMDGPU/SIInstructions.td
 +++ b/llvm/lib/Target/AMDGPU/SIInstructions.td
-@@ -129,6 +129,39 @@
+@@ -129,6 +129,40 @@
    let usesCustomInserter = 1;
  }
  
@@ -352,7 +400,8 @@ diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/S
 +
 +// Exact VGPR register hint pseudos. Identity copies carrying a target VGPR
 +// register number and strict flag. The pre-RA AMDGPUSchedBank pass reads
-+// these operands, sets a register allocation hint, and replaces with COPY.
++// these operands and sets a register allocation hint. Soft pins become a COPY;
++// strict pins stay until expandPostRAPseudo.
 +let isAsCheapAsAMove = 1, isReMaterializable = 1, hasSideEffects = 0,
 +    mayLoad = 0, mayStore = 0, Size = 0 in {
 +  def V_SCHEDULE_VGPR_B32  : VPseudoInstSI<(outs VGPR_32:$vdst),
@@ -370,7 +419,7 @@ diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/S
  // 64-bit vector move instruction. This is mainly used by the
  // SIFoldOperands pass to enable folding of inline immediates.
  def V_MOV_B64_PSEUDO : VPseudoInstSI <(outs VReg_64:$vdst),
-@@ -217,6 +250,37 @@
+@@ -217,6 +251,37 @@
  
  } // End let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [EXEC]
  
@@ -423,7 +472,41 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
  std::array<std::vector<int16_t>, 32> SIRegisterInfo::RegSplitParts;
  std::array<std::array<uint16_t, 32>, 9> SIRegisterInfo::SubRegFromChannelTable;
  
-@@ -4159,6 +4164,71 @@
+@@ -4098,6 +4103,33 @@
+   return AMDGPUGenRegisterInfo::getRegUnitPressureSets(RegUnit);
+ }
+ 
++static bool isSchedRegHint(unsigned Kind) {
++  return Kind >= AMDGPURI::VGPRRegHint && Kind <= AMDGPURI::StrictAGPRRegHint;
++}
++
++// Keep a sched pin hint when the coalescer merges Reg into NewReg, e.g. into
++// the register PHI elimination created for a loop-carried value.
++void SIRegisterInfo::updateRegAllocHint(Register Reg, Register NewReg,
++                                        MachineFunction &MF) const {
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  if (!Reg.isVirtual() || !NewReg.isVirtual())
++    return;
++  std::pair<unsigned, Register> Hint = MRI.getRegAllocationHint(Reg);
++  if (!isSchedRegHint(Hint.first))
++    return;
++  std::pair<unsigned, Register> Existing = MRI.getRegAllocationHint(NewReg);
++  bool Upgrade = isSchedRegHint(Existing.first) &&
++                 Existing.first == (Hint.first & ~1u) &&
++                 Existing.second == Hint.second;
++  if ((Existing.first || Existing.second) && !Upgrade)
++    return;
++  SmallVector<Register, 4> Partners(
++      drop_begin(MRI.getRegAllocationHints(Reg)->second));
++  MRI.setRegAllocationHint(NewReg, Hint.first, Hint.second);
++  for (Register Partner : Partners)
++    MRI.addRegAllocationHint(NewReg, Partner);
++}
++
+ bool SIRegisterInfo::getRegAllocationHints(Register VirtReg,
+                                            ArrayRef<MCPhysReg> Order,
+                                            SmallVectorImpl<MCPhysReg> &Hints,
+@@ -4159,6 +4191,122 @@
      }
      return false;
    }
@@ -481,16 +564,67 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
 +  case AMDGPURI::StrictSGPRRegHint:
 +  case AMDGPURI::AGPRRegHint:
 +  case AMDGPURI::StrictAGPRRegHint: {
-+    unsigned TargetIdx = Hint.second;
-+    for (MCPhysReg PhysReg : Order) {
++    // Exact architectural register from llvm.amdgcn.sched.{vgpr,sgpr,agpr}.
++    // Hint.second is the HW index. vN and aN share that index, so the hint
++    // only admits physregs of the requested file. A hint that propagated onto
++    // a vreg whose class cannot hold that file (an AGPR pin copied into a
++    // VGPR, for example) is ignored.
++    const unsigned Kind = Hint.first;
++    const bool WantVGPR =
++        Kind == AMDGPURI::VGPRRegHint || Kind == AMDGPURI::StrictVGPRRegHint;
++    const bool WantSGPR =
++        Kind == AMDGPURI::SGPRRegHint || Kind == AMDGPURI::StrictSGPRRegHint;
++    const bool WantAGPR =
++        Kind == AMDGPURI::AGPRRegHint || Kind == AMDGPURI::StrictAGPRRegHint;
++    const bool Strict = Kind == AMDGPURI::StrictVGPRRegHint ||
++                        Kind == AMDGPURI::StrictSGPRRegHint ||
++                        Kind == AMDGPURI::StrictAGPRRegHint;
++    const TargetRegisterClass *VRC = MRI.getRegClass(VirtReg);
++    const bool ClassOK =
++        (WantAGPR && (isAGPRClass(VRC) || isVectorSuperClass(VRC))) ||
++        (WantVGPR && (isVGPRClass(VRC) || isVectorSuperClass(VRC))) ||
++        (WantSGPR && (isSGPRClass(VRC) || isVSSuperClass(VRC)));
++    if (!ClassOK)
++      return false;
++
++    auto InFile = [&](MCPhysReg PhysReg) {
 +      if (MRI.isReserved(PhysReg))
-+        continue;
-+      if (getHWRegIndex(PhysReg) == TargetIdx)
++        return false;
++      const TargetRegisterClass *RC = getPhysRegBaseClass(PhysReg);
++      return RC && (!WantAGPR || isAGPRClass(RC)) &&
++             (!WantVGPR || isVGPRClass(RC)) && (!WantSGPR || isSGPRClass(RC));
++    };
++
++    unsigned TargetIdx = Hint.second;
++    if (TargetIdx == AMDGPURI::AnyRegHintIdx) {
++      // Any register of the file. The registers already given to the values
++      // this one is copied from or to (the later hint entries) come first, so
++      // a chain of pinned values keeps one register.
++      SmallSet<MCPhysReg, 8> Preferred;
++      for (Register HintReg :
++           drop_begin(MRI.getRegAllocationHints(VirtReg)->second)) {
++        MCPhysReg Phys = 0;
++        if (HintReg.isPhysical())
++          Phys = HintReg;
++        else if (VRM && VRM->hasPhys(HintReg))
++          Phys = VRM->getPhys(HintReg);
++        if (Phys && is_contained(Order, Phys) && InFile(Phys) &&
++            Preferred.insert(Phys).second)
++          Hints.push_back(Phys);
++      }
++      for (MCPhysReg PhysReg : Order)
++        if (!Preferred.count(PhysReg) && InFile(PhysReg))
++          Hints.push_back(PhysReg);
++      return Strict;
++    }
++
++    for (MCPhysReg PhysReg : Order) {
++      if (getHWRegIndex(PhysReg) == TargetIdx && InFile(PhysReg))
 +        Hints.push_back(PhysReg);
 +    }
-+    return Hint.first == AMDGPURI::StrictVGPRRegHint ||
-+           Hint.first == AMDGPURI::StrictSGPRRegHint ||
-+           Hint.first == AMDGPURI::StrictAGPRRegHint;
++    // Strict is a hard constraint. If none matched, allocation fails instead
++    // of silently using the other file.
++    return Strict;
 +  }
    default:
      return TargetRegisterInfo::getRegAllocationHints(VirtReg, Order, Hints, MF,
@@ -498,7 +632,7 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
 diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
 --- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
 +++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.h
-@@ -33,7 +33,19 @@
+@@ -33,7 +33,23 @@
  /// Register allocation hint types. Helps eliminate unneeded COPY with True16
  namespace AMDGPURI {
  
@@ -516,13 +650,27 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.h b/llvm/lib/Target/AMDGPU/SI
 +  AGPRRegHint = 10,
 +  StrictAGPRRegHint = 11,
 +};
++
++/// Value of an exact-register hint (VGPRRegHint ... StrictAGPRRegHint) that
++/// asks for any register of the file instead of a fixed index.
++constexpr unsigned AnyRegHintIdx = 0xFFFF;
  
  } // end namespace AMDGPURI
  
+@@ -364,6 +380,9 @@
+                              const MachineFunction &MF, const VirtRegMap *VRM,
+                              const LiveRegMatrix *Matrix) const override;
+ 
++  void updateRegAllocHint(Register Reg, Register NewReg,
++                          MachineFunction &MF) const override;
++
+   const int *getRegUnitPressureSets(MCRegUnit RegUnit) const override;
+ 
+   MCRegister getReturnAddressReg(const MachineFunction &MF) const;
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 --- a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
 +++ b/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td
-@@ -808,6 +808,115 @@
+@@ -808,6 +808,122 @@
    }];
  }
  
@@ -565,16 +713,17 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +class ROCDL_ScheduleGPROp<string mnemonic, string intrName, string gprKind>
 +  : ROCDL_IntrOp<mnemonic, [], [0],
 +    [AllTypesMatch<["res", "value"]>], 1, 0, 0, 0, [], []>,
-+  Arguments<(ins LLVM_Type:$value, I32Attr:$regnum,
++  Arguments<(ins LLVM_Type:$value, OptionalAttr<I32Attr>:$regnum,
 +             OptionalAttr<UnitAttr>:$soft)> {
 +  let results = (outs LLVM_Type:$res);
 +  let assemblyFormat = [{
-+    $value `,` $regnum (`soft` $soft^)? attr-dict `:` type($value)
++    $value (`,` $regnum^)? (`soft` $soft^)? attr-dict `:` type($value)
 +  }];
 +  string llvmBuilder = [{
 +    auto schedOp = cast<ROCDL::Schedule}] # gprKind # [{Op>(opInst);
 +    auto *value = moduleTranslation.lookupValue(schedOp.getValue());
-+    int32_t regnum = schedOp.getRegnum();
++    // An omitted regnum is encoded as -1: any register of the file.
++    int32_t regnum = static_cast<int32_t>(schedOp.getRegnum().value_or(-1));
 +    int32_t strict = schedOp.getSoftAttr() ? 0 : 1;
 +    auto *fn = llvm::Intrinsic::getOrInsertDeclaration(
 +        moduleTranslation.getLLVMModule(),
@@ -592,12 +741,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    allocator to place `value` in the specified VGPR register number.
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in VGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.vgpr %val, 42 : f32        // strict: allocate to v42
 +    %1 = rocdl.sched.vgpr %val, 10 soft : f32   // soft: prefer v10
++    %2 = rocdl.sched.vgpr %val : f32            // strict: any VGPR
 +    ```
 +  }];
 +}
@@ -608,12 +759,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    allocator to place `value` in the specified SGPR register number.
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in SGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.sgpr %val, 10 : i32        // strict: allocate to s10
 +    %1 = rocdl.sched.sgpr %val, 4 soft : i32    // soft: prefer s4
++    %2 = rocdl.sched.sgpr %val : i32            // strict: any SGPR
 +    ```
 +  }];
 +}
@@ -625,12 +778,14 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 +    Only valid on targets with MAI instructions (e.g., gfx90a, gfx940).
 +
 +    For wide values (64/128/256 bit), `regnum` is the starting register index.
++    Omit `regnum` to only keep `value` in AGPRs, in any register.
 +    Default is strict (allocator must obey). Pass `soft` for an advisory hint.
 +
 +    Example:
 +    ```mlir
 +    %0 = rocdl.sched.agpr %val, 8 : f32         // strict: allocate to a8
 +    %1 = rocdl.sched.agpr %val, 0 soft : f32    // soft: prefer a0
++    %2 = rocdl.sched.agpr %val : f32            // strict: any AGPR
 +    ```
 +  }];
 +}
@@ -641,7 +796,7 @@ diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLOps.td b/mlir/include/mlir/Di
 diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocdl.mlir
 --- a/mlir/test/Dialect/LLVMIR/rocdl.mlir
 +++ b/mlir/test/Dialect/LLVMIR/rocdl.mlir
-@@ -168,6 +168,38 @@
+@@ -168,6 +168,44 @@
    llvm.return
  }
  
@@ -658,6 +813,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.vgpr %val, 42 : f32
 +  // CHECK: rocdl.sched.vgpr %{{.*}}, 10 soft : i32
 +  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  // CHECK: rocdl.sched.vgpr %{{.*}} : f32
++  %2 = rocdl.sched.vgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -666,6 +823,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.sgpr %val, 20 : f32
 +  // CHECK: rocdl.sched.sgpr %{{.*}}, 5 soft : i32
 +  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  // CHECK: rocdl.sched.sgpr %{{.*}} : f32
++  %2 = rocdl.sched.sgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -674,6 +833,8 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 +  %0 = rocdl.sched.agpr %val, 8 : f32
 +  // CHECK: rocdl.sched.agpr %{{.*}}, 0 soft : i32
 +  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  // CHECK: rocdl.sched.agpr %{{.*}} : f32
++  %2 = rocdl.sched.agpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -683,7 +844,7 @@ diff --git a/mlir/test/Dialect/LLVMIR/rocdl.mlir b/mlir/test/Dialect/LLVMIR/rocd
 diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.mlir
 --- a/mlir/test/Target/LLVMIR/rocdl.mlir
 +++ b/mlir/test/Target/LLVMIR/rocdl.mlir
-@@ -451,6 +451,46 @@
+@@ -451,6 +451,55 @@
    llvm.return
  }
  
@@ -706,6 +867,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  // soft: regnum 10, strict 0
 +  // CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 10, i32 0)
 +  %1 = rocdl.sched.vgpr %ival, 10 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.vgpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.vgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -715,6 +879,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  %0 = rocdl.sched.sgpr %val, 20 : f32
 +  // CHECK: call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %{{.*}}, i32 5, i32 0)
 +  %1 = rocdl.sched.sgpr %ival, 5 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.sgpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.sgpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -724,6 +891,9 @@ diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.
 +  %0 = rocdl.sched.agpr %val, 8 : f32
 +  // CHECK: call i32 @llvm.amdgcn.sched.agpr.i32(i32 %{{.*}}, i32 0, i32 0)
 +  %1 = rocdl.sched.agpr %ival, 0 soft : i32
++  // omitted regnum: -1, any register of the file
++  // CHECK: call float @llvm.amdgcn.sched.agpr.f32(float %{{.*}}, i32 -1, i32 1)
++  %2 = rocdl.sched.agpr %val : f32
 +  llvm.return %0 : f32
 +}
 +
@@ -835,7 +1005,7 @@ diff --git a/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl b/clang/test/
 new file mode 100644
 --- /dev/null
 +++ b/clang/test/CodeGenOpenCL/builtins-amdgcn-sched-gpr.cl
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,75 @@
 +// NOTE: Assertions have been autogenerated by utils/update_cc_test_checks.py
 +// RUN: %clang_cc1 -cl-std=CL2.0 -O0 -triple amdgcn-unknown-unknown -target-cpu gfx1250 -emit-llvm -o - %s | FileCheck %s
 +// REQUIRES: amdgpu-registered-target
@@ -885,6 +1055,13 @@ new file mode 100644
 +  *out = __builtin_amdgcn_sched_vgpr(x, 42);
 +}
 +
++// CHECK-LABEL: @test_sched_vgpr_any
++// CHECK: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %{{.*}}, i32 -1, i32 1)
++void test_sched_vgpr_any(global int *out, int x) {
++  // regnum -1: any VGPR
++  *out = __builtin_amdgcn_sched_vgpr(x, -1);
++}
++
 +// === sched_sgpr tests ===
 +
 +// CHECK-LABEL: @test_sched_sgpr_i32
@@ -908,7 +1085,7 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU
 new file mode 100644
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,435 @@
 +//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -928,11 +1105,17 @@ new file mode 100644
 +///      (and source) vreg so the allocator prefers the target bank or register,
 +///   3. propagates the hint through COPY / REG_SEQUENCE / INSERT_SUBREG /
 +///      SUBREG_TO_REG so it survives coalescing, and
-+///   4. replaces the pseudo with a plain COPY.
++///   4. replaces the pseudo with a plain COPY, except for a strict AGPR pin.
 +///
-+/// The hint is advisory: SIRegisterInfo::getRegAllocationHints only reorders the
-+/// allocation candidates, so a full bank (or unavailable register) falls back to
-+/// the default order and the pass never forces a spill.
++/// A strict AGPR pseudo is left in place until expandPostRAPseudo. Replacing
++/// it with a COPY drops the AGPR operand constraint, and the coalescer then
++/// widens the vreg from AGPR_* to AV_*. vN and aN share a HW index, so the
++/// allocator can satisfy the hint with a VGPR. Keeping the pseudo holds the
++/// class at AGPR_* through coalescing.
++///
++/// A non-strict hint only reorders the allocation candidates, so a full bank
++/// (or unavailable register) falls back to the default order. A strict hint is
++/// a hard constraint.
 +//
 +//===----------------------------------------------------------------------===//
 +
@@ -941,7 +1124,11 @@ new file mode 100644
 +#include "GCNSubtarget.h"
 +#include "SIInstrInfo.h"
 +#include "SIRegisterInfo.h"
++#include "llvm/ADT/BitVector.h"
++#include "llvm/ADT/DenseMap.h"
 +#include "llvm/ADT/DenseSet.h"
++#include "llvm/ADT/EquivalenceClasses.h"
++#include "llvm/ADT/SmallPtrSet.h"
 +#include "llvm/CodeGen/MachineFunctionPass.h"
 +#include "llvm/CodeGen/MachineInstrBuilder.h"
 +#include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -1019,6 +1206,122 @@ new file mode 100644
 +  }
 +}
 +
++/// Give each chain of values joined by regnum -1 strict AGPR pins its own AGPR
++/// index, if all chains fit in the free AGPRs. With only the file constraint
++/// the allocator moves accumulators between AGPRs once they are all in use,
++/// and each move is a copy; a fixed index per chain keeps every accumulator in
++/// place. A chain is joined through the pin, the accumulator input of the MFMA
++/// that feeds it, PHIs and COPYs, and only through values with one use that is
++/// not a PHI or COPY, so its members are not live at the same time.
++static void assignAnyAGPRIndices(MachineFunction &MF, const SIInstrInfo &TII,
++                                 const SIRegisterInfo &TRI) {
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  if (!MRI.reservedRegsFrozen())
++    return;
++
++  auto NumRegs = [&](Register R) {
++    return TRI.getRegSizeInBits(*MRI.getRegClass(R)) / 32;
++  };
++  // Besides its one real use a value may be forwarded by PHIs and COPYs on
++  // other paths, such as the loop back edge and exit, but not twice in one
++  // block (a shared initial value of several chains).
++  auto HasOneRealUse = [&](Register R) {
++    unsigned N = 0;
++    SmallPtrSet<const MachineBasicBlock *, 4> Blocks;
++    for (const MachineInstr &U : MRI.use_nodbg_instructions(R))
++      if ((!U.isPHI() && !U.isCopy() && ++N > 1) ||
++          !Blocks.insert(U.getParent()).second)
++        return false;
++    return true;
++  };
++  EquivalenceClasses<unsigned> Chains;
++  auto Join = [&](Register From, Register To) {
++    if (From.isVirtual() && To.isVirtual() && HasOneRealUse(From) &&
++        NumRegs(From) == NumRegs(To))
++      Chains.unionSets(From.id(), To.id());
++  };
++
++  const TargetRegisterClass &AGPRs = AMDGPU::AGPR_32RegClass;
++  BitVector Used(AGPRs.getNumRegs());
++  for (MCPhysReg R : AGPRs)
++    if (MRI.isReserved(R))
++      Used.set(TRI.getHWRegIndex(R));
++
++  SmallVector<MachineInstr *, 64> Pins;
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : MBB) {
++      if (MI.isPHI()) {
++        for (unsigned I = 1, E = MI.getNumOperands(); I < E; I += 2)
++          if (!MI.getOperand(I).getSubReg())
++            Join(MI.getOperand(I).getReg(), MI.getOperand(0).getReg());
++        continue;
++      }
++      if (MI.isCopy()) {
++        if (!MI.getOperand(0).getSubReg() && !MI.getOperand(1).getSubReg())
++          Join(MI.getOperand(1).getReg(), MI.getOperand(0).getReg());
++        continue;
++      }
++      if (getScheduleHintKind(MI.getOpcode()) != SHK_AGPR)
++        continue;
++
++      Register Dst = MI.getOperand(0).getReg();
++      unsigned RegNum = MI.getOperand(2).getImm();
++      if (RegNum != ~0u) {
++        unsigned End = std::min<unsigned>(RegNum + NumRegs(Dst), Used.size());
++        if (RegNum < End)
++          Used.set(RegNum, End);
++        continue;
++      }
++      if (MI.getOperand(3).getImm() == 0 || !Dst.isVirtual())
++        continue;
++
++      Pins.push_back(&MI);
++      Chains.insert(Dst.id());
++      const MachineOperand &SrcMO = MI.getOperand(1);
++      if (SrcMO.getSubReg() || !SrcMO.getReg().isVirtual())
++        continue;
++      Join(SrcMO.getReg(), Dst);
++      MachineInstr *Def = MRI.getUniqueVRegDef(SrcMO.getReg());
++      if (!Def || !SIInstrInfo::isMAI(*Def))
++        continue;
++      const MachineOperand *Src2 =
++          TII.getNamedOperand(*Def, AMDGPU::OpName::src2);
++      if (Src2 && Src2->isReg() && !Src2->getSubReg())
++        Join(Src2->getReg(), SrcMO.getReg());
++    }
++  }
++
++  // First fit, in program order; give up on all chains if one does not fit.
++  DenseMap<unsigned, unsigned> ChainIdx;
++  for (MachineInstr *MI : Pins) {
++    unsigned Leader = Chains.getLeaderValue(MI->getOperand(0).getReg().id());
++    if (ChainIdx.count(Leader))
++      continue;
++    unsigned Size = NumRegs(MI->getOperand(0).getReg());
++    unsigned Align = std::min(Size, 4u);
++    unsigned Base = 0;
++    while (Base + Size <= Used.size() &&
++           Used.find_first_in(Base, Base + Size) != -1)
++      Base += Align;
++    if (Base + Size > Used.size()) {
++      LLVM_DEBUG(dbgs() << "  any-AGPR chains do not fit: " << ChainIdx.size()
++                        << " placed, " << Used.count() << " AGPRs used\n");
++      return;
++    }
++    Used.set(Base, Base + Size);
++    ChainIdx[Leader] = Base;
++  }
++
++  for (MachineInstr *MI : Pins) {
++    unsigned Idx =
++        ChainIdx[Chains.getLeaderValue(MI->getOperand(0).getReg().id())];
++    LLVM_DEBUG(dbgs() << "  any-AGPR pin "
++                      << printReg(MI->getOperand(0).getReg()) << " -> a" << Idx
++                      << '\n');
++    MI->getOperand(2).setImm(Idx);
++  }
++}
++
 +// Shared implementation used by both the legacy and new-PM passes.
 +static bool runScheduleBank(MachineFunction &MF) {
 +  const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
@@ -1026,7 +1329,11 @@ new file mode 100644
 +  const SIInstrInfo *TII = ST.getInstrInfo();
 +  bool Changed = false;
 +
++  assignAnyAGPRIndices(MF, *TII, *ST.getRegisterInfo());
++
 +  SmallVector<MachineInstr *, 16> ToErase;
++  // Values that should share a register with a regnum -1 pin.
++  SmallVector<std::pair<Register, Register>, 16> Partners;
 +
 +  for (MachineBasicBlock &MBB : MF) {
 +    for (MachineInstr &MI : MBB) {
@@ -1040,6 +1347,8 @@ new file mode 100644
 +
 +      unsigned HintKind;
 +      unsigned HintValue;
++      bool Strict = false;
++      bool AnyReg = false;
 +
 +      if (Kind == SHK_Bank) {
 +        // Bank pseudos are only valid on targets with 1024 addressable VGPRs.
@@ -1054,7 +1363,7 @@ new file mode 100644
 +        }
 +
 +        unsigned EncodedBank = MI.getOperand(2).getImm();
-+        bool Strict = EncodedBank & 0x4;
++        Strict = EncodedBank & 0x4;
 +        unsigned Bank = EncodedBank & 0x3;
 +
 +        if (EncodedBank > 7) {
@@ -1070,8 +1379,12 @@ new file mode 100644
 +                          << " strict " << Strict << '\n');
 +      } else {
 +        // Exact register pseudos: operand 2 = regnum, operand 3 = strict.
++        // regnum -1 pins only the register file: the hint carries
++        // AnyRegHintIdx instead of an index. A soft pin with regnum -1 has no
++        // effect.
 +        unsigned RegNum = MI.getOperand(2).getImm();
-+        bool Strict = MI.getOperand(3).getImm() != 0;
++        Strict = MI.getOperand(3).getImm() != 0;
++        AnyReg = RegNum == ~0u;
 +
 +        switch (Kind) {
 +        case SHK_VGPR:
@@ -1089,7 +1402,7 @@ new file mode 100644
 +        default:
 +          llvm_unreachable("unexpected schedule hint kind");
 +        }
-+        HintValue = RegNum;
++        HintValue = AnyReg ? AMDGPURI::AnyRegHintIdx : RegNum;
 +
 +        LLVM_DEBUG(dbgs() << "  schedule."
 +                          << (Kind == SHK_VGPR   ? "vgpr"
@@ -1110,18 +1423,45 @@ new file mode 100644
 +      // The strict variant is always HintKind | 1 for each category.
 +      unsigned StrictVariant = HintKind | 1;
 +
-+      if (DstReg.isVirtual() &&
++      bool NoHint = AnyReg && !Strict;
++      if (!NoHint && DstReg.isVirtual() &&
 +          (IsStrict ||
 +           MRI.getRegAllocationHint(DstReg).first != StrictVariant))
 +        MRI.setRegAllocationHint(DstReg, HintKind, HintValue);
-+      if (SrcReg.isVirtual() &&
++      if (!NoHint && SrcReg.isVirtual() &&
 +          (IsStrict ||
 +           MRI.getRegAllocationHint(SrcReg).first != StrictVariant))
 +        MRI.setRegAllocationHint(SrcReg, HintKind, HintValue);
 +
 +      SmallDenseSet<unsigned, 32> Visited;
-+      if (DstReg.isVirtual())
++      if (!NoHint && DstReg.isVirtual())
 +        propagateHint(MRI, DstReg, HintValue, HintKind, Visited);
++
++      // With an index every value in the chain is hinted to the same
++      // register. Without one, nothing else asks RA to give the kept pseudo's
++      // source and result, or an MFMA's accumulator input and result, the same
++      // register, and each mismatch becomes a copy.
++      if (AnyReg && Strict && DstReg.isVirtual() && SrcReg.isVirtual() &&
++          !SrcMO.getSubReg()) {
++        Partners.emplace_back(SrcReg, DstReg);
++        MachineInstr *Def = MRI.getUniqueVRegDef(SrcReg);
++        const MachineOperand *Src2 =
++            Def && SIInstrInfo::isMAI(*Def)
++                ? TII->getNamedOperand(*Def, AMDGPU::OpName::src2)
++                : nullptr;
++        if (Src2 && Src2->isReg() && Src2->getReg().isVirtual() &&
++            !Src2->getSubReg())
++          Partners.emplace_back(Src2->getReg(), SrcReg);
++      }
++
++      // A strict exact-register pin must keep its own def until after RA:
++      // a plain COPY gets coalesced and the hint can be dropped with it. For
++      // AGPR it also keeps the AGPR operand constraint. expandPostRAPseudo
++      // turns the pseudo into a physreg copy.
++      if (Kind != SHK_Bank && Strict) {
++        Changed = true;
++        continue;
++      }
 +
 +      // Replace the pseudo with a plain COPY.
 +      BuildMI(MBB, MI, MI.getDebugLoc(), TII->get(TargetOpcode::COPY), DstReg)
@@ -1130,6 +1470,12 @@ new file mode 100644
 +      ToErase.push_back(&MI);
 +      Changed = true;
 +    }
++  }
++
++  // After all hints are set: setRegAllocationHint drops earlier entries.
++  for (auto [A, B] : Partners) {
++    MRI.addRegAllocationHint(A, B);
++    MRI.addRegAllocationHint(B, A);
 +  }
 +
 +  for (MachineInstr *MI : ToErase)
@@ -1284,16 +1630,16 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AM
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,85 @@
 +# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
 +
 +# The AMDGPUSchedBank pass attaches exact register allocation hints (not
-+# printed in MIR) and lowers each schedule pseudo to a plain COPY.
++# printed in MIR). Soft pins are lowered to a plain COPY; strict pins keep the
++# pseudo until expandPostRAPseudo.
 +
 +---
 +# CHECK-LABEL: name: lower_sched_vgpr_b32
-+# CHECK: %1:vgpr_32 = COPY %0
-+# CHECK-NOT: V_SCHEDULE_VGPR_B32
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 42, 1
 +name: lower_sched_vgpr_b32
 +tracksRegLiveness: true
 +body: |
@@ -1323,8 +1669,7 @@ new file mode 100644
 +
 +---
 +# CHECK-LABEL: name: lower_sched_sgpr_b32
-+# CHECK: %1:sgpr_32 = COPY %0
-+# CHECK-NOT: S_SCHEDULE_SGPR_B32
++# CHECK: %1:sgpr_32 = S_SCHEDULE_SGPR_B32 %0, 10, 1
 +name: lower_sched_sgpr_b32
 +tracksRegLiveness: true
 +body: |
@@ -1351,11 +1696,31 @@ new file mode 100644
 +    $sgpr0_sgpr1 = COPY %1
 +    SI_RETURN_TO_EPILOG $sgpr0_sgpr1
 +...
++
++---
++# regnum -1 (any register of the file): a strict pin keeps the pseudo, a soft
++# pin is a plain COPY.
++# CHECK-LABEL: name: lower_sched_vgpr_any
++# CHECK: %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1
++# CHECK: %2:vgpr_32 = COPY %0
++# CHECK-NOT: V_SCHEDULE_VGPR_B32
++name: lower_sched_vgpr_any
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0
++    %0:vgpr_32 = COPY $vgpr0
++    %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 1, implicit $exec
++    %2:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, -1, 0, implicit $exec
++    %3:vgpr_32 = V_ADD_U32_e32 %1, %2, implicit $exec
++    $vgpr0 = COPY %3
++    SI_RETURN_TO_EPILOG $vgpr0
++...
 diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,153 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
 +
 +; Verify that llvm.amdgcn.schedule.{vgpr,sgpr} steer register allocation to
@@ -1366,6 +1731,9 @@ new file mode 100644
 +declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
 +declare i64 @llvm.amdgcn.sched.vgpr.i64(i64, i32, i32)
 +declare <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float>, i32, i32)
++declare i32 @llvm.amdgcn.sched.sgpr.i32(i32, i32, i32)
++declare i32 @llvm.amdgcn.workitem.id.x()
 +
 +; --------------------------------------------------------------------------
 +; sched_vgpr: strict hint to v42
@@ -1431,11 +1799,62 @@ new file mode 100644
 +; sched_vgpr: 512-bit value (v16f32), strict hint to v[512:527]
 +
 +; GCN-LABEL: {{^}}vgpr512_v16f32:
-+; GCN: v[512:527]
++; GCN-DAG: v[524:527]
++; GCN-DAG: v[512:515]
 +define amdgpu_kernel void @vgpr512_v16f32(ptr addrspace(1) %out, ptr addrspace(1) %in) #0 {
 +  %x = load <16 x float>, ptr addrspace(1) %in
 +  %h = call <16 x float> @llvm.amdgcn.sched.vgpr.v16f32(<16 x float> %x, i32 512, i32 1)
 +  store <16 x float> %h, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; sched_vgpr: a strict pin on a value built from sub-register defs still holds
++; after coalescing, and every later use reads the pinned v[40:43].
++
++; GCN-LABEL: {{^}}vgpr40_shared_uses:
++; GCN-DAG: v_pk_add_f32 v[40:41],
++; GCN-DAG: v_pk_add_f32 v[42:43],
++; GCN-DAG: v_pk_add_f32 v[{{[0-9]+:[0-9]+}}], v[40:41],
++; GCN-DAG: v_pk_mul_f32 v[{{[0-9]+:[0-9]+}}], v[40:41],
++define amdgpu_kernel void @vgpr40_shared_uses(ptr addrspace(1) %out, ptr addrspace(1) %in) #0 {
++  %pb = getelementptr <4 x float>, ptr addrspace(1) %in, i32 1
++  %pe = getelementptr <4 x float>, ptr addrspace(1) %in, i32 2
++  %a = load volatile <4 x float>, ptr addrspace(1) %in
++  %b = load volatile <4 x float>, ptr addrspace(1) %pb
++  %e = load volatile <4 x float>, ptr addrspace(1) %pe
++  %c0 = fadd <4 x float> %a, %b
++  %c = call <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float> %c0, i32 40, i32 1)
++  %d = fadd <4 x float> %c, %e
++  %f = fmul <4 x float> %c, %e
++  %o2 = getelementptr <4 x float>, ptr addrspace(1) %out, i32 1
++  store <4 x float> %d, ptr addrspace(1) %out
++  store <4 x float> %f, ptr addrspace(1) %o2
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; regnum -1: any register of the file. No index is forced, so the allocator
++; keeps the default low-numbered registers.
++
++; GCN-LABEL: {{^}}vgpr_any:
++; GCN-NOT: v42
++; GCN: v_add_nc_u32_e32 v{{[0-9]}}, 1, v{{[0-9]}}
++define amdgpu_kernel void @vgpr_any(ptr addrspace(1) %out, i32 %x) #0 {
++  %v = call i32 @llvm.amdgcn.workitem.id.x()
++  %s = add i32 %v, %x
++  %h = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %s, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; GCN-LABEL: {{^}}sgpr_any:
++; GCN: s_add_co_i32 s{{[0-9]+}}, s{{[0-9]+}}, 1
++define amdgpu_kernel void @sgpr_any(ptr addrspace(1) %out, i32 inreg %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.sgpr.i32(i32 %x, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
 +  ret void
 +}
 +
@@ -1455,3 +1874,635 @@ new file mode 100644
 +}
 +
 +attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+--- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+@@ -2550,6 +2550,35 @@
+     break;
+   }
+ 
++  case AMDGPU::A_SCHEDULE_AGPR_B32:
++  case AMDGPU::A_SCHEDULE_AGPR_B64:
++  case AMDGPU::A_SCHEDULE_AGPR_B128:
++  case AMDGPU::A_SCHEDULE_AGPR_B256:
++  case AMDGPU::A_SCHEDULE_AGPR_B512:
++  case AMDGPU::V_SCHEDULE_VGPR_B32:
++  case AMDGPU::V_SCHEDULE_VGPR_B64:
++  case AMDGPU::V_SCHEDULE_VGPR_B128:
++  case AMDGPU::V_SCHEDULE_VGPR_B256:
++  case AMDGPU::V_SCHEDULE_VGPR_B512:
++  case AMDGPU::S_SCHEDULE_SGPR_B32:
++  case AMDGPU::S_SCHEDULE_SGPR_B64:
++  case AMDGPU::S_SCHEDULE_SGPR_B128:
++  case AMDGPU::S_SCHEDULE_SGPR_B256:
++  case AMDGPU::S_SCHEDULE_SGPR_B512: {
++    // Strict exact-register pins are kept through RA so the pinned value keeps
++    // its own def and hint (and, for AGPR, its operand class).
++    // The immediates have already been consumed as allocation hints.
++    Register Dst = MI.getOperand(0).getReg();
++    Register Src = MI.getOperand(1).getReg();
++    if (unsigned DstSub = MI.getOperand(0).getSubReg())
++      Dst = RI.getSubReg(Dst, DstSub);
++    if (unsigned SrcSub = MI.getOperand(1).getSubReg())
++      Src = RI.getSubReg(Src, SrcSub);
++    if (Dst != Src)
++      copyPhysReg(MBB, MI, DL, Dst, Src, MI.getOperand(1).isKill());
++    MI.eraseFromParent();
++    break;
++  }
+   case AMDGPU::GET_STACK_BASE:
+     // The stack starts at offset 0 unless we need to reserve some space at the
+     // bottom.
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr.ll b/llvm/test/CodeGen/AMDGPU/sched-agpr.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-agpr.ll
+@@ -0,0 +1,92 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx942 < %s | FileCheck -check-prefix=GCN %s
++
++; sched_agpr's regnum is an architectural AGPR index (aN), not a unified-file
++; offset. vN and aN share a HW index, so a strict hint must also constrain the
++; register file. The strict pseudo stays through coalescing (its AGPR operand
++; class blocks inflation to AV_*) and is expanded after RA.
++
++declare i32 @llvm.amdgcn.sched.agpr.i32(i32, i32, i32)
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++
++; --------------------------------------------------------------------------
++; Result is only used by VALU. strict hint 8 still lands on a8; VALU reads it
++; back into a VGPR.
++
++; GCN-LABEL: {{^}}agpr8_as_vgpr:
++; GCN: v_accvgpr_write_b32 a8,
++; GCN: v_accvgpr_read_b32 v{{[0-9]+}}, a8
++; GCN: v_add_u32_e32
++; GCN: .Lagpr8_as_vgpr.num_agpr, 9
++define amdgpu_kernel void @agpr8_as_vgpr(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 8, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; Same hint, but the result is consumed as an AGPR. Lands on a8.
++
++; GCN-LABEL: {{^}}agpr8_kept:
++; GCN: v_accvgpr_write_b32 a8,
++; GCN: .Lagpr8_kept.num_agpr, 9
++define amdgpu_kernel void @agpr8_kept(i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 8, i32 1)
++  call void asm sideeffect "; use $0", "a"(i32 %h)
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; 128-bit value, strict hint 4, AGPR use. Starting index is a4: a[4:7].
++
++; GCN-LABEL: {{^}}agpr4_v4:
++; GCN-DAG: v_accvgpr_write_b32 a4,
++; GCN-DAG: v_accvgpr_write_b32 a5,
++; GCN-DAG: v_accvgpr_write_b32 a6,
++; GCN-DAG: v_accvgpr_write_b32 a7,
++; GCN: .Lagpr4_v4.num_agpr, 8
++define amdgpu_kernel void @agpr4_v4(ptr addrspace(1) %in) #0 {
++  %x = load <4 x float>, ptr addrspace(1) %in
++  %h = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %x, i32 4, i32 1)
++  call void asm sideeffect "; use $0", "a"(<4 x float> %h)
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; regnum 0 is a real a0, not "no hint".
++
++; GCN-LABEL: {{^}}agpr0_kept:
++; GCN: v_accvgpr_write_b32 a0,
++; GCN: .Lagpr0_kept.num_agpr, 1
++define amdgpu_kernel void @agpr0_kept(i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 0, i32 1)
++  call void asm sideeffect "; use $0", "a"(i32 %h)
++  ret void
++}
++
++; --------------------------------------------------------------------------
++; regnum -1 keeps the value in the AGPR file without fixing the index. A soft
++; pin with regnum -1 has no effect.
++
++; GCN-LABEL: {{^}}agpr_any_as_vgpr:
++; GCN: v_accvgpr_write_b32 [[A:a[0-9]+]],
++; GCN: v_accvgpr_read_b32 v{{[0-9]+}}, [[A]]
++; GCN: v_add_u32_e32
++define amdgpu_kernel void @agpr_any_as_vgpr(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 -1, i32 1)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++; GCN-LABEL: {{^}}agpr_any_soft:
++; GCN-NOT: v_accvgpr_write
++; GCN: .Lagpr_any_soft.num_agpr, 0
++define amdgpu_kernel void @agpr_any_soft(ptr addrspace(1) %out, i32 %x) #0 {
++  %h = call i32 @llvm.amdgcn.sched.agpr.i32(i32 %x, i32 -1, i32 0)
++  %y = add i32 %h, 1
++  store i32 %y, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-flat-work-group-size"="64,64" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
+--- a/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
++++ b/llvm/lib/Target/AMDGPU/AMDGPUISelDAGToDAG.h
+@@ -90,6 +90,7 @@ private:
+   }
+ 
+   bool isVGPRImm(const SDNode *N) const;
++  bool isStrictAGPRPinnedMFMA(const SDNode *N) const;
+   bool isUniformLoad(const SDNode *N) const;
+   bool isUniformBr(const SDNode *N) const;
+ 
+diff --git a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+--- a/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
++++ b/llvm/lib/Target/AMDGPU/VOP3PInstructions.td
+@@ -1137,7 +1137,7 @@ class MAIFrag<SDPatternOperator Op, bit HasAbid = true, bit Scaled = false> : Pa
+ 
+ class CanUseAGPR_MAI<ValueType vt> {
+   code PredicateCode = [{
+-    return !Subtarget->hasGFX90AInsts() ||
++    return !Subtarget->hasGFX90AInsts() || isStrictAGPRPinnedMFMA(N) ||
+       MF->getInfo<SIMachineFunctionInfo>()->selectAGPRFormMFMA(
+         }] # !srl(vt.Size, 5) # ");";
+ 
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll b/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-agpr-mfma-form.ll
+@@ -0,0 +1,64 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 -stop-after=finalize-isel < %s | FileCheck -check-prefix=ISEL %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
++
++; An MFMA whose src2 or result is strictly pinned by sched.agpr is selected in
++; the AGPR form even when the function is not known to need AGPRs, so the
++; accumulator stays in place instead of being copied to and from VGPRs around
++; the MFMA. Soft pins and unpinned MFMAs keep the default VGPR form.
++
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half>, <4 x half>, <4 x float>, i32, i32, i32)
++
++; ISEL-LABEL: name: strict_pin
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL-NOT: V_MFMA_F32_16X16X16F16_vgprcd_e64
++; GCN-LABEL: {{^}}strict_pin:
++; GCN-NOT: v_accvgpr_read
++; GCN: v_mfma_f32_16x16x16_f16 a[8:11], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[8:11]
++; GCN-NOT: v_accvgpr_read
++; GCN: v_mfma_f32_16x16x16_f16 a[8:11], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[8:11]
++define amdgpu_kernel void @strict_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 8, i32 1)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  %rp = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 8, i32 1)
++  %cin2 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %rp, i32 8, i32 1)
++  %r2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %b, <4 x half> %a, <4 x float> %cin2, i32 0, i32 0, i32 0)
++  %rp2 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r2, i32 8, i32 1)
++  store <4 x float> %rp2, ptr addrspace(1) %out
++  ret void
++}
++
++; A strict pin with regnum -1 also selects the AGPR form; the allocator picks
++; the AGPRs.
++; ISEL-LABEL: name: any_pin
++; ISEL: V_MFMA_F32_16X16X16F16_e64
++; ISEL-NOT: V_MFMA_F32_16X16X16F16_vgprcd_e64
++; GCN-LABEL: {{^}}any_pin:
++; GCN: v_mfma_f32_16x16x16_f16 a[{{[0-9:]+}}], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[{{[0-9:]+}}]
++define amdgpu_kernel void @any_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 -1, i32 1)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  %rp = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 -1, i32 1)
++  store <4 x float> %rp, ptr addrspace(1) %out
++  ret void
++}
++
++; ISEL-LABEL: name: soft_pin
++; ISEL: V_MFMA_F32_16X16X16F16_vgprcd_e64
++define amdgpu_kernel void @soft_pin(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %cin = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 8, i32 0)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %cin, i32 0, i32 0, i32 0)
++  store <4 x float> %r, ptr addrspace(1) %out
++  ret void
++}
++
++; ISEL-LABEL: name: unpinned
++; ISEL: V_MFMA_F32_16X16X16F16_vgprcd_e64
++define amdgpu_kernel void @unpinned(ptr addrspace(1) %out, <4 x half> %a, <4 x half> %b, <4 x float> %c) #0 {
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %b, <4 x float> %c, i32 0, i32 0, i32 0)
++  store <4 x float> %r, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-agpr-alloc"="0" "amdgpu-flat-work-group-size"="256,256" "amdgpu-waves-per-eu"="1" }
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll b/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-agpr-any-chain.ll
+@@ -0,0 +1,103 @@
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 -stop-after=amdgpu-sched-bank < %s | FileCheck %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
++
++; Each accumulator chain of regnum -1 strict AGPR pins gets its own AGPR index.
++; Two chains that share their zero initial value stay separate.
++
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half>, <4 x half>, <4 x float>, i32, i32, i32)
++
++; CHECK-LABEL: name: two_chains
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 4, 1
++define amdgpu_kernel void @two_chains(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) #0 {
++entry:
++  br label %loop
++
++loop:
++  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
++  %c0 = phi <4 x float> [ zeroinitializer, %entry ], [ %p0, %loop ]
++  %c1 = phi <4 x float> [ zeroinitializer, %entry ], [ %p1, %loop ]
++  %pa = getelementptr <4 x half>, ptr addrspace(1) %in, i32 %i
++  %a = load <4 x half>, ptr addrspace(1) %pa
++  %r0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %c0, i32 0, i32 0, i32 0)
++  %p0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r0, i32 -1, i32 1)
++  %r1 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %c1, i32 0, i32 0, i32 0)
++  %p1 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r1, i32 -1, i32 1)
++  %i.next = add i32 %i, 1
++  %cond = icmp slt i32 %i.next, %n
++  br i1 %cond, label %loop, label %exit
++
++exit:
++  %o1 = getelementptr <4 x float>, ptr addrspace(1) %out, i32 1
++  store <4 x float> %p0, ptr addrspace(1) %out
++  store <4 x float> %p1, ptr addrspace(1) %o1
++  ret void
++}
++
++; One chain from the MFMA before the loop, through the loop PHI and the
++; accumulator input of the MFMA after the loop.
++; CHECK-LABEL: name: loop_chain
++; CHECK-COUNT-3: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
++; CHECK-NOT: A_SCHEDULE_AGPR_B128
++; GCN-LABEL: {{^}}loop_chain:
++; GCN-NOT: v_accvgpr_mov
++; GCN: v_mfma_f32_16x16x16_f16 a[0:3], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[0:3]
++; GCN-NOT: v_accvgpr_mov
++; GCN: v_mfma_f32_16x16x16_f16 a[0:3], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[0:3]
++; GCN-NOT: v_accvgpr_mov
++; GCN: v_mfma_f32_16x16x16_f16 a[0:3], v[{{[0-9:]+}}], v[{{[0-9:]+}}], a[0:3]
++; GCN-NOT: v_accvgpr_mov
++; GCN: s_endpgm
++define amdgpu_kernel void @loop_chain(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n, <4 x float> %init) #0 {
++entry:
++  %a0 = load <4 x half>, ptr addrspace(1) %in
++  %r0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a0, <4 x half> %a0, <4 x float> %init, i32 0, i32 0, i32 0)
++  %p0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r0, i32 -1, i32 1)
++  br label %loop
++
++loop:
++  %i = phi i32 [ 1, %entry ], [ %i.next, %loop ]
++  %c = phi <4 x float> [ %p0, %entry ], [ %p, %loop ]
++  %pa = getelementptr <4 x half>, ptr addrspace(1) %in, i32 %i
++  %a = load <4 x half>, ptr addrspace(1) %pa
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %c, i32 0, i32 0, i32 0)
++  %p = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 -1, i32 1)
++  %i.next = add i32 %i, 1
++  %cond = icmp slt i32 %i.next, %n
++  br i1 %cond, label %loop, label %exit
++
++exit:
++  %b = load <4 x half>, ptr addrspace(1) %in
++  %e = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %b, <4 x half> %b, <4 x float> %p, i32 0, i32 0, i32 0)
++  %q = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %e, i32 -1, i32 1)
++  store <4 x float> %q, ptr addrspace(1) %out
++  ret void
++}
++
++; An exact pin takes a0..a3, so the chain starts at a4.
++; CHECK-LABEL: name: after_exact
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 0, 1
++; CHECK: A_SCHEDULE_AGPR_B128 {{.*}}%{{[0-9]+}}, 4, 1
++define amdgpu_kernel void @after_exact(ptr addrspace(1) %out, <4 x half> %a, <4 x float> %c, <4 x float> %d) #0 {
++  %x = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %c, i32 0, i32 1)
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %d, i32 0, i32 0, i32 0)
++  %p = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 -1, i32 1)
++  %o1 = getelementptr <4 x float>, ptr addrspace(1) %out, i32 1
++  store <4 x float> %x, ptr addrspace(1) %out
++  store <4 x float> %p, ptr addrspace(1) %o1
++  ret void
++}
++
++; A soft pin with regnum -1 gets no index.
++; CHECK-LABEL: name: soft_any
++; CHECK-NOT: A_SCHEDULE_AGPR
++; CHECK: S_ENDPGM
++define amdgpu_kernel void @soft_any(ptr addrspace(1) %out, <4 x half> %a, <4 x float> %c) #0 {
++  %r = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half> %a, <4 x half> %a, <4 x float> %c, i32 0, i32 0, i32 0)
++  %p = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %r, i32 -1, i32 0)
++  store <4 x float> %p, ptr addrspace(1) %out
++  ret void
++}
++
++attributes #0 = { "amdgpu-flat-work-group-size"="256,256" "amdgpu-waves-per-eu"="1" }
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp b/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
+--- a/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUCodeGenPrepare.cpp
+@@ -16,6 +16,7 @@
+ #include "AMDGPUMemoryUtils.h"
+ #include "AMDGPUTargetMachine.h"
+ #include "SIModeRegisterDefaults.h"
++#include "llvm/ADT/EquivalenceClasses.h"
+ #include "llvm/ADT/SetVector.h"
+ #include "llvm/Analysis/AssumptionCache.h"
+ #include "llvm/Analysis/ConstantFolding.h"
+@@ -26,6 +27,7 @@
+ #include "llvm/CodeGen/TargetPassConfig.h"
+ #include "llvm/IR/Dominators.h"
+ #include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/InstIterator.h"
+ #include "llvm/IR/InstVisitor.h"
+ #include "llvm/IR/IntrinsicsAMDGPU.h"
+ #include "llvm/IR/PatternMatch.h"
+@@ -293,9 +295,103 @@
+ 
+ } // end anonymous namespace
+ 
++static bool isStrictSchedPin(const Value *V) {
++  const auto *II = dyn_cast<IntrinsicInst>(V);
++  if (!II || (II->getIntrinsicID() != Intrinsic::amdgcn_sched_vgpr &&
++              II->getIntrinsicID() != Intrinsic::amdgcn_sched_sgpr &&
++              II->getIntrinsicID() != Intrinsic::amdgcn_sched_agpr))
++    return false;
++  const auto *Strict = dyn_cast<ConstantInt>(II->getArgOperand(2));
++  return Strict && !Strict->isZero() && isa<ConstantInt>(II->getArgOperand(1));
++}
++
++/// A strict sched pin applies to the whole variable it starts: every value
++/// that replaces it through a PHI or as the accumulator of an MFMA gets the
++/// same pin, so a loop-carried variable or an MFMA accumulator keeps one
++/// register without a pin at each update.
++static bool propagateLoopPins(Function &F, const UniformityInfo &UA) {
++  auto IsMFMA = [](const Value *V) {
++    const auto *II = dyn_cast<IntrinsicInst>(V);
++    return II && II->getCalledFunction()->getName().starts_with(
++                     "llvm.amdgcn.mfma.");
++  };
++  // A value shared by several accumulators (e.g. one initial value) must not
++  // join them into one variable.
++  auto HasOnePHIUser = [](const Value *V) {
++    return count_if(V->users(), [](const User *U) { return isa<PHINode>(U); }) ==
++           1;
++  };
++  auto HasOneAccUser = [&](const Value *V) {
++    return count_if(V->uses(), [&](const Use &U) {
++             return IsMFMA(U.getUser()) && U.getOperandNo() == 2;
++           }) == 1;
++  };
++
++  EquivalenceClasses<Value *> Chains;
++  SmallVector<IntrinsicInst *, 16> Pins;
++  for (Instruction &I : instructions(F)) {
++    if (auto *Phi = dyn_cast<PHINode>(&I)) {
++      for (Value *In : Phi->incoming_values())
++        if (isa<Instruction>(In) && HasOnePHIUser(In))
++          Chains.unionSets(In, Phi);
++    } else if (isStrictSchedPin(&I)) {
++      Pins.push_back(cast<IntrinsicInst>(&I));
++      if (isa<Instruction>(I.getOperand(0)))
++        Chains.unionSets(I.getOperand(0), &I);
++      else
++        Chains.insert(&I);
++    } else if (IsMFMA(&I) && isa<Instruction>(I.getOperand(2)) &&
++               HasOneAccUser(I.getOperand(2))) {
++      Chains.unionSets(I.getOperand(2), &I);
++    }
++  }
++
++  struct ChainPin {
++    IntrinsicInst *Pin;
++    int64_t RegNum;
++    bool Conflict = false;
++  };
++  DenseMap<Value *, ChainPin> Info;
++  for (IntrinsicInst *P : Pins) {
++    int64_t RegNum = cast<ConstantInt>(P->getArgOperand(1))->getSExtValue();
++    auto [It, Inserted] =
++        Info.try_emplace(Chains.getLeaderValue(P), ChainPin{P, RegNum});
++    ChainPin &C = It->second;
++    if (Inserted)
++      continue;
++    if (C.Pin->getIntrinsicID() != P->getIntrinsicID())
++      C.Conflict = true;
++    else if (C.RegNum == -1)
++      C.RegNum = RegNum;
++    else if (RegNum != -1 && RegNum != C.RegNum)
++      C.Conflict = true;
++  }
++
++  bool Changed = false;
++  for (auto [Leader, C] : Info) {
++    if (C.Conflict)
++      continue;
++    for (Value *V : Chains.members(Leader)) {
++      auto *I = dyn_cast<Instruction>(V);
++      if (!I || isa<PHINode>(I) || isStrictSchedPin(I) ||
++          any_of(I->users(), isStrictSchedPin) ||
++          (C.Pin->getIntrinsicID() == Intrinsic::amdgcn_sched_sgpr &&
++           UA.isDivergentAtDef(I)))
++        continue;
++      IRBuilder<> B(I->getNextNode());
++      Value *Pin = B.CreateIntrinsic(
++          C.Pin->getIntrinsicID(), {I->getType()},
++          {I, B.getInt32(C.RegNum), C.Pin->getArgOperand(2)});
++      I->replaceUsesWithIf(Pin, [&](Use &U) { return U.getUser() != Pin; });
++      Changed = true;
++    }
++  }
++  return Changed;
++}
++
+ bool AMDGPUCodeGenPrepareImpl::run() {
+   BreakPhiNodesCache.clear();
+-  bool MadeChange = false;
++  bool MadeChange = propagateLoopPins(F, UA);
+ 
+   // Need to use make_early_inc_range because integer division expansion is
+   // handled by Transform/Utils, and it can delete instructions such as the
+diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-loop-carried.ll
+@@ -0,0 +1,167 @@
++; RUN: opt -mtriple=amdgcn -mcpu=gfx950 -passes=amdgpu-codegenprepare -S < %s | FileCheck -check-prefix=IR %s
++; RUN: llc -mtriple=amdgcn -mcpu=gfx950 < %s | FileCheck -check-prefix=GCN %s
++
++; A strict pin of a loop's initial value covers the whole loop-carried
++; variable: the updates inside the loop need no pin of their own and the
++; variable keeps one register across iterations.
++
++declare i32 @llvm.amdgcn.sched.vgpr.i32(i32, i32, i32)
++declare <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float>, i32, i32)
++declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float, float, <4 x float>, i32, i32, i32)
++declare i32 @llvm.amdgcn.workitem.id.x()
++
++; IR-LABEL: @vgpr_numbered(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 12, i32 1)
++; IR: %d1 = xor i32 %d, %y
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %d1, i32 13, i32 1)
++
++; GCN-LABEL: vgpr_numbered:
++; GCN: .LBB0_1:
++; GCN-NOT: v_mov
++; GCN: v_add_u32_e32 v12, v12, v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: v_xor_b32_e32 v13, v13, v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: s_cbranch_scc1 .LBB0_1
++define amdgpu_kernel void @vgpr_numbered(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %y = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %w = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 12, i32 1)
++  %d0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %w, i32 13, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c1, %loop]
++  %d = phi i32 [%d0, %entry], [%d1, %loop]
++  %c1 = add i32 %c, %x
++  %d1 = xor i32 %d, %y
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c1, ptr addrspace(1) %q
++  store volatile i32 %d1, ptr addrspace(1) %q
++  ret void
++}
++
++; IR-LABEL: @vgpr_any(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 -1, i32 1)
++
++; GCN-LABEL: vgpr_any:
++; GCN: .LBB1_1:
++; GCN-NOT: v_mov
++; GCN: v_add_u32_e32 [[C:v[0-9]+]], [[C]], v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: v_xor_b32_e32 [[D:v[0-9]+]], [[D]], v{{[0-9]+}}
++; GCN-NOT: v_mov
++; GCN: s_cbranch_scc1 .LBB1_1
++define amdgpu_kernel void @vgpr_any(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %y = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %w = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 -1, i32 1)
++  %d0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %w, i32 -1, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c1, %loop]
++  %d = phi i32 [%d0, %entry], [%d1, %loop]
++  %c1 = add i32 %c, %x
++  %d1 = xor i32 %d, %y
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c1, ptr addrspace(1) %q
++  store volatile i32 %d1, ptr addrspace(1) %q
++  ret void
++}
++
++; Two MFMAs per iteration accumulate into each AGPR chain.
++
++; IR-LABEL: @agpr_any(
++; IR: %e2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(
++; IR-NEXT: call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %e2, i32 -1, i32 1)
++; IR: %e3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(
++; IR-NEXT: call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %e3, i32 -1, i32 1)
++
++; GCN-LABEL: agpr_any:
++; GCN-NOT: v_accvgpr_mov
++; GCN: .LBB2_1:
++; GCN: v_mfma_f32_16x16x4_f32 a[0:3], v{{[0-9]+}}, v{{[0-9]+}}, a[0:3]
++; GCN: v_mfma_f32_16x16x4_f32 a[4:7], v{{[0-9]+}}, v{{[0-9]+}}, a[4:7]
++; GCN-NOT: v_accvgpr_mov
++; GCN: v_mfma_f32_16x16x4_f32 a[0:3], v{{[0-9]+}}, v{{[0-9]+}}, a[0:3]
++; GCN: v_mfma_f32_16x16x4_f32 a[4:7], v{{[0-9]+}}, v{{[0-9]+}}, a[4:7]
++; GCN-NOT: v_accvgpr_mov
++; GCN: s_cbranch_scc1 .LBB2_1
++define amdgpu_kernel void @agpr_any(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr float, ptr addrspace(1) %in, i32 %tid
++  %a = load volatile float, ptr addrspace(1) %p
++  %b = load volatile float, ptr addrspace(1) %p
++  %m0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %b, <4 x float> zeroinitializer, i32 0, i32 0, i32 0)
++  %e0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %m0, i32 -1, i32 1)
++  %n0 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %a, <4 x float> zeroinitializer, i32 0, i32 0, i32 0)
++  %f0 = call <4 x float> @llvm.amdgcn.sched.agpr.v4f32(<4 x float> %n0, i32 -1, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %e = phi <4 x float> [%e0, %entry], [%e3, %loop]
++  %f = phi <4 x float> [%f0, %entry], [%f3, %loop]
++  %e2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %b, <4 x float> %e, i32 0, i32 0, i32 0)
++  %f2 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %a, <4 x float> %f, i32 0, i32 0, i32 0)
++  %e3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %b, float %b, <4 x float> %e2, i32 0, i32 0, i32 0)
++  %f3 = call <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float %a, float %a, <4 x float> %f2, i32 0, i32 0, i32 0)
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr <4 x float>, ptr addrspace(1) %out, i32 %tid
++  store volatile <4 x float> %e3, ptr addrspace(1) %q
++  store volatile <4 x float> %f3, ptr addrspace(1) %q
++  ret void
++}
++
++; Pins with different register numbers in one variable conflict: nothing is
++; added.
++
++; IR-LABEL: @conflict(
++; IR: %c1 = add i32 %c, %x
++; IR-NEXT: %c2 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 13, i32 1)
++; IR-NEXT: %i1 = add i32 %i, 1
++define amdgpu_kernel void @conflict(ptr addrspace(1) %out, ptr addrspace(1) %in, i32 %n) {
++entry:
++  %tid = call i32 @llvm.amdgcn.workitem.id.x()
++  %p = getelementptr i32, ptr addrspace(1) %in, i32 %tid
++  %x = load volatile i32, ptr addrspace(1) %p
++  %z = load volatile i32, ptr addrspace(1) %p
++  %c0 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %z, i32 12, i32 1)
++  br label %loop
++loop:
++  %i = phi i32 [0, %entry], [%i1, %loop]
++  %c = phi i32 [%c0, %entry], [%c2, %loop]
++  %c1 = add i32 %c, %x
++  %c2 = call i32 @llvm.amdgcn.sched.vgpr.i32(i32 %c1, i32 13, i32 1)
++  %i1 = add i32 %i, 1
++  %cc = icmp slt i32 %i1, %n
++  br i1 %cc, label %loop, label %exit
++exit:
++  %q = getelementptr i32, ptr addrspace(1) %out, i32 %tid
++  store volatile i32 %c2, ptr addrspace(1) %q
++  ret void
++}

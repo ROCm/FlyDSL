@@ -6,7 +6,10 @@
 ``fx.coop.universal.warp_reduce`` always uses the portable warp implementation.
 ``fx.coop.warp_reduce`` may select a backend override when its requirements are
 met. Both expose the same argument and result contracts; floating-point
-rounding can depend on the reduction tree.
+rounding can depend on the reduction tree, and so can the sign of a zero
+result: an override's float ADD fold may return +0.0 where the exact result is
+-0.0 (for example a one-lane segment, or the first inclusive prefix, holding
+-0.0). The two compare equal.
 
 The block subclasses in this module also route their internal warp operations
 and scans through portable implementations. This namespace supports explicit

@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import ctypes
 import enum
 import operator
 import types
 from collections.abc import Callable as AbcCallable
+from fractions import Fraction
 from inspect import isclass
 from typing import Any, Callable, List, Type, get_origin, overload
 
 from .._mlir import ir
-from .._mlir.dialects import arith, gpu, vector
+from .._mlir.dialects import arith, fly, gpu, vector
 from .meta import dsl_loc_tracing
 from .numeric import (  # noqa: F401
     BFloat16,
@@ -81,6 +83,7 @@ __all__ = [
     "Tile",
     "TiledCopy",
     "TiledMma",
+    "FastDivmodDivisor",
     "Stream",
     "Tuple3D",
     "Basis",
@@ -696,7 +699,7 @@ class IntTuple(BuiltinDslType):
         if ty.is_leaf_basis:
             bt = ty.get_leaf_as_basis
             return Basis(bt.value, list(bt.modes))
-        return ty.get_static_leaf_int
+        return ty.static_value
 
     @staticmethod
     def _dynamic_leaf_to_py(ty, value):
@@ -709,14 +712,14 @@ class IntTuple(BuiltinDslType):
     def _static_to_py_value(ty):
         if ty.is_leaf:
             return IntTuple._static_leaf_to_py(ty)
-        return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range(ty.rank))
+        return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range_constexpr(ty.rank))
 
     def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
             if self.is_static:
                 return IntTuple._static_leaf_to_py(self.type)
             return next(leaf_iter)
-        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range_constexpr(self.rank))
 
     @dsl_loc_tracing
     def to_py_value(self):
@@ -750,18 +753,35 @@ class Tile(BuiltinDslType):
         """Return the value on each mode, mirroring ``IntTuple.unpack``.
 
         Int modes become Python ints, layout modes become ``Layout`` values, and
-        nested modes become tuples.
+        nested modes become tuples. A dynamic layout mode is rebuilt from the
+        tile's runtime leaves, which follow the modes in order.
         """
+        leaves = None
+
+        def dynamic_leaf_count(ty):
+            if ty.is_leaf:
+                return 0 if ty.is_static else 1
+            return sum(dynamic_leaf_count(ty.at(i)) for i in range_constexpr(ty.rank))
+
+        def int_tuple(ty):
+            nonlocal leaves
+            if ty.is_static:
+                return static(ty)
+            if leaves is None:
+                leaves = iter(fly.GetLeavesOp(self).results)
+            return fly.make_int_tuple(ty, [next(leaves) for _ in range_constexpr(dynamic_leaf_count(ty))])
 
         def to_py_value(ty):
             ty = ty.maybe_downcast()
             if isinstance(ty, LayoutType):
-                return static(ty)
+                if ty.is_static:
+                    return static(ty)
+                return make_layout(int_tuple(IntTupleType(ty.shape)), int_tuple(IntTupleType(ty.stride)))
             if not isinstance(ty, TileType):
                 return IntTuple._static_to_py_value(ty)
             if ty.is_leaf:
                 return to_py_value(ty.at(0))
-            return tuple(to_py_value(ty.at(i)) for i in range(ty.rank))
+            return tuple(to_py_value(ty.at(i)) for i in range_constexpr(ty.rank))
 
         return to_py_value(self.type)
 
@@ -1388,6 +1408,62 @@ class TiledMma(BuiltinDslType):
         return mma_make_fragment(MmaOperand.C, self, c, stages=stages)
 
 
+@ir.register_value_caster(FastDivModType.static_typeid, replace=True)
+class FastDivmodDivisor(BuiltinDslType):
+    """A divisor with the magic numbers of its fast division.
+
+    Constructing one from an Int32 or Int64 computes the magic numbers once
+    (``make_fast_divmod``): in a ``@flyc.jit`` function on the host, which
+    passes the divisor to a kernel as one argument; in a kernel on the GPU.
+    Dividing by it is then a multiply-high, an add and a shift::
+
+        divisor = fx.FastDivmodDivisor(n)
+        q, r = divmod(x, divisor)
+        q = x // divisor
+        r = x % divisor
+
+    The divisor must be in [1, 2^(width-1)) and the dividend in
+    [0, 2^(width-1)), where width is that of the divisor. ``divisor`` reads the
+    divisor back, inside a kernel too. As a shape leaf, e.g.
+    ``fx.make_shape(divisor, 8)``, it makes the layout algebra divide by it
+    the same way.
+    """
+
+    def __init__(self, divisor):
+        if not (isinstance(divisor, ir.Value) and isinstance(divisor.type, FastDivModType)):
+            divisor = make_fast_divmod(divisor)
+        super().__init__(divisor)
+
+    @property
+    def width(self) -> int:
+        return self.type.divisor_type.width
+
+    @property
+    def divisor(self):
+        return fast_divmod_get_divisor(self)
+
+    def _dividend(self, dividend):
+        dtype = Int32 if self.width == 32 else Int64
+        if isinstance(dividend, ir.Value) and not isinstance(dividend, Numeric):
+            dividend = as_dsl_value(dividend)
+        dividend = as_numeric(dividend)
+        if not isinstance(dividend, Integer) or dividend.width > self.width:
+            raise TypeError(
+                f"a {self.width}-bit FastDivmodDivisor cannot divide {type(dividend).__name__}; "
+                f"pass an integer at most {self.width} bits wide"
+            )
+        return dividend if type(dividend) is dtype else dividend.to(dtype)
+
+    def __rdivmod__(self, dividend):
+        return fast_divmod(self._dividend(dividend), self)
+
+    def __rfloordiv__(self, dividend):
+        return self.__rdivmod__(dividend)[0]
+
+    def __rmod__(self, dividend):
+        return self.__rdivmod__(dividend)[1]
+
+
 class Stream:
     """Opaque async queue handle for kernel launch.
 
@@ -1461,8 +1537,8 @@ class Basis:
         self.modes = modes
 
     def __mul__(self, other):
-        if not isinstance(other, (int, Integer)):
-            raise TypeError(f"Basis multiplication requires int or Integer, got {type(other)}")
+        if not isinstance(other, (int, Fraction, Integer)):
+            raise TypeError(f"Basis multiplication requires int, Fraction, or Integer, got {type(other)}")
         return Basis(self.value * other, self.modes)
 
     __rmul__ = __mul__
@@ -2036,6 +2112,14 @@ class Vector(ArithValue):
                 dynamic_position=[dyn_idx],
             ).result
             return self._dtype(res)
+        if isinstance(idx, builtins.slice):  # `slice` here is the layout primitive from .primitive
+            # Like an int index, a slice addresses the flat (row-major) element positions.
+            if not all(bound is None or isinstance(bound, int) for bound in (idx.start, idx.stop, idx.step)):
+                raise TypeError(f"vector slice bounds must be Python ints, got {idx}")
+            positions = list(range_constexpr(*idx.indices(self.numel)))
+            if not positions:
+                raise IndexError(f"vector slice {idx} is empty for numel {self.numel}")
+            return self.shuffle(self, positions)
         if isinstance(idx, tuple):
             coord = self._canonical_shape(idx)
             if not any(part is None for part in self._flatten_static(coord)):
@@ -2070,7 +2154,7 @@ class Vector(ArithValue):
         # Without this, list()/unpacking falls back to the legacy sequence
         # protocol (self[0], self[1], ...), which spins forever because the
         # int branch of __getitem__ used to never raise IndexError (see #793).
-        for i in range(self.numel):
+        for i in range_constexpr(self.numel):
             yield self[i]
 
     def _build_result(self, value, shape, *, row_major=False) -> "Vector":

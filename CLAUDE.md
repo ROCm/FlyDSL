@@ -141,15 +141,15 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 | Purpose | Variable |
 |---|---|
 | Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
-| Override compile arch | `ARCH` |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` disables disk cache; in-memory cache remains) |
 | AOT-cache-only execution | `FLYDSL_RUNTIME_RUN_ONLY` (`1` skips JIT; loads disk cache only, raises on cache miss; incompatible with `FLYDSL_DUMP_IR=1`) |
 | External LLVM/MLIR codegen | `FLYDSL_COMPILE_LLVM_DIR` (install prefix; enables external-binary final codegen, part of the JIT cache key) |
+| ROCm device-bitcode root | `FLYDSL_COMPILE_ROCM_PATH` (overrides the `amdgcn/bitcode` bundled with the package and `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME`) |
 | IR dumps | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Runtime kind | `FLYDSL_RUNTIME_KIND` |
-| GPU arch hints | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| Override GPU arch (compile target and arch checks) | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
 | Debug info / pass diagnostics | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_DEBUG_PRINT_AFTER_ALL`, `FLYDSL_DEBUG_AST_DIFF` |
 
 The JIT disk cache normally invalidates on kernel source and closure changes.
@@ -194,7 +194,7 @@ This is routing guidance, not a complete kernel inventory. Search the current `k
 - Allocate shared memory with `SharedAllocator` (`flydsl.expr.gpu`, reached as `fx.SharedAllocator`) over a `@fx.struct` storage layout for new kernels. The typical `static=True` (default) mode emits a per-leaf static LDS global and the compiler sizes it, so `launch(smem=...)` is left unset. Only the `static=False` (dynamic) mode makes the launch wrapper auto-infer smem from `SharedAllocator.allocated_bytes` when `smem=None`; an explicit `smem` must be >= that size. The legacy `utils.smem_allocator.SmemAllocator` / `SmemPtr` path is kept so existing kernels keep working, but it warns on use and is not for new kernels (PR #506 added SharedAllocator; PR #541 migrated norm/softmax/fp8-gemm).
 - Do not define a value only inside an `if`/`else` branch and use it after the branch. Hoist the value or return a single explicit merged value.
 - Nested helpers inside `@flyc.kernel` / `@flyc.jit` may read captured values, but should not mutate captured outer variables. Pass values explicitly and return updated state.
-- Avoid early `return` and branch-local `return` / `yield` in traced functions. Keep a single explicit exit path so MLIR result types stay well-defined.
+- Avoid early `return` and branch-local `return` / `yield` in traced functions. Keep a single explicit exit path so MLIR result types stay well-defined. A `return` in an `if` branch works only when the condition is a Python value at trace time; under a dynamic condition, or in a `range(...)` / dynamic `while` loop body, tracing raises `NotImplementedError` (`docs/kernel_authoring_guide.md` section 5.3).
 - Prefer arch-specific helper modules and constants over inline scattered `gfx*` conditionals.
 - **Helper placement.** Do not scatter small helpers across unrelated modules and do not duplicate an existing one; search for and reuse an existing helper first. Shared kernel helpers belong in `kernels/common/kernels_common.py` (wave size via `get_warp_size`, `dtype_to_elem_type`, `validate_moe_dtypes`, the `_if_then` SCF context manager, LLVM-ptr/stream helpers); domain-specific shared helpers go in the existing topical modules (`kernels/moe/moe_common.py`, `kernels/common/layout_utils.py`, `kernels/gemm/fp8_gemm_utils.py`, `kernels/common/dpp_utils.py`, `kernels/common/mma/mfma_preshuffle_pipeline.py`). DSL-level numeric/arith and type helpers belong in `python/flydsl/expr/utils/arith.py` / `python/flydsl/expr/numeric.py`; compiler/runtime-wide utilities (env, logger) in `python/flydsl/utils/`. (PR #388 extracted shared `_if_then`/`validate_moe_dtypes` into `kernels_common.py`; PR #448 removed redundant numeric wrappers in favor of existing `fx.*` type methods.)
 - **`expr/` is target-neutral.** The direct child modules of `python/flydsl/expr/` (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `enum`, `numeric`, `meta`, `extern`, `utils/`) must stay backend-agnostic: they may not import ROCDL/HIP bindings (`flydsl._mlir.dialects.rocdl`, `_mlirDialectsFlyROCDL`, `fly_rocdl`). `import flydsl.expr` must succeed without the FlyROCDL bindings; `tests/unit/test_expr_optional_rocdl.py` enforces this in CI. New target-specific (ROCDL/HIP, MFMA/WMMA, buffer/TDM/cluster) expr code goes in the `expr/rocdl/` package (`cdna3`, `cdna4`, `cdna5`, `rdna3`, `rdna4`, `cluster`, `inline_asm`, `tdm_ops`, `universal`), never in a new top-level `expr/*.py`. The target-specific modules `rocdl` and `tdm_ops` are lazy-loaded from `expr/__init__.py` via `__getattr__` (`_BACKEND_MODULES`); add new backend modules to that lazy map rather than eager-importing them (PR #521).

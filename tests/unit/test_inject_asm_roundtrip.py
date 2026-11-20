@@ -39,6 +39,11 @@ if not _arch.startswith("gfx9"):
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Mirrors inject_asm._rocm_path(): prepare assembles with the ROCm clang.
+_ROCM = next((os.environ[v] for v in ("ROCM_PATH", "ROCM_ROOT", "ROCM_HOME") if os.environ.get(v)), "/opt/rocm")
+if not (Path(_ROCM) / "llvm" / "bin" / "clang").is_file():
+    pytest.skip(f"ROCm clang not found under {_ROCM}", allow_module_level=True)
+
 # Runs vecAdd once and saves the result, so phases can be compared across processes.
 DRIVER = """
 import sys

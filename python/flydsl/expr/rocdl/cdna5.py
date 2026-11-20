@@ -127,7 +127,8 @@ def TDM(
     The global base pointer comes from the ``copy_atom_call`` global operand; the
     per-dim extent (OOB), per-dim stride, ``imm_offset`` (K-loop tile bump), and the
     MCAST ``workgroup_mask`` are runtime atom state set via ``fx.atom.set_value``.
-    :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor.
+    :func:`make_tdm_atom` builds the atom and populates the descriptor from a tensor;
+    both are the legacy form. :func:`make_tiled_tdm_atom` is preferred for new kernels.
     """
     return fly_rocdl.CopyOpGFX1250TDMType.get(
         rank,
@@ -153,6 +154,10 @@ def make_tdm_atom(
     early_timeout=False,
 ) -> object:
     """Build a gfx1250 N-D TDM copy atom carrying ``tensor``'s tile descriptor.
+
+    Legacy form: prefer :func:`make_tiled_tdm_atom`, which derives the per-dim
+    extent and stride from the LDS layout and the tiler instead of taking them
+    here. This one is kept for copies that atom cannot express.
 
     The global base pointer comes from the ``copy_atom_call`` global operand (not
     atom state); the atom carries the tensor's per-dim extent (for hardware
@@ -230,9 +235,11 @@ def make_tiled_tdm_atom(
     the input global tensor's shape; :func:`tdm_partition` selects each warp's
     share using the same compact LDS traversal as descriptor construction.
 
-    Stage one supports at most five leaf modes in the global tensor's shape,
-    counted before coalescing (including extent-one modes). The innermost
-    descriptor dimension of each warp's issue must span at least 16 bytes.
+    Global tensors may have more than five leaf modes. After coalescing, excess
+    modes share a descriptor coordinate and their transfers remain in ITER.
+    Those packed modes have no individual hardware boundary check. With LDS
+    padding, the innermost descriptor dimension of each warp's issue must span a
+    whole multiple of 4 bytes.
 
     * ``op`` — a ``TensorLoad(...)`` or ``TensorStore(...)`` instance.
     * ``tensor`` — the global tensor.
@@ -243,7 +250,7 @@ def make_tiled_tdm_atom(
       layout.
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
-    * ``internal_type`` — reserved; currently must be ``None``.
+    * ``internal_type`` — optional descriptor element type.
 
     Example:
         Loading a 128x64 tile of a row-major ``gA`` into LDS.
@@ -286,9 +293,6 @@ def make_tiled_tdm_atom(
         raise TypeError(
             f"make_tiled_tdm_atom: first argument must be a TensorLoad() or TensorStore() instance, got {op!r}"
         )
-
-    if internal_type is not None:
-        raise ValueError("internal_type must be None for now")
 
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
@@ -351,11 +355,7 @@ def tdm_partition(
         layout_v = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, tensor.type, n_warps))
         n_rest = tensor.layout.rank - 1
         tiled = composition(tensor, static(TileType.get([layout_v.type, *([None] * n_rest)])))
-        # Composition canonicalizes singleton wrappers. Restore the tile mode
-        # before selecting WARP from (ATOM, WARP, ITER).
-        if n_rest == 0:
-            tiled = group(tiled, 0, tiled.layout.rank)
-        tiled = tiled[((None, warp_id, None), *([None] * n_rest))]
+        tiled = tiled[(((None, warp_id), None), *([None] * n_rest))]
         # Slice collects the surviving ATOM and ITER modes at the outer level.
         tiled = group(tiled, 0, 2)
         return coalesce(tiled, make_int_tuple(((1, 1),)))

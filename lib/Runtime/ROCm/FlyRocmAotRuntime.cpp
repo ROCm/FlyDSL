@@ -12,12 +12,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "FlyRocmRuntimeError.h"
+#include "hip/hip_runtime.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <pthread.h>
+
+// Exports localize the embedded copy's hidden symbols, so each export keeps its own.
+#if defined(FLYDSL_AOT_RUNTIME_EMBEDDED)
+#define FLYDSL_RUNTIME_API __attribute__((visibility("hidden")))
+#else
+#define FLYDSL_RUNTIME_API __attribute__((visibility("default")))
+#endif
 
 enum : int32_t {
   FLYDSL_AOT_ERR_NOT_INITIALIZED = -1,
@@ -50,6 +58,23 @@ struct AotModule {
 // so independently exported objects do not share this lock.
 pthread_rwlock_t aotStateLock = PTHREAD_RWLOCK_INITIALIZER;
 
+// Keep the first error of a call in its status.
+void recordError(int32_t *status, int32_t error) {
+  if (error && !*status)
+    *status = error;
+}
+
+void reportIfError(int32_t *status, hipError_t error, const char *call) {
+  if (!error)
+    return;
+  recordError(status, error);
+  // The call returns the error; clear HIP's copy so the caller's next HIP call
+  // does not report it again.
+  (void)hipGetLastError();
+  const char *name = hipGetErrorName(error);
+  fprintf(stderr, "'%s' failed with '%s'\n", call, name ? name : "<unknown>");
+}
+
 AotDeviceModule *findDevice(AotModule *aot, int device) {
   for (AotDeviceModule *entry = aot->devices; entry; entry = entry->next)
     if (entry->device == device)
@@ -57,10 +82,10 @@ AotDeviceModule *findDevice(AotModule *aot, int device) {
   return nullptr;
 }
 
-hipFunction_t getFunction(AotModule *aot, const char *name) {
+hipFunction_t getFunction(AotModule *aot, const char *name, int32_t *status) {
   int device = 0;
   if (hipError_t err = hipGetDevice(&device)) {
-    flydslRecordRuntimeError(err);
+    reportIfError(status, err, "hipGetDevice");
     return nullptr;
   }
 
@@ -68,7 +93,7 @@ hipFunction_t getFunction(AotModule *aot, const char *name) {
   AotDeviceModule *entry = findDevice(aot, device);
   if (!entry) {
     pthread_mutex_unlock(&aot->mutex);
-    flydslRecordRuntimeError(FLYDSL_AOT_ERR_NOT_LOADED);
+    recordError(status, FLYDSL_AOT_ERR_NOT_LOADED);
     return nullptr;
   }
   for (AotFunction *cached = entry->functions; cached; cached = cached->next) {
@@ -84,7 +109,7 @@ hipFunction_t getFunction(AotModule *aot, const char *name) {
   hipFunction_t function = nullptr;
   if (hipError_t err = hipModuleGetFunction(&function, entry->module, name)) {
     pthread_mutex_unlock(&aot->mutex);
-    flydslRecordRuntimeError(err);
+    reportIfError(status, err, "hipModuleGetFunction");
     return nullptr;
   }
   if (auto *cached = static_cast<AotFunction *>(malloc(sizeof(AotFunction)))) {
@@ -99,17 +124,19 @@ hipFunction_t getFunction(AotModule *aot, const char *name) {
 
 void launchKernel(hipFunction_t function, intptr_t gridX, intptr_t gridY, intptr_t gridZ,
                   intptr_t blockX, intptr_t blockY, intptr_t blockZ, int32_t smem,
-                  hipStream_t stream, void **params, void **extra) {
+                  hipStream_t stream, void **params, void **extra, int32_t *status) {
   if (!function)
     return;
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
-                                            smem, stream, params, extra));
+  reportIfError(status,
+                hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ, smem,
+                                      stream, params, extra),
+                "hipModuleLaunchKernel");
 }
 
 void launchClusterKernel(hipFunction_t function, intptr_t clusterX, intptr_t clusterY,
                          intptr_t clusterZ, intptr_t gridX, intptr_t gridY, intptr_t gridZ,
                          intptr_t blockX, intptr_t blockY, intptr_t blockZ, int32_t smem,
-                         hipStream_t stream, void **params, void **extra) {
+                         hipStream_t stream, void **params, void **extra, int32_t *status) {
   if (!function)
     return;
   using LaunchKernelExFn =
@@ -138,7 +165,7 @@ void launchClusterKernel(hipFunction_t function, intptr_t clusterX, intptr_t clu
     config.hStream = stream;
     config.attrs = attrs;
     config.numAttrs = 1;
-    HIP_REPORT_IF_ERROR(launchKernelEx(&config, function, params, extra));
+    reportIfError(status, launchKernelEx(&config, function, params, extra), "hipDrvLaunchKernelEx");
     return;
   }
 
@@ -148,8 +175,10 @@ void launchClusterKernel(hipFunction_t function, intptr_t clusterX, intptr_t clu
             "unavailable; falling back to hipModuleLaunchKernel.\n",
             static_cast<long>(clusterX), static_cast<long>(clusterY), static_cast<long>(clusterZ));
   }
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
-                                            smem, stream, params, extra));
+  reportIfError(status,
+                hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ, smem,
+                                      stream, params, extra),
+                "hipModuleLaunchKernel");
 }
 
 void freeFunctions(AotFunction *function) {
@@ -283,20 +312,26 @@ extern "C" FLYDSL_RUNTIME_API int32_t flydslAotModuleUnload(AotModule **slot) {
   return status;
 }
 
+// The launches keep the first error in `*status`, which belongs to the calling
+// entry and is returned by it. Once a call has failed, its remaining launches
+// are skipped, so a call that fails to launch its first kernel launches none.
 extern "C" FLYDSL_RUNTIME_API void
 flydslAotModuleLaunchKernel(AotModule **slot, const char *name, intptr_t gridX, intptr_t gridY,
                             intptr_t gridZ, intptr_t blockX, intptr_t blockY, intptr_t blockZ,
                             int32_t smem, hipStream_t stream, void **params, void **extra,
-                            size_t /*paramsCount*/) {
+                            size_t /*paramsCount*/, int32_t *status) {
+  if (*status)
+    return;
   pthread_rwlock_rdlock(&aotStateLock);
   AotModule *aot = *slot;
   if (!aot) {
-    flydslRecordRuntimeError(FLYDSL_AOT_ERR_NOT_INITIALIZED);
+    recordError(status, FLYDSL_AOT_ERR_NOT_INITIALIZED);
     pthread_rwlock_unlock(&aotStateLock);
     return;
   }
-  hipFunction_t function = getFunction(aot, name);
-  launchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ, smem, stream, params, extra);
+  hipFunction_t function = getFunction(aot, name, status);
+  launchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ, smem, stream, params, extra,
+               status);
   pthread_rwlock_unlock(&aotStateLock);
 }
 
@@ -305,16 +340,18 @@ flydslAotModuleLaunchClusterKernel(AotModule **slot, const char *name, intptr_t 
                                    intptr_t clusterY, intptr_t clusterZ, intptr_t gridX,
                                    intptr_t gridY, intptr_t gridZ, intptr_t blockX, intptr_t blockY,
                                    intptr_t blockZ, int32_t smem, hipStream_t stream, void **params,
-                                   void **extra, size_t /*paramsCount*/) {
+                                   void **extra, size_t /*paramsCount*/, int32_t *status) {
+  if (*status)
+    return;
   pthread_rwlock_rdlock(&aotStateLock);
   AotModule *aot = *slot;
   if (!aot) {
-    flydslRecordRuntimeError(FLYDSL_AOT_ERR_NOT_INITIALIZED);
+    recordError(status, FLYDSL_AOT_ERR_NOT_INITIALIZED);
     pthread_rwlock_unlock(&aotStateLock);
     return;
   }
-  hipFunction_t function = getFunction(aot, name);
+  hipFunction_t function = getFunction(aot, name, status);
   launchClusterKernel(function, clusterX, clusterY, clusterZ, gridX, gridY, gridZ, blockX, blockY,
-                      blockZ, smem, stream, params, extra);
+                      blockZ, smem, stream, params, extra, status);
   pthread_rwlock_unlock(&aotStateLock);
 }

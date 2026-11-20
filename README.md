@@ -91,6 +91,10 @@ Prerequisites for source builds:
 
 - **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
 - **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `scripts/build_llvm.sh`; install them manually if you skip that step)
+- **ROCm device bitcode**: `scripts/build.sh` bundles `amdgcn/bitcode/*.bc` from the ROCm found via
+  `ROCM_PATH`/`ROCM_ROOT`/`ROCM_HOME` or `/opt/rocm`, so kernels calling `__ocml_*` compile wherever the
+  package is later installed. Override with `-DFLYDSL_ROCM_BITCODE_DIR=<dir>`; skipping it only means
+  those kernels need `FLYDSL_COMPILE_ROCM_PATH` or `ROCM_PATH` set at compile time.
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
@@ -292,7 +296,7 @@ Python Function (@flyc.kernel / @flyc.jit)
         ▼  MlirCompiler.compile()
    ┌──────────────────────────────────────────────────────────┐
    │ A. pre_binary_fragments  (Fly → ROCDL)                   │
-   │    fly-rewrite-func-signature → fly-canonicalize →       │
+   │    fly-canonicalize → fly-rocdl-expand-ops →             │
    │    fly-layout-lowering → fly-int-swizzle-simplify →      │
    │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
    │    fly-promote-regmem-to-vectorssa →                     │
@@ -301,13 +305,12 @@ Python Function (@flyc.kernel / @flyc.jit)
    │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
    ├──────────────────────────────────────────────────────────┤
    │ B. binary_prep_fragments  (→ LLVM)                       │
-   │    rocdl-attach-target{chip=gfxNNN} →                    │
-   │    convert-scf-to-cf → convert-cf-to-llvm →              │
-   │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
+   │    func.func(convert-scf-to-cf) →                        │
+   │    convert-vector-to-llvm → gpu-to-llvm →                │
    │    reconcile-unrealized-casts                            │
    ├──────────────────────────────────────────────────────────┤
    │ C. binary_fragment                                       │
-   │    gpu-module-to-binary{format=fatbin}                   │
+   │    fly-emit-gpu-binary                                   │
    └──────────────────────────────────────────────────────────┘
         │
         ▼

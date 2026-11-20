@@ -51,7 +51,7 @@ def empty_storage(mode, *operators):
     indirect=["api"],
 )
 def test_specialization_metadata_and_target_cache(monkeypatch, name, tile, api):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     root = getattr(api, name)
     params = (fx.Int32, 8, 3) if tile else (fx.Int32, 8)
     operator = root[params]
@@ -63,9 +63,9 @@ def test_specialization_metadata_and_target_cache(monkeypatch, name, tile, api):
         operator[params]
     with pytest.raises(TypeError, match="member function"):
         operator()
-    monkeypatch.setenv("ARCH", "gfx1100")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx1100")
     assert root[params] is not operator
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     assert root[params] is operator
 
 
@@ -310,7 +310,7 @@ def test_sort_members_and_direct_functions(api, family, storage_mode):
     indirect=["api"],
 )
 def test_compile_operator_pipeline(monkeypatch, arch, api, default_device):
-    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
 
     def apply(a, out):

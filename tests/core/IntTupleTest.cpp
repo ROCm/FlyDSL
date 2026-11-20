@@ -131,6 +131,20 @@ TEST(IntTupleParity, Comparisons) {
   EXPECT_EQ(toString(elem_less(make_tuple(dyn(8, 4), 2_c), make_tuple(8_c, 3_c))), "?0");
   // A mode of a beyond the rank of b makes a not less, whatever its value.
   EXPECT_EQ(toString(elem_less(make_tuple(1_c, 5_d), make_tuple(2_c))), "0");
+  // Equal tuples have the same tree, not only the same leaves.
+  EXPECT_TRUE(make_tuple(make_tuple(1_c, 2_c), 3_c) == make_tuple(make_tuple(1_c, 2_c), 3_c));
+  EXPECT_FALSE(make_tuple(make_tuple(1_c, 2_c), 3_c) == make_tuple(1_c, make_tuple(2_c, 3_c)));
+}
+
+// No reference has a ratio leaf.  Static arithmetic is exact and an integral result is an
+// integer.
+TEST(IntTupleParity, RatioArithmetic) {
+  EXPECT_EQ(toString(ratio(1, 2) + ratio(1, 3)), "5/6");
+  EXPECT_EQ(toString(ratio(1, 2) - ratio(1, 2)), "0");
+  EXPECT_EQ(toString(ratio(1, 2) * 4_ct), "2");
+  EXPECT_EQ(toString(make_tuple(ratio(1, 2), 3_c) * make_tuple(6_c, ratio(1, 3))), "(3,1)");
+  EXPECT_EQ(toString(product_each(make_tuple(make_tuple(ratio(1, 2), 4_c), 3_c))), "(2,3)");
+  EXPECT_EQ(toString(product(make_tuple(ratio(1, 2), make_tuple(3_c, ratio(-3, 4))))), "-9/8");
 }
 
 // A shorter divisor is padded with ones; a leaf divisor is consumed across the modes.
@@ -254,11 +268,12 @@ TEST(IntTupleParity, CompactOrder) {
             "(0,1,128,4,0)");
 }
 
-// A coordinate is static only if the index and every shape it divides by are.
+// A coordinate is static if the index and every shape it divides by are, or if
+// divisibility fixes it: 16 % (2 * ?) is even, so its remainder by 2 is 0.
 TEST(IntTupleParity, Idx2Crd) {
   EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_c), 4_c))), "((0,2),2)");
   EXPECT_EQ(toString(idx2crd(16_dt, make_tuple(make_tuple(2_c, 3_c), 4_c))), "((?0,?2),?2)");
-  EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_d), 4_c))), "((?0,?2),?2)");
+  EXPECT_EQ(toString(idx2crd(16_ct, make_tuple(make_tuple(2_c, 3_d), 4_c))), "((0,?2),?2)");
   EXPECT_EQ(toString(idx2crd(make_tuple(5_c, 3_c), make_tuple(make_tuple(2_c, 3_c), 4_c))),
             "((1,2),3)");
   EXPECT_EQ(toString(idx2crd(13_dt, make_tuple(2_c, 3_c, 4_c), make_tuple(1_c, 2_c, 6_c))),

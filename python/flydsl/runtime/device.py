@@ -4,6 +4,7 @@
 import functools
 import os
 import subprocess
+import sys
 from typing import Optional
 
 _ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
@@ -58,7 +59,7 @@ def _arch_from_torch() -> str:
 @functools.lru_cache(maxsize=None)
 def _arch_from_hardware() -> str:
     """Cache hardware detection, including failures, to avoid repeated slow probes."""
-    if os.name == "nt":
+    if sys.platform == "win32":
         # Windows ROCm ships no rocm_agent_enumerator, and guessing gfx942 there
         # would compile for the wrong GPU.
         return _arch_from_torch()
@@ -77,7 +78,7 @@ def get_rocm_arch() -> str:
 
     Raises RuntimeError if neither an explicit override nor hardware supplies a target.
     """
-    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION") or os.environ.get("ARCH")
+    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         env = env.lower()
         if env.startswith("gfx"):
@@ -88,9 +89,10 @@ def get_rocm_arch() -> str:
 
     arch = _arch_from_hardware()
     if not arch:
+        tried = "torch.cuda" if sys.platform == "win32" else "rocm_agent_enumerator or rocminfo"
         raise RuntimeError(
-            "Unable to detect a ROCm GPU architecture with rocm_agent_enumerator or rocminfo. "
-            "Set FLYDSL_GPU_ARCH (or ARCH) to the intended gfx target when hardware detection is unavailable."
+            f"Unable to detect a ROCm GPU architecture with {tried}. "
+            "Set FLYDSL_GPU_ARCH to the intended gfx target when hardware detection is unavailable."
         )
     return arch.lower()
 
@@ -103,7 +105,7 @@ def get_rocm_device_count() -> int:
     Returns 0 when the tool is unavailable or no discrete GPU agents are reported.
     Windows has no such tool: there HIP's ``hipGetDeviceCount`` answers.
     """
-    if os.name == "nt":
+    if sys.platform == "win32":
         from .device_runtime.rocm import _hip_device_count
 
         return _hip_device_count()

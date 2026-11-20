@@ -493,6 +493,15 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
         ...
 ```
 
+`fx.range` is the runtime loop with keyword-only directives:
+
+```python
+for i in fx.range(runtime_value, unroll=4):  # LLVM unrolls by 4
+    ...
+for k in fx.range(N, unroll_full=True):  # LLVM unrolls completely
+    ...
+```
+
 ### 5.2 `const_expr()`
 
 Mark a value as compile-time constant:
@@ -504,6 +513,40 @@ from flydsl.expr import const_expr
 def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
     tile_size = const_expr(N // 4)
     for i in range_constexpr(tile_size):
+        ...
+```
+
+### 5.3 `if` and `return`
+
+The `ASTRewriter` also rewrites `if` statements. What a branch becomes depends on
+the value of the condition at trace time:
+
+- A Python value, for example a `Constexpr` argument or `const_expr(...)`: only
+  the branch its truth value picks is traced, as in plain Python.
+- A dynamic value, such as a comparison of `fx.Int32` values: both branches are
+  traced into one `scf.if`.
+
+A `return` inside a branch behaves as in Python when the condition is a Python
+value. When the condition is dynamic, a `return` that tracing reaches raises
+`NotImplementedError`, because an `scf.if` region cannot return from the
+enclosing function. The same holds for a `return` inside the body of a
+`for ... in range(...)` loop, which always becomes an `scf.for`, and of a
+dynamic `while` loop; a `range(..., init=...)` loop cannot contain a `return`
+either. Assign the value instead and return it after the branch or loop, and
+write an early exit as a branch around the code that follows:
+
+```python
+def clamp(x, limit):  # a helper inside a @flyc.kernel / @flyc.jit body
+    out = x
+    if x > limit:  # dynamic condition: traced into one scf.if
+        out = limit
+    return out
+
+
+@flyc.kernel
+def scale(data: fx.Tensor, n: fx.Int32):
+    tid = fx.thread_idx.x
+    if tid < n:  # not `if tid >= n: return`
         ...
 ```
 

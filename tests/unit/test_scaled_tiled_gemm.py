@@ -494,7 +494,6 @@ def test_mxfp8_callback_kernel_compiles(monkeypatch, default_device, preshuffled
     import flydsl.compiler as flyc
     from kernels.gemm.mxfp8_gemm_8wave import compile_mxfp8_gemm_8w
 
-    monkeypatch.setenv("ARCH", "gfx950")
     monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx950")
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")

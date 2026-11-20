@@ -41,13 +41,6 @@ mlir::Value castInteger(EmitContext &ctx, mlir::Value value, unsigned bits) {
   return mlir::arith::ExtSIOp::create(ctx.builder, ctx.location, type, value);
 }
 
-/// The type of the SSA value the dynamic `scale` is bound to.
-mlir::Type getBindingType(EmitContext &ctx, Leaf<Trait> scale) {
-  if (scale.hasFastDivMod())
-    return ctx.getHooks().getFastDivModType(ctx, scale.bitWidth());
-  return ctx.builder.getIntegerType(scale.bitWidth());
-}
-
 /// The binding of `leaf` once its property becomes `type`: a fast-divmod
 /// divisor that `type` no longer marks is bound to its divisor.
 mlir::Value rebind(const Leaf<EmitOp> &leaf, Leaf<Trait> type) {
@@ -57,6 +50,13 @@ mlir::Value rebind(const Leaf<EmitOp> &leaf, Leaf<Trait> type) {
 }
 
 } // namespace
+
+mlir::Type get_leaf_type(EmitContext &ctx, Leaf<Trait> scale) {
+  if (scale.hasFastDivMod())
+    return ctx.getHooks().getFastDivModType(ctx, scale.bitWidth());
+  return ctx.builder.getIntegerType(scale.bitWidth());
+}
+
 } // namespace emit_op
 
 //===----------------------------------------------------------------------===//
@@ -272,7 +272,7 @@ Leaf<EmitOp>::Leaf(LeafProperty property, mlir::Value value, EmitContext *contex
     : LeafProperty(property) {
   auto scale = Leaf<Trait>(property).scale();
   if (scale.isDInt()) {
-    if (!value || !context || value.getType() != emit_op::getBindingType(*context, scale)) {
+    if (!value || !context || value.getType() != emit_op::get_leaf_type(*context, scale)) {
       static_cast<LeafProperty &>(*this) = Leaf<Trait>::getError(ErrorCode::InvalidSSAValue);
       return;
     }
@@ -325,7 +325,7 @@ bool Leaf<EmitOp>::isSound() const {
   if (isStatic())
     return !value_ && !context_;
   return context_ && value_ &&
-         value_.getType() == emit_op::getBindingType(*context_, Leaf<Trait>(*this).scale());
+         value_.getType() == emit_op::get_leaf_type(*context_, Leaf<Trait>(*this).scale());
 }
 
 Leaf<EmitOp> Leaf<EmitOp>::withRange(int32_t lo, int32_t hi) const {
@@ -526,7 +526,7 @@ mlir::Value mul(EmitContext &ctx, Leaf<EmitOp> a, Leaf<EmitOp> b, unsigned width
     return emitScalar(ctx, a, width);
   if (lhs.isOne())
     return emitScalar(ctx, b, width);
-  return emitNsw<mlir::arith::MulIOp>(ctx, a, b, width);
+  return emitArith<mlir::arith::MulIOp>(ctx, a, b, width);
 }
 
 mlir::Value div(EmitContext &ctx, Leaf<EmitOp> a, Leaf<EmitOp> b, unsigned width) {

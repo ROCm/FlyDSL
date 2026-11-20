@@ -20,6 +20,7 @@
 
 #include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 
@@ -37,6 +38,10 @@ static llvm::Twine getModuleIdentifier(llvm::StringRef moduleName) {
 static std::string getAotStateIdentifier(llvm::StringRef moduleName) {
   return (moduleName + "_aot_state").str();
 }
+
+// Names the argument of an exported launcher through which its fly.aot_module
+// launches report the first error of the call.
+static constexpr llvm::StringLiteral kAotStatusArgAttr = "fly.aot_status_arg";
 
 namespace {
 
@@ -250,10 +255,11 @@ public:
   FunctionCallee getAotKernelLaunchFn() {
     return module.getOrInsertFunction(
         "flydslAotModuleLaunchKernel",
-        FunctionType::get(voidTy,
-                          ArrayRef<Type *>({ptrTy, ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
-                                            intPtrTy, intPtrTy, i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
-                          false));
+        FunctionType::get(
+            voidTy,
+            ArrayRef<Type *>({ptrTy, ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
+                              intPtrTy, i32Ty, ptrTy, ptrTy, ptrTy, i64Ty, ptrTy}),
+            false));
   }
 
   FunctionCallee getAotClusterKernelLaunchFn() {
@@ -262,7 +268,7 @@ public:
         FunctionType::get(voidTy,
                           ArrayRef<Type *>({ptrTy, ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
                                             intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, i32Ty,
-                                            ptrTy, ptrTy, ptrTy, i64Ty}),
+                                            ptrTy, ptrTy, ptrTy, i64Ty, ptrTy}),
                           false));
   }
 
@@ -326,6 +332,18 @@ public:
     else
       dynamicMemorySize = ConstantInt::get(i32Ty, 0);
 
+    // The enclosing exported launcher's status argument.
+    Value *status = nullptr;
+    if (aotModule) {
+      auto func = op->getParentOfType<mlir::LLVM::LLVMFuncOp>();
+      auto index = func ? func->getAttrOfType<mlir::IntegerAttr>(kAotStatusArgAttr) : nullptr;
+      if (!index || index.getInt() < 0 || index.getInt() >= func.getNumArguments() ||
+          !isa<mlir::LLVM::LLVMPointerType>(func.getArgument(index.getInt()).getType()))
+        return op.emitError() << "fly.aot_module launches must be in a function whose '"
+                              << kAotStatusArgAttr << "' attribute names a pointer argument";
+      status = llvmValue(func.getArgument(index.getInt()));
+    }
+
     Value *argArray = createKernelArgArray(op);
 
     StringRef moduleName = op.getKernelModuleName().getValue();
@@ -360,10 +378,10 @@ public:
       mlir::gpu::KernelDim3 cluster = op.getClusterSizeOperandValues();
       Value *cx = llvmValue(cluster.x), *cy = llvmValue(cluster.y), *cz = llvmValue(cluster.z);
       if (aotModule) {
-        builder.CreateCall(
-            getAotClusterKernelLaunchFn(),
-            ArrayRef<Value *>({modulePtr, functionName, cx, cy, cz, gx, gy, gz, bx, by, bz,
-                               dynamicMemorySize, stream, argArray, nullPtr, paramsCount}));
+        return createAotLaunchCall(op, getAotClusterKernelLaunchFn(),
+                                   {modulePtr, functionName, cx, cy, cz, gx, gy, gz, bx, by, bz,
+                                    dynamicMemorySize, stream, argArray, nullPtr, paramsCount,
+                                    status});
       } else {
         builder.CreateCall(
             getClusterKernelLaunchFn(),
@@ -372,10 +390,10 @@ public:
       }
     } else {
       if (aotModule) {
-        builder.CreateCall(
-            getAotKernelLaunchFn(),
-            ArrayRef<Value *>({modulePtr, functionName, gx, gy, gz, bx, by, bz, dynamicMemorySize,
-                               stream, argArray, nullPtr, paramsCount}));
+        return createAotLaunchCall(op, getAotKernelLaunchFn(),
+                                   {modulePtr, functionName, gx, gy, gz, bx, by, bz,
+                                    dynamicMemorySize, stream, argArray, nullPtr, paramsCount,
+                                    status});
       } else {
         builder.CreateCall(
             getKernelLaunchFn(),
@@ -388,6 +406,18 @@ public:
   }
 
 private:
+  // The AOT runtime may already be defined in the module (Windows merges it in
+  // before translation); it must take exactly what the launch passes.
+  llvm::LogicalResult createAotLaunchCall(mlir::gpu::LaunchFuncOp op, FunctionCallee callee,
+                                          ArrayRef<Value *> args) {
+    auto *function = dyn_cast<Function>(callee.getCallee());
+    if (!function || function->getFunctionType() != callee.getFunctionType())
+      return op.emitError() << "'" << callee.getCallee()->getName()
+                            << "' in the module does not match the AOT launch signature";
+    builder.CreateCall(callee, args);
+    return success();
+  }
+
   Module &module;
   IRBuilderBase &builder;
   mlir::LLVM::ModuleTranslation &moduleTranslation;

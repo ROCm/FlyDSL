@@ -6,34 +6,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-def FlyRewriteFuncSignaturePass : Pass<"fly-rewrite-func-signature"> {
-  let summary = "Rewrite DSL types at function and SCF control-flow boundaries";
-  let description = [{
-    This pass does the following:
-    1. DSLTypes (IntTuple, Layout, ComposedLayout, CoordTensor, MemRef) are always lowered to
-       packed LLVM struct types that contain only their dynamic components (static subcomponents
-       are omitted). They are reconstructed in the function body using constructor ops
-       (e.g. `MakeIntTupleOp`, `MakeLayoutOp`).
-    2. Fully static DSL arguments (and static subcomponents of otherwise dynamic DSL arguments)
-       are removed from function signatures and reconstructed via `fly.static` inside the
-       function body.
-    3. On the caller side (`gpu.launch_func`), DSL operands are packed into the corresponding
-       struct values using only their dynamic components, and static operands are omitted.
-    4. DSL types appearing as iter_args / results of `scf.for`, `scf.if`, and `scf.while` are
-       converted to LLVM struct types. At block entry the struct is unpacked back to normal-form
-       DSL values (via `MakeIntTupleOp` / `MakeLayoutOp` etc.), and at yield / condition
-       terminators the DSL values are packed back into structs.
-  }];
-
-  let dependentDialects = [
-    "arith::ArithDialect",
-    "func::FuncDialect",
-    "gpu::GPUDialect",
-    "LLVM::LLVMDialect",
-    "scf::SCFDialect"
-  ];
-}
-
 def FlyCanonicalizePass : Pass<"fly-canonicalize"> {
   let summary = "Canonicalize Pattern";
   let description = [{
@@ -90,6 +62,29 @@ def FlyIntSwizzleSimplifyPass : Pass<"fly-int-swizzle-simplify"> {
     "arith::ArithDialect",
     "gpu::GPUDialect"
   ];
+}
+
+def FlyCheckResourceLimitsPass : Pass<"fly-check-resource-limits", "gpu::GPUModuleOp"> {
+  let summary = "Reject kernels whose static resource usage exceeds the target's limits";
+  let description = [{
+    For every kernel in the `gpu.module`, finds per resource the most that the
+    allocations made in the kernel body hold at once, from the allocations and frees its
+    ops report through `ResourceUsageOpInterface`, and fails when that exceeds the limit
+    one of the module's targets reports through `GPUTargetInfoAttrInterface`. Ops are
+    taken in the order they appear, as in a linear scan: an allocation is held until the
+    op freeing it or the end of the kernel, so allocations never freed add up wherever
+    they are. A resource with a free the pass cannot match to an earlier allocation is
+    not checked.
+
+    The pass names no resource. As with address spaces, a resource is an attribute:
+    generic ones such as `#fly.kernel_resource<shared_memory>` come from Fly,
+    target-specific ones from the backend dialect, and a resource a target does not know
+    is not checked. Shared memory is allocated by shared `fly.make_ptr` (`allocBytes`)
+    and never freed.
+
+    Usage that is only known at run time, such as the dynamic shared memory of a launch,
+    is not counted.
+  }];
 }
 
 def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {

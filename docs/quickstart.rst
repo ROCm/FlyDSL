@@ -120,7 +120,7 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
            ▼  MlirCompiler.compile()
       ┌──────────────────────────────────────────────────────────┐
       │ A. pre_binary_fragments  (Fly → ROCDL)                   │
-      │    fly-rewrite-func-signature → fly-canonicalize →       │
+      │    fly-canonicalize → fly-rocdl-expand-ops →             │
       │    fly-layout-lowering → fly-int-swizzle-simplify →      │
       │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
       │    fly-promote-regmem-to-vectorssa →                     │
@@ -130,9 +130,8 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │
-      │    rocdl-attach-target{chip=gfxNNN} →                    │
-      │    convert-scf-to-cf → convert-cf-to-llvm →              │
-      │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
+      │    func.func(convert-scf-to-cf) →                        │
+      │    convert-vector-to-llvm → gpu-to-llvm →                │
       │    reconcile-unrealized-casts                            │
       ├──────────────────────────────────────────────────────────┤
       │ C. binary_fragment                                       │
@@ -191,7 +190,7 @@ where an empty ``.flydsl_export.lock`` also stays to serialize exports) and
 system libraries needed when linking the final binary, along with typed inline
 call helpers and module lifecycle entry points. On a build host
 without a visible GPU, select the architecture explicitly (for example,
-``ARCH=gfx950``) and compile with null pointer or non-device tensor
+``FLYDSL_GPU_ARCH=gfx950``) and compile with null pointer or non-device tensor
 placeholders. See :doc:`api/compiler` for the API contract and supported
 argument categories.
 

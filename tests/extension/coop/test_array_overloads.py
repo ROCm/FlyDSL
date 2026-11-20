@@ -109,7 +109,7 @@ def test_guarded_complete_element(kind, valid, universal, name, policy):
     ],
 )
 def test_guarded_rejects_outer_sequences(insert_point, monkeypatch, universal, name, kind, container, count):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     namespace = fx.coop.universal if universal else fx.coop
     dtype = {"scalar": fx.Int32, "vector": V, "struct": Record}[kind]
     value = fx.Int32(1) if kind == "scalar" else element(kind, fx.Int32(1), fx.Int32(2))
@@ -127,7 +127,7 @@ def test_guarded_rejects_outer_sequences(insert_point, monkeypatch, universal, n
 @pytest.mark.parametrize("kind", ["scalar", "vector", "struct"])
 @pytest.mark.parametrize("name,method", WARP_METHODS)
 def test_warp_array_methods_reject_bare_elements(insert_point, monkeypatch, universal, kind, name, method):
-    monkeypatch.setenv("ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     namespace = fx.coop.universal if universal else fx.coop
     dtype = {"scalar": fx.Int32, "vector": V, "struct": Record}[kind]
     value = fx.Int32(1) if kind == "scalar" else element(kind, fx.Int32(1), fx.Int32(2))

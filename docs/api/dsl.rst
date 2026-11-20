@@ -123,7 +123,7 @@ Type annotations
 - **fx.Constexpr[int]** -- compile-time constant
 - **fx.Int32** -- dynamic int32 argument
 - **fx.Float32**, **fx.Float16**, **fx.BFloat16** -- scalar types
-- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2** -- FP8 scalar types
+- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2**, **fx.Float8E5M2FNUZ** -- FP8 scalar types
 - **fx.Stream** -- GPU stream argument
 - **fx.T** -- type namespace (``T.f32``, ``T.f16``, ``T.bf16``, ``T.i8``, ``T.index``, etc.)
 - **fx.Basis(value, modes)** / **fx.E(\*modes)** -- basis-stride leaves for by-mode layout construction (``E(0)`` → ``1E0``)
@@ -200,7 +200,7 @@ are useful for source-tree kernel development.
 
 - **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy instruction atoms
-- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; 4th arg is the A/B element type; accumulator defaults to f32)
+- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_b_or_acc=None, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; with two element types they are A/B and the accumulator, with three they are A, B and the accumulator; accumulator defaults to f32)
 - **fx.rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, \*\*kwargs)** -- WMMA MMA atom constructor (arch-dispatched: gfx11 / gfx120x / gfx1250). ``elem_ty_b`` optionally selects a different B operand type. gfx1250 supports f32(K4), f16/bf16(K32), fp8/bf8(K64/128), i8(K64), i4(K32); integer paths take ``sign_a`` / ``sign_b`` / ``clamp``. gfx120x (RDNA4) supports 16x16x16 f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B combination to f32, on the v8 operand ABI
 - **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- unstable, target-specific gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
 - **fx.rocdl.cdna5.make_tiled_tdm_atom(op, tensor, smem_layout, tdm_tile, num_warps=1, ...)** / **fx.rocdl.cdna5.tdm_partition(atom, warp_coord, warp_layout, stensor, gtensor)** -- unstable, target-specific gfx1250 TDM tiled copy atom; **preferred for new kernels**. The atom is built over the whole global tensor and returns ``(atom, coord_tensor)``; ``fx.zipped_divide`` selects the block's tile and ``tdm_partition`` cuts both sides into one warp's share, returning ``((ATOM, ITER), rest...)``. Padding is row slack in ``smem_layout``; out-of-bounds comes from the tensor extent plus ``boundary_check``; the K-loop advances by indexing the coordinate rest with an i32 tile number

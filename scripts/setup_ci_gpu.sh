@@ -30,8 +30,6 @@ if [ -d "${ci_wheel_dir}/base" ]; then
     exit 1
   fi
   (cd "${ci_wheel_dir}/base" && sha256sum -c SHA256SUMS)
-else
-  echo "::warning title=Baseline wheel unavailable::Exact base benchmark will be skipped."
 fi
 (cd "${ci_wheel_dir}/tools" && sha256sum -c SHA256SUMS)
 

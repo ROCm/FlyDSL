@@ -37,7 +37,7 @@ def test_pass_pipeline_ir_keeps_user_locations_without_debug_info(tmp_path, monk
     # Pass diagnostics can only point at user code if the IR the passes run on still has its source
     # locations, also when debug info is off.
     for name, value in {
-        "ARCH": "gfx942",
+        "FLYDSL_GPU_ARCH": "gfx942",
         "COMPILE_ONLY": "1",
         "FLYDSL_RUNTIME_ENABLE_CACHE": "0",
         "FLYDSL_DUMP_IR": "1",
@@ -61,13 +61,15 @@ def test_pass_pipeline_ir_keeps_user_locations_without_debug_info(tmp_path, monk
 
     launch(torch.empty(1, 64))
     first_pass_ir = sorted(tmp_path.glob("*/01_*.mlir"))[0].read_text()
-    assert f'loc("{__file__}"' in first_pass_ir
+    # MLIR escapes the backslashes of a Windows path when it prints a location.
+    printed_file = __file__.replace("\\", "\\\\")
+    assert f'loc("{printed_file}"' in first_pass_ir
 
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 def test_compile_error_points_at_the_kernel(monkeypatch):
-    for name, value in {"ARCH": "gfx942", "COMPILE_ONLY": "1", "FLYDSL_RUNTIME_ENABLE_CACHE": "0"}.items():
+    for name, value in {"FLYDSL_GPU_ARCH": "gfx942", "COMPILE_ONLY": "1", "FLYDSL_RUNTIME_ENABLE_CACHE": "0"}.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("FLYDSL_DUMP_IR", raising=False)
 

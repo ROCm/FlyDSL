@@ -17,7 +17,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(autouse=True)
 def _clear_arch_caches(monkeypatch):
-    for name in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION", "ARCH"):
+    for name in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION"):
         monkeypatch.delenv(name, raising=False)
     # These functions may be monkeypatched until after this fixture tears down.
     clear_arch = device._arch_from_hardware.cache_clear
@@ -27,6 +27,12 @@ def _clear_arch_caches(monkeypatch):
     yield
     clear_arch()
     clear_count()
+
+
+@pytest.fixture
+def linux_detection(monkeypatch):
+    """Take the rocm_agent_enumerator/rocminfo path these tests mock; Windows asks torch and HIP instead."""
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def test_arch_detection_uses_visible_device_query(monkeypatch):
@@ -42,6 +48,7 @@ def test_arch_detection_uses_visible_device_query(monkeypatch):
     assert calls[0][0] == ["rocm_agent_enumerator", "-name"]
 
 
+@pytest.mark.usefixtures("linux_detection")
 def test_arch_detection_ignores_hidden_heterogeneous_gpu(monkeypatch):
     """KFD counting order must not choose the architecture of a hidden GPU."""
 
@@ -57,6 +64,7 @@ def test_arch_detection_ignores_hidden_heterogeneous_gpu(monkeypatch):
     assert device._arch_from_hardware() == "gfx950"
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout", "exit", "empty", "cpu-only"])
 def test_hardware_detection_falls_back_to_rocminfo(monkeypatch, failure):
     def check_output(command, **_kwargs):
@@ -76,6 +84,7 @@ def test_hardware_detection_falls_back_to_rocminfo(monkeypatch, failure):
     assert device._arch_from_hardware() == "gfx950"
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout", "exit", "empty"])
 def test_hardware_detection_does_not_default_to_gfx942(monkeypatch, failure):
     calls = []
@@ -99,7 +108,19 @@ def test_hardware_detection_does_not_default_to_gfx942(monkeypatch, failure):
     assert calls == ["rocm_agent_enumerator", "rocminfo"]
 
 
-@pytest.mark.parametrize("override", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION", "ARCH"])
+@pytest.mark.parametrize(
+    ("platform", "tried"), [("linux", "rocm_agent_enumerator or rocminfo"), ("win32", "torch.cuda")]
+)
+def test_detection_failure_names_what_was_tried(monkeypatch, platform, tried):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(subprocess, "check_output", lambda command, **_kwargs: "")
+    monkeypatch.setattr(device, "_arch_from_torch", lambda: "")
+
+    with pytest.raises(RuntimeError, match=f"with {tried}\\. Set FLYDSL_GPU_ARCH"):
+        device.get_rocm_arch()
+
+
+@pytest.mark.parametrize("override", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION"])
 def test_explicit_target_overrides_bypass_hardware_detection(monkeypatch, override):
     monkeypatch.setenv(override, "9.5.0" if override == "HSA_OVERRIDE_GFX_VERSION" else "GFX950")
     monkeypatch.setattr(
@@ -113,16 +134,7 @@ def test_explicit_target_overrides_bypass_hardware_detection(monkeypatch, overri
     assert device.is_rdna_arch() is False
 
 
-@pytest.mark.parametrize("name", ["FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION"])
-def test_arch_overrides_take_precedence_over_compile_arch(monkeypatch, name):
-    """``ARCH`` is a compile-time hint; the dedicated overrides win when both are set."""
-    monkeypatch.setenv("ARCH", "gfx942")
-    monkeypatch.setenv(name, "gfx950")
-    monkeypatch.setattr(device, "_arch_from_hardware", lambda: pytest.fail("hardware detection should not run"))
-
-    assert device.get_rocm_arch() == "gfx950"
-
-
+@pytest.mark.usefixtures("linux_detection")
 def test_device_count_counts_gpus_not_supported_isas(monkeypatch):
     """Two identical GPUs must count as two, even when each exposes two ISAs."""
 
@@ -137,6 +149,7 @@ def test_device_count_counts_gpus_not_supported_isas(monkeypatch):
     assert device.get_rocm_device_count() == 2
 
 
+@pytest.mark.usefixtures("linux_detection")
 @pytest.mark.parametrize("failure", ["missing", "timeout"])
 def test_device_count_remains_best_effort(monkeypatch, failure):
     def check_output(command, **_kwargs):
@@ -163,9 +176,7 @@ def test_backend_agnostic_collection_needs_no_gpu(tmp_path, module, expected_tes
         pytest.importorskip("torch")
         pytest.importorskip("flydsl._mlir.ir")
     probe_env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION", "ARCH")
+        key: value for key, value in os.environ.items() if key not in ("FLYDSL_GPU_ARCH", "HSA_OVERRIDE_GFX_VERSION")
     }
     # Empty PATH: rocm_agent_enumerator and rocminfo are not resolvable.
     probe_env["PATH"] = ""

@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import inspect
 from enum import IntEnum
+from fractions import Fraction
 from functools import wraps
 from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, ParamSpec
+    from typing import Any, Callable, Iterator, ParamSpec
 
     _P = ParamSpec("_P")
 
@@ -25,6 +27,7 @@ from .._mlir.dialects.fly import (
     CopyAtomType,
     CopyOpUniversalAtomicType,
     CopyOpUniversalCopyType,
+    FastDivModType,
     GemmTraversalOrder,
     IntTupleType,
     LayoutType,
@@ -69,6 +72,7 @@ __all__ = [
     "CopyOpUniversalCopyType",
     "CopyOpUniversalAtomicType",
     "MmaOpUniversalFMAType",
+    "FastDivModType",
     # UniversalOps
     "UniversalCopy",
     "UniversalCopy8b",
@@ -88,6 +92,7 @@ __all__ = [
     # Constexpr functions
     "const_expr",
     "range_constexpr",
+    "range",
     "rank",
     "depth",
     "has_none",
@@ -107,6 +112,9 @@ __all__ = [
     "make_fragment_like",
     "get_scalar",
     "get_leaves",
+    "make_fast_divmod",
+    "fast_divmod",
+    "fast_divmod_get_divisor",
     "get_shape",
     "get_stride",
     "get_layout",
@@ -326,7 +334,27 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    return range(*args)
+    return builtins.range(*args)
+
+
+def range(*args, unroll=-1, unroll_full=False) -> "Iterator[Any]":
+    """Runtime loop over ``range([start,] stop[, step])``.
+
+    Write it as the iterable of a ``for`` statement in a ``@flyc.kernel`` or
+    ``@flyc.jit`` function.
+
+    - ``unroll=N``: unroll by ``N`` (``N >= 2``); ``unroll=1`` disables unrolling.
+    - ``unroll_full=True``: unroll completely. Needs a trip count that is a
+      compile-time constant after lowering, such as Python int bounds.
+
+    Unlike ``range_constexpr``, the body is traced once, so trace time does not
+    grow with the trip count. The loop index is a runtime value, so the body
+    cannot branch on it with ``const_expr`` or use it to index a Python list.
+    """
+    raise RuntimeError(
+        "fx.range() is only valid as the iterable of a `for` statement in a @flyc.kernel or @flyc.jit "
+        "function; use range_constexpr for a static loop that runs while tracing"
+    )
 
 
 def rank(int_or_tuple):
@@ -339,7 +367,7 @@ def rank(int_or_tuple):
         rank((8, 16))        -> 2
         rank((8, (4, 2)))    -> 2   (the nested (4, 2) still counts as one mode)
     """
-    if isinstance(int_or_tuple, int):
+    if isinstance(int_or_tuple, (int, Fraction)):
         return 1
     if isinstance(int_or_tuple, tuple):
         return len(int_or_tuple)
@@ -357,7 +385,7 @@ def depth(int_or_tuple):
         depth((8, 16))       -> 1
         depth((8, (4, 2)))   -> 2
     """
-    if isinstance(int_or_tuple, int):
+    if isinstance(int_or_tuple, (int, Fraction)):
         return 0
     if isinstance(int_or_tuple, tuple):
         return 1 + max((depth(c) for c in int_or_tuple), default=0)
@@ -575,10 +603,13 @@ def get_leaves(input, dynamic_only=False):
 
     Set *dynamic_only=True* to keep only runtime values and drop static
     constants - handy when you need the inputs that were passed at call time.
+    fly.get_leaves extracts the runtime values; static leaves are read off the
+    type, with a ``*`` leaf as ``None``.
 
     Examples:
         get_leaves(make_coord(tid, 0)) -> (Int32(tid), 0)
         get_leaves(make_coord(tid, 0), dynamic_only=True) -> (Int32(tid),) # 0 is static, dropped
+        get_leaves(make_coord(None, tid)) -> (None, Int32(tid))
     """
     from .typing import IntTuple
 
@@ -586,11 +617,11 @@ def get_leaves(input, dynamic_only=False):
         if ty.is_leaf:
             yield ty
             return
-        for i in range(ty.rank):
+        for i in range_constexpr(ty.rank):
             yield from _walk_int_tuple_leaves(ty.at(i))
 
     ty = IntTupleType(input.type)
-    res_lists = fly.GetLeavesOp(input, dynamicOnly=True)
+    res_lists = fly.GetLeavesOp(input)
     dyn_iter = iter(res_lists.results)
     out = []
     for leaf_ty in _walk_int_tuple_leaves(ty):
@@ -1386,6 +1417,44 @@ def memref_store(value, memref, indices):
 
 
 # ===----------------------------------------------------------------------=== #
+# Fast division
+# ===----------------------------------------------------------------------=== #
+
+
+@dsl_loc_tracing
+def make_fast_divmod(divisor):
+    """Precompute the fast division by ``divisor``, an Int32 or Int64 in [1, 2^(width-1)).
+
+    This is the only place the magic numbers are computed: on the host in a
+    ``@flyc.jit`` function, which passes the result to the kernels it launches,
+    or on the GPU in a kernel. ``FastDivmodDivisor`` wraps the result.
+    """
+    from .typing import as_ir_value
+
+    return fly.make_fast_divmod(as_ir_value(divisor))
+
+
+@dsl_loc_tracing
+@dsl_wrap_result
+def fast_divmod(dividend, divisor):
+    """The quotient and remainder of ``dividend`` by the fast-divmod ``divisor``.
+
+    ``dividend`` is as wide as the divisor and in [0, 2^(width-1)).
+    """
+    from .typing import as_ir_value
+
+    quotient, remainder = fly.fast_divmod(as_ir_value(dividend), divisor)
+    return quotient, remainder
+
+
+@dsl_loc_tracing
+@dsl_wrap_result
+def fast_divmod_get_divisor(divisor):
+    """The divisor the fast-divmod ``divisor`` was made of."""
+    return fly.fast_divmod_get_divisor(divisor)
+
+
+# ===----------------------------------------------------------------------=== #
 # Utility ops
 # ===----------------------------------------------------------------------=== #
 
@@ -1461,15 +1530,22 @@ def assume(result_type, dst, src):
 def make_tile(*args):
     from .typing import Layout
 
+    # Dynamic leaves of the layout modes, in the order fly.make_tile takes them.
+    dyncElems = []
+
     def _resolve(m):
         if isinstance(m, int) or m is None:
             return m
         if isinstance(m, tuple):
             return tuple(_resolve(e) for e in m)
         if isinstance(m, Layout):
+            if not m.is_static:
+                dyncElems.extend(fly.GetLeavesOp(m).results)
             return m.type
         raise ValueError(f"make_tile: expected int, None, tuple, or Layout, got {type(m)}")
 
     resolved = [_resolve(m) for m in args]
     tile_type = TileType.get(resolved)
-    return static(tile_type)
+    if not dyncElems:
+        return static(tile_type)
+    return fly.make_tile(tile_type, dyncElems)
