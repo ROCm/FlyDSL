@@ -5,10 +5,13 @@ from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from .ktrace import KtraceBackend
+
+#: ``(llvm_options, prepare)``, see :meth:`BaseBackend.codegen_retries`.
+CodegenRetry = Tuple[dict, Optional[Callable]]
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,20 @@ class BaseBackend(metaclass=ABCMeta):
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Optionally materialize backend-specific hints before the pipeline."""
         return None
+
+    def codegen_retries(self, compiled, *, source_asm: str, llvm_options: Optional[dict]) -> Sequence[CodegenRetry]:
+        """Settings to lower the same input with again when ``compiled`` can be improved.
+
+        Each entry is ``(llvm_options, prepare)``: LLVM options added to the
+        kernel's own, and an optional callable applied to the parsed input
+        module. The first retry :meth:`accepts_codegen_retry` approves replaces
+        ``compiled``.
+        """
+        return ()
+
+    def accepts_codegen_retry(self, first, retry) -> bool:
+        """Whether the module ``retry`` should replace the module ``first``."""
+        return False
 
     @classmethod
     def ktrace_backend(cls) -> KtraceBackend:

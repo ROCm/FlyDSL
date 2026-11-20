@@ -3,15 +3,16 @@
 
 import hashlib
 import os
+import re
 import sys
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
-from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
+from .base import AOTRuntimeConfig, BaseBackend, CodegenRetry, GPUTarget
 
 #: FlyDSL wrapper around ``gpu-module-to-binary`` that links the HSA code object
 #: with the in-process LLD library instead of spawning ``ld.lld`` from the ROCm
@@ -26,6 +27,29 @@ BUNDLED_ROCM_PATH = Path(__file__).parents[2] / "_mlir" / "_rocm"
 
 #: Device libraries ``appendStandardLibs()`` can pull out of a toolkit path.
 _DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
+
+#: Targets where VGPRs and AGPRs share one 512-register file and this retry is measured.
+#: LLVM lets a value that finds no free VGPR tuple take AGPRs; the total then exceeds 256
+#: and the kernel runs one wave per SIMD instead of two.
+_AGPR_OVERFLOW_ARCHS = frozenset({"gfx950"})
+_ARCH_VGPRS = 256
+
+_REVERSE_LOCAL = {"greedy-reverse-local-assignment": True}
+_CLASS_PRIORITY = {"greedy-regclass-priority-trumps-globalness": True}
+#: ``(llvm_options, forbid AGPRs)``: allocation orders that can place such a kernel in the
+#: VGPRs without a spill. Entries that keep LLVM's register limits, and so the instruction
+#: schedule, come first.
+_AGPR_OVERFLOW_RETRIES = (
+    (_REVERSE_LOCAL, False),
+    (_CLASS_PRIORITY, False),
+    (_REVERSE_LOCAL, True),
+    (_CLASS_PRIORITY, True),
+)
+#: Source text of a kernel that may place values in AGPRs itself.
+_AGPR_USERS = ("rocdl.sched.agpr", "llvm.inline_asm", "amdgpu-agpr-alloc")
+
+_KERNEL_METADATA = re.compile(r'#gpu\.kernel_metadata<"([^"]+)".*?metadata = \{([^}]*)\}')
+_METADATA_COUNT = re.compile(r"(\w+) = (\d+) : i64")
 
 
 def _mlir_capi_lib_name() -> str:
@@ -427,6 +451,34 @@ class RocmBackend(BaseBackend):
             for func_op in _iter_gpu_kernel_funcs(module):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
+    def codegen_retries(self, compiled, *, source_asm: str, llvm_options: Optional[dict]) -> Sequence[CodegenRetry]:
+        """Allocation orders to try when a kernel overflowed from the VGPRs into AGPRs."""
+        if self.target.arch not in _AGPR_OVERFLOW_ARCHS:
+            return ()
+        if not any(_overflows_into_agprs(regs) for regs in kernel_register_usage(compiled).values()):
+            return ()
+        if any(marker in source_asm for marker in _AGPR_USERS):
+            return ()
+        return [
+            (options, _forbid_agprs if forbid_agprs else None)
+            for options, forbid_agprs in _AGPR_OVERFLOW_RETRIES
+            if not (llvm_options and options.keys() & llvm_options.keys())
+        ]
+
+    def accepts_codegen_retry(self, first, retry) -> bool:
+        """Accept a retry that removes the AGPRs and adds no spill or register to any kernel."""
+        before, after = kernel_register_usage(first), kernel_register_usage(retry)
+        if before.keys() != after.keys():
+            return False
+        return all(
+            all(
+                after[name].get(count, 0) <= regs.get(count, 0)
+                for count in ("vgpr_count", "vgpr_spill_count", "sgpr_spill_count")
+            )
+            and (after[name].get("agpr_count", 0) == 0 or not _overflows_into_agprs(regs))
+            for name, regs in before.items()
+        )
+
     def gpu_module_targets(self, *, compile_hints: dict, link_libs: Sequence[str] = ()) -> List[str]:
         # The one #rocdl.target, carrying every compile option
         from ..._mlir import ir
@@ -554,3 +606,29 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
     existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
     kept = [entry for entry in existing if _entry_key(entry) != key] if existing is not None else []
     func_op.attributes["passthrough"] = ir.ArrayAttr.get([*kept, new_entry])
+
+
+def kernel_register_usage(module) -> Dict[str, Dict[str, int]]:
+    """Register counts LLVM reported for each kernel of a compiled module, by kernel name."""
+    usage = {}
+    for op in module.body.operations:
+        if op.operation.name == "gpu.binary":
+            for name, fields in _KERNEL_METADATA.findall(str(op.attributes["objects"])):
+                usage[name] = {count: int(value) for count, value in _METADATA_COUNT.findall(fields)}
+    return usage
+
+
+def _overflows_into_agprs(regs: Dict[str, int]) -> bool:
+    return regs.get("agpr_count", 0) > 0 and regs.get("vgpr_count", 0) > _ARCH_VGPRS
+
+
+def _forbid_agprs(module) -> None:
+    """Make LLVM allocate no AGPR in the kernels of the input ``module``."""
+    from ..._mlir import ir
+
+    with module.context:
+        entry = ir.ArrayAttr.get([ir.StringAttr.get("amdgpu-agpr-alloc"), ir.StringAttr.get("0,0")])
+        for func_op in _iter_gpu_kernel_funcs(module):
+            # MLIR drops a bare ``passthrough`` on a gpu.func; ``llvm.``-prefixed names become llvm.func properties.
+            kept = list(func_op.attributes["llvm.passthrough"]) if "llvm.passthrough" in func_op.attributes else []
+            func_op.attributes["llvm.passthrough"] = ir.ArrayAttr.get([*kept, entry])
