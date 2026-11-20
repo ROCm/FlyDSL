@@ -1,0 +1,67 @@
+@function fontPath($weight, $style, $ext: false) {
+  $result: "./fonts/open-sans/open-sans-v34-latin-";
+  @if $ext {
+    $result: $result + "ext-";
+  }
+  @if $weight == 400 {
+    @if $style == "normal" {
+      $result: $result + "regular";
+    }
+  } @else {
+    $result: $result + $weight;
+  }
+  @if $style != "normal" {
+    $result: $result + $style;
+  }
+  @return $result + ".woff";
+}
+
+@each $ext in (false, true) {
+  @each $style in ("normal", "italic") {
+    @each $weight in (300, 400, 500, 600, 700, 800) {
+      $fontPath: fontPath($weight, $style, $ext);
+      $unicodeRange: (
+        u+00??,
+        u+0131,
+        u+0152-0153,
+        u+02bb-02bc,
+        u+02c6,
+        u+02da,
+        u+02dc,
+        u+2000-206f,
+        u+2074,
+        u+20ac,
+        u+2122,
+        u+2191,
+        u+2193,
+        u+2212,
+        u+2215,
+        u+feff,
+        u+fffd
+      );
+      @if $ext {
+        $unicodeRange: (
+          u+0100-024f,
+          u+0259,
+          u+1e??,
+          u+2020,
+          u+20a0-20ab,
+          u+20ad-20cf,
+          u+2113,
+          u+2c60-2c7f,
+          u+a720-a7ff
+        );
+      }
+      @font-face {
+        font-display: swap;
+        font-family: Open Sans;
+        font-style: unquote($style);
+        font-weight: $weight;
+        src: local(""), url(unquote($fontPath + "2")) format("woff2"),
+          url(unquote($fontPath)) format("woff");
+        unicode-range: $unicodeRange;
+      }
+      $fontPath: fontPath($weight, $style, true);
+    }
+  }
+}
