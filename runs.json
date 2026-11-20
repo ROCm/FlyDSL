@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-19T21:48:10Z",
+ "updated": "2026-11-20T00:41:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44625929762,
+   "pr": 1453,
+   "commit": "368083e8d930033c298e11e8cd70c50714a6649f",
+   "branch": "pr/mx-preshuffle-w4-v2",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Pick the MXFP4 GEMM geometry from M and pipeline its fp4 K loop",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762",
+   "created_at": "2026-11-19T22:09:52Z",
+   "updated_at": "2026-11-19T22:09:52Z",
+   "actor": "Monstertail",
+   "jobs": []
+  },
   {
    "run_id": 44617713253,
    "pr": 1452,
@@ -126,7 +141,7 @@
   },
   {
    "run_id": 44530386920,
-   "pr": 1453,
+   "pr": null,
    "commit": "e5e616e27b85e21585e3c1d8e68642e16a1d74cb",
    "branch": "pr/mx-preshuffle-w4-v2",
    "event": "pull_request",
@@ -1876,21 +1891,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44053225099",
    "created_at": "2026-11-17T09:11:09Z",
    "updated_at": "2026-11-17T09:12:45Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44052041217,
-   "pr": null,
-   "commit": "b355fe8ef9dd4d21f6a1d6363b184559bfae54b1",
-   "branch": "main",
-   "event": "push",
-   "title": "[Fly] Add an optional check-resource-limits pass (#1419)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44052041217",
-   "created_at": "2026-11-17T09:03:25Z",
-   "updated_at": "2026-11-17T09:11:27Z",
    "actor": "coderfeli",
    "jobs": []
   }
