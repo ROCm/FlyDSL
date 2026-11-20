@@ -282,3 +282,9 @@ Its two placement modes differ only in where the bytes come from:
 Both modes expose the same field-view API, and `allocated_bytes` follows the same logical layout
 in both modes. In static mode a nested struct emits one allocation per leaf, which is why it has
 no single contiguous base pointer.
+
+### Register memory (experimental)
+
+`flydsl.experimental.register_allocation` provides a `RegisterAllocator` with the same
+`allocate(T)` / `Storage[T]` interface that requests chosen register numbers for register memory. It
+is experimental; see [Register allocation (experimental)](../experimental/register_allocation.md).
