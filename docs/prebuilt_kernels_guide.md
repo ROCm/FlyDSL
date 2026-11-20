@@ -214,6 +214,25 @@ launch_softmax(A, C, m_in, stream=...)                          # returned launc
 softmax_direct(A, C, m_in, N, dtype_str, BLOCK_THREADS, tuning_schema, stream=...)
 ```
 
+**Wide rows** (`kernels/norm/softmax_split.py`): a decode call with a few wide rows
+occupies a few CUs, and past ~98k columns the one-row kernel also spills to scratch
+(1.2–2.1 KB per lane at 128256–163840 columns). On gfx95*, `softmax_autotuned` sends
+rows wider than `WIDE_ROW_MIN_N` (65536) in calls of at most `DECODE_MAX_ROWS` (64) rows,
+and rows of at least `ALL_ROWS_SPLIT_N` columns (106496 f32, 77824 f16/bf16) at any row
+count (`use_split_softmax`), to a two-pass kernel that splits each row across blocks:
+`partial_kernel` writes each chunk's max and exp-sum to an fp32 workspace, and
+`combine_kernel` folds the row's partials and normalises its own chunk. Direct callers
+allocate the workspace; `build_softmax_module` keeps the register-buffered kernel at
+every width.
+
+```python
+from kernels.norm.softmax_split import build_split_softmax_module, split_softmax_workspace_elems
+
+launch = build_split_softmax_module(N=163840, dtype_str="f32")
+w = torch.empty(split_softmax_workspace_elems(M, 163840, "f32"), dtype=torch.float32, device="cuda")
+launch(A, C, w, M, stream)
+```
+
 ### 2.2 Softmax backward (`kernels/norm/softmax_bwd_kernel.py`)
 
 Computes the row-wise Softmax gradient: `dx = y * (dy - sum(dy * y))`, with the
