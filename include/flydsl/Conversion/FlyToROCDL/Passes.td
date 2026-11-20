@@ -3,19 +3,21 @@
 
 include "mlir/Pass/PassBase.td"
 
-def ConvertROCDLFastMathOpsPass : Pass<"convert-rocdl-fastmath-ops", "gpu::GPUModuleOp"> {
-  let summary = "Lower approximate math operations to native ROCDL operations";
+def ConvertROCDLMathOpsPass : Pass<"convert-rocdl-math-ops", "gpu::GPUModuleOp"> {
+  let summary = "Lower math operations that convert-gpu-to-rocdl would get wrong or slow";
   let description = [{
-    Rewrites supported neutral math operations carrying the `afn` fast-math
-    flag to their native ROCDL counterparts. This pass runs immediately before
-    `convert-gpu-to-rocdl`, which would otherwise route those operations
-    through device-library calls.
+    Runs immediately before `convert-gpu-to-rocdl`.
 
-    It also expands `math.log1p` and `math.expm1`, whatever their fast-math
-    flags, which `convert-gpu-to-rocdl` lowers to `log(1 + x)` and
-    `exp(x) - 1`, both 0 for tiny `x`: `log1p` becomes a compensated
-    `log(1 + x)` on the native `log`, and `expm1` a call to OCML's
-    `__ocml_expm1_*`.
+    Rewrites supported neutral math operations carrying the `afn` fast-math
+    flag to their native ROCDL counterparts, which `convert-gpu-to-rocdl`
+    would otherwise route through device-library calls.
+
+    Lowers to OCML calls the math operations that `convert-gpu-to-rocdl` could
+    also lower with MathToLLVM, whose forms are wrong on AMDGPU: `tan`, `asin`,
+    `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `expm1` and the remaining
+    `log1p` always, `rsqrt` without `afn`, `fpowi` unless it is scalar with a
+    constant exponent. Which lowering `convert-gpu-to-rocdl` picks for them
+    depends on the dialects loaded in the context.
   }];
   let dependentDialects = ["arith::ArithDialect", "LLVM::LLVMDialect", "ROCDL::ROCDLDialect",
                            "vector::VectorDialect"];

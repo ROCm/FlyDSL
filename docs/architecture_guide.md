@@ -179,7 +179,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    │   convert-fly-to-rocdl                                 │
    │   canonicalize                                         │
    │   gpu.module(convert-scf-to-cf, cse,                   │
-   │              convert-rocdl-fastmath-ops,              │
+   │              convert-rocdl-math-ops,                   │
    │              convert-gpu-to-rocdl{chipset=gfxNNN ...}, │
    │              fly-rocdl-cluster-attr)                   │
    ├────────────────────────────────────────────────────────┤
@@ -237,7 +237,7 @@ definition for this checkout:
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
 | 8 | `convert-fly-to-rocdl` | Converts Fly values everywhere, including function arguments, results, calls, kernel launches and SCF/CF values, to the nested packed ABI, omitting static fields. Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
-| 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering (and the accurate `math.log1p` / `math.expm1` expansion), GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
+| 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-math-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL math ops lowering (`afn` ops → native instructions; math ops that MathToLLVM lowers wrongly → OCML), GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
 With the `check_resource_limits` compile hint, `gpu.module(fly-check-resource-limits)` also runs after #5 (`canonicalize`) and rejects a kernel whose statically known allocations hold more of a resource at once than its `gpu.module` target allows (`GPUTargetInfoAttrInterface`). Ops report what they allocate and free through `ResourceUsageOpInterface`; shared `fly.make_ptr` allocations are never freed, so they add up. Usage only known at run time, such as a launch's dynamic shared memory, is not counted. An allocation counts whether or not the kernel uses it.
 

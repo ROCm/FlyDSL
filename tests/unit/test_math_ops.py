@@ -716,15 +716,8 @@ def test_log1p_expm1_accurate_gpu(name):
 
     @flyc.kernel
     def kernel(A: fx.Tensor, C: fx.Tensor):
-        tid = fx.thread_idx.x
-        tA = fx.logical_divide(A, fx.make_layout(VEC, 1))
-        tC = fx.logical_divide(C, fx.make_layout(VEC, 1))
-        atom = fx.make_copy_atom(fx.UniversalCopy(VEC * 32), fx.Float32)
-        rA = fx.make_rmem_tensor(VEC, fx.Float32)
-        rC = fx.make_rmem_tensor(VEC, fx.Float32)
-        fx.copy_atom_call(atom, fx.slice(tA, (None, tid)), rA)
-        fx.memref_store_vec(fn(fx.memref_load_vec(rA)), rC)
-        fx.copy_atom_call(atom, rC, fx.slice(tC, (None, tid)))
+        offset = fx.thread_idx.x * VEC
+        fx.generic_store(C.iter + offset, fn(fx.generic_load(A.iter + offset, dtype=fx.Float32x4)))
 
     @flyc.jit
     def launch(A: fx.Tensor, C, stream: fx.Stream = fx.Stream(None)):

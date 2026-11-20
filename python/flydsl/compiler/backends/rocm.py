@@ -350,7 +350,7 @@ class RocmBackend(BaseBackend):
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
-            f"convert-rocdl-fastmath-ops,"
+            f"convert-rocdl-math-ops,"
             f"convert-gpu-to-rocdl{{chipset={chipset} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
         ]
