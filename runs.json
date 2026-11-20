@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-20T01:39:22Z",
+ "updated": "2026-11-20T02:19:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,22 @@
    "branch": "phil/compile-hints-copy",
    "event": "pull_request",
    "title": "[JIT] flyc.compile[hints] no longer leaves its hints on the function",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330",
    "created_at": "2026-11-20T00:49:25Z",
-   "updated_at": "2026-11-20T01:37:13Z",
+   "updated_at": "2026-11-20T01:40:52Z",
    "actor": "Phil-amd",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-20T01:40:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136019617618"
+    },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
@@ -24,7 +33,7 @@
      "conclusion": "success",
      "started_at": "2026-11-20T01:04:32Z",
      "completed_at": "2026-11-20T01:34:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860859",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136019619337",
      "machine": "cv350-1e707-c03-2",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
@@ -36,16 +45,7 @@
      "conclusion": "success",
      "started_at": "2026-11-20T01:04:23Z",
      "completed_at": "2026-11-20T01:15:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860944"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-20T01:04:50Z",
-     "completed_at": "2026-11-20T01:06:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136004860951"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136019624904"
     }
    ]
   },
