@@ -144,6 +144,21 @@ _RMSNORM_FORWARD_EXTRA_CONFIGS = (
     (7, 3073, "f16"),  # large-N vec8 prefix/scalar tail
 )
 
+# Rows on either side of SMOOTHQUANT_MAX_ELEMS_PER_THREAD (the widest ones the vectorized
+# SmoothQuant kernel takes, and the first ones that go back to the block-per-row kernel),
+# and more rows than its grid, so that its row loop repeats.
+_RMSNORM_SMOOTHQUANT_EXTRA_CONFIGS = (
+    (8, 32775, "bf16"),  # 8 vec8 iterations plus a scalar tail
+    (8, 32776, "bf16"),  # 9 vec8 iterations: block-per-row kernel
+    (8, 32768, "f32"),  # 16 vec4 iterations
+    (8, 32772, "f32"),  # 17 vec4 iterations: block-per-row kernel
+    (2051, 4096, "bf16"),  # 1024-block grid: blocks loop over 2 or 3 rows
+    (1500, 4096, "f32"),  # 1024-block grid: blocks loop over 1 or 2 rows
+)
+_RMSNORM_SMOOTHQUANT_LARGE_CONFIGS = (
+    (32771, 8192, "bf16"),  # past the LLC: 8192-block streaming grid, blocks loop over 4 or 5 rows
+)
+
 
 def get_default_rmsnorm_forward_configs():
     return list(_RMSNORM_CONFIGS + _RMSNORM_FORWARD_EXTRA_CONFIGS)
@@ -152,6 +167,11 @@ def get_default_rmsnorm_forward_configs():
 def _get_rmsnorm_configs():
     override = _get_rmsnorm_shape_override()
     return override if override is not None else list(_RMSNORM_CONFIGS)
+
+
+def _get_rmsnorm_smoothquant_configs():
+    override = _get_rmsnorm_shape_override()
+    return override if override is not None else list(_RMSNORM_CONFIGS + _RMSNORM_SMOOTHQUANT_EXTRA_CONFIGS)
 
 
 def _get_rmsnorm_forward_configs():
@@ -1969,6 +1989,14 @@ def test_rmsnorm_large_shape():
         assert ok
 
 
+@pytest.mark.large_shape
+def test_rmsnorm_smoothquant_large_shape():
+    """Working sets past the LLC take the streaming SmoothQuant kernel on gfx95x."""
+    for M, N, dtype in _RMSNORM_SMOOTHQUANT_LARGE_CONFIGS:
+        ok, _ = run_quant_test(M, N, dtype, is_smooth=True)
+        assert ok
+
+
 def test_rmsnorm_dynamicquant():
     print("=" * 80)
     print("Running RMSNorm DynamicQuant Tests")
@@ -2018,7 +2046,7 @@ def test_rmsnorm_smoothquant():
     print("Running RMSNorm SmoothQuant Tests")
     print("=" * 80)
 
-    configs = _get_rmsnorm_configs()
+    configs = _get_rmsnorm_smoothquant_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
