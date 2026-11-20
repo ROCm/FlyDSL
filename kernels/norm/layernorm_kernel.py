@@ -16,7 +16,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import ReductionOp, full
+from flydsl.expr.typing import ReductionOp, T, full
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import atomic_add, dtype_to_elem_type, get_warp_size
 from kernels.norm.rmsnorm_common import validate_norm_operand_dtypes
@@ -1198,6 +1198,651 @@ def _build_fused_add_layernorm_quant_module(
     return launch_fused_add_layernorm_dynamicquant
 
 
+def _layernorm_smoothquant_vec_config(N: int, dtype_str: str, block_threads: int | None = None):
+    """Pick the 128-bit-vector geometry for the smooth-quant kernel.
+
+    A vector carries four fp32 or eight fp16/bf16 values; a row that is not a
+    whole number of vectors finishes with a scalar tail.  Small rows are
+    handled by one wave (or a sub-wave) per block; wide rows get enough
+    threads to keep several 128-bit requests in flight per row.  Rows shorter
+    than one vector keep the scalar builder.
+    """
+    vec_width = 4 if dtype_str == "f32" else VEC_WIDTH
+    if N < vec_width:
+        return None
+    vec_tiles = N // vec_width
+    if block_threads is None:
+        # A full wave is the smallest useful launch: sub-wave blocks add
+        # scheduling overhead without reducing the work.  Up to four waves
+        # keeps the block reduction cheap; wider rows use two iterations at
+        # eight waves, which measured better than 1x16-wave blocks.
+        if vec_tiles <= 64:
+            block_threads = 64
+        elif vec_tiles <= 128:
+            block_threads = 128
+        elif vec_tiles <= 1536:
+            block_threads = 256
+        else:
+            block_threads = 512
+    return vec_width, vec_tiles, block_threads
+
+
+def _build_layernorm_smoothquant_vec_module(
+    N: int,
+    dtype_str: str,
+    *,
+    quant_dtype_str: str = "i8",
+    eps: float = EPS,
+    block_threads: int | None = None,
+    safe_tail_limit: int = 512,
+    input_nt: bool = False,
+):
+    """Vectorized, register-cached smooth-quant kernel.
+
+    The input and the unquantized row are kept in registers between the
+    statistics, row-max and store passes.  That removes the two extra global
+    reads of the stock scalar path and gives every 128-bit transaction a
+    single use.  One block owns one row, so no inter-block synchronisation is
+    needed.
+    """
+    cfg = _layernorm_smoothquant_vec_config(N, dtype_str, block_threads)
+    if cfg is None:
+        raise ValueError(f"vector smooth-quant geometry requires N of at least one vector, got N={N}")
+    vec_width, vec_tiles, block_threads = cfg
+    elem_bits = 32 if dtype_str == "f32" else 16
+    num_vec_iters = vec_tiles // block_threads
+    tail_tiles = vec_tiles - num_vec_iters * block_threads
+    scalar_tail = N - vec_tiles * vec_width
+    quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+    inv_quant_dtype_max = 1.0 / quant_dtype_max
+    quant_word = 4
+    quant_words_per_vec = vec_width // quant_word
+
+    # At most one physical wave gets a wave reduction; wider blocks use the
+    # cooperative block reduction.  Keeping the small-row case barrier-free
+    # matters for the decode-sized shapes.
+    warp_width = get_warp_size()
+    if block_threads <= warp_width:
+        BlockReduce = None
+        SharedStorage = None
+    else:
+        BlockReduce = fx.coop.BlockReduce[fx.Float32x2, block_threads]
+        SharedStorage = BlockReduce.SharedStorage
+
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
+    def layernorm_smoothquant_vec_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Beta: fx.Tensor,
+        XScale: fx.Tensor,
+        YScale: fx.Tensor,
+        Output: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        eps_c = eps
+        inv_n = 1.0 / float(N)
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_inv_dtype_max = fx.Float32(inv_quant_dtype_max)
+        abs_mask = full(vec_width, fx.Uint32(0x7FFFFFFF), fx.Uint32)
+
+        if const_expr(block_threads <= warp_width):
+
+            def block_reduce_add2(val0, val1):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                with fx.fastmath(fm_fast):
+                    total = fx.coop.warp_reduce(values, fx.ReductionOp.ADD, width=block_threads, _dtype=fx.Float32x2)
+                return total[0], total[1]
+
+            def block_reduce_max(val):
+                with fx.fastmath(fm_fast):
+                    return fx.coop.warp_reduce(val, fx.ReductionOp.MAX, width=block_threads)
+
+        else:
+            # Distinct scratch lets the two reductions proceed without the
+            # extra block-wide barrier that reusing one set of slots needs.
+            shared = fx.SharedAllocator()
+            lds_sum = shared.allocate(SharedStorage).peek()
+            lds_max = shared.allocate(SharedStorage).peek()
+
+            def block_reduce_add2(val0, val1):
+                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                with fx.fastmath(fm_fast):
+                    total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds_sum)
+                return total[0], total[1]
+
+            def block_reduce_max(val):
+                values = fx.full(2, val, fx.Float32)
+                with fx.fastmath(fm_fast):
+                    return BlockReduce(values, fx.ReductionOp.MAX, storage=lds_max)[0]
+
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
+        XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
+        YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
+        Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+        row_in = fx.slice(Input_buf, (bid, None))
+        row_out = fx.slice(Output_buf, (bid, None))
+        in_div = fx.logical_divide(row_in, fx.make_layout(vec_width, 1))
+        out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_word, 1))
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(vec_width, 1))
+        beta_div = fx.logical_divide(Beta_buf, fx.make_layout(vec_width, 1))
+        xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(vec_width, 1))
+
+        copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+        copy_atom_x = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if input_nt else 0), elem_bits)
+        copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
+
+        sum_vec = fx.full(vec_width, c_zero_f, fx.Float32)
+        sumsq_vec = fx.full(vec_width, c_zero_f, fx.Float32)
+        thread_sum = c_zero_f
+        thread_sumsq = c_zero_f
+        x_local = []
+        gamma_local = []
+        beta_local = []
+        xscale_local = []
+
+        # Pass 1: launch every cold HBM request (row and the three shared
+        # affine vectors) before waiting on the reduction, and cache them for
+        # the later passes.  When the data is not in cache this turns three
+        # dependent round trips into one.
+        for tile_i in range_constexpr(num_vec_iters):
+            idx = tid + tile_i * block_threads
+            x_e = _load_vec(copy_atom_x, vec_width, elem_dtype, in_div, idx)
+            g_e = _load_vec(copy_atom, vec_width, elem_dtype, gamma_div, idx)
+            b_e = _load_vec(copy_atom, vec_width, elem_dtype, beta_div, idx)
+            s_e = _load_vec(copy_atom, vec_width, elem_dtype, xscale_div, idx)
+            x_local.append(x_e)
+            gamma_local.append(g_e)
+            beta_local.append(b_e)
+            xscale_local.append(s_e)
+            x = x_e.to(fx.Float32)
+            if const_expr(dtype_str == "f32"):
+                sum_vec = sum_vec + x
+                sumsq_vec = sumsq_vec + x * x
+            else:
+                x2 = x * x
+                thread_sum = thread_sum + x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                thread_sumsq = thread_sumsq + x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+
+        if const_expr(dtype_str == "f32"):
+            thread_sum = sum_vec.reduce(ReductionOp.ADD, fastmath=fm_fast)
+            thread_sumsq = sumsq_vec.reduce(ReductionOp.ADD, fastmath=fm_fast)
+
+        # The final partial vector tile: for a short tail the uniform
+        # safe-index load is cheaper than a divergent branch; a long tail
+        # avoids the redundant traffic and carries zeroes instead.
+        if const_expr(tail_tiles > 0):
+            tail_idx = tid + num_vec_iters * block_threads
+            tail_valid = tail_idx < vec_tiles
+            if const_expr(tail_tiles <= safe_tail_limit):
+                tail_safe = tail_valid.select(tail_idx, 0)
+                x_e = _load_vec(copy_atom_x, vec_width, elem_dtype, in_div, tail_safe)
+                g_e = _load_vec(copy_atom, vec_width, elem_dtype, gamma_div, tail_safe)
+                b_e = _load_vec(copy_atom, vec_width, elem_dtype, beta_div, tail_safe)
+                s_e = _load_vec(copy_atom, vec_width, elem_dtype, xscale_div, tail_safe)
+            else:
+                zero_e = fx.full(vec_width, fx.Float32(0.0).to(elem_dtype), elem_dtype)
+                x_e = zero_e
+                g_e = zero_e
+                b_e = zero_e
+                s_e = zero_e
+                if tail_valid:
+                    x_e = _load_vec(copy_atom, vec_width, elem_dtype, in_div, tail_idx)
+                    g_e = _load_vec(copy_atom, vec_width, elem_dtype, gamma_div, tail_idx)
+                    b_e = _load_vec(copy_atom, vec_width, elem_dtype, beta_div, tail_idx)
+                    s_e = _load_vec(copy_atom, vec_width, elem_dtype, xscale_div, tail_idx)
+            x_local.append(x_e)
+            gamma_local.append(g_e)
+            beta_local.append(b_e)
+            xscale_local.append(s_e)
+            x = x_e.to(fx.Float32)
+            x2 = x * x
+            tile_sum = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+            tile_sumsq = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+            if const_expr(tail_tiles <= safe_tail_limit):
+                tile_sum = tail_valid.select(tile_sum, c_zero_f)
+                tile_sumsq = tail_valid.select(tile_sumsq, c_zero_f)
+            thread_sum = thread_sum + tile_sum
+            thread_sumsq = thread_sumsq + tile_sumsq
+
+        # Non-vector-multiple rows finish with fewer than one vector of
+        # scalar values.  Keeping those in the same cached pass means an
+        # arbitrary N still gets the single-read fast path.
+        tail_x = c_zero_f
+        tail_g = c_zero_f
+        tail_b = c_zero_f
+        tail_s = c_zero_f
+        if const_expr(scalar_tail > 0):
+            if tid < scalar_tail:
+                scalar_idx = vec_tiles * vec_width + tid
+                tail_x = row_in[scalar_idx].to(fx.Float32)
+                tail_g = Gamma_buf[scalar_idx].to(fx.Float32)
+                tail_b = Beta_buf[scalar_idx].to(fx.Float32)
+                tail_s = XScale_buf[scalar_idx].to(fx.Float32)
+                thread_sum = thread_sum + tail_x
+                thread_sumsq = thread_sumsq + tail_x * tail_x
+
+        sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
+        mean = sum_val * inv_n
+        var = sumsq_val * inv_n - mean * mean
+        var = (var < c_zero_f).select(c_zero_f, var)
+        rstd = fmath.rsqrt(var + eps_c, fastmath=fm_fast)
+        mean_rstd = mean * rstd
+
+        thread_row_max = c_zero_f
+        y_local = []
+
+        # Pass 2: normalize + affine + smooth scale, cached for quantization.
+        for tile_i in range_constexpr(num_vec_iters):
+            x = x_local[tile_i].to(fx.Float32)
+            g = gamma_local[tile_i].to(fx.Float32)
+            b = beta_local[tile_i].to(fx.Float32)
+            s = xscale_local[tile_i].to(fx.Float32)
+            # Fold the centering and the RMS scale into one FMA.  The
+            # algebraically identical form removes one packed FP32 operation
+            # per element from the hot pass.
+            xhat = x * rstd - mean_rstd
+            y = xhat * g + b
+            y = y * s
+            y_local.append(y)
+            y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
+            thread_row_max = fx.max(
+                thread_row_max,
+                y_abs.reduce(ReductionOp.MAX, fastmath=fm_fast),
+            )
+
+        if const_expr(tail_tiles > 0):
+            tail_slot = num_vec_iters
+            x = x_local[tail_slot].to(fx.Float32)
+            g = gamma_local[tail_slot].to(fx.Float32)
+            b = beta_local[tail_slot].to(fx.Float32)
+            s = xscale_local[tail_slot].to(fx.Float32)
+            xhat = x * rstd - mean_rstd
+            y = xhat * g + b
+            y = y * s
+            y_local.append(y)
+            y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
+            tail_max = y_abs.reduce(ReductionOp.MAX, fastmath=fm_fast)
+            if const_expr(tail_tiles <= safe_tail_limit):
+                tail_max = tail_valid.select(tail_max, c_zero_f)
+            thread_row_max = fx.max(thread_row_max, tail_max)
+
+        tail_y = c_zero_f
+        if const_expr(scalar_tail > 0):
+            # Invalid lanes carry zeroes and therefore contribute a neutral
+            # zero to the reduction and the later quantized store.
+            xhat = tail_x * rstd - mean_rstd
+            tail_y = (xhat * tail_g + tail_b) * tail_s
+            thread_row_max = fx.max(thread_row_max, fx.absf(tail_y))
+
+        row_max = block_reduce_max(thread_row_max)
+        scale = row_max * c_inv_dtype_max
+        final_scale = (scale == c_zero_f).select(c_one_f, scale)
+        if tid == 0:
+            YScale_buf[bid] = final_scale
+        inv_scale = fx.rocdl.rcp(T.f32, final_scale)
+
+        # Pass 3: quantize from registers and emit 32-bit packed stores.
+        for tile_i in range_constexpr(num_vec_iters):
+            idx = tid + tile_i * block_threads
+            q_i8 = (y_local[tile_i] * inv_scale).to(quant_dtype)
+            for word_i in range_constexpr(quant_words_per_vec):
+                lo = word_i * quant_word
+                q_word = q_i8.shuffle(q_i8, [lo, lo + 1, lo + 2, lo + 3])
+                _store_vec(
+                    copy_atom_q,
+                    quant_word,
+                    quant_dtype,
+                    q_word,
+                    out_div_q,
+                    idx * quant_words_per_vec + word_i,
+                )
+
+        if const_expr(tail_tiles > 0):
+            tail_idx = tid + num_vec_iters * block_threads
+            if tail_idx < vec_tiles:
+                tail_slot = num_vec_iters
+                q_i8 = (y_local[tail_slot] * inv_scale).to(quant_dtype)
+                for word_i in range_constexpr(quant_words_per_vec):
+                    lo = word_i * quant_word
+                    q_word = q_i8.shuffle(q_i8, [lo, lo + 1, lo + 2, lo + 3])
+                    _store_vec(
+                        copy_atom_q,
+                        quant_word,
+                        quant_dtype,
+                        q_word,
+                        out_div_q,
+                        tail_idx * quant_words_per_vec + word_i,
+                    )
+
+        if const_expr(scalar_tail > 0):
+            if tid < scalar_tail:
+                scalar_idx = vec_tiles * vec_width + tid
+                row_out[scalar_idx] = (tail_y * inv_scale).to(quant_dtype)
+
+    @flyc.jit
+    def launch_layernorm_smoothquant_vec(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Beta: fx.Tensor,
+        XScale: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+        launcher = layernorm_smoothquant_vec_kernel(Input, Gamma, Beta, XScale, YScale, Output)
+        launcher.launch(
+            grid=(m_in, 1, 1),
+            block=(block_threads, 1, 1),
+            stream=stream,
+        )
+
+    return launch_layernorm_smoothquant_vec
+
+
+def _build_layernorm_smoothquant_small_n_module(
+    N: int,
+    dtype_str: str,
+    *,
+    quant_dtype_str: str = "i8",
+    eps: float = EPS,
+    rows_per_block: int = 4,
+):
+    """One-vector-per-lane variant for short rows.
+
+    ``GROUP`` lanes cooperate on one row with a logical-warp reduction.  A
+    block therefore advances ``rows_per_block`` independent rows at once,
+    reusing the row-invariant affine vectors from the same cache lines.  This
+    is useful when a row is shorter than a full wave and one-row blocks would
+    leave most lanes idle.
+    """
+    cfg = _layernorm_smoothquant_vec_config(N, dtype_str)
+    if cfg is None:
+        raise ValueError("small-N smooth quant requires a vectorized row")
+    vec_width, vec_tiles, _ = cfg
+    scalar_tail = N - vec_tiles * vec_width
+    group = 1 << (max(vec_tiles, scalar_tail, 1) - 1).bit_length()
+    if group > get_warp_size():
+        raise ValueError("small-N smooth quant requires a row group no wider than a wave")
+    block_threads = group * rows_per_block
+    if block_threads > 1024:
+        raise ValueError("rows_per_block is too large for this row width")
+    elem_bits = 32 if dtype_str == "f32" else 16
+    quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+    inv_quant_dtype_max = 1.0 / quant_dtype_max
+    quant_word = 4
+    quant_words_per_vec = vec_width // quant_word
+
+    @flyc.kernel(known_block_size=[block_threads, 1, 1])
+    def layernorm_smoothquant_small_n_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Beta: fx.Tensor,
+        XScale: fx.Tensor,
+        YScale: fx.Tensor,
+        Output: fx.Tensor,
+        MIn: fx.Int32,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+        lane = tid % group
+        row = bid * rows_per_block + tid // group
+        if row < MIn:
+            elem_dtype = dtype_to_elem_type(dtype_str)
+            quant_dtype = _quant_dtype_to_elem_type(quant_dtype_str)
+            fm_fast = arith.FastMathFlags.fast
+            inv_n = 1.0 / float(N)
+            c_zero_f = fx.Float32(0.0)
+            c_one_f = fx.Float32(1.0)
+            c_inv_dtype_max = fx.Float32(inv_quant_dtype_max)
+            abs_mask = full(vec_width, fx.Uint32(0x7FFFFFFF), fx.Uint32)
+
+            Input_buf = fx.rocdl.make_buffer_tensor(Input)
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+            Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
+            XScale_buf = fx.rocdl.make_buffer_tensor(XScale)
+            YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
+            Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+            row_in = fx.slice(Input_buf, (row, None))
+            row_out = fx.slice(Output_buf, (row, None))
+            in_div = fx.logical_divide(row_in, fx.make_layout(vec_width, 1))
+            out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_word, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(vec_width, 1))
+            beta_div = fx.logical_divide(Beta_buf, fx.make_layout(vec_width, 1))
+            xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(vec_width, 1))
+
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
+
+            zero_e = fx.full(vec_width, fx.Float32(0.0).to(elem_dtype), elem_dtype)
+            x_e = zero_e
+            g_e = zero_e
+            b_e = zero_e
+            s_e = zero_e
+            if lane < vec_tiles:
+                x_e = _load_vec(copy_atom, vec_width, elem_dtype, in_div, lane)
+                g_e = _load_vec(copy_atom, vec_width, elem_dtype, gamma_div, lane)
+                b_e = _load_vec(copy_atom, vec_width, elem_dtype, beta_div, lane)
+                s_e = _load_vec(copy_atom, vec_width, elem_dtype, xscale_div, lane)
+            x = x_e.to(fx.Float32)
+            x2 = x * x
+            thread_sum = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+            thread_sumsq = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+
+            tail_x = c_zero_f
+            tail_g = c_zero_f
+            tail_b = c_zero_f
+            tail_s = c_zero_f
+            if const_expr(scalar_tail > 0):
+                if lane < scalar_tail:
+                    scalar_idx = vec_tiles * vec_width + lane
+                    tail_x = row_in[scalar_idx].to(fx.Float32)
+                    tail_g = Gamma_buf[scalar_idx].to(fx.Float32)
+                    tail_b = Beta_buf[scalar_idx].to(fx.Float32)
+                    tail_s = XScale_buf[scalar_idx].to(fx.Float32)
+                    thread_sum = thread_sum + tail_x
+                    thread_sumsq = thread_sumsq + tail_x * tail_x
+
+            pair = fx.Vector.from_elements([thread_sum, thread_sumsq], fx.Float32)
+            sums = fx.coop.warp_reduce(pair, fx.ReductionOp.ADD, width=group, _dtype=fx.Float32x2)
+            mean = sums[0] * inv_n
+            var = sums[1] * inv_n - mean * mean
+            var = (var < c_zero_f).select(c_zero_f, var)
+            rstd = fmath.rsqrt(var + eps, fastmath=fm_fast)
+            mean_rstd = mean * rstd
+
+            xhat = x * rstd - mean_rstd
+            y = xhat * g_e.to(fx.Float32) + b_e.to(fx.Float32)
+            y = y * s_e.to(fx.Float32)
+            y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
+            thread_row_max = y_abs.reduce(ReductionOp.MAX, fastmath=fm_fast)
+
+            tail_y = c_zero_f
+            if const_expr(scalar_tail > 0):
+                if lane < scalar_tail:
+                    xhat_tail = tail_x * rstd - mean_rstd
+                    tail_y = (xhat_tail * tail_g + tail_b) * tail_s
+                    thread_row_max = fx.max(thread_row_max, fx.absf(tail_y))
+
+            row_max = fx.coop.warp_reduce(
+                thread_row_max,
+                fx.ReductionOp.MAX,
+                width=group,
+            )
+            scale = row_max * c_inv_dtype_max
+            final_scale = (scale == c_zero_f).select(c_one_f, scale)
+            if lane == 0:
+                YScale_buf[row] = final_scale
+            inv_scale = fx.rocdl.rcp(T.f32, final_scale)
+
+            if lane < vec_tiles:
+                q_i8 = (y * inv_scale).to(quant_dtype)
+                for word_i in range_constexpr(quant_words_per_vec):
+                    lo = word_i * quant_word
+                    q_word = q_i8.shuffle(q_i8, [lo, lo + 1, lo + 2, lo + 3])
+                    _store_vec(
+                        copy_atom_q,
+                        quant_word,
+                        quant_dtype,
+                        q_word,
+                        out_div_q,
+                        lane * quant_words_per_vec + word_i,
+                    )
+            if const_expr(scalar_tail > 0):
+                if lane < scalar_tail:
+                    scalar_idx = vec_tiles * vec_width + lane
+                    row_out[scalar_idx] = (tail_y * inv_scale).to(quant_dtype)
+
+    @flyc.jit
+    def launch_layernorm_smoothquant_small_n(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Beta: fx.Tensor,
+        XScale: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+        launcher = layernorm_smoothquant_small_n_kernel(Input, Gamma, Beta, XScale, YScale, Output, m_in)
+        launcher.launch(
+            grid=((m_in + rows_per_block - 1) // rows_per_block, 1, 1),
+            block=(block_threads, 1, 1),
+            stream=stream,
+        )
+
+    return launch_layernorm_smoothquant_small_n
+
+
+def _small_n_rows_per_block(group: int, dense: bool, scalar_tail: int = 0) -> int:
+    """Rows per block for the short-row kernel.
+
+    Sparse blocks (one row per block) keep small-M launches spread over the
+    CUs; dense blocks pack several row groups into each launch for throughput
+    once M is large enough to fill the grid.  A row with a scalar remainder
+    carries extra per-lane work, so it uses the smaller dense block.
+    """
+    if not dense:
+        return 1
+    threads = 64 if group <= 32 and scalar_tail else 256
+    return max(1, threads // group)
+
+
+def _build_layernorm_smoothquant_small_n_adaptive_module(
+    N: int,
+    dtype_str: str,
+    *,
+    quant_dtype_str: str = "i8",
+    eps: float = EPS,
+):
+    cfg = _layernorm_smoothquant_vec_config(N, dtype_str)
+    if cfg is None:
+        raise ValueError("small-N smooth quant requires a vectorized row")
+    vec_width, vec_tiles, _ = cfg
+    scalar_tail = N - vec_tiles * vec_width
+    group = 1 << (max(vec_tiles, scalar_tail, 1) - 1).bit_length()
+    if group <= 16:
+        # Several row groups share a physical wave here, so the dense layout
+        # is also the low-latency one.
+        sparse = None
+        dense = _build_layernorm_smoothquant_small_n_module(
+            N,
+            dtype_str,
+            quant_dtype_str=quant_dtype_str,
+            eps=eps,
+            rows_per_block=_small_n_rows_per_block(group, True, scalar_tail),
+        )
+        small = None
+        if not scalar_tail:
+            small = _build_layernorm_smoothquant_small_n_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+                rows_per_block=max(1, 128 // group),
+            )
+    else:
+        sparse = _build_layernorm_smoothquant_small_n_module(
+            N,
+            dtype_str,
+            quant_dtype_str=quant_dtype_str,
+            eps=eps,
+            rows_per_block=1,
+        )
+        dense = _build_layernorm_smoothquant_small_n_module(
+            N,
+            dtype_str,
+            quant_dtype_str=quant_dtype_str,
+            eps=eps,
+            rows_per_block=_small_n_rows_per_block(group, True, scalar_tail),
+        )
+
+    @flyc.jit
+    def launch_layernorm_smoothquant_small_n(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        Beta: fx.Tensor,
+        XScale: fx.Tensor,
+        Output: fx.Tensor,
+        YScale: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+
+        def launch_dense():
+            dense(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+        if const_expr(group <= 16):
+            if const_expr(scalar_tail == 0):
+
+                def launch_small():
+                    small(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                @flyc.jit
+                def dispatch_exact():
+                    if m_in >= fx.Int32(1024):
+                        launch_small()
+                    else:
+                        launch_dense()
+
+                dispatch_exact()
+            else:
+                launch_dense()
+        else:
+
+            def launch_sparse():
+                sparse(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+            @flyc.jit
+            def dispatch():
+                # Small launches benefit from spreading one-row blocks over
+                # more CUs; large launches pack row groups to cut block
+                # scheduling, and the middle band stays sparse because a
+                # small integer number of dense blocks would underfill the
+                # machine.
+                if (m_in >= fx.Int32(256)) | (m_in < fx.Int32(32)):
+                    launch_dense()
+                else:
+                    launch_sparse()
+
+            dispatch()
+
+    return launch_layernorm_smoothquant_small_n
+
+
 def build_layernorm_dynamicquant_module(
     N: int,
     dtype_str: str,
@@ -1219,6 +1864,216 @@ def build_layernorm_smoothquant_module(
     quant_dtype_str: str = "i8",
     eps: float = EPS,
 ):
+    # Short, power-of-two vector rows can be packed several to a block; wider
+    # rows use the one-row register-cached vector path.  Arbitrary tails keep
+    # the correctness-complete scalar implementation.
+    cfg = _layernorm_smoothquant_vec_config(N, dtype_str)
+    if cfg is not None:
+        _, vec_tiles, _ = cfg
+        vec_width = cfg[0]
+        scalar_tail = N - vec_tiles * vec_width
+        group = 1 << (max(vec_tiles, scalar_tail, 1) - 1).bit_length()
+        if vec_tiles <= get_warp_size() and group <= get_warp_size():
+            return _build_layernorm_smoothquant_small_n_adaptive_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+            )
+        default_threads = _layernorm_smoothquant_vec_config(N, dtype_str)[2]
+        if vec_tiles <= 896:
+            throughput_threads = 64
+        elif vec_tiles <= 1792:
+            throughput_threads = 256
+        else:
+            throughput_threads = default_threads
+        default_launch = _build_layernorm_smoothquant_vec_module(
+            N,
+            dtype_str,
+            quant_dtype_str=quant_dtype_str,
+            eps=eps,
+            block_threads=default_threads,
+        )
+        if dtype_str == "f32" and vec_tiles > 1792:
+            # Streaming x avoids evicting pending output lines for these
+            # very wide f32 rows; it is neutral to positive for both cold
+            # and warm evaluation across row counts.
+            return _build_layernorm_smoothquant_vec_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+                block_threads=default_threads,
+                input_nt=True,
+            )
+
+        if dtype_str == "f32" and 65 <= vec_tiles <= 896:
+            nt_launch = _build_layernorm_smoothquant_vec_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+                block_threads=default_threads,
+                input_nt=True,
+            )
+
+            if vec_tiles >= 257:
+
+                @flyc.jit
+                def launch_layernorm_smoothquant_nt_rows(
+                    Input: fx.Tensor,
+                    Gamma: fx.Tensor,
+                    Beta: fx.Tensor,
+                    XScale: fx.Tensor,
+                    Output: fx.Tensor,
+                    YScale: fx.Tensor,
+                    m_in: fx.Int32,
+                    stream: fx.Stream = fx.Stream(None),
+                ):
+                    validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+
+                    def launch_cached():
+                        default_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                    def launch_streaming():
+                        nt_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                    @flyc.jit
+                    def dispatch_nt_rows():
+                        if m_in >= fx.Int32(512):
+                            launch_streaming()
+                        else:
+                            launch_cached()
+
+                    dispatch_nt_rows()
+
+                return launch_layernorm_smoothquant_nt_rows
+
+            mid_launch = _build_layernorm_smoothquant_vec_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+                block_threads=64,
+            )
+
+            @flyc.jit
+            def launch_layernorm_smoothquant_nt_mid(
+                Input: fx.Tensor,
+                Gamma: fx.Tensor,
+                Beta: fx.Tensor,
+                XScale: fx.Tensor,
+                Output: fx.Tensor,
+                YScale: fx.Tensor,
+                m_in: fx.Int32,
+                stream: fx.Stream = fx.Stream(None),
+            ):
+                validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+
+                def launch_cached():
+                    default_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                def launch_mid():
+                    mid_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                def launch_streaming():
+                    nt_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                @flyc.jit
+                def dispatch_nt_mid():
+                    if m_in >= fx.Int32(2048):
+                        launch_streaming()
+                    elif m_in >= fx.Int32(512):
+                        launch_mid()
+                    else:
+                        launch_cached()
+
+                dispatch_nt_mid()
+
+            return launch_layernorm_smoothquant_nt_mid
+
+        if dtype_str == "f32" and 897 <= vec_tiles <= 1792:
+            nt_launch = _build_layernorm_smoothquant_vec_module(
+                N,
+                dtype_str,
+                quant_dtype_str=quant_dtype_str,
+                eps=eps,
+                block_threads=256,
+                input_nt=True,
+            )
+
+            @flyc.jit
+            def launch_layernorm_smoothquant_nt_rows(
+                Input: fx.Tensor,
+                Gamma: fx.Tensor,
+                Beta: fx.Tensor,
+                XScale: fx.Tensor,
+                Output: fx.Tensor,
+                YScale: fx.Tensor,
+                m_in: fx.Int32,
+                stream: fx.Stream = fx.Stream(None),
+            ):
+                validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+
+                def launch_cached():
+                    default_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                def launch_streaming():
+                    nt_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+                @flyc.jit
+                def dispatch_nt_rows():
+                    if m_in >= fx.Int32(512):
+                        launch_streaming()
+                    else:
+                        launch_cached()
+
+                dispatch_nt_rows()
+
+            return launch_layernorm_smoothquant_nt_rows
+
+        if throughput_threads == default_threads:
+            # No second geometry is useful for this row width.
+            return default_launch
+        throughput_launch = _build_layernorm_smoothquant_vec_module(
+            N,
+            dtype_str,
+            quant_dtype_str=quant_dtype_str,
+            eps=eps,
+            block_threads=throughput_threads,
+        )
+
+        @flyc.jit
+        def launch_layernorm_smoothquant_dispatch(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Beta: fx.Tensor,
+            XScale: fx.Tensor,
+            Output: fx.Tensor,
+            YScale: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, Beta=Beta, XScale=XScale)
+
+            def launch_default():
+                default_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+            def launch_throughput():
+                throughput_launch(Input, Gamma, Beta, XScale, Output, YScale, m_in, stream)
+
+            @flyc.jit
+            def dispatch():
+                # Many rows: one-wave blocks avoid the per-block reduction
+                # overhead and let the scheduler keep more row work in flight.
+                if m_in >= fx.Int32(512):
+                    launch_throughput()
+                else:
+                    launch_default()
+
+            dispatch()
+
+        return launch_layernorm_smoothquant_dispatch
     return _build_layernorm_quant_module(
         N,
         dtype_str,
