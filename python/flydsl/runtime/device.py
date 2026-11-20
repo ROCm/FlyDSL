@@ -7,6 +7,8 @@ import subprocess
 import sys
 from typing import Optional
 
+from ..utils import env
+
 _ROCM_AGENT_TIMEOUT_S = int(os.environ.get("FLYDSL_ROCM_AGENT_TIMEOUT", "300"))
 
 
@@ -186,3 +188,93 @@ def check_smem_capacity(allocated_bytes: int, arch: str = None):
         raise RuntimeError(
             f"Shared Memory Overflow: Requested {allocated_bytes} bytes, " f"but device {arch} limit is {limit} bytes."
         )
+
+
+_KFD_TOPOLOGY_ROOT = "/sys/class/kfd/kfd/topology/nodes"
+
+
+def _parse_kfd_properties(path: str) -> dict:
+    """Parse a KFD ``properties`` file into ``{key: first_value_token}``."""
+    result = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    result[parts[0]] = parts[1]
+    except OSError:
+        pass
+    return result
+
+
+def _llc_bytes_from_kfd_node(node_dir: str) -> int:
+    """Total size (bytes) of the highest cache level >= 2 under one KFD node.
+
+    Picks L3 where present (CDNA3/4, RDNA), otherwise L2. KFD may list one entry
+    per cache instance; entries at a level are summed, as ROCr does for
+    ``HSA_AGENT_INFO_CACHE_SIZE``.
+    """
+    caches_dir = os.path.join(node_dir, "caches")
+    try:
+        entries = os.listdir(caches_dir)
+    except OSError:
+        return 0
+    totals: dict = {}
+    for entry in entries:
+        props = _parse_kfd_properties(os.path.join(caches_dir, entry, "properties"))
+        try:
+            level, size_kb = int(props["level"]), int(props["size"])
+        except (KeyError, ValueError):
+            continue
+        if level >= 2:
+            totals[level] = totals.get(level, 0) + size_kb * 1024
+    return totals[max(totals)] if totals else 0
+
+
+@functools.lru_cache(maxsize=None)
+def _kfd_llc_bytes(pci_location: Optional[tuple]) -> int:
+    """LLC bytes of the KFD GPU node at ``(pci_domain, location_id)``, 0 if unknown.
+
+    With ``pci_location`` None, uses the GPU node only if it is the sole one.
+    """
+    try:
+        node_names = os.listdir(_KFD_TOPOLOGY_ROOT)
+    except OSError:
+        return 0
+
+    candidates = []
+    for name in node_names:
+        node_dir = os.path.join(_KFD_TOPOLOGY_ROOT, name)
+        props = _parse_kfd_properties(os.path.join(node_dir, "properties"))
+        try:
+            location = int(props["domain"]), int(props["location_id"])
+        except (KeyError, ValueError):
+            continue
+        if location[1] == 0:
+            continue  # the CPU node
+        candidates.append((location, node_dir))
+
+    if pci_location is not None:
+        candidates = [c for c in candidates if c[0] == pci_location]
+    if len(candidates) != 1:
+        return 0
+    return _llc_bytes_from_kfd_node(candidates[0][1])
+
+
+def get_llc_cache_bytes() -> int:
+    """Last-level cache size in bytes of the current HIP device, 0 if unknown.
+
+    ``FLYDSL_RUNTIME_LLC_CACHE_MB`` overrides detection. Otherwise the size is
+    read from KFD topology sysfs for the node at the current device's PCI address,
+    which follows ``hipSetDevice`` and HIP/ROCR visibility; without HIP only a
+    single-GPU host resolves. There is no arch-keyed table on purpose:
+    ``gfx1100`` alone covers 80 MB and 96 MB parts, so guessing is worse than
+    reporting unknown.
+    """
+    override_mb = env.runtime.llc_cache_mb
+    if override_mb:
+        return override_mb * 1024 * 1024
+
+    from .device_runtime.rocm import _hip_current_pci_location
+
+    return _kfd_llc_bytes(_hip_current_pci_location())
