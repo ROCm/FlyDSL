@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-11-20T09:25:09Z",
+ "updated": "2026-11-20T10:51:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44722333778,
+   "pr": 1455,
+   "commit": "9adc80667b46238566e2f886f223b6f8aab15499",
+   "branch": "pr/fix-rocdl-math-ocml",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778",
+   "created_at": "2026-11-20T10:48:33Z",
+   "updated_at": "2026-11-20T10:49:06Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 44714560430,
+   "pr": 1455,
+   "commit": "723ac511a09571f5e2b52feba1b1e9ca4d2058c4",
+   "branch": "pr/fix-rocdl-math-ocml",
+   "event": "pull_request",
+   "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430",
+   "created_at": "2026-11-20T09:53:45Z",
+   "updated_at": "2026-11-20T10:48:52Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T10:15:34Z",
+     "completed_at": "2026-11-20T10:41:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853024"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-20T10:25:33Z",
+     "completed_at": "2026-11-20T10:33:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853060"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-20T10:15:23Z",
+     "completed_at": "2026-11-20T10:48:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853265"
+    }
+   ]
+  },
   {
    "run_id": 44671774123,
    "pr": null,
@@ -1885,80 +1943,6 @@
      "started_at": "2026-11-18T03:11:49Z",
      "completed_at": "2026-11-18T03:33:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219229488/job/134541903728"
-    }
-   ]
-  },
-  {
-   "run_id": 44219180340,
-   "pr": null,
-   "commit": "b23cb87402abf424cbf299c2041189e0484ebb62",
-   "branch": "pr/fp4-4wave-race",
-   "event": "pull_request",
-   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340",
-   "created_at": "2026-11-18T01:53:14Z",
-   "updated_at": "2026-11-18T03:55:04Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T02:55:51Z",
-     "completed_at": "2026-11-18T03:21:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340/job/134541609941",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T03:07:24Z",
-     "completed_at": "2026-11-18T03:55:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44219180340/job/134541610006"
-    }
-   ]
-  },
-  {
-   "run_id": 44210615103,
-   "pr": 1396,
-   "commit": "076b24e0f434766b619190e26ae8c9583d8b01ae",
-   "branch": "pr/fp8-rowscale-8wave",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add a small-M kernel to the FP8 8-wave GEMM",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103",
-   "created_at": "2026-11-18T00:46:50Z",
-   "updated_at": "2026-11-18T02:59:25Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T02:34:56Z",
-     "completed_at": "2026-11-18T02:59:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103/job/134495920487"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T01:09:59Z",
-     "completed_at": "2026-11-18T01:33:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44210615103/job/134495920519",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
