@@ -1372,6 +1372,99 @@ def test_tile_pa_vectorized_5d_matches_torch(
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @_requires_tile_pa
+@pytest.mark.parametrize("compute_type", ["bf16", "fp8"])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_tile_pa_nhd_kv_cache_matches_vectorized_5d(compute_type: str, block_size: int) -> None:
+    from kernels.attention.pa_decode_tile import pa_decode_tile
+
+    batch_size, context_length = 2, 1027
+    num_query_heads, num_kv_heads = 16, 2
+    head_size = 128
+    blocks_per_sequence = triton.cdiv(context_length, block_size)
+    total_blocks = batch_size * blocks_per_sequence
+    device = torch.device("cuda:0")
+    cache_dtype = dtypes.d_dtypes[compute_type]
+
+    setup_seed(20261106)
+    query = torch.empty(batch_size, num_query_heads, head_size, dtype=torch.bfloat16, device=device).uniform_(-0.5, 0.5)
+    key_caches, value_caches = create_kv_cache(
+        total_blocks,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        "auto",
+        torch.bfloat16,
+        seed=20261106,
+        device=str(device),
+        itemsize=1 if compute_type == "fp8" else cache_dtype.itemsize,
+    )
+    key_cache = key_caches[0]
+    value_cache = value_caches[0]
+    key_scale = None
+    value_scale = None
+    if compute_type == "fp8":
+        key_cache, _, value_cache, _, key_scale, value_scale = quantize_kv_cache_per_tensor(
+            key_cache, value_cache, quant_dtype=cache_dtype
+        )
+    value_cache_nhd = value_cache.permute(0, 3, 1, 2).contiguous()
+    value_cache = shuffle_value_cache_layout(value_cache)
+    key_cache_nhd = (
+        key_cache.permute(0, 3, 1, 2, 4).contiguous().view(total_blocks, block_size, num_kv_heads, head_size)
+    )
+    block_tables = torch.arange(total_blocks - 1, -1, -1, dtype=torch.int32, device=device).reshape(
+        batch_size, blocks_per_sequence
+    )
+    context_lengths = torch.full((batch_size,), context_length, dtype=torch.int32, device=device)
+
+    outputs = []
+    for layout_key_cache, layout_value_cache in ((key_cache, value_cache), (key_cache_nhd, value_cache_nhd)):
+        output = torch.full_like(query, float("nan"))
+        pa_decode_tile(
+            output=output,
+            query=query,
+            key_cache=layout_key_cache,
+            value_cache=layout_value_cache,
+            block_tables=block_tables,
+            context_lengths=context_lengths,
+            key_scale=key_scale,
+            value_scale=value_scale,
+            softmax_scale=head_size**-0.5,
+            num_partitions=4,
+        )
+        outputs.append(output)
+    torch.cuda.synchronize()
+
+    assert bool(torch.isfinite(outputs[1]).all().item())
+    torch.testing.assert_close(outputs[1], outputs[0], rtol=0, atol=0)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@_requires_tile_pa
+def test_pa_decode_ps_rejects_nhd_key_cache() -> None:
+    if not HAS_FLYDSL_PS:
+        pytest.skip("FlyDSL `pa_decode_ps_launch` is not available")
+    query = torch.zeros(1, 16, 128, dtype=torch.bfloat16)
+    key_cache = torch.zeros(1, 64, 1, 128, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="vectorized-5D key_cache"):
+        flydsl_ps_launch(
+            output=torch.empty_like(query),
+            query=query,
+            key_cache=key_cache,
+            value_cache=torch.zeros(1, 1, 8, 128, 8, dtype=torch.bfloat16),
+            context_lengths=torch.ones(1, dtype=torch.int32),
+            kv_page_indices=torch.zeros(1, dtype=torch.int32),
+            kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
+            softmax_scale=128**-0.5,
+            block_tables=torch.zeros(1, 1, dtype=torch.int32),
+            max_context_partition_num=1,
+        )
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@_requires_tile_pa
 @pytest.mark.parametrize(
     ("compute_type", "block_size", "sliding_window"),
     [

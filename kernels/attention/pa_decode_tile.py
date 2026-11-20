@@ -18,9 +18,11 @@ preshuffle.
 * ``query``        [num_seqs, num_q_heads, head_dim]  f16/bf16 (head_dim contiguous)
 * ``key_cache``    [num_blocks, num_kv_heads, head_dim//16, block_size, 16] fp8
                    or [num_blocks, num_kv_heads, head_dim//8, block_size, 8] bf16
+                   (also contiguous NHD [num_blocks, block_size, num_kv_heads, head_dim])
 * ``value_cache``  [num_blocks, num_kv_heads, block_size//16, v_head_dim, 16] fp8
                    or [num_blocks, num_kv_heads, block_size//8, v_head_dim, 8] bf16
-                   (fp8 also supports [num_blocks, num_kv_heads, v_head_dim, block_size])
+                   (fp8 also supports [num_blocks, num_kv_heads, v_head_dim, block_size];
+                   an NHD key_cache needs a contiguous NHD [num_blocks, block_size, num_kv_heads, v_head_dim])
 * ``block_tables`` [num_seqs, max_blocks_per_seq]  int32
 * ``context_lengths`` [num_seqs]  int32
 * ``output``       [num_seqs, num_q_heads, v_head_dim]  same dtype as query
@@ -69,6 +71,7 @@ def compile_pa_decode_tile(
     query_dtype: str = "f16",
     per_token_kv: bool = False,
     query_length: int = 1,
+    nhd_kv: bool = False,
     trans_v: bool = True,
     kv_dtype: str = "fp8",
 ):
@@ -260,6 +263,26 @@ def compile_pa_decode_tile(
         def _v_load_bf16x8_words(elem_off):
             return _v_load_bf16x8(elem_off).bitcast(fx.Int64)
 
+        if const_expr(nhd_kv):
+            if const_expr(is_bf16_kv):
+                v_bits_ty = fx.Int16
+                _v_load_elem = _make_flat_loader(value_cache_ptr, fx.BFloat16, 1, fx.UniversalCopy16b())
+            else:
+                v_bits_ty = fx.Int8
+                _v_load_elem = _make_flat_loader(value_cache_ptr, FP8, 1, fx.UniversalCopy8b())
+
+            def _v_nhd_words(phys, step, head_element):
+                # NHD keeps a token's head_dim contiguous, so the tokens one lane needs for one
+                # head element sit a whole row apart: gather them element by element into the
+                # same two i64 words the vectorized-5D load returns.
+                vector_width = 8 if is_bf16_kv else 16
+                first = ((phys * block_size + step * vector_width) * n_kv + kv_h) * v_head_dim + head_element
+                row_pitch = n_kv * v_head_dim
+                elems = [
+                    _v_load_elem(first + j * row_pitch).bitcast(v_bits_ty)[0] for j in range_constexpr(vector_width)
+                ]
+                return fx.Vector.from_elements(elems, dtype=v_bits_ty).bitcast(fx.Int64)
+
         def _bf16_mfma_operand(word):
             # K16 BF16 MFMA consumes four i16 lanes per thread. Keep the
             # 64-bit load packed through the loop-carried state and expose the
@@ -395,17 +418,30 @@ def compile_pa_decode_tile(
             # once an individual KV cache grows beyond 2 GiB.
             phys = fx.Int64(phys)
             within_page_tok = (a * c16 + lane16) % block_size
+            if const_expr(nhd_kv):
+                # NHD keeps a token's head_dim contiguous; every chunk is a slice of this row.
+                k_row = ((phys * block_size + within_page_tok) * n_kv + kv_h) * head_dim
             ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
                 he_idx = qkhe * RGROUP_QUARTERS + rgroup
                 if const_expr(is_bf16_kv):
                     for qkr in range_constexpr(2):
                         he8_idx = he_idx * 2 + qkr
-                        base = (((phys * n_kv + kv_h) * (head_dim // 8) + he8_idx) * block_size + within_page_tok) * 8
+                        if const_expr(not nhd_kv):
+                            base = (
+                                ((phys * n_kv + kv_h) * (head_dim // 8) + he8_idx) * block_size + within_page_tok
+                            ) * 8
+                        else:
+                            base = k_row + he8_idx * 8
                         words = _k_load_bf16x8_words(base)
                         ops.extend([words[0], words[1]])
                 else:
-                    base = (((phys * n_kv + kv_h) * QCHUNK + he_idx) * block_size + within_page_tok) * QK_CHUNK_ELEMS
+                    if const_expr(not nhd_kv):
+                        base = (
+                            ((phys * n_kv + kv_h) * QCHUNK + he_idx) * block_size + within_page_tok
+                        ) * QK_CHUNK_ELEMS
+                    else:
+                        base = k_row + he_idx * QK_CHUNK_ELEMS
                     w = _k_load16(base)  # head[he_idx*16 : +16] -> k_step 2*qkhe, 2*qkhe+1
                     ops.extend([w[0], w[1]])
                 if const_expr(block_size == 16):
@@ -612,19 +648,23 @@ def compile_pa_decode_tile(
             for sub in range_constexpr(PAGES_PER_CHUNK):
                 phys = fx.Int64(phys_row[sub])
                 for step in range_constexpr(STEPS_PER_PAGE):
-                    if const_expr(trans_v):
-                        vector_width = 8 if is_bf16_kv else 16
-                        base = (
-                            ((phys * n_kv + kv_h) * STEPS_PER_PAGE + step) * v_head_dim + head_element
-                        ) * vector_width
-                    else:
-                        base = ((phys * n_kv + kv_h) * v_head_dim + head_element) * block_size + step * 16
-                    if const_expr(is_bf16_kv):
-                        words = _v_load_bf16x8_words(base)
-                        ops.extend([words[0], words[1]])
-                    else:
-                        w = _v_load16(base)
+                    if const_expr(nhd_kv):
+                        w = _v_nhd_words(phys, step, head_element)
                         ops.extend([w[0], w[1]])
+                    else:
+                        if const_expr(trans_v):
+                            vector_width = 8 if is_bf16_kv else 16
+                            base = (
+                                ((phys * n_kv + kv_h) * STEPS_PER_PAGE + step) * v_head_dim + head_element
+                            ) * vector_width
+                        else:
+                            base = ((phys * n_kv + kv_h) * v_head_dim + head_element) * block_size + step * 16
+                        if const_expr(is_bf16_kv):
+                            words = _v_load_bf16x8_words(base)
+                            ops.extend([words[0], words[1]])
+                        else:
+                            w = _v_load16(base)
+                            ops.extend([w[0], w[1]])
                     if const_expr(block_size == 16):
                         # help the scheduler overlap the per-page gathered loads (see _k_ops)
                         fx.rocdl.sched_barrier(fx.rocdl.mask_vmem_rd)
@@ -1146,7 +1186,11 @@ def pa_decode_tile(
         total_q_rows % num_seqs == 0
     ), f"query.shape[0] ({total_q_rows}) must be a multiple of context_lengths.shape[0] ({num_seqs})"
     query_length = total_q_rows // num_seqs
-    _, num_kv_heads, num_hgroups, block_size, hgroup_width = key_cache.shape
+    nhd_kv = key_cache.dim() == 4
+    if not nhd_kv:
+        _, num_kv_heads, num_hgroups, block_size, hgroup_width = key_cache.shape
+    else:
+        _, block_size, num_kv_heads, k_head_dim = key_cache.shape
     arch = str(get_rocm_arch()).split(":", 1)[0]
     fp8_dtype = torch.float8_e4m3fn if "gfx95" in arch else torch.float8_e4m3fnuz
     if key_cache.dtype not in (torch.bfloat16, fp8_dtype):
@@ -1155,14 +1199,30 @@ def pa_decode_tile(
     kv_dtype = "bf16" if is_bf16_kv else "fp8"
 
     expected_vector = 8 if is_bf16_kv else 16
-    assert num_hgroups == head_dim // expected_vector and hgroup_width == expected_vector, (
-        f"key_cache shape {tuple(key_cache.shape)} does not match head_dim={head_dim}, "
-        f"vector_width={expected_vector}"
-    )
+    if not nhd_kv:
+        assert num_hgroups == head_dim // expected_vector and hgroup_width == expected_vector, (
+            f"key_cache shape {tuple(key_cache.shape)} does not match head_dim={head_dim}, "
+            f"vector_width={expected_vector}"
+        )
+    else:
+        assert k_head_dim == head_dim and key_cache.is_contiguous(), (
+            f"NHD key_cache must be a contiguous [num_blocks, block_size, num_kv_heads, {head_dim}] tensor, "
+            f"got shape {tuple(key_cache.shape)} strides {key_cache.stride()}"
+        )
     assert block_size in (16, 64), f"pa_decode_tile only supports block_size in (16, 64), got {block_size}"
 
-    trans_v = value_cache.dim() == 5
-    if trans_v:
+    trans_v = not nhd_kv and value_cache.dim() == 5
+    if nhd_kv:
+        assert value_cache.dim() == 4 and value_cache.is_contiguous(), (
+            "an NHD key_cache needs a contiguous NHD value_cache [num_blocks, block_size, num_kv_heads, v_head_dim], "
+            f"got shape {tuple(value_cache.shape)} strides {value_cache.stride()}"
+        )
+        _, v_block_size, v_num_kv_heads, v_head_dim = value_cache.shape
+        assert v_head_dim == value_head_dim and v_block_size == block_size, (
+            f"value_cache shape {tuple(value_cache.shape)} doesn't match "
+            f"block_size={block_size}, value_head_dim={value_head_dim}"
+        )
+    elif trans_v:
         _, v_num_kv_heads, v_subblocks, v_head_dim, v_width = value_cache.shape
         assert (
             v_head_dim == value_head_dim and v_width == expected_vector and v_subblocks == block_size // expected_vector
@@ -1271,6 +1331,7 @@ def pa_decode_tile(
         query_dtype=query_dtype,
         per_token_kv=per_token_kv,
         query_length=query_length,
+        nhd_kv=nhd_kv,
         trans_v=trans_v,
         kv_dtype=kv_dtype,
     )

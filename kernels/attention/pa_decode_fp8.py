@@ -294,6 +294,10 @@ def pa_decode_ps_launch(
         metadata: Pre-computed metadata dict from get_pa_metadata().
                   If None, calls get_pa_metadata() internally.
     """
+    if key_cache.dim() != 5:
+        raise ValueError(
+            "pa_decode_ps_launch requires a vectorized-5D key_cache; pass an NHD key_cache to pa_decode_tile directly."
+        )
     num_query_heads = query.shape[1]
     num_kv_heads = key_cache.shape[1]
     batch_size = context_lengths.shape[0]
