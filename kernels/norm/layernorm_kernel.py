@@ -41,6 +41,14 @@ def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
     return fx.memref_load_vec(r)
 
 
+def _load_vec_pred(copy_atom, vec_width, elem_dtype, div_tensor, idx, pred):
+    r = fx.make_rmem_tensor(vec_width, elem_dtype)
+    p = fx.make_rmem_tensor(1, fx.Boolean)
+    p[0] = pred
+    fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r, pred=p)
+    return fx.memref_load_vec(r)
+
+
 def _store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.memref_store_vec(val, r)
@@ -85,157 +93,369 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
+# LayerNorm forward launch geometry, measured on MI355X.
+# Rows of at most LN_FWD_SHORT_ROW_MAX_N elements pack several rows per block: wide
+# blocks while M is small, narrower ones once M passes LN_FWD_SHORT_ROW_LARGE_M.
+LN_FWD_SHORT_ROW_MAX_N = 1024
+LN_FWD_SHORT_ROW_BLOCK_THREADS = 512
+LN_FWD_SHORT_ROW_LARGE_M_BLOCK_THREADS = 256
+LN_FWD_SHORT_ROW_LARGE_M = 2048
+# Short rows up to this many give each row its own small block instead.
+LN_FWD_SHORT_ROW_SMALL_M_MAX = 64
+# Rows that are not 16-byte aligned take the scalar path: up to LN_FWD_SCALAR_SMALL_M
+# rows get wider blocks to hide latency, the widest past LN_FWD_SCALAR_WIDE_N elements.
+LN_FWD_SCALAR_SMALL_M = 2048
+LN_FWD_SCALAR_WIDE_N = 8192
+# Vector rows of more than 256 tiles drop to 256-thread blocks past this many rows.
+LN_FWD_VEC_LARGE_M = 512
+# Cache policy of the input loads once the input no longer fits the last-level cache.
+LN_FWD_NT_CACHE_MODIFIER = 2
+
+
 def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, eps: float = EPS):
+    """Build the LayerNorm-forward launcher for a fixed N and element dtype.
+
+    The row is kept in registers between the two passes.  A 128-bit vector
+    path is used whenever the row stride keeps every row 16-byte aligned;
+    otherwise a scalar (register-cached) fallback handles the row.
+
+    Rows wider than one wave use one CTA per row with an adaptive wave count.
+    Short rows use either one small CTA per row (low M) or several rows per
+    CTA, each reduced by an independent sub-wave (high M).  Selecting between
+    those two geometries is a host-side branch inside the compiled launcher:
+    the GPU still runs exactly one kernel per call.
+    """
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
+    elem_dtype = dtype_to_elem_type(dtype_str)
     elem_bits = 32 if dtype_str == "f32" else 16
-    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
-    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
-    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
+    vec_width = 128 // elem_bits
+    VEC_TILES = N // vec_width
+    VEC_N = N % vec_width == 0
+    USE_VEC = VEC_N and VEC_TILES > 0
 
-    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
-    SharedStorage = BlockReduce.SharedStorage
+    def _choose_one_row_threads(n_units: int) -> int:
+        # One 128-bit transaction per lane when the row is short.  Keeping the
+        # CTA to the number of active lanes avoids issuing a full wave of
+        # redundant loads for a 128-element row.
+        if n_units <= 16:
+            return 16
+        if n_units <= 32:
+            return 32
+        if n_units <= 64:
+            return 64
+        if n_units <= 128:
+            return 128
+        if n_units <= 256:
+            return 256
+        return 512
 
-    # ── GPU kernel ────────────────────────────────────────────────────────
-    @flyc.kernel
-    def layernorm_kernel(
-        Input: fx.Pointer,
-        Gamma: fx.Pointer,
-        Beta: fx.Pointer,
-        Output: fx.Pointer,
-        Mean: fx.Pointer,
-        Rstd: fx.Pointer,
-    ):
-        bid = fx.block_idx.x
-        tid = fx.thread_idx.x
+    def _choose_scalar_threads(n: int) -> int:
+        if n <= 4 * WARP_SIZE:
+            return WARP_SIZE
+        if n <= 2048:
+            return 2 * WARP_SIZE
+        return 4 * WARP_SIZE
 
-        elem_dtype = dtype_to_elem_type(dtype_str)
-        fm_fast = arith.FastMathFlags.fast
-        eps_c = eps
+    SCALAR_SPLIT = (not USE_VEC) and N > 256
+    VEC_GEOM_SPLIT = USE_VEC and VEC_TILES > 256
+    if USE_VEC:
+        ONE_ROW_THREADS = _choose_one_row_threads(VEC_TILES)
+        if elem_bits == 32 and 256 < VEC_TILES <= 512:
+            ONE_ROW_THREADS = 448
+        SCALAR_SMALL_M_THREADS = ONE_ROW_THREADS
+    elif SCALAR_SPLIT:
+        # Many CTAs need throughput; a handful of wide rows need latency
+        # hiding, so those use more waves per row.
+        ONE_ROW_THREADS = 128 if N <= 1024 else 256
+        SCALAR_SMALL_M_THREADS = 256 if N <= 512 else (512 if N <= LN_FWD_SCALAR_WIDE_N else 1024)
+    else:
+        ONE_ROW_THREADS = _choose_scalar_threads(N)
+        SCALAR_SMALL_M_THREADS = ONE_ROW_THREADS
+    ONE_ROW_NT_THREADS = ONE_ROW_THREADS
 
+    def _one_row_reduce_width(block_threads):
+        if USE_VEC:
+            units = VEC_TILES
+        else:
+            units = block_threads
+        width = block_threads
+        while width > 1 and width >= 2 * units:
+            width //= 2
+        return width
+
+    # A short-row kernel puts THREADS_PER_ROW consecutive lanes on one row.
+    SMALL_TILES = (N + vec_width - 1) // vec_width
+    wanted = 8
+    while wanted < SMALL_TILES and wanted < 64:
+        wanted *= 2
+    SMALL_TPR = min(wanted, 64)
+    SMALL_ROWS = LN_FWD_SHORT_ROW_BLOCK_THREADS // SMALL_TPR
+    SMALL_BLOCK = SMALL_TPR * SMALL_ROWS
+    ROWS_PER_BLOCK = SMALL_ROWS
+    SMALL_ROWS_LARGE = LN_FWD_SHORT_ROW_LARGE_M_BLOCK_THREADS // SMALL_TPR
+    SMALL_BLOCK_LARGE = SMALL_TPR * SMALL_ROWS_LARGE
+    ROWS_PER_BLOCK_LARGE = SMALL_ROWS_LARGE
+    SMALL_LARGE_SPLIT = SMALL_BLOCK_LARGE != SMALL_BLOCK
+    SMALL_VEC = USE_VEC and N <= LN_FWD_SHORT_ROW_MAX_N
+    SMALL_EXACT = SMALL_VEC and SMALL_TILES % SMALL_TPR == 0
+    _small_iters = (SMALL_TILES + SMALL_TPR - 1) // SMALL_TPR
+    _small_pad = _small_iters * SMALL_TPR - SMALL_TILES
+    SMALL_PRED_LOAD = SMALL_VEC and not SMALL_EXACT and _small_pad * 4 > _small_iters * SMALL_TPR
+    USE_SMALL = SMALL_VEC
+    SMALL_M_MAX = (
+        min(LN_FWD_SHORT_ROW_SMALL_M_MAX, 64 if elem_bits <= 16 else 32)
+        if (SMALL_VEC and SMALL_TILES <= SMALL_TPR)
+        else 0
+    )
+
+    fm_fast = arith.FastMathFlags.fast
+    eps_c = eps
+    inv_n = 1.0 / float(N)
+
+    def _compute_mean_rstd(sum_val, sumsq_val):
+        mean = sum_val * inv_n
+        mean_sq = sumsq_val * inv_n
+        var = mean_sq - mean * mean
+        var = (var < 0.0).select(0.0, var)
+        return mean, fmath.rsqrt(var + eps_c, fastmath=fm_fast)
+
+    def _one_row_reduce_factory(block_threads, reduce_width):
+        if block_threads <= WARP_SIZE:
+
+            def reduce2(v0, v1):
+                with fx.fastmath(fm_fast):
+                    return (
+                        fx.coop.warp_reduce(v0, ReductionOp.ADD, width=block_threads),
+                        fx.coop.warp_reduce(v1, ReductionOp.ADD, width=block_threads),
+                    )
+
+            return reduce2, None
+
+        BlockReduce = fx.coop.BlockReduce[fx.Float32x2, block_threads]
+        SharedStorage = BlockReduce.SharedStorage
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
 
-        # The wrapper guarantees contiguous [M, N] rows and contiguous [N]
-        # affine parameters. Reconstruct only this block's static views so the
-        # kernel ABI carries one address per argument, without shape/stride
-        # metadata for layouts already fixed by the contract.
-        row_layout = fx.make_layout(N, 1)
-        scalar_layout = fx.make_layout(1, 1)
-        bid_i64 = fx.Int64(bid)
-        row_offset = bid_i64 * N
-        Input_buf = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
-        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
-        Beta_buf = fx.rocdl.make_buffer_tensor(Beta.view(row_layout))
-        Output_buf = fx.rocdl.make_buffer_tensor((Output + row_offset).view(row_layout))
-
-        if const_expr(store_stats):
-            mean_row = fx.rocdl.make_buffer_tensor((Mean + bid_i64).view(scalar_layout))
-            rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
-
-        # ── helpers: wave / block reduction ───────────────────────────────
-
-        def block_reduce_add2(val0, val1):
+        def reduce2(v0, v1):
             with fx.fastmath(fm_fast):
-                values = fx.Vector.from_elements([val0, val1], fx.Float32)
+                values = fx.Vector.from_elements([v0, v1], fx.Float32)
                 total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
             return total[0], total[1]
 
-        def compute_mean_rstd(sum_val, sumsq_val):
-            inv_n = 1.0 / float(N)
-            mean = sum_val * inv_n
-            mean_sq = sumsq_val * inv_n
-            mean2 = mean * mean
-            var = mean_sq - mean2
-            is_neg = var < 0.0
-            var = is_neg.select(0.0, var)
-            var_eps = var + eps_c
-            rstd = fmath.rsqrt(var_eps, fastmath=fm_fast)
-            return mean, rstd
+        return reduce2, lds
 
-        # ==================================================================
-        # Vector path for every complete f16/bf16 vec8 row.
-        # ==================================================================
-        if const_expr(USE_VEC_N):
+    NT_MIN_ROWS = (256 << 20) // (N * 4) if dtype_str == "bf16" and N > 1024 else 0
+    use_nt_dispatch = USE_VEC and NT_MIN_ROWS > 0
+
+    # ── One row per CTA: the wide-row and latency-friendly path ───────────
+    def _make_one_row_kernel(input_cache_modifier, block_threads):
+        vec_exact = USE_VEC and VEC_TILES % block_threads == 0
+        vec_iters = (VEC_TILES + block_threads - 1) // block_threads
+        vec_pad = vec_iters * block_threads - VEC_TILES
+        # Predicated loads avoid a mostly empty final tile; for a small pad the
+        # predicate setup costs more than the redundant safe load.
+        vec_pred_load = USE_VEC and not vec_exact and vec_pad * 4 > vec_iters * block_threads
+        preload_weights = (
+            USE_VEC and input_cache_modifier == 0 and block_threads <= 512 and VEC_TILES <= 2 * block_threads
+        )
+        scalar_cache = (not USE_VEC) and (N + block_threads - 1) // block_threads <= 16
+        _one_row_kwargs = {} if block_threads <= 256 else {"known_block_size": [block_threads, 1, 1]}
+
+        @flyc.kernel(**_one_row_kwargs)
+        def layernorm_kernel(
+            Input: fx.Pointer,
+            Gamma: fx.Pointer,
+            Beta: fx.Pointer,
+            Output: fx.Pointer,
+            Mean: fx.Pointer,
+            Rstd: fx.Pointer,
+        ):
+            bid = fx.block_idx.x
+            tid = fx.thread_idx.x
+            row_layout = fx.make_layout(N, 1)
+            scalar_layout = fx.make_layout(1, 1)
+            bid_i64 = fx.Int64(bid)
+            row_offset = bid_i64 * N
+
+            Input_buf = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
+            Beta_buf = fx.rocdl.make_buffer_tensor(Beta.view(row_layout))
+            Output_buf = fx.rocdl.make_buffer_tensor((Output + row_offset).view(row_layout))
+            if const_expr(store_stats):
+                mean_row = fx.rocdl.make_buffer_tensor((Mean + bid_i64).view(scalar_layout))
+                rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
+
+            block_reduce_add2, _ = _one_row_reduce_factory(block_threads, _one_row_reduce_width(block_threads))
+
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
             in_local = []
 
-            # ── Layout API: buffer-backed tensors + tiled access ─────
-            in_div = fx.logical_divide(Input_buf, fx.make_layout(VEC_WIDTH, 1))
-            out_div = fx.logical_divide(Output_buf, fx.make_layout(VEC_WIDTH, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
-            beta_div = fx.logical_divide(Beta_buf, fx.make_layout(VEC_WIDTH, 1))
+            if const_expr(USE_VEC):
+                in_div = fx.logical_divide(Input_buf, fx.make_layout(vec_width, 1))
+                out_div = fx.logical_divide(Output_buf, fx.make_layout(vec_width, 1))
+                gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(vec_width, 1))
+                beta_div = fx.logical_divide(Beta_buf, fx.make_layout(vec_width, 1))
+                copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(input_cache_modifier), elem_bits)
+                weight_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                store_modifier = 2 if block_threads <= 32 else 0
+                store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(store_modifier), elem_bits)
 
-            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                for tile_i in range_constexpr((VEC_TILES + block_threads - 1) // block_threads):
+                    idx = tid + tile_i * block_threads
+                    if const_expr(vec_exact):
+                        vec = _load_vec(copy_atom, vec_width, elem_dtype, in_div, idx)
+                    elif const_expr(vec_pred_load):
+                        is_valid = idx < VEC_TILES
+                        vec = _load_vec_pred(copy_atom, vec_width, elem_dtype, in_div, idx, is_valid)
+                    else:
+                        is_valid = idx < VEC_TILES
+                        idx_safe = is_valid.select(idx, 0)
+                        vec = _load_vec(copy_atom, vec_width, elem_dtype, in_div, idx_safe)
+                    in_local.append(vec)
+                    x = vec.to(fx.Float32)
+                    x2 = x * x
+                    red = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                    red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                    if const_expr(vec_exact):
+                        thread_sum = thread_sum + red
+                        thread_sumsq = thread_sumsq + red2
+                    else:
+                        thread_sum = thread_sum + is_valid.select(red, c_zero_f)
+                        thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
-            # ── Pass 1: load input, accumulate sum / sumsq ───────────────
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
-                idx = tid + tile_i * BLOCK_THREADS
-                is_valid = idx < VEC_TILES
-                idx_safe = is_valid.select(idx, 0)
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
-                in_local.append(vec)
-                x = vec.to(fx.Float32)
+                gamma_pre = []
+                beta_pre = []
+                if const_expr(preload_weights):
+                    for tile_i in range_constexpr((VEC_TILES + block_threads - 1) // block_threads):
+                        idx = tid + tile_i * block_threads
+                        is_valid = idx < VEC_TILES
+                        idx_safe = is_valid.select(idx, 0)
+                        gamma_pre.append(_load_vec(weight_atom, vec_width, elem_dtype, gamma_div, idx_safe))
+                        beta_pre.append(_load_vec(weight_atom, vec_width, elem_dtype, beta_div, idx_safe))
 
-                x2 = x * x
-                red = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sum = thread_sum + is_valid.select(red, c_zero_f)
-                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
+                mean, rstd = _compute_mean_rstd(sum_val, sumsq_val)
 
-            sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
-            mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
+                if const_expr(store_stats):
+                    if tid == 0:
+                        mean_row[0] = mean
+                        rstd_row[0] = rstd
 
+                for tile_i in range_constexpr((VEC_TILES + block_threads - 1) // block_threads):
+                    idx = tid + tile_i * block_threads
+                    if idx < VEC_TILES:
+                        if const_expr(preload_weights):
+                            g = gamma_pre[tile_i].to(fx.Float32)
+                            b = beta_pre[tile_i].to(fx.Float32)
+                        else:
+                            g = _load_vec(weight_atom, vec_width, elem_dtype, gamma_div, idx).to(fx.Float32)
+                            b = _load_vec(weight_atom, vec_width, elem_dtype, beta_div, idx).to(fx.Float32)
+                        x = in_local[tile_i].to(fx.Float32)
+                        y = (x - mean) * rstd
+                        y = y * g + b
+                        out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                        _store_vec(store_atom, vec_width, elem_dtype, out_e, out_div, idx)
+            else:
+                copy_atom = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy32b() if elem_bits == 32 else fx.rocdl.BufferCopy16b(), elem_bits
+                )
+                for base_idx_int in range_constexpr(0, N, block_threads):
+                    idx = tid + base_idx_int
+                    is_valid = idx < N
+                    idx_safe = is_valid.select(idx, 0)
+                    x_e = Input_buf[idx_safe]
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    if const_expr(scalar_cache):
+                        in_local.append(x)
+                    thread_sum = thread_sum + is_valid.select(x, c_zero_f)
+                    thread_sumsq = thread_sumsq + is_valid.select(x * x, c_zero_f)
+
+                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
+                mean, rstd = _compute_mean_rstd(sum_val, sumsq_val)
+
+                if const_expr(store_stats):
+                    if tid == 0:
+                        mean_row[0] = mean
+                        rstd_row[0] = rstd
+
+                for base_idx_int in range_constexpr(0, N, block_threads):
+                    idx = tid + base_idx_int
+                    if idx < N:
+                        g_e = Gamma_buf[idx]
+                        b_e = Beta_buf[idx]
+                        g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                        b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
+                        if const_expr(scalar_cache):
+                            x = in_local[(base_idx_int // block_threads)]
+                        else:
+                            x_e2 = Input_buf[idx]
+                            x = x_e2 if dtype_str == "f32" else x_e2.to(fx.Float32)
+                        y = (x - mean) * rstd
+                        y = y * g + b
+                        y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                        Output_buf[idx] = y_e
+
+        return layernorm_kernel
+
+    layernorm_kernel = _make_one_row_kernel(0, ONE_ROW_THREADS)
+    layernorm_kernel_nt = (
+        _make_one_row_kernel(LN_FWD_NT_CACHE_MODIFIER, ONE_ROW_NT_THREADS) if use_nt_dispatch else None
+    )
+    layernorm_kernel_scalar_small_m = _make_one_row_kernel(0, SCALAR_SMALL_M_THREADS) if SCALAR_SPLIT else None
+    # A large grid of medium-width rows already has enough work in flight;
+    # four waves per row is then cheaper than eight (or sixteen).
+    layernorm_kernel_vec_large_m = _make_one_row_kernel(0, 256) if VEC_GEOM_SPLIT else None
+
+    def _make_scalar_nocache_kernel(block_threads):
+        kwargs = {} if block_threads <= 256 else {"known_block_size": [block_threads, 1, 1]}
+
+        @flyc.kernel(**kwargs)
+        def layernorm_scalar_nocache_kernel(
+            Input: fx.Pointer,
+            Gamma: fx.Pointer,
+            Beta: fx.Pointer,
+            Output: fx.Pointer,
+            Mean: fx.Pointer,
+            Rstd: fx.Pointer,
+        ):
+            bid = fx.block_idx.x
+            tid = fx.thread_idx.x
+            row_layout = fx.make_layout(N, 1)
+            scalar_layout = fx.make_layout(1, 1)
+            bid_i64 = fx.Int64(bid)
+            row_offset = bid_i64 * N
+            Input_buf = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
+            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
+            Beta_buf = fx.rocdl.make_buffer_tensor(Beta.view(row_layout))
+            Output_buf = fx.rocdl.make_buffer_tensor((Output + row_offset).view(row_layout))
             if const_expr(store_stats):
-                if tid == 0:
-                    mean_row[0] = mean
-                    rstd_row[0] = rstd
+                mean_row = fx.rocdl.make_buffer_tensor((Mean + bid_i64).view(scalar_layout))
+                rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
 
-            # ── Pass 2: normalize + affine + store ───────────────────────
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
-                idx = tid + tile_i * BLOCK_THREADS
-                if idx < VEC_TILES:
-                    g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
-                    b = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, idx).to(fx.Float32)
-                    x = in_local[tile_i].to(fx.Float32)
-                    y = (x - mean) * rstd
-                    y = y * g + b
-                    out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
-
-        else:
-            # ==============================================================
-            # Generic path: 2-pass scalar implementation for arbitrary N
-            # ==============================================================
+            block_reduce_add2, _ = _one_row_reduce_factory(block_threads, _one_row_reduce_width(block_threads))
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
-
-            # ── Pass 1: sum + sumsq ──────────────────────────────────────
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
+            for base_idx_int in range_constexpr(0, N, block_threads):
                 idx = tid + base_idx_int
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
                 x_e = Input_buf[idx_safe]
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                x2 = x * x
-                x_safe = is_valid.select(x, c_zero_f)
-                x2_safe = is_valid.select(x2, c_zero_f)
-                thread_sum = thread_sum + x_safe
-                thread_sumsq = thread_sumsq + x2_safe
+                thread_sum = thread_sum + is_valid.select(x, c_zero_f)
+                thread_sumsq = thread_sumsq + is_valid.select(x * x, c_zero_f)
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
-            mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
-
+            mean, rstd = _compute_mean_rstd(sum_val, sumsq_val)
             if const_expr(store_stats):
                 if tid == 0:
                     mean_row[0] = mean
                     rstd_row[0] = rstd
 
-            # ── Pass 2: normalize + affine + store ───────────────────────
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
+            for base_idx_int in range_constexpr(0, N, block_threads):
                 idx = tid + base_idx_int
                 if idx < N:
                     x_e = Input_buf[idx]
@@ -244,14 +464,176 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
-                    diff = x - mean
-                    norm = diff * rstd
-                    scaled = norm * g
-                    y = scaled + b
+                    y = (x - mean) * rstd
+                    y = y * g + b
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
                     Output_buf[idx] = y_e
 
-    # ── JIT host launcher ─────────────────────────────────────────────────
+        return layernorm_scalar_nocache_kernel
+
+    MAIN_SCALAR_NOCACHE = (not USE_VEC) and (N + ONE_ROW_THREADS - 1) // ONE_ROW_THREADS > 16
+    SMALL_SCALAR_NOCACHE = SCALAR_SPLIT and ((N + SCALAR_SMALL_M_THREADS - 1) // SCALAR_SMALL_M_THREADS > 16)
+    if MAIN_SCALAR_NOCACHE:
+        layernorm_main_launch_kernel = _make_scalar_nocache_kernel(ONE_ROW_THREADS)
+    else:
+        layernorm_main_launch_kernel = layernorm_kernel
+    if SCALAR_SPLIT:
+        if SMALL_SCALAR_NOCACHE:
+            layernorm_scalar_small_m_kernel = _make_scalar_nocache_kernel(SCALAR_SMALL_M_THREADS)
+        else:
+            layernorm_scalar_small_m_kernel = layernorm_kernel_scalar_small_m
+    else:
+        layernorm_scalar_small_m_kernel = None
+
+    # ── Several short rows per CTA, one independent sub-wave per row ──────
+    if USE_SMALL:
+
+        def _make_small_kernel(block_threads):
+            SMALL_ROWS = block_threads // SMALL_TPR
+            SMALL_BLOCK = SMALL_TPR * SMALL_ROWS
+            SMALL_KWARGS = {} if SMALL_BLOCK <= 256 else {"known_block_size": [SMALL_BLOCK, 1, 1]}
+
+            @flyc.kernel(**SMALL_KWARGS)
+            def layernorm_small_kernel(
+                Input: fx.Pointer,
+                Gamma: fx.Pointer,
+                Beta: fx.Pointer,
+                Output: fx.Pointer,
+                Mean: fx.Pointer,
+                Rstd: fx.Pointer,
+                MIn: fx.Int32,
+            ):
+                bid = fx.block_idx.x
+                tid = fx.thread_idx.x
+                row_layout = fx.make_layout(N, 1)
+                scalar_layout = fx.make_layout(1, 1)
+                lane = tid % SMALL_TPR
+                row_local = tid // SMALL_TPR
+
+                c_zero_f = fx.Float32(0.0)
+
+                # Gamma and Beta are shared by every row in the CTA.  Their loads
+                # are hoisted out of the per-row guard and reused across rows.
+                Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
+                Beta_buf = fx.rocdl.make_buffer_tensor(Beta.view(row_layout))
+
+                if const_expr(SMALL_VEC):
+                    # One descriptor for the whole tensor: per-lane source offsets
+                    # then stay in one wave instruction instead of serialising four
+                    # distinct row descriptors inside the wave.
+                    total_elems = fx.Int64(MIn) * N
+                    flat_layout = fx.make_layout(total_elems, 1)
+                    Input_flat = fx.rocdl.make_buffer_tensor(Input.view(flat_layout))
+                    Output_flat = fx.rocdl.make_buffer_tensor(Output.view(flat_layout))
+                    in_flat_div = fx.logical_divide(Input_flat, fx.make_layout(vec_width, 1))
+                    out_flat_div = fx.logical_divide(Output_flat, fx.make_layout(vec_width, 1))
+                    gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(vec_width, 1))
+                    beta_div = fx.logical_divide(Beta_buf, fx.make_layout(vec_width, 1))
+                    copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(0), elem_bits)
+                    store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(2), elem_bits)
+                    gamma_local = []
+                    beta_local = []
+                    for tile_i in range_constexpr((SMALL_TILES + SMALL_TPR - 1) // SMALL_TPR):
+                        idx = lane + tile_i * SMALL_TPR
+                        is_valid = idx < VEC_TILES
+                        idx_safe = is_valid.select(idx, 0)
+                        gamma_local.append(_load_vec(copy_atom, vec_width, elem_dtype, gamma_div, idx_safe))
+                        beta_local.append(_load_vec(copy_atom, vec_width, elem_dtype, beta_div, idx_safe))
+
+                row = bid * SMALL_ROWS + row_local
+                if row < MIn:
+                    row_i64 = fx.Int64(row)
+                    if const_expr(not SMALL_VEC):
+                        row_offset = row_i64 * N
+                        Input_buf = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
+                        Output_buf = fx.rocdl.make_buffer_tensor((Output + row_offset).view(row_layout))
+                    if const_expr(store_stats):
+                        mean_row = fx.rocdl.make_buffer_tensor((Mean + row_i64).view(scalar_layout))
+                        rstd_row = fx.rocdl.make_buffer_tensor((Rstd + row_i64).view(scalar_layout))
+
+                    thread_sum = c_zero_f
+                    thread_sumsq = c_zero_f
+                    in_local = []
+
+                    if const_expr(SMALL_VEC):
+                        row_vec_base = fx.Int32(row) * VEC_TILES
+                        for tile_i in range_constexpr((SMALL_TILES + SMALL_TPR - 1) // SMALL_TPR):
+                            idx = row_vec_base + lane + tile_i * SMALL_TPR
+                            if const_expr(SMALL_EXACT):
+                                vec = _load_vec(copy_atom, vec_width, elem_dtype, in_flat_div, idx)
+                            elif const_expr(SMALL_PRED_LOAD):
+                                is_valid = idx < (fx.Int32(row) + 1) * VEC_TILES
+                                vec = _load_vec_pred(copy_atom, vec_width, elem_dtype, in_flat_div, idx, is_valid)
+                            else:
+                                is_valid = idx < (fx.Int32(row) + 1) * VEC_TILES
+                                idx_safe = is_valid.select(idx, row_vec_base)
+                                vec = _load_vec(copy_atom, vec_width, elem_dtype, in_flat_div, idx_safe)
+                            in_local.append(vec)
+                            x = vec.to(fx.Float32)
+                            x2 = x * x
+                            red = x.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                            red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                            if const_expr(SMALL_EXACT):
+                                thread_sum = thread_sum + red
+                                thread_sumsq = thread_sumsq + red2
+                            else:
+                                thread_sum = thread_sum + is_valid.select(red, c_zero_f)
+                                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                    else:
+                        for base_idx_int in range_constexpr(0, N, SMALL_TPR):
+                            idx = lane + base_idx_int
+                            is_valid = idx < N
+                            idx_safe = is_valid.select(idx, 0)
+                            x_e = Input_buf[idx_safe]
+                            x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                            in_local.append(x)
+                            thread_sum = thread_sum + is_valid.select(x, c_zero_f)
+                            thread_sumsq = thread_sumsq + is_valid.select(x * x, c_zero_f)
+
+                    with fx.fastmath(fm_fast):
+                        sum_val = fx.coop.warp_reduce(thread_sum, ReductionOp.ADD, width=SMALL_TPR)
+                        sumsq_val = fx.coop.warp_reduce(thread_sumsq, ReductionOp.ADD, width=SMALL_TPR)
+                    mean, rstd = _compute_mean_rstd(sum_val, sumsq_val)
+
+                    if const_expr(store_stats):
+                        if lane == 0:
+                            mean_row[0] = mean
+                            rstd_row[0] = rstd
+
+                    if const_expr(SMALL_VEC):
+                        row_vec_base = fx.Int32(row) * VEC_TILES
+                        for tile_i in range_constexpr((SMALL_TILES + SMALL_TPR - 1) // SMALL_TPR):
+                            idx = row_vec_base + lane + tile_i * SMALL_TPR
+                            if idx < (fx.Int32(row) + 1) * VEC_TILES:
+                                g = gamma_local[tile_i].to(fx.Float32)
+                                b = beta_local[tile_i].to(fx.Float32)
+                                x = in_local[tile_i].to(fx.Float32)
+                                y = (x - mean) * rstd
+                                y = y * g + b
+                                out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                                _store_vec(store_atom, vec_width, elem_dtype, out_e, out_flat_div, idx)
+                    else:
+                        for base_idx_int in range_constexpr(0, N, SMALL_TPR):
+                            idx = lane + base_idx_int
+                            if idx < N:
+                                g_e = Gamma_buf[idx]
+                                b_e = Beta_buf[idx]
+                                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                                b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
+                                x = in_local[(base_idx_int // SMALL_TPR)]
+                                y = (x - mean) * rstd
+                                y = y * g + b
+                                y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                                Output_buf[idx] = y_e
+
+            return layernorm_small_kernel
+
+        layernorm_small_kernel = _make_small_kernel(LN_FWD_SHORT_ROW_BLOCK_THREADS)
+        layernorm_small_large_kernel = (
+            _make_small_kernel(LN_FWD_SHORT_ROW_LARGE_M_BLOCK_THREADS) if SMALL_LARGE_SPLIT else None
+        )
+
+    # ── Host launchers ────────────────────────────────────────────────────
     if store_stats:
 
         @flyc.jit
@@ -265,12 +647,107 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = layernorm_kernel(Input, Gamma, Beta, Output, Mean, Rstd)
-            launcher.launch(
-                grid=(m_in, 1, 1),
-                block=(BLOCK_THREADS, 1, 1),
-                stream=stream,
-            )
+            def launch_one():
+                launcher = layernorm_main_launch_kernel(Input, Gamma, Beta, Output, Mean, Rstd)
+                launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_THREADS, 1, 1), stream=stream)
+
+            if const_expr(SCALAR_SPLIT):
+
+                def launch_scalar_small_m():
+                    launcher = layernorm_scalar_small_m_kernel(Input, Gamma, Beta, Output, Mean, Rstd)
+                    launcher.launch(
+                        grid=(m_in, 1, 1),
+                        block=(SCALAR_SMALL_M_THREADS, 1, 1),
+                        stream=stream,
+                    )
+
+                @flyc.jit
+                def dispatch():
+                    if m_in <= fx.Int32(LN_FWD_SCALAR_SMALL_M):
+                        launch_scalar_small_m()
+                    else:
+                        launch_one()
+
+                dispatch()
+            elif const_expr(USE_SMALL):
+
+                def launch_small():
+                    launcher = layernorm_small_kernel(Input, Gamma, Beta, Output, Mean, Rstd, m_in)
+                    launcher.launch(
+                        grid=((m_in + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK, 1, 1),
+                        block=(SMALL_BLOCK, 1, 1),
+                        stream=stream,
+                    )
+
+                def launch_small_large():
+                    launcher = layernorm_small_large_kernel(Input, Gamma, Beta, Output, Mean, Rstd, m_in)
+                    launcher.launch(
+                        grid=((m_in + ROWS_PER_BLOCK_LARGE - 1) // ROWS_PER_BLOCK_LARGE, 1, 1),
+                        block=(SMALL_BLOCK_LARGE, 1, 1),
+                        stream=stream,
+                    )
+
+                @flyc.jit
+                def dispatch():
+                    if m_in <= fx.Int32(SMALL_M_MAX):
+                        launch_small()
+                    elif m_in > fx.Int32(LN_FWD_SHORT_ROW_LARGE_M):
+                        if const_expr(SMALL_LARGE_SPLIT):
+                            launch_small_large()
+                        else:
+                            launch_small()
+                    else:
+                        launch_one()
+
+                dispatch()
+            elif const_expr(VEC_GEOM_SPLIT):
+
+                def launch_vec_large_m():
+                    launcher = layernorm_kernel_vec_large_m(Input, Gamma, Beta, Output, Mean, Rstd)
+                    launcher.launch(grid=(m_in, 1, 1), block=(256, 1, 1), stream=stream)
+
+                if const_expr(use_nt_dispatch):
+
+                    def launch_streaming():
+                        launcher = layernorm_kernel_nt(Input, Gamma, Beta, Output, Mean, Rstd)
+                        launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_NT_THREADS, 1, 1), stream=stream)
+
+                    @flyc.jit
+                    def dispatch():
+                        if m_in > fx.Int32(NT_MIN_ROWS):
+                            launch_streaming()
+                        elif m_in > fx.Int32(LN_FWD_VEC_LARGE_M):
+                            launch_vec_large_m()
+                        else:
+                            launch_one()
+
+                    dispatch()
+                else:
+
+                    @flyc.jit
+                    def dispatch():
+                        if m_in > fx.Int32(LN_FWD_VEC_LARGE_M):
+                            launch_vec_large_m()
+                        else:
+                            launch_one()
+
+                    dispatch()
+            elif const_expr(use_nt_dispatch):
+
+                def launch_streaming():
+                    launcher = layernorm_kernel_nt(Input, Gamma, Beta, Output, Mean, Rstd)
+                    launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_NT_THREADS, 1, 1), stream=stream)
+
+                @flyc.jit
+                def dispatch():
+                    if m_in > fx.Int32(NT_MIN_ROWS):
+                        launch_streaming()
+                    else:
+                        launch_one()
+
+                dispatch()
+            else:
+                launch_one()
 
         return launch_layernorm
 
@@ -283,12 +760,108 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = layernorm_kernel(Input, Gamma, Beta, Output, Gamma, Gamma)
-        launcher.launch(
-            grid=(m_in, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
+        def launch_one():
+            # Mean/Rstd are never dereferenced on this path.
+            launcher = layernorm_main_launch_kernel(Input, Gamma, Beta, Output, Gamma, Gamma)
+            launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_THREADS, 1, 1), stream=stream)
+
+        if const_expr(SCALAR_SPLIT):
+
+            def launch_scalar_small_m():
+                launcher = layernorm_scalar_small_m_kernel(Input, Gamma, Beta, Output, Gamma, Gamma)
+                launcher.launch(
+                    grid=(m_in, 1, 1),
+                    block=(SCALAR_SMALL_M_THREADS, 1, 1),
+                    stream=stream,
+                )
+
+            @flyc.jit
+            def dispatch():
+                if m_in <= fx.Int32(LN_FWD_SCALAR_SMALL_M):
+                    launch_scalar_small_m()
+                else:
+                    launch_one()
+
+            dispatch()
+        elif const_expr(USE_SMALL):
+
+            def launch_small():
+                launcher = layernorm_small_kernel(Input, Gamma, Beta, Output, Gamma, Gamma, m_in)
+                launcher.launch(
+                    grid=((m_in + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK, 1, 1),
+                    block=(SMALL_BLOCK, 1, 1),
+                    stream=stream,
+                )
+
+            def launch_small_large():
+                launcher = layernorm_small_large_kernel(Input, Gamma, Beta, Output, Gamma, Gamma, m_in)
+                launcher.launch(
+                    grid=((m_in + ROWS_PER_BLOCK_LARGE - 1) // ROWS_PER_BLOCK_LARGE, 1, 1),
+                    block=(SMALL_BLOCK_LARGE, 1, 1),
+                    stream=stream,
+                )
+
+            @flyc.jit
+            def dispatch():
+                if m_in <= fx.Int32(SMALL_M_MAX):
+                    launch_small()
+                elif m_in > fx.Int32(LN_FWD_SHORT_ROW_LARGE_M):
+                    if const_expr(SMALL_LARGE_SPLIT):
+                        launch_small_large()
+                    else:
+                        launch_small()
+                else:
+                    launch_one()
+
+            dispatch()
+        elif const_expr(VEC_GEOM_SPLIT):
+
+            def launch_vec_large_m():
+                launcher = layernorm_kernel_vec_large_m(Input, Gamma, Beta, Output, Gamma, Gamma)
+                launcher.launch(grid=(m_in, 1, 1), block=(256, 1, 1), stream=stream)
+
+            if const_expr(use_nt_dispatch):
+
+                def launch_streaming():
+                    launcher = layernorm_kernel_nt(Input, Gamma, Beta, Output, Gamma, Gamma)
+                    launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_NT_THREADS, 1, 1), stream=stream)
+
+                @flyc.jit
+                def dispatch():
+                    if m_in > fx.Int32(NT_MIN_ROWS):
+                        launch_streaming()
+                    elif m_in > fx.Int32(LN_FWD_VEC_LARGE_M):
+                        launch_vec_large_m()
+                    else:
+                        launch_one()
+
+                dispatch()
+            else:
+
+                @flyc.jit
+                def dispatch():
+                    if m_in > fx.Int32(LN_FWD_VEC_LARGE_M):
+                        launch_vec_large_m()
+                    else:
+                        launch_one()
+
+                dispatch()
+        elif const_expr(use_nt_dispatch):
+
+            def launch_streaming():
+                launcher = layernorm_kernel_nt(Input, Gamma, Beta, Output, Gamma, Gamma)
+                launcher.launch(grid=(m_in, 1, 1), block=(ONE_ROW_NT_THREADS, 1, 1), stream=stream)
+
+            @flyc.jit
+            def dispatch():
+                if m_in > fx.Int32(NT_MIN_ROWS):
+                    launch_streaming()
+                else:
+                    launch_one()
+
+            dispatch()
+        else:
+            launch_one()
 
     return launch_layernorm
 
