@@ -2106,6 +2106,16 @@ def test_fused_add_rmsnorm_dynamicquant():
     print("=" * 80)
 
     configs = _get_rmsnorm_configs()
+    if _get_rmsnorm_shape_override() is None:
+        configs += [
+            (45, 128, "bf16"),  # packed narrow rows, M not a multiple of the rows per block
+            (300, 4096, "bf16"),  # wider row on the single-pass kernel
+        ]
+    if _get_rmsnorm_shape_override() is None:
+        configs += [
+            (45, 128, "bf16"),  # packed narrow rows, M not a multiple of the rows per block
+            (16384, 8192, "bf16"),  # past the last-level cache
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -2154,6 +2164,12 @@ def test_fused_add_rmsnorm_smoothquant():
     print("=" * 80)
 
     configs = _get_rmsnorm_configs()
+    if _get_rmsnorm_shape_override() is None:
+        configs += [
+            (45, 128, "bf16"),  # packed narrow rows, M not a multiple of the rows per block
+            (300, 4096, "bf16"),  # 256 rows or more: two chunks per thread
+            (16384, 8192, "bf16"),  # past the last-level cache: non-temporal loads
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
