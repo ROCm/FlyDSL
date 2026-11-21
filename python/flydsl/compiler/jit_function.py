@@ -12,7 +12,7 @@ import time
 import types
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -588,9 +588,34 @@ class MlirCompiler:
         return asm, cfg
 
     @classmethod
-    def compile(cls, asm: str, *, func_name: str, config: PipelineConfig) -> ir.Module:
-        """Lower the text and configuration resolved by :meth:`prepare`."""
+    def compile(cls, asm: str, *, func_name: str, config: PipelineConfig, backend=None) -> ir.Module:
+        """Lower the text and configuration resolved by :meth:`prepare`.
+
+        With a ``backend``, lower the same text again with each setting the
+        backend proposes for the first result, and return the first retry it
+        accepts. External codegen is not retried.
+        """
+        module = cls._lower(asm, func_name=func_name, config=config)
+        if backend is None or config.external:
+            return module
+        for llvm_opts, prepare in backend.codegen_retries(module, source_asm=asm, llvm_options=config.llvm_opts):
+            retry_config = replace(config, llvm_opts={**(config.llvm_opts or {}), **llvm_opts})
+            retry = cls._lower(asm, func_name=func_name, config=retry_config, prepare=prepare, dump=False)
+            if backend.accepts_codegen_retry(module, retry):
+                if env.debug.dump_ir or env.debug.dump_asm:
+                    # The dump on disk is of the first result: write the one that is returned.
+                    return cls._lower(asm, func_name=func_name, config=retry_config, prepare=prepare)
+                return retry
+        return module
+
+    @classmethod
+    def _lower(
+        cls, asm: str, *, func_name: str, config: PipelineConfig, prepare: Optional[Callable] = None, dump: bool = True
+    ) -> ir.Module:
+        """Run the pipeline once; ``prepare`` edits the parsed input and ``dump`` gates the debug dumps."""
         module = ir.Module.parse(asm)
+        if prepare is not None:
+            prepare(module)
         fragments = config.fragments
         pre_binary_fragments = config.pre_binary
         binary_fragment = config.binary_fragment
@@ -605,8 +630,8 @@ class MlirCompiler:
             log().info(f"Origin IR: \n{module}")
 
         # FLYDSL_DEBUG_DUMP_ASM takes the FLYDSL_DUMP_IR path but writes only the final ISA.
-        dump_ir = env.debug.dump_ir
-        dump_enabled = dump_ir or env.debug.dump_asm
+        dump_ir = dump and env.debug.dump_ir
+        dump_enabled = dump and (dump_ir or env.debug.dump_asm)
         dump_dir = Path(env.debug.dump_dir).resolve()
 
         if dump_enabled and not dump_ir and external_binary:
@@ -1252,7 +1277,9 @@ class JitFunction:
                         # Keep source locations for pass diagnostics even when DWARF is off.
                         # The key omits them unless debug info affects the generated artifact.
                         source_ir = traced.module.operation.get_asm(enable_debug_info=True, assume_verified=True)
-                        compiled_module = MlirCompiler.compile(source_ir, func_name=self.func.__name__, config=config)
+                        compiled_module = MlirCompiler.compile(
+                            source_ir, func_name=self.func.__name__, config=config, backend=backend
+                        )
                         compiled_func = CompiledArtifact(
                             compiled_module,
                             self.func.__name__,
