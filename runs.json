@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-21T00:42:29Z",
+ "updated": "2026-11-21T02:14:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44851075691,
+   "pr": 1457,
+   "commit": "280508edef8877339d4f786f79852c69f8248fd0",
+   "branch": "perf/rocm-avoid-agpr-overflow",
+   "event": "pull_request",
+   "title": "[Perf] Keep gfx950 kernels that fit in 256 VGPRs out of the AGPRs",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44851075691",
+   "created_at": "2026-11-21T01:35:33Z",
+   "updated_at": "2026-11-21T02:00:59Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-21T01:51:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44851075691/job/136687149541"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-21T01:52:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44851075691/job/136687149586"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T02:00:59Z",
+     "completed_at": "2026-11-21T02:11:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44851075691/job/136687149691"
+    }
+   ]
+  },
   {
    "run_id": 44842430752,
    "pr": 1431,
@@ -10,38 +53,38 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752",
    "created_at": "2026-11-21T00:14:03Z",
-   "updated_at": "2026-11-21T00:39:38Z",
+   "updated_at": "2026-11-21T02:12:13Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-21T00:39:51Z",
-     "completed_at": null,
+     "completed_at": "2026-11-21T00:50:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368051"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-21T00:39:38Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-21T01:12:32Z",
+     "completed_at": "2026-11-21T02:02:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368072"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-21T00:39:38Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-21T00:40:38Z",
+     "completed_at": "2026-11-21T01:00:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368084"
     }
    ]
@@ -1967,21 +2010,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768/job/134612243966"
     }
    ]
-  },
-  {
-   "run_id": 44243198365,
-   "pr": 1431,
-   "commit": "100bc1b9a3df137296cd151d2b57bad58d1e2171",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243198365",
-   "created_at": "2026-11-18T05:17:20Z",
-   "updated_at": "2026-11-18T05:18:45Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
