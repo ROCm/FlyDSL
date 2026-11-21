@@ -9,6 +9,7 @@ The tool is self-contained and only consumes ``*final_isa.s`` files produced by
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff /tmp/before /tmp/after
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py summarize <dump-dir> --json snapshot.json
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff before.json after.json
+    python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff /tmp/before /tmp/after --kernel REGEX
 
 ``diff`` accepts either two dump directories or two JSON snapshots, and the two
 sides may be mixed.  Every metric is scoped to one kernel, even when an ISA file
@@ -25,6 +26,10 @@ Each metric cell is one of three states: a parsed value, ``n/a`` when the quanti
 does not exist on the target, or ``?`` when the tool could not read something it
 claims to report.  Only the third is a failure: the tool exits 1 for a resource
 regression and 2 whenever it cannot produce a trustworthy answer.
+
+On targets with an occupancy model (gfx90a and later CDNA), the regression trigger
+for registers and LDS is the derived ``occupancy`` (waves per SIMD) rather than the
+raw ``vgpr``, ``sgpr`` and ``lds_static_bytes`` counts, which are then informational.
 """
 
 import sys
@@ -50,7 +55,7 @@ from dataclasses import dataclass, field, replace  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import TextIO  # noqa: E402
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TOOL_NAME = "isa_resource_table"
 
 
@@ -132,6 +137,7 @@ INFO = "info"
 METADATA = "metadata"
 SYMBOL = "symbol"
 INSTRUCTION = "instruction"
+DERIVED = "derived"
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,7 @@ class Metric:
 # two regressions, and would flag moving accumulators into AGPRs -- which the kernel
 # tuning guide recommends -- as a regression.
 METRICS = (
+    Metric("occupancy", TRIGGER, DERIVED, "occupancy"),
     Metric("vgpr", TRIGGER, METADATA, "vgpr_count"),
     Metric("arch_vgpr", INFO, SYMBOL, "num_vgpr"),
     Metric("agpr", INFO, SYMBOL, "num_agpr"),
@@ -166,11 +173,18 @@ METRICS = (
 KEYS = tuple(metric.key for metric in METRICS)
 BY_KEY = {metric.key: metric for metric in METRICS}
 TRIGGERS = frozenset(metric.key for metric in METRICS if metric.kind == TRIGGER)
+# Waves per SIMD: more is better.  Every other metric worsens when it grows.
+HIGHER_IS_BETTER = frozenset({"occupancy"})
+# What `occupancy` is computed from.  They are triggers only where `occupancy` is n/a:
+# where it is known, 252 -> 256 VGPRs or a few more KiB of LDS that keep the waves per
+# SIMD are not a regression, and a change that does lose a wave shows up as one.
+OCCUPANCY_INPUTS = frozenset({"vgpr", "sgpr", "lds_static_bytes"})
 
 KNOWN_SET_SUFFIXES = frozenset({"num_vgpr", "num_agpr", "numbered_sgpr", "private_seg_size"})
 
 LEGEND = (
-    "* = regression trigger; other columns are informational.\n"
+    "* = regression trigger; (*) = trigger only where occupancy is n/a; other columns are informational.\n"
+    "  occupancy = waves/SIMD allowed by vgpr, sgpr and lds_static_bytes.\n"
     "  vgpr = total (arch+acc, LLVM's occupancy number); arch_vgpr/agpr are its split "
     "-- do not add them."
 )
@@ -181,6 +195,28 @@ LEGEND = (
 # --------------------------------------------------------------------------------------
 
 RE_PROC = re.compile(r"^gfx([0-9a-f]{3,})$")
+
+
+@dataclass(frozen=True)
+class OccupancyModel:
+    vgprs: int  # VGPRs one SIMD can hand out per lane (arch + accumulator on a unified file)
+    vgpr_granule: int
+    max_waves: int  # per SIMD
+    lds_bytes: int  # per CU
+    simds: int = 4  # per CU
+
+
+# gfx90a and later CDNA: one unified 512-entry VGPR file, allocated in blocks of 8, at
+# most 8 waves per SIMD (LLVM AMDGPU's own occupancy model); LDS per CU from the CDNA3
+# and CDNA4 ISA guides.  Targets missing here get `occupancy` n/a, and `vgpr`, `sgpr`
+# and `lds_static_bytes` stay the triggers there.
+OCCUPANCY_MODELS = {
+    "gfx90a": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx940": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx941": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx942": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx950": OccupancyModel(512, 8, 8, 160 * 1024),
+}
 # FeatureArchitectedFlatScratch on gfx9: these spill through scratch_*, gfx90a does not.
 GFX9_FLAT_SCRATCH = frozenset({"gfx940", "gfx941", "gfx942", "gfx950"})
 HIGHEST_KNOWN_GEN = 13
@@ -527,6 +563,39 @@ def _symbol_cell(symbols: dict, name: str, metric: Metric) -> Cell:
     return Cell.of(value)
 
 
+def _sgpr_waves(sgprs: int) -> int:
+    """LLVM's GCNSubtarget::getOccupancyWithNumSGPRs for gfx8 and gfx9."""
+    for limit, waves in ((80, 10), (88, 9), (100, 8)):
+        if sgprs <= limit:
+            return waves
+    return 7
+
+
+def _occupancy_cell(entry: dict, metrics: dict, arch: Arch) -> Cell:
+    """Waves per SIMD that the VGPR, SGPR and static-LDS footprint allow.
+
+    VGPR-bound waves are ``vgprs // round_up(vgpr, granule)``, as in the
+    kernel-trace-analysis skill; LDS-bound waves are the workgroups that fit in one
+    CU's LDS times the waves per workgroup, spread over the CU's SIMDs.
+    """
+    model = OCCUPANCY_MODELS.get(arch.processor or "")
+    if model is None:
+        return Cell.na(f"no occupancy model for {arch.processor or 'an unidentified target'}")
+    vgpr, sgpr, lds = metrics["vgpr"], metrics["sgpr"], metrics["lds_static_bytes"]
+    if any(cell.state != VALUE for cell in (vgpr, sgpr, lds)):
+        return Cell.unparsed("occupancy needs vgpr, sgpr and lds_static_bytes")
+    allocated = -(-max(vgpr.value, 1) // model.vgpr_granule) * model.vgpr_granule
+    waves = min(model.max_waves, model.vgprs // allocated, _sgpr_waves(sgpr.value))
+    if lds.value:
+        size = _metadata_cell(entry, Metric("", INFO, METADATA, "max_flat_workgroup_size"))
+        wave = _metadata_cell(entry, Metric("", INFO, METADATA, "wavefront_size"))
+        if size.state != VALUE or wave.state != VALUE or not size.value or not wave.value:
+            return Cell.unparsed("occupancy needs .max_flat_workgroup_size and .wavefront_size")
+        waves_per_group = -(-size.value // wave.value)
+        waves = min(waves, model.lds_bytes // lds.value * waves_per_group // model.simds)
+    return Cell.of(waves)
+
+
 def _instruction_cells(counts: dict, arch: Arch, body_error: str | None) -> tuple:
     """Returns (cells, notes, problems) for the five instruction-derived metrics."""
     if body_error is not None:
@@ -620,6 +689,7 @@ def parse_isa(path: str | Path) -> tuple:
         counts, body_error = _body_counts(scan, name)
         instruction_cells, notes, instruction_problems = _instruction_cells(counts, arch, body_error)
         metrics.update(instruction_cells)
+        metrics["occupancy"] = _occupancy_cell(entry, metrics, arch)
 
         notes = list(notes)
         lds_static = metrics["lds_static_bytes"]
@@ -914,6 +984,20 @@ class DiffRow:
         """The single definition of 'this kernel changed', used by every caller."""
         return any(self.delta(key) for key in KEYS)
 
+    @property
+    def trigger_keys(self) -> tuple:
+        """`occupancy` where both sides have it, else the raw inputs it would replace."""
+        if self.delta("occupancy") is not None:
+            return tuple(key for key in KEYS if key in TRIGGERS and key not in OCCUPANCY_INPUTS)
+        return tuple(key for key in KEYS if key in TRIGGERS and key != "occupancy")
+
+    def worsening(self, key: str) -> int | None:
+        """The delta signed so that positive always means worse."""
+        delta = self.delta(key)
+        if delta is None:
+            return None
+        return -delta if key in HIGHER_IS_BETTER else delta
+
 
 @dataclass(frozen=True)
 class Comparison:
@@ -948,8 +1032,8 @@ class Comparison:
         for row in self.rows:
             if not row.comparable:
                 continue
-            for key in TRIGGERS:
-                delta = row.delta(key)
+            for key in row.trigger_keys:
+                delta = row.worsening(key)
                 if delta is not None and predicate(delta):
                     total += 1
         return total
@@ -994,7 +1078,32 @@ def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
     return pairs, tuple(notes)
 
 
-def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
+def _select(snapshot: Snapshot, pattern: re.Pattern) -> tuple:
+    """(the snapshot restricted to kernels whose name matches, the keys left out).
+
+    Problems that belong to a left-out kernel go with it; problems of a whole file
+    stay, because they may hide a kernel that would have matched.
+    """
+    kept = {key: record for key, record in snapshot.kernels.items() if pattern.search(key.rpartition("::")[2])}
+    dropped = sorted(snapshot.kernels.keys() - kept.keys())
+    prefixes = tuple(f"{key}: " for key in dropped)
+    problems = tuple(problem for problem in snapshot.problems if not prefixes or not problem.startswith(prefixes))
+    return replace(snapshot, kernels=kept, problems=problems), dropped
+
+
+def compare_snapshots(before: Snapshot, after: Snapshot, kernel: re.Pattern | None = None) -> Comparison:
+    selection_notes: list = []
+    if kernel is not None:
+        before, dropped_before = _select(before, kernel)
+        after, dropped_after = _select(after, kernel)
+        dropped = sorted(set(dropped_before) | set(dropped_after))
+        if dropped:
+            shown = "".join(f"\n      {_label(key)}" for key in dropped[:20])
+            more = f"\n      ... and {len(dropped) - 20} more" if len(dropped) > 20 else ""
+            selection_notes.append(
+                f"--kernel {kernel.pattern!r} left {len(dropped)} kernel(s) out of the comparison "
+                f"({len(dropped_before)} before, {len(dropped_after)} after):{shown}{more}"
+            )
     problems = list(before.problems) + list(after.problems)
     if not before or not after:
         problems.append(f"one or both inputs contain no kernels (before={len(before)}, after={len(after)})")
@@ -1045,7 +1154,7 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
         rows=tuple(rows),
         problems=tuple(problems),
         warnings=tuple(before.warnings) + tuple(after.warnings),
-        notes=tuple(notes),
+        notes=tuple(selection_notes) + tuple(notes),
         total_kernels=total,
     )
 
@@ -1054,7 +1163,6 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
 # Rendering
 # --------------------------------------------------------------------------------------
 
-MIN_NAME_WIDTH = 20
 MAX_NAME_WIDTH = 60
 NAME_TAIL = 12
 MIN_CELL_WIDTH = 5
@@ -1070,14 +1178,28 @@ def _abbreviate(name: str, width: int) -> str:
     return name[:head] + "~" + name[-NAME_TAIL:]
 
 
+def _label(key: str) -> str:
+    """``<kernel> [<directory>]`` for a ``<directory>/<kernel>::<kernel>`` key.
+
+    FLYDSL_DUMP_IR names each directory after its kernel, so the key repeats the
+    kernel name, and in a tree with one directory per test case the case name comes
+    first.  Abbreviating the whole key then cut out the kernel name; here the kernel
+    name is kept whole and only the directory is shortened.
+    """
+    directory, separator, name = key.rpartition("::")
+    if not separator:
+        return key
+    if directory and Path(directory).name == name:
+        directory = Path(directory).parent.as_posix()
+    if directory in ("", "."):
+        return name
+    return f"{name} [{_abbreviate(directory, MAX_NAME_WIDTH)}]"
+
+
 def _name_column(names: list) -> dict:
-    if not names:
-        return {}
-    longest = max(len(name) for name in names)
-    width = min(max(MIN_NAME_WIDTH, longest), MAX_NAME_WIDTH)
-    shown = {name: _abbreviate(name, width) for name in names}
+    shown = {name: _label(name) for name in names}
     if len(set(shown.values())) != len(shown):
-        # Rows must never be indistinguishable; drop the cap rather than the identity.
+        # Rows must never be indistinguishable; drop the abbreviation rather than the identity.
         return {name: name for name in names}
     return shown
 
@@ -1101,7 +1223,12 @@ def _format_table(headers: list, rows: list) -> list:
 
 
 def _header_cells() -> list:
-    return ["kernel"] + [("*" + key if key in TRIGGERS else key) for key in KEYS]
+    def marked(key):
+        if key in OCCUPANCY_INPUTS:
+            return "(*)" + key
+        return "*" + key if key in TRIGGERS else key
+
+    return ["kernel"] + [marked(key) for key in KEYS]
 
 
 def _cell_text(cell: Cell) -> str:
@@ -1195,10 +1322,11 @@ def do_diff(
     error: TextIO | None = None,
     json_path: str | Path | None = None,
     quiet: bool = False,
+    kernel: re.Pattern | None = None,
 ) -> int:
     output = output if output is not None else sys.stdout
     error = error if error is not None else sys.stderr
-    comparison = compare_snapshots(load_input(before_path), load_input(after_path))
+    comparison = compare_snapshots(load_input(before_path), load_input(after_path), kernel)
     if json_path is not None:
         Path(json_path).write_text(
             json.dumps(_comparison_json(comparison), indent=2, sort_keys=True) + "\n",
@@ -1270,6 +1398,15 @@ def do_summarize(
     return 0
 
 
+def _regex(text: str) -> re.Pattern:
+    # argparse reports ArgumentTypeError with exit 2; an uncaught re.error would exit 1,
+    # which reads as a regression.
+    try:
+        return re.compile(text)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid regex {text!r}: {exc}") from None
+
+
 def _create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1284,6 +1421,12 @@ def _create_parser() -> argparse.ArgumentParser:
     diff.add_argument("after", type=Path, help="after dump directory or JSON snapshot")
     diff.add_argument("--json", type=Path, metavar="PATH", help="write the comparison as JSON")
     diff.add_argument("-q", "--quiet", action="store_true", help="suppress the table")
+    diff.add_argument(
+        "--kernel",
+        type=_regex,
+        metavar="REGEX",
+        help="compare only kernels whose name matches REGEX (re.search); the rest are listed, not compared",
+    )
     return parser
 
 
@@ -1291,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _create_parser().parse_args(argv)
     try:
         if args.command == "diff":
-            return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet)
+            return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet, kernel=args.kernel)
         return do_summarize(args.dump_dir, json_path=args.json, quiet=args.quiet)
     except SnapshotError as exc:
         print(f"error: {exc}", file=sys.stderr)
