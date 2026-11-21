@@ -1,8 +1,84 @@
 {
  "schema": 1,
- "updated": "2026-11-21T03:31:05Z",
+ "updated": "2026-11-21T05:43:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44872096634,
+   "pr": 1460,
+   "commit": "f8f06f0b9fe9cdcc0aa56b39b777059fc5607fcf",
+   "branch": "skills/flydsl-kernel-authoring-contract-and-branch-cost",
+   "event": "pull_request",
+   "title": "[Skills] flydsl-kernel-authoring: cost of small runtime ifs; contract fastmath and bit-exact fast paths",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634",
+   "created_at": "2026-11-21T05:42:07Z",
+   "updated_at": "2026-11-21T05:42:07Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 44872021042,
+   "pr": 1459,
+   "commit": "724409682a10f1b491782a9af39f2a7916704959",
+   "branch": "skills/prefetch-data-load-provable-guard",
+   "event": "pull_request",
+   "title": "[Skills] prefetch-data-load: keep the prefetch guard provable from the loop bound",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042",
+   "created_at": "2026-11-21T05:41:07Z",
+   "updated_at": "2026-11-21T05:41:21Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 44871955568,
+   "pr": 1458,
+   "commit": "40a51163530d4a597135d429319bcf281058ffaa",
+   "branch": "skills/debug-flydsl-kernel-call-base-state",
+   "event": "pull_request",
+   "title": "[Skills] debug-flydsl-kernel: method calls on locals in a runtime if/for make them region state",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568",
+   "created_at": "2026-11-21T05:40:18Z",
+   "updated_at": "2026-11-21T05:41:54Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:41:50Z",
+     "completed_at": "2026-11-21T05:41:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552855",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:41:49Z",
+     "completed_at": "2026-11-21T05:41:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552860"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:41:49Z",
+     "completed_at": "2026-11-21T05:41:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552873"
+    }
+   ]
+  },
   {
    "run_id": 44851075691,
    "pr": 1457,
@@ -1909,110 +1985,6 @@
    "updated_at": "2026-11-18T07:56:34Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 44261767281,
-   "pr": null,
-   "commit": "b8d25cfcea13eee9a195f2ffec79fa3975eba1f0",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44261767281",
-   "created_at": "2026-11-18T07:48:33Z",
-   "updated_at": "2026-11-18T07:48:33Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 44260805638,
-   "pr": 1432,
-   "commit": "14bd2f1748e4d1cfd3657e0fdda4eeb530a7e5bc",
-   "branch": "perf/fuse-ast-transformers",
-   "event": "pull_request",
-   "title": "[AST] Apply the structural rewrites in one walk",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638",
-   "created_at": "2026-11-18T07:41:08Z",
-   "updated_at": "2026-11-18T09:37:54Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:07:25Z",
-     "completed_at": "2026-11-18T08:53:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664347890"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:07:43Z",
-     "completed_at": "2026-11-18T08:41:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664347912",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:16:42Z",
-     "completed_at": "2026-11-18T08:24:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44260805638/job/134664348266"
-    }
-   ]
-  },
-  {
-   "run_id": 44243592768,
-   "pr": 1431,
-   "commit": "c5ce0e6fdb4e187cde1ce1e5cbc9bf02065dc9ed",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768",
-   "created_at": "2026-11-18T05:20:41Z",
-   "updated_at": "2026-11-18T07:43:30Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-18T07:11:30Z",
-     "completed_at": "2026-11-18T07:31:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768/job/134612243908"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-18T06:01:19Z",
-     "completed_at": "2026-11-18T06:13:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768/job/134612243910"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T06:01:05Z",
-     "completed_at": "2026-11-18T06:09:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44243592768/job/134612243966"
-    }
-   ]
   }
  ]
 }
