@@ -135,6 +135,18 @@ class TestLLVMOptionsContextManager:
             with llvm_options({"enable-post-misched": [1, 2, 3]}):
                 pass
 
+    def test_unknown_option_warns_and_is_skipped(self):
+        from flydsl.compiler.llvm_options import llvm_options
+
+        # Options moved to TableGen (not cl::opt) must not abort compilation.
+        with pytest.warns(RuntimeWarning, match="Unknown LLVM option"):
+            with llvm_options({"this-option-does-not-exist-xyz": True, "enable-post-misched": False}):
+                pass
+        # Known options in the same dict are still applied and restored.
+        from flydsl._mlir._mlir_libs import _mlirDialectsFly
+
+        assert _mlirDialectsFly.set_llvm_option_bool("enable-post-misched", True) is True
+
 
 # ──────────────────────────────────────────────────────────────
 # Tests: CompileCallable subscript

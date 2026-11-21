@@ -27,6 +27,10 @@ def FlyKtrace_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
+
+  // The pinned LLVM defaults this to 1, which rejects assembly formats that
+  // leave inherent attributes unbound. Keep the historical format.
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 #endif

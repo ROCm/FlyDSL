@@ -11,9 +11,9 @@
 // CHECK-SAME: (%[[OUT:.*]]: !fly.ptr<f32, global>)
 // CHECK-NOT: register
 // CHECK-NOT: fly.mma_atom_call(
-// CHECK: %[[A_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [0], strides = [1]} : vector<4xf16> into vector<4xf16>
-// CHECK: %[[B_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [0], strides = [1]} : vector<4xf16> into vector<4xf16>
-// CHECK: %[[ACC_INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
+// CHECK: %[[A_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
+// CHECK: %[[B_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [0], strides = [1] : vector<4xf16> into vector<4xf16>
+// CHECK: %[[ACC_INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [4], strides = [1] : vector<4xf32> into vector<8xf32>
 gpu.module @promote_rmem_to_vector_ssa {
   gpu.func @promote_accumulator_to_vector_ssa(%out: !fly.ptr<f32, global>) kernel {
     %c0 = arith.constant 0 : index
@@ -47,24 +47,24 @@ gpu.module @promote_rmem_to_vector_ssa {
     %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>
 
     // CHECK: %{{.*}}:3 = scf.for {{.*}} iter_args(%[[A_ITER:.*]] = %[[A_STATE]], %[[B_ITER:.*]] = %[[B_STATE]], %[[ACC:.*]] = %[[ACC_INIT]]) -> (vector<4xf16>, vector<4xf16>, vector<8xf32>) {
-    // CHECK: %[[LOOP_A:.*]] = vector.extract_strided_slice %[[A_ITER]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
-    // CHECK: %[[LOOP_B:.*]] = vector.extract_strided_slice %[[B_ITER]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
-    // CHECK: %[[LOOP_C:.*]] = vector.extract_strided_slice %[[ACC]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
+    // CHECK: %[[LOOP_A:.*]] = vector.extract_strided_slice %[[A_ITER]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
+    // CHECK: %[[LOOP_B:.*]] = vector.extract_strided_slice %[[B_ITER]] offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
+    // CHECK: %[[LOOP_C:.*]] = vector.extract_strided_slice %[[ACC]] offsets = [4], sizes = [4], strides = [1] : vector<8xf32> to vector<4xf32>
     // CHECK: %[[LOOP_RES:.*]] = fly.mma_atom_call_ssa
-    // CHECK: %[[LOOP_ACC_NEXT:.*]] = vector.insert_strided_slice %[[LOOP_RES]], %[[ACC]] {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
+    // CHECK: %[[LOOP_ACC_NEXT:.*]] = vector.insert_strided_slice %[[LOOP_RES]], %[[ACC]] offsets = [4], strides = [1] : vector<4xf32> into vector<8xf32>
     // CHECK: scf.yield %[[A_ITER]], %[[B_ITER]], %[[LOOP_ACC_NEXT]] : vector<4xf16>, vector<4xf16>, vector<8xf32>
     scf.for %iv = %c0 to %c2 step %c1 {
       fly.mma_atom_call(%atom, %acc_view, %a_view, %b_view, %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
     }
 
-    // CHECK: %[[TAIL_A:.*]] = vector.extract_strided_slice %{{.*}} {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
-    // CHECK: %[[TAIL_B:.*]] = vector.extract_strided_slice %{{.*}} {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
-    // CHECK: %[[TAIL_C:.*]] = vector.extract_strided_slice %{{.*}} {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
+    // CHECK: %[[TAIL_A:.*]] = vector.extract_strided_slice %{{.*}} offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
+    // CHECK: %[[TAIL_B:.*]] = vector.extract_strided_slice %{{.*}} offsets = [0], sizes = [4], strides = [1] : vector<4xf16> to vector<4xf16>
+    // CHECK: %[[TAIL_C:.*]] = vector.extract_strided_slice %{{.*}} offsets = [4], sizes = [4], strides = [1] : vector<8xf32> to vector<4xf32>
     // CHECK: %[[TAIL_RES:.*]] = fly.mma_atom_call_ssa
-    // CHECK: %[[TAIL_ACC:.*]] = vector.insert_strided_slice %[[TAIL_RES]], %{{.*}} {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
+    // CHECK: %[[TAIL_ACC:.*]] = vector.insert_strided_slice %[[TAIL_RES]], %{{.*}} offsets = [4], strides = [1] : vector<4xf32> into vector<8xf32>
     fly.mma_atom_call(%atom, %acc_view, %a_view, %b_view, %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
 
-    // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[TAIL_ACC]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
+    // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[TAIL_ACC]] offsets = [4], sizes = [4], strides = [1] : vector<8xf32> to vector<4xf32>
     // CHECK: %[[ELEM:.*]] = vector.extract %[[FINAL]][%{{.*}}] : f32 from vector<4xf32>
     // CHECK: fly.ptr.store(%[[ELEM]], %[[OUT]]) : (f32, !fly.ptr<f32, global>) -> ()
     %final = fly.ptr.load(%acc_slot) : (!fly.ptr<f32, register>) -> vector<4xf32>
@@ -77,13 +77,13 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK-NOT: register
   // CHECK-NOT: fly.mma_atom_call(
   // CHECK: %[[A_BC:.*]] = vector.bitcast %{{.*}} : vector<8xf8E4M3FNUZ> to vector<8xi8>
-  // CHECK: %[[A_STATE:.*]] = vector.insert_strided_slice %[[A_BC]], %{{.*}} {offsets = [0], strides = [1]} : vector<8xi8> into vector<8xi8>
+  // CHECK: %[[A_STATE:.*]] = vector.insert_strided_slice %[[A_BC]], %{{.*}} offsets = [0], strides = [1] : vector<8xi8> into vector<8xi8>
   // CHECK: %[[B_BC:.*]] = vector.bitcast %{{.*}} : vector<8xf8E4M3FNUZ> to vector<8xi8>
-  // CHECK: %[[B_STATE:.*]] = vector.insert_strided_slice %[[B_BC]], %{{.*}} {offsets = [0], strides = [1]} : vector<8xi8> into vector<8xi8>
-  // CHECK: %[[ACC_INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
-  // CHECK: %[[A:.*]] = vector.extract_strided_slice %[[A_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
-  // CHECK: %[[B:.*]] = vector.extract_strided_slice %[[B_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
-  // CHECK: %[[C:.*]] = vector.extract_strided_slice %[[ACC_INIT]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
+  // CHECK: %[[B_STATE:.*]] = vector.insert_strided_slice %[[B_BC]], %{{.*}} offsets = [0], strides = [1] : vector<8xi8> into vector<8xi8>
+  // CHECK: %[[ACC_INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [4], strides = [1] : vector<4xf32> into vector<8xf32>
+  // CHECK: %[[A:.*]] = vector.extract_strided_slice %[[A_STATE]] offsets = [0], sizes = [8], strides = [1] : vector<8xi8> to vector<8xi8>
+  // CHECK: %[[B:.*]] = vector.extract_strided_slice %[[B_STATE]] offsets = [0], sizes = [8], strides = [1] : vector<8xi8> to vector<8xi8>
+  // CHECK: %[[C:.*]] = vector.extract_strided_slice %[[ACC_INIT]] offsets = [4], sizes = [4], strides = [1] : vector<8xf32> to vector<4xf32>
   // CHECK: %[[RES:.*]] = fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %[[C]])
   // CHECK-SAME: -> vector<4xf32>
   gpu.func @promote_fp8_mma_to_vector_ssa(%out: !fly.ptr<f32, global>) kernel {
@@ -125,14 +125,14 @@ gpu.module @promote_rmem_to_vector_ssa {
 
   // CHECK-LABEL: gpu.func @promote_if_register_state_to_vector_ssa
   // CHECK-NOT: register
-  // CHECK: %[[INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} {offsets = [0], strides = [1]} : vector<4xf32> into vector<4xf32>
+  // CHECK: %[[INIT:.*]] = vector.insert_strided_slice %{{.*}}, %{{.*}} offsets = [0], strides = [1] : vector<4xf32> into vector<4xf32>
   // CHECK: %[[IF_STATE:.*]] = scf.if %arg1 -> (vector<4xf32>) {
-  // CHECK:   %[[THEN_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %[[INIT]] {offsets = [0], strides = [1]} : vector<4xf32> into vector<4xf32>
+  // CHECK:   %[[THEN_STATE:.*]] = vector.insert_strided_slice %{{.*}}, %[[INIT]] offsets = [0], strides = [1] : vector<4xf32> into vector<4xf32>
   // CHECK:   scf.yield %[[THEN_STATE]] : vector<4xf32>
   // CHECK: } else {
   // CHECK:   scf.yield %[[INIT]] : vector<4xf32>
   // CHECK: }
-  // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[IF_STATE]] {offsets = [0], sizes = [4], strides = [1]} : vector<4xf32> to vector<4xf32>
+  // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[IF_STATE]] offsets = [0], sizes = [4], strides = [1] : vector<4xf32> to vector<4xf32>
   gpu.func @promote_if_register_state_to_vector_ssa(%out: !fly.ptr<f32, global>, %pred: i1) kernel {
     %c0 = arith.constant 0 : index
     %zero = arith.constant dense<0.000000e+00> : vector<4xf32>
