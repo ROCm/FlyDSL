@@ -7,7 +7,8 @@ description: >
   it works on any target the compiler supports and runs in seconds. Use when asked
   whether a change increased register pressure, caused spilling, or hurt occupancy,
   when reviewing a kernel change for resource impact, or as a fast pre-check before
-  spending a profiling run.
+  spending a profiling run. Its `loops` subcommand also shows what a change did
+  to a hot loop (instruction mix, wait order, VGPR liveness estimate).
   Usage: /isa-resource-diff [<test-or-command>] [--arch <gfx>]
 allowed-tools: Read Write Bash Grep Glob
 ---
@@ -85,6 +86,49 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py summarize /tmp/isa-bef
 python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff baseline.json /tmp/isa-after
 ```
 
+### Step 4 — Diff the hot loops before timing
+
+The table cannot see what a change did to a loop's schedule. `loops` prints, per
+loop (a backward branch in the final ISA), its instruction mix, its lowest
+`s_waitcnt vmcnt`, and the order of its memory, MFMA, wait and barrier
+instructions, in a form that a plain text diff compares:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py loops /tmp/isa-before --kernel attn > before.txt
+python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py loops /tmp/isa-after --kernel attn > after.txt
+diff -u before.txt after.txt
+```
+
+```
+attn_tile_kernel: vgpr 252
+  loop 1 .LBB0_13 - .LBB0_22+: instr 904 valu 543 mfma 128 s_nop 73 v_cmp 65 v_cndmask 65 scratch 0 vmcnt_min 8
+      K0 BAR DRx2 K1 M DR M ... BR LD K1 LDx8 W16 K0 M DR M W8 K0 Mx23 ...
+```
+
+Tokens: `LD`/`ST` global or buffer load/store, `SL`/`SS` scratch load/store,
+`DR`/`DW` LDS read/write, `M` MFMA/WMMA, `W<n>` `vmcnt(n)`, `K<n>`
+`lgkmcnt(n)`, `BAR` barrier, `BR` conditional branch; `x<n>` repeats. Look
+for a wait that drops (`W8` -> `W0` after the first loads of a phase), a new
+`BR` around loads, and `SL`/`SS` inside the loop. Observed on gfx942: a change
+that removed ~50-150 instructions from a decode kernel's KV loop at equal VGPRs
+ran 2-4% slower. Its loop waited `vmcnt(0)` right after the first K load of
+the QK phase, where the old loop waited `vmcnt(8)`; the table said `OK`.
+
+- `--blocks` prints every basic block, not just loops. Use it when a change
+  adds a runtime branch that duplicates code (two versions of a stage that
+  rejoin): at the join the waitcnt pass merges both versions' outstanding
+  loads and may replace per-chunk `vmcnt(N..0)` waits with one `vmcnt(0)`.
+  Compare the blocks of each version and the blocks after the join. Observed
+  on gfx942: ~1 us more per call on short launches at unchanged VGPR and spill
+  counts.
+- `--live` adds a VGPR liveness estimate (arch + accumulator; backward dataflow
+  over the basic blocks): the maximum live count and the instruction where it
+  peaks, per kernel and per loop or block. Ask it before moving a load
+  earlier: which region holds the peak, and how much room is left where the
+  load would be in flight. It is syntactic (EXEC-masked writes count as full
+  writes, allocation padding is ignored), so it reads below `vgpr`: 1-18
+  below on 155 gfx942 kernels checked, never above.
+
 ## Reading the output
 
 ```
@@ -98,7 +142,8 @@ compared 1 of 1 kernels; 0 unchanged; 1 changed; worsened: 2; improved: 0
 RESULT: REGRESSION
 ```
 
-Only changed and problematic kernels are printed. The **last** stdout line is
+Only changed and problematic kernels are printed. A clean table does not clear
+the hot loop: before timing a change that keeps the resources, run Step 4. The **last** stdout line is
 always the `RESULT:` verdict and matches the exit code exactly — script against
 that line, not against a fixed number of them: when there are problems, a count of
 untrustworthy items is printed above it.
