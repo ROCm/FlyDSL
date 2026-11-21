@@ -400,7 +400,8 @@ LLVM may place a value that finds no free VGPR tuple in AGPRs instead of spillin
 it. The combined count then exceeds 256 and the kernel drops to one wave per SIMD
 without any spill being reported. On gfx950, FlyDSL lowers such a kernel again
 with other register allocation orders and keeps the first result that needs no
-AGPR and adds no spill. A kernel that uses AGPRs itself (`rocdl.sched_agpr`,
+AGPR and adds no spill. It does so only when the kernel's LDS use leaves room
+for a second wave per SIMD. A kernel that uses AGPRs itself (`rocdl.sched_agpr`,
 inline asm, or an `amdgpu-agpr-alloc` attribute) is not lowered again.
 
 **2. LDS.** LDS is a per-CU pool shared by all resident workgroups, so

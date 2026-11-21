@@ -11,6 +11,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler import jit_function
+from flydsl.compiler.backends import rocm
 from flydsl.compiler.backends.rocm import RocmBackend
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm
 
@@ -78,6 +79,12 @@ def test_a_retry_that_needs_a_spill_is_not_taken(monkeypatch):
     _without_retries(monkeypatch)
     assert retried == _compiled_ir(**NEEDS_A_SPILL)
     assert _registers(retried)["agpr_count"] > 0
+
+
+def test_a_kernel_that_lds_limits_to_one_wave_is_not_lowered_again(monkeypatch):
+    # The kernel uses 32768 bytes of LDS per 256-thread work group: with 40000 bytes per CU only one group fits.
+    monkeypatch.setitem(rocm.SMEM_CAPACITY_MAP, "gfx950", 40000)
+    assert _registers(_compiled_ir(**FITS_WITHOUT_AGPRS)) == {"vgpr_count": 260, "agpr_count": 8, "vgpr_spill_count": 0}
 
 
 def test_the_kernels_own_agpr_and_allocator_choices_are_kept(monkeypatch):

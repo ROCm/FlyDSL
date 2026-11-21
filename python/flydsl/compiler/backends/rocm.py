@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ...runtime.device import get_rocm_arch, get_warp_size
+from ...runtime.device import SMEM_CAPACITY_MAP, get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, CodegenRetry, GPUTarget
 
@@ -33,6 +33,7 @@ _DEVICE_BITCODE_FILES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
 #: and the kernel runs one wave per SIMD instead of two.
 _AGPR_OVERFLOW_ARCHS = frozenset({"gfx950"})
 _ARCH_VGPRS = 256
+_SIMDS_PER_CU = 4
 
 _REVERSE_LOCAL = {"greedy-reverse-local-assignment": True}
 _CLASS_PRIORITY = {"greedy-regclass-priority-trumps-globalness": True}
@@ -452,10 +453,14 @@ class RocmBackend(BaseBackend):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def codegen_retries(self, compiled, *, source_asm: str, llvm_options: Optional[dict]) -> Sequence[CodegenRetry]:
-        """Allocation orders to try when a kernel overflowed from the VGPRs into AGPRs."""
+        """Allocation orders to try when a kernel overflowed from the VGPRs into AGPRs and that cost it a wave."""
         if self.target.arch not in _AGPR_OVERFLOW_ARCHS:
             return ()
-        if not any(_overflows_into_agprs(regs) for regs in kernel_register_usage(compiled).values()):
+        arch = self.target.arch
+        if not any(
+            _overflows_into_agprs(regs) and _lds_allows_two_waves(regs, arch)
+            for regs in kernel_register_usage(compiled).values()
+        ):
             return ()
         if any(marker in source_asm for marker in _AGPR_USERS):
             return ()
@@ -620,6 +625,15 @@ def kernel_register_usage(module) -> Dict[str, Dict[str, int]]:
 
 def _overflows_into_agprs(regs: Dict[str, int]) -> bool:
     return regs.get("agpr_count", 0) > 0 and regs.get("vgpr_count", 0) > _ARCH_VGPRS
+
+
+def _lds_allows_two_waves(regs: Dict[str, int], arch: str) -> bool:
+    """Whether the kernel's LDS use leaves room for a second wave per SIMD; without it, fewer registers gain nothing."""
+    lds, capacity = regs.get("group_segment_fixed_size", 0), SMEM_CAPACITY_MAP.get(arch)
+    if not lds or not capacity:
+        return True
+    waves_per_group = -(-regs.get("max_flat_workgroup_size", 1) // regs.get("wavefront_size", 64))
+    return (capacity // lds) * waves_per_group > _SIMDS_PER_CU
 
 
 def _forbid_agprs(module) -> None:
