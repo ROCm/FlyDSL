@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-21T06:02:27Z",
+ "updated": "2026-11-21T06:06:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44873698294,
+   "pr": 1464,
+   "commit": "3a80ff349790417eb2c914fd30d72e954c3b1a0d",
+   "branch": "skills/isa-resource-diff-jit-cache",
+   "event": "pull_request",
+   "title": "[Skills] isa-resource-diff: read a FlyDSL JIT cache, one row per specialization binary",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294",
+   "created_at": "2026-11-21T06:03:08Z",
+   "updated_at": "2026-11-21T06:04:43Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T06:04:40Z",
+     "completed_at": "2026-11-21T06:04:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946388"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T06:04:40Z",
+     "completed_at": "2026-11-21T06:04:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946395"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T06:04:40Z",
+     "completed_at": "2026-11-21T06:04:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946418",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 44873276341,
    "pr": 1463,
@@ -2030,52 +2076,6 @@
      "started_at": "2026-11-18T11:19:14Z",
      "completed_at": "2026-11-18T12:06:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134857785461"
-    }
-   ]
-  },
-  {
-   "run_id": 44269129027,
-   "pr": 1434,
-   "commit": "8d1b973e01bb92ca0c74002d9f10ce63824712ce",
-   "branch": "phil/fc9-fly-build-dir",
-   "event": "pull_request",
-   "title": "[Tests] Honour FLY_BUILD_DIR in tests/conftest.py",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027",
-   "created_at": "2026-11-18T08:41:12Z",
-   "updated_at": "2026-11-18T14:38:38Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T14:07:18Z",
-     "completed_at": "2026-11-18T14:38:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134858471557",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T11:50:39Z",
-     "completed_at": "2026-11-18T12:00:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134858474274"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T11:24:28Z",
-     "completed_at": "2026-11-18T11:44:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134858474437"
     }
    ]
   }
