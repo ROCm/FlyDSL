@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-20T22:24:18Z",
+ "updated": "2026-11-21T00:42:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44842430752,
+   "pr": 1431,
+   "commit": "488e208f67b38f307917ac54d42d567d71caf323",
+   "branch": "jli/llvm-upgrade-e2ce52c885",
+   "event": "pull_request",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752",
+   "created_at": "2026-11-21T00:14:03Z",
+   "updated_at": "2026-11-21T00:39:38Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-21T00:39:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368051"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-21T00:39:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368072"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-21T00:39:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368084"
+    }
+   ]
+  },
   {
    "run_id": 44726992619,
    "pr": 1456,
@@ -1939,43 +1982,6 @@
    "updated_at": "2026-11-18T05:18:45Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 44239143257,
-   "pr": null,
-   "commit": "2616adca4a39a44e89f071dfea82f1b3a8f3a638",
-   "branch": "pr/fp8-8wave-tail-race",
-   "event": "pull_request",
-   "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257",
-   "created_at": "2026-11-18T04:42:11Z",
-   "updated_at": "2026-11-18T08:14:46Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T05:25:39Z",
-     "completed_at": "2026-11-18T05:51:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257/job/134598556526",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T07:11:18Z",
-     "completed_at": "2026-11-18T07:45:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44239143257/job/134598556548"
-    }
-   ]
   }
  ]
 }
