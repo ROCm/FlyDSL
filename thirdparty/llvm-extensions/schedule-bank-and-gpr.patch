@@ -2717,3 +2717,138 @@ index 0000000000..dd77db084a
 +}
 +
 +attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
+diff --git a/llvm/lib/Target/AMDGPU/SILowerSGPRSpills.cpp b/llvm/lib/Target/AMDGPU/SILowerSGPRSpills.cpp
+index d0a57e163d..fc1b41755a 100644
+--- a/llvm/lib/Target/AMDGPU/SILowerSGPRSpills.cpp
++++ b/llvm/lib/Target/AMDGPU/SILowerSGPRSpills.cpp
+@@ -385,15 +385,51 @@ SILowerSGPRSpills::determineRegsForWWMAllocation(MachineFunction &MF) {
+   const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
+   unsigned MaxNumVGPRs = ST.getMaxNumVectorRegs(MF.getFunction()).first;
+ 
++  // VGPRs named by strict sched.vgpr pins. The pins are still virtual here,
++  // so isPhysRegUsed does not see them, but a WWM register reserved on top of
++  // one leaves the pinned value no register to take.
++  BitVector Pinned(MaxNumVGPRs);
++  for (const MachineBasicBlock &MBB : MF) {
++    for (const MachineInstr &MI : MBB) {
++      switch (MI.getOpcode()) {
++      case AMDGPU::V_SCHEDULE_VGPR_B32:
++      case AMDGPU::V_SCHEDULE_VGPR_B64:
++      case AMDGPU::V_SCHEDULE_VGPR_B128:
++      case AMDGPU::V_SCHEDULE_VGPR_B256:
++      case AMDGPU::V_SCHEDULE_VGPR_B512:
++        break;
++      default:
++        continue;
++      }
++      unsigned RegNum = MI.getOperand(2).getImm();
++      if (RegNum == ~0u || MI.getOperand(3).getImm() == 0)
++        continue;
++      unsigned Size =
++          TRI->getRegSizeInBits(*MRI.getRegClass(MI.getOperand(0).getReg())) /
++          32;
++      unsigned End = std::min(RegNum + Size, MaxNumVGPRs);
++      if (RegNum < End)
++        Pinned.set(RegNum, End);
++    }
++  }
++
+   // Try to use the highest available registers for now. Later after
+-  // vgpr-regalloc, they can be shifted to the lowest range.
+-  for (unsigned Reg = AMDGPU::VGPR0 + MaxNumVGPRs - 1;
+-       WWMRegCandidates.size() < MaxNumVGPRsForWwmAllocation &&
+-       Reg >= AMDGPU::VGPR0;
+-       --Reg) {
+-    if (!ReservedRegs.test(Reg) &&
+-        !MRI.isPhysRegUsed(Reg, /*SkipRegMaskTest=*/true))
+-      WWMRegCandidates.push_back(Reg);
++  // vgpr-regalloc, they can be shifted to the lowest range. Pinned registers
++  // are taken only when the unpinned ones run out, so a function whose pins
++  // cover most of the file still gets a WWM pool instead of an error.
++  for (bool AllowPinned : {false, true}) {
++    for (unsigned Reg = AMDGPU::VGPR0 + MaxNumVGPRs - 1;
++         WWMRegCandidates.size() < MaxNumVGPRsForWwmAllocation &&
++         Reg >= AMDGPU::VGPR0;
++         --Reg) {
++      if (Pinned.test(TRI->getHWRegIndex(Reg)) != AllowPinned)
++        continue;
++      if (!ReservedRegs.test(Reg) &&
++          !MRI.isPhysRegUsed(Reg, /*SkipRegMaskTest=*/true))
++        WWMRegCandidates.push_back(Reg);
++    }
++    if (Pinned.none())
++      break;
+   }
+ 
+   return WWMRegCandidates;
+@@ -426,8 +462,12 @@ void SILowerSGPRSpills::assignWWMRegs(MachineFunction &MF,
+         "cannot find enough VGPRs for wwm-regalloc");
+   }
+ 
+-  BitVector PerLaneVGPRMask(WwmRegMask);
+-  PerLaneVGPRMask.flip().clearBitsNotInMask(TRI->getAllVGPRRegMask());
++  // Every VGPR outside the pool, including those above v255 on targets with
++  // 1024 addressable VGPRs, which the AllVGPRs regmask does not cover.
++  BitVector PerLaneVGPRMask(TRI->getNumRegs());
++  for (MCPhysReg Reg : AMDGPU::VGPR_32RegClass)
++    if (!WwmRegMask.test(Reg))
++      PerLaneVGPRMask.set(Reg);
+ 
+   // The complement set will be the registers for per-lane VGPR allocation.
+   FuncInfo->updatePerLaneVGPRMask(PerLaneVGPRMask);
+diff --git a/llvm/test/CodeGen/AMDGPU/wwm-regalloc-pinned-fallback.mir b/llvm/test/CodeGen/AMDGPU/wwm-regalloc-pinned-fallback.mir
+new file mode 100644
+index 0000000000..6c06ba1ec3
+--- /dev/null
++++ b/llvm/test/CodeGen/AMDGPU/wwm-regalloc-pinned-fallback.mir
+@@ -0,0 +1,50 @@
++# RUN: llc -mtriple=amdgpu9.50-amd-amdhsa -O0 -amdgpu-stress-vgpr=2 -amdgpu-num-vgprs-for-wwm-alloc=2 -start-before=si-lower-sgpr-spills -stop-after=regallocfast,1 -verify-machineinstrs -o - %s | FileCheck %s
++# RUN: llc -mtriple=amdgpu12.50-amd-amdhsa -O0 -amdgpu-stress-vgpr=2 -amdgpu-num-vgprs-for-wwm-alloc=2 -start-before=si-lower-sgpr-spills -stop-after=regallocfast,1 -verify-machineinstrs -o - %s | FileCheck %s
++
++# Strict sched.vgpr pins name both VGPRs left by -amdgpu-stress-vgpr=2. The
++# WWM pool skips pinned VGPRs while unpinned ones remain; once they run out it
++# falls back to the pinned ones rather than leaving the pool empty.
++
++# CHECK-LABEL: name: pinned_fallback
++# CHECK-COUNT-2: flags: [ WWM_REG ]
++# CHECK-NOT: SI_SPILL_S1024_SAVE
++# CHECK-NOT: SI_SPILL_S32_SAVE
++
++--- |
++  define amdgpu_kernel void @pinned_fallback() #0 {
++    ret void
++  }
++
++  attributes #0 = { "amdgpu-no-workitem-id-x" "amdgpu-no-workitem-id-y" "amdgpu-no-workitem-id-z" }
++...
++---
++name:            pinned_fallback
++tracksRegLiveness: true
++frameInfo:
++  maxAlignment:    4
++stack:
++  - { id: 0, type: spill-slot, size: 128, alignment: 4, stack-id: sgpr-spill }
++  - { id: 1, type: spill-slot, size: 128, alignment: 4, stack-id: sgpr-spill }
++  - { id: 2, type: spill-slot, size: 4, alignment: 4, stack-id: sgpr-spill }
++machineFunctionInfo:
++  isEntryFunction: true
++  scratchRSrcReg:  '$sgpr0_sgpr1_sgpr2_sgpr3'
++  stackPtrOffsetReg: '$sgpr32'
++  frameOffsetReg: '$sgpr33'
++  hasSpilledSGPRs: true
++body:             |
++  bb.0:
++    liveins: $sgpr34, $sgpr36_sgpr37_sgpr38_sgpr39_sgpr40_sgpr41_sgpr42_sgpr43_sgpr44_sgpr45_sgpr46_sgpr47_sgpr48_sgpr49_sgpr50_sgpr51_sgpr52_sgpr53_sgpr54_sgpr55_sgpr56_sgpr57_sgpr58_sgpr59_sgpr60_sgpr61_sgpr62_sgpr63_sgpr64_sgpr65_sgpr66_sgpr67, $sgpr68_sgpr69_sgpr70_sgpr71_sgpr72_sgpr73_sgpr74_sgpr75_sgpr76_sgpr77_sgpr78_sgpr79_sgpr80_sgpr81_sgpr82_sgpr83_sgpr84_sgpr85_sgpr86_sgpr87_sgpr88_sgpr89_sgpr90_sgpr91_sgpr92_sgpr93_sgpr94_sgpr95_sgpr96_sgpr97_sgpr98_sgpr99
++
++    %0:vgpr_32 = IMPLICIT_DEF
++    %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 0, 1, implicit $exec
++    %2:vgpr_32 = IMPLICIT_DEF
++    %3:vgpr_32 = V_SCHEDULE_VGPR_B32 %2, 1, 1, implicit $exec
++    SI_SPILL_S1024_SAVE killed $sgpr36_sgpr37_sgpr38_sgpr39_sgpr40_sgpr41_sgpr42_sgpr43_sgpr44_sgpr45_sgpr46_sgpr47_sgpr48_sgpr49_sgpr50_sgpr51_sgpr52_sgpr53_sgpr54_sgpr55_sgpr56_sgpr57_sgpr58_sgpr59_sgpr60_sgpr61_sgpr62_sgpr63_sgpr64_sgpr65_sgpr66_sgpr67, %stack.0, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    SI_SPILL_S1024_SAVE killed $sgpr68_sgpr69_sgpr70_sgpr71_sgpr72_sgpr73_sgpr74_sgpr75_sgpr76_sgpr77_sgpr78_sgpr79_sgpr80_sgpr81_sgpr82_sgpr83_sgpr84_sgpr85_sgpr86_sgpr87_sgpr88_sgpr89_sgpr90_sgpr91_sgpr92_sgpr93_sgpr94_sgpr95_sgpr96_sgpr97_sgpr98_sgpr99, %stack.1, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    SI_SPILL_S32_SAVE killed $sgpr34, %stack.2, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    renamable $sgpr34 = SI_SPILL_S32_RESTORE %stack.2, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    renamable $sgpr68_sgpr69_sgpr70_sgpr71_sgpr72_sgpr73_sgpr74_sgpr75_sgpr76_sgpr77_sgpr78_sgpr79_sgpr80_sgpr81_sgpr82_sgpr83_sgpr84_sgpr85_sgpr86_sgpr87_sgpr88_sgpr89_sgpr90_sgpr91_sgpr92_sgpr93_sgpr94_sgpr95_sgpr96_sgpr97_sgpr98_sgpr99 = SI_SPILL_S1024_RESTORE %stack.1, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    renamable $sgpr36_sgpr37_sgpr38_sgpr39_sgpr40_sgpr41_sgpr42_sgpr43_sgpr44_sgpr45_sgpr46_sgpr47_sgpr48_sgpr49_sgpr50_sgpr51_sgpr52_sgpr53_sgpr54_sgpr55_sgpr56_sgpr57_sgpr58_sgpr59_sgpr60_sgpr61_sgpr62_sgpr63_sgpr64_sgpr65_sgpr66_sgpr67 = SI_SPILL_S1024_RESTORE %stack.0, implicit $exec, implicit $sgpr0_sgpr1_sgpr2_sgpr3, implicit $sgpr32
++    S_ENDPGM 0
++...
