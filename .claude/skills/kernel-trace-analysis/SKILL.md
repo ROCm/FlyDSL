@@ -320,8 +320,11 @@ workgroup size — an AGPR-form-blind ISA scan reports `accum=0` and gets
 occupancy badly wrong. The analyzer reads `out_kernel_trace.csv` (staged next to
 the dispatch dir) for the authoritative `Accum_VGPR_Count` / `LDS_Block_Size` /
 `SGPR_Count` / `Workgroup_Size_*`. arch_vgpr is taken as `max(ISA_scan, CSV)` so
-a bogus-low CSV `VGPR_Count` field can't under-report. If no CSV is found it
-falls back to ISA-only and prints a warning.
+a bogus-low CSV `VGPR_Count` field can't under-report. The CSV exists only if
+the capture traced kernels too: Step 2's `sys_trace: true`, or `--kernel-trace`
+next to command-line `--att` flags. Without it the analyzer falls back to the
+ISA, skips the LDS and SGPR limits, and prints the occupancy as an upper bound
+(`<= N waves/SIMD`).
 
 **Auto-detection**: gfx950-specific instructions (`v_mfma_scale_f32_*`, `v_mfma_f32_16x16x128_*`,
 `v_mfma_f32_32x32x64_*`) indicate CDNA4. Absence indicates CDNA3.
@@ -473,6 +476,7 @@ See /prefetch-data-load skill.
 | `INVALID_SHADER_DATA` | aqlprofile/decoder version mismatch — update both |
 | Source loc all `""` | Set `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`; check `-g` flag in compile pipeline |
 | Top hotspot is kernel decorator line | Debug info artifact — skip it, focus on op lines |
+| `no *kernel_trace*.csv next to the dispatch dir` | Captured without kernel tracing; recapture with `sys_trace: true` (or `--kernel-trace` next to `--att`) for LDS/SGPR occupancy limits |
 | `--att` flag error | `--att` is boolean, no value; use `-i input.yaml` for full config |
 | GPU Hang / HW Exception during PMC | Too many counters → multi-pass. Split into single-pass jobs of ≤ ~4 TCC counters |
 | PMC `accum_vgpr=0` but kernel uses MFMA | vgpr-form MFMA: accumulators are in the arch VGPR file; read total from `VGPR_Count + Accum_VGPR_Count` |
