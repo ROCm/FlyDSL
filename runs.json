@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-21T05:48:13Z",
+ "updated": "2026-11-21T05:55:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44872877791,
+   "pr": 1462,
+   "commit": "2980f6ae0907d602f9c54c6c900f259f802627a2",
+   "branch": "skills/isa-resource-diff-occupancy-verdict",
+   "event": "pull_request",
+   "title": "[Skills] isa-resource-diff: occupancy as the regression trigger, readable row labels, diff --kernel",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791",
+   "created_at": "2026-11-21T05:52:22Z",
+   "updated_at": "2026-11-21T05:54:00Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:53:54Z",
+     "completed_at": "2026-11-21T05:53:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391768",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:53:55Z",
+     "completed_at": "2026-11-21T05:53:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391786"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:53:55Z",
+     "completed_at": "2026-11-21T05:53:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391851"
+    }
+   ]
+  },
   {
    "run_id": 44872275091,
    "pr": 1461,
@@ -2030,52 +2076,6 @@
      "started_at": "2026-11-18T08:24:52Z",
      "completed_at": "2026-11-18T08:32:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965549"
-    }
-   ]
-  },
-  {
-   "run_id": 44262529742,
-   "pr": 1433,
-   "commit": "c985905e2bb17078929f37fd27d55a79d5f5acbc",
-   "branch": "bump-version-0.5.1",
-   "event": "pull_request",
-   "title": "[Misc] Bump version to 0.5.1",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742",
-   "created_at": "2026-11-18T07:54:25Z",
-   "updated_at": "2026-11-18T09:41:12Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:13:40Z",
-     "completed_at": "2026-11-18T08:44:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286007",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:53:07Z",
-     "completed_at": "2026-11-18T09:02:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286115"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:15:40Z",
-     "completed_at": "2026-11-18T09:41:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286257"
     }
    ]
   }
