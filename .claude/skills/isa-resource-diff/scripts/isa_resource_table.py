@@ -15,6 +15,11 @@ The tool is self-contained and only consumes ``*final_isa.s`` files produced by
 sides may be mixed.  Every metric is scoped to one kernel, even when an ISA file
 contains multiple kernels.
 
+A FlyDSL JIT cache directory (``FLYDSL_RUNTIME_CACHE_DIR``) is accepted in place of a
+dump directory.  It gives one row per compiled kernel -- every specialization, from
+one run -- with the counts of the kernel metadata and a hash of its binary, but no
+assembler symbols and no instruction counts.
+
 The tool is architecture-general.  Register counts come from the per-kernel
 ``.set <kernel>.num_vgpr`` / ``.num_agpr`` / ``.numbered_sgpr`` assembler symbols,
 which LLVM emits on every AMDGPU target, rather than from the ``.agpr_count``
@@ -47,9 +52,12 @@ if sys.version_info < (3, 10):  # pragma: no cover - exercised via subprocess
     raise SystemExit(2)
 
 import argparse  # noqa: E402  - imports must follow the interpreter guard
+import hashlib  # noqa: E402
 import json  # noqa: E402
+import pickletools  # noqa: E402
 import re  # noqa: E402
 import traceback  # noqa: E402
+import zlib  # noqa: E402
 from bisect import bisect_left  # noqa: E402
 from dataclasses import dataclass, field, replace  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -513,6 +521,7 @@ class KernelRecord:
     source: str = ""
     notes: tuple = ()
     problems: tuple = ()
+    binary: str = ""  # hash of the code object, when read from a JIT cache
 
     @property
     def unparsed_keys(self) -> tuple:
@@ -774,6 +783,7 @@ class Snapshot:
             "kernels": {
                 key: {
                     "source": record.source,
+                    "binary": record.binary,
                     "arch": record.arch.to_json(),
                     "notes": list(record.notes),
                     "problems": list(record.problems),
@@ -816,6 +826,8 @@ def collect(root: str | Path) -> Snapshot:
     by_directory: dict = {}
     for path in sorted(root.rglob("*final_isa.s")):
         by_directory.setdefault(path.parent, []).append(path)
+    if not by_directory and any(root.rglob("*.pkl")):
+        return collect_jit_cache(root)
     if not by_directory:
         raise SnapshotError(f"no *final_isa.s under {root} (is FLYDSL_DUMP_IR set?)")
 
@@ -884,6 +896,91 @@ def collect(root: str | Path) -> Snapshot:
     return Snapshot(kernels=kernels, warnings=tuple(warnings), problems=tuple(problems))
 
 
+# One `gpu.binary` op per compiled module; its `#rocdl.target` names the chip and its
+# `#gpu.kernel_metadata` entries carry the same counts as the ISA's `.amdgpu_metadata`.
+RE_GPU_BINARY = re.compile(r"^\s*gpu\.binary\s+@")
+RE_ROCDL_TARGET = re.compile(r"#rocdl\.target<([^>]*)>")
+RE_ATTR_STRING = re.compile(r'\b(chip|features)\s*=\s*"([^"]*)"')
+RE_KERNEL_METADATA = re.compile(r'#gpu\.kernel_metadata<"([^"]+)".*?metadata\s*=\s*\{([^}]*)\}')
+RE_METADATA_INT = re.compile(r"(\w+)\s*=\s*(-?\d+)\s*:\s*i\d+")
+CACHE_NA = "not recorded in a JIT cache entry (kernel metadata only)"
+
+
+def _cache_ir(data: bytes) -> str | None:
+    """The compiled IR in one FlyDSL JIT cache entry, read without unpickling it.
+
+    An entry pickles a ``CompiledArtifact`` whose state keeps the IR as
+    zlib-compressed bytes under ``ir_zlib`` (``ir_text`` in older versions).
+    Walking the opcode stream with ``pickletools`` finds it without importing
+    FlyDSL and without running anything the file contains.
+    """
+    key = None
+    for opcode, arg, _ in pickletools.genops(data):
+        if key == "ir_zlib" and isinstance(arg, bytes):
+            return zlib.decompress(arg).decode("utf-8")
+        if key == "ir_text" and isinstance(arg, str):
+            return arg
+        if isinstance(arg, str):
+            key = arg
+        elif "PUT" not in opcode.name and opcode.name != "MEMOIZE":
+            key = None
+    return None
+
+
+def _cache_arch(target: str) -> Arch:
+    fields = dict(RE_ATTR_STRING.findall(target))
+    # `+xnack,-sramecc` in the attribute is `xnack+:sramecc-` in a target ID.
+    features = [f[1:] + f[0] for f in fields.get("features", "").split(",") if f[:1] in ("+", "-")]
+    return parse_target_id(":".join([f"amdgcn-amd-amdhsa--{fields.get('chip', '')}"] + features))
+
+
+def collect_jit_cache(root: Path) -> Snapshot:
+    """One record per distinct kernel binary in a FlyDSL JIT cache directory.
+
+    Keys are ``<jit function directory>@<binary hash>::<kernel name>``: kernel names
+    alone do not identify specializations (a compile hint, for one, changes the
+    binary but not the name).  ``diff`` then pairs identical binaries by key and a
+    changed one by kernel name when that name is left over exactly once per side;
+    anything more ambiguous stays unpaired.
+    """
+    kernels: dict = {}
+    problems: list = []
+    for path in sorted(root.rglob("*.pkl")):
+        try:
+            ir = _cache_ir(path.read_bytes())
+        except Exception as exc:  # noqa: BLE001 - any damage makes this entry unreadable, not the run
+            problems.append(f"{path}: unreadable JIT cache entry ({type(exc).__name__}: {exc})")
+            continue
+        if ir is None:
+            problems.append(f"{path}: no compiled IR in this JIT cache entry")
+            continue
+        relative_dir = path.parent.relative_to(root).as_posix()
+        for line in ir.splitlines():
+            if not RE_GPU_BINARY.match(line):
+                continue
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+            target = RE_ROCDL_TARGET.search(line)
+            arch = _cache_arch(target.group(1) if target else "")
+            for name, body in RE_KERNEL_METADATA.findall(line):
+                entry = dict(RE_METADATA_INT.findall(body))
+                metrics = {
+                    metric.key: _metadata_cell(entry, metric) if metric.source == METADATA else Cell.na(CACHE_NA)
+                    for metric in METRICS
+                }
+                if "agpr_count" in entry:  # the ISA path reads it from `.set`; the cache has only metadata
+                    metrics["agpr"] = _metadata_cell(entry, Metric("agpr", INFO, METADATA, "agpr_count"))
+                metrics["occupancy"] = _occupancy_cell(entry, metrics, arch)
+                key = f"{'' if relative_dir == '.' else relative_dir}@{digest}::{name}"
+                kernels.setdefault(key, KernelRecord(name, arch, metrics, str(path.relative_to(root)), binary=digest))
+    if not kernels:
+        raise SnapshotError(f"no compiled kernels in the JIT cache under {root}")
+    warnings = (
+        "read from a FlyDSL JIT cache: kernel metadata only (no .set symbols, no instruction counts). "
+        "Use a fresh FLYDSL_RUNTIME_CACHE_DIR per side so stale entries do not mix in.",
+    )
+    return Snapshot(kernels=kernels, warnings=warnings, problems=tuple(problems))
+
+
 def load_snapshot(path: str | Path) -> Snapshot:
     path = Path(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -915,6 +1012,7 @@ def load_snapshot(path: str | Path) -> Snapshot:
             source=str(body.get("source") or ""),
             notes=tuple(body.get("notes") or ()),
             problems=tuple(body.get("problems") or ()),
+            binary=str(body.get("binary") or ""),
         )
 
     # `collect()` folds each record's problems into the snapshot's; a snapshot that did
@@ -980,9 +1078,16 @@ class DiffRow:
         return after_cell.value - before_cell.value
 
     @property
+    def binary_changed(self) -> bool | None:
+        """None unless both sides carry a binary hash (JIT cache input)."""
+        if not self.comparable or not self.before.binary or not self.after.binary:
+            return None
+        return self.before.binary != self.after.binary
+
+    @property
     def changed(self) -> bool:
         """The single definition of 'this kernel changed', used by every caller."""
-        return any(self.delta(key) for key in KEYS)
+        return bool(self.binary_changed) or any(self.delta(key) for key in KEYS)
 
     @property
     def trigger_keys(self) -> tuple:
@@ -1049,6 +1154,11 @@ class Comparison:
         return {0: "RESULT: OK", 1: "RESULT: REGRESSION", 2: "RESULT: NOT TRUSTWORTHY"}[self.exit_code]
 
 
+def _layout(key: str) -> str:
+    """The directory part of a key, without a JIT cache row's binary hash."""
+    return re.sub(r"@[0-9a-f]{16}$", "", key.rpartition("::")[0])
+
+
 def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
     """Exact keys first, then pair leftovers by bare kernel name across layout drift."""
     common = before.kernels.keys() & after.kernels.keys()
@@ -1070,6 +1180,8 @@ def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
             right_keys = right_by.get(kernel, [])
             if len(left_keys) == 1 and len(right_keys) == 1:
                 pairs[left_keys[0]] = right_keys[0]
+                if _layout(left_keys[0]) == _layout(right_keys[0]):
+                    continue  # JIT cache rows: same place, different binary -- the expected pairing
                 notes.append(
                     "matched by kernel name across differing layouts:\n"
                     f"      before  {left_keys[0]}\n"
@@ -1240,13 +1352,14 @@ def _cell_text(cell: Cell) -> str:
 def render_snapshot(snapshot: Snapshot, output: TextIO, error: TextIO | None = None) -> None:
     error = error if error is not None else sys.stderr
     names = _name_column(sorted(snapshot.kernels))
+    hashed = any(record.binary for record in snapshot.kernels.values())
     rows = []
     for key in sorted(snapshot.kernels):
         record = snapshot.kernels[key]
-        rows.append([names[key]] + [_cell_text(record.metrics[k]) for k in KEYS])
+        rows.append([names[key]] + [_cell_text(record.metrics[k]) for k in KEYS] + ([record.binary] if hashed else []))
 
     print(LEGEND, file=output)
-    for line in _format_table(_header_cells(), rows):
+    for line in _format_table(_header_cells() + (["binary"] if hashed else []), rows):
         print(line, file=output)
 
     for key in sorted(snapshot.kernels):
@@ -1272,14 +1385,17 @@ def _render_problems(warnings, problems, output: TextIO, error: TextIO) -> None:
 def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> None:
     printable = [row for row in comparison.rows if not row.comparable or row.changed]
     names = _name_column([row.name for row in printable])
+    hashed = [row for row in comparison.rows if row.binary_changed is not None]
+    headers = _header_cells() + (["binary"] if hashed else [])
+    padding = [""] * (len(headers) - 2)
 
     rows = []
     for row in printable:
         if row.side is not None:
-            rows.append([names[row.name], row.side] + [""] * (len(KEYS) - 1))
+            rows.append([names[row.name], row.side] + padding)
             continue
         if row.blocked:
-            rows.append([names[row.name], "BLOCKED: " + row.blocked[0]] + [""] * (len(KEYS) - 1))
+            rows.append([names[row.name], "BLOCKED: " + row.blocked[0]] + padding)
             continue
         cells = [names[row.name]]
         for key in KEYS:
@@ -1290,10 +1406,12 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
                 cells.append(f"{before_value}->{after_value}({delta:+d})")
             else:
                 cells.append(_cell_text(row.after.metrics[key]))
+        if hashed:
+            cells.append({True: "changed", False: "identical", None: ""}[row.binary_changed])
         rows.append(cells)
 
     print(LEGEND, file=output)
-    for line in _format_table(_header_cells(), rows):
+    for line in _format_table(headers, rows):
         print(line, file=output)
 
     for note in comparison.notes:
@@ -1305,6 +1423,9 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
         f"worsened: {comparison.worsened_metrics}; improved: {comparison.improved_metrics}",
         file=output,
     )
+    if hashed:
+        same = sum(1 for row in hashed if not row.binary_changed)
+        print(f"binaries: {same} identical, {len(hashed) - same} changed", file=output)
     _render_problems(comparison.warnings, comparison.problems, output, error)
     print(comparison.verdict, file=output)
 
@@ -1358,6 +1479,7 @@ def _comparison_json(comparison: Comparison) -> dict:
                 "side": row.side,
                 "blocked": list(row.blocked),
                 "deltas": {key: row.delta(key) for key in KEYS if row.delta(key)},
+                "binary_changed": row.binary_changed,
             }
             for row in comparison.rows
             if not row.comparable or row.changed
