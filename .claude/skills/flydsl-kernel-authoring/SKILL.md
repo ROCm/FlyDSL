@@ -228,6 +228,8 @@ cond = arith.unwrap(partition_idx >= visible_tile_count)
 if_op = scf.IfOp(cond, has_else=False)
 ```
 
+A dynamic `if` around a few VALU ops in an MFMA stage is not free: the guarded ops form their own basic block, so they can no longer interleave with the MFMAs before them, and their hazard `s_nop`s (e.g. `v_cmp` -> `v_cndmask`) become visible. On a gfx942 attention tile, per-M-tile branches around 16 score selects made the taken path ~10% longer in instructions than the same selects unguarded. Guard whole stages instead (one uniform branch selecting between two versions of a stage; LLVM tail-merges identical suffixes), then compare both paths' instruction and `s_nop` counts, and the `s_waitcnt vmcnt` after the join, in the final ISA.
+
 ### Frontend Semantic Restrictions
 When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid these patterns because they can conflict with MLIR construction even if they look valid in plain Python.
 
@@ -458,6 +460,8 @@ See [references/environment-and-debugging.md](references/environment-and-debuggi
 10. **Absolute value**: the *arith dialect* has no `absf`, but FlyDSL exports one — use `abs(v)` or `fx.absf(v)` rather than a negate/compare/select sequence.
 
 11. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
+
+12. **Bit-exactness under an ambient `contract` scope**: with a `{"fastmath": "contract"}` compile hint or `fx.fastmath("contract")`, whether LLVM fuses `a * b` into a later add/sub as one FMA (one rounding) depends on the ops in between. A fast path that drops a select between `s = a * b` and `s - m` rounds differently from the masked path it replaces. If it must stay bit-identical, build that multiply under `with fx.fastmath(None):` (an explicit scope overrides the ambient one, and LLVM fuses only when both ops carry `contract`), and test for bit-exactness, not error bounds.
 
 ---
 
