@@ -403,6 +403,7 @@ MFMAs and to the `s_waitcnt vmcnt` that guards their use. Add
 - **Don't assume occupancy can increase**: on MI308 with 512 max VGPRs, adding prefetch buffers that push total VGPRs above 256 will drop occupancy from 2 to 1 wave/SIMD. This may or may not be acceptable — profile both configurations.
 - **Don't reorder loads that have data dependencies**: if `load_B` depends on the result of `load_A` (e.g., block table lookup -> cache load), they must stay sequential within the prefetch block.
 - **Don't forget to handle conditional branches**: if scale loads are conditional (`KV_QUANT_MODE`), the prefetch must replicate the same conditions.
+- **Don't guard the prefetch with a test the loop bound does not imply**: if the body (or a tile helper it shares with other loops) guards the next-iteration loads with a runtime bound check, LLVM removes the branch only when it can prove the check from the `scf.for` bound. A surviving branch costs more than a branch: the waitcnt pass merges the "prefetch issued" and "not issued" paths, so the consumers of the *current* data also wait for the prefetch (`s_waitcnt vmcnt(0)`). Observed on gfx942: a guard `tile + 1 < end` folded inside `range(start, end - 1)`, but inside `range(start, end - 2)` it stayed a branch (2 extra `s_cbranch` per loop) and the next MFMA phase's lowest `vmcnt` dropped from 8 to 0. Iterating the next index instead (`for nxt in range(start + 1, stop + 1)`, current tile `nxt - 1`, guard `nxt < end`) folded it again.
 - **Don't break the prologue/epilogue semantics**: the prologue covers iteration 0; the runtime loop runs N-1 iterations carrying prefetched data; epilogue processes the last iteration from `results`.
 - **Don't use Python ints as loop bounds when using `init=`**: use a typed DSL integer such as `fx.Int64(...)`, NOT a plain int, or the AST rewriter will unroll the loop and silently ignore `init=`.
 
@@ -411,7 +412,7 @@ MFMAs and to the `s_waitcnt vmcnt` that guards their use. Add
 After applying prefetch:
 
 1. **Correctness**: Run the existing test suite. Output must match bit-for-bit (fp32 accumulation) or within tolerance (fp8/bf16).
-2. **Issue order**: Check in the final ISA dump that the prefetch loads are still issued where you put them (see "Source Order Is Not Issue Order").
+2. **Issue order**: Check in the final ISA dump that the prefetch loads are still issued where you put them (see "Source Order Is Not Issue Order"), that no extra `s_cbranch` guards them inside the loop body, and that the `s_waitcnt vmcnt` before the MFMAs that consume the current data did not drop to 0.
 3. **Performance**: Time the kernel with HIP events or graph replay. Do not use `rocprofv3 --kernel-trace` for this: profiler overhead dominates kernels of a few microseconds. For stalls, capture ATT (`/kernel-trace-analysis`) and look for:
    - Reduced `VMEM` stall cycles in the loop body
    - Higher MFMA utilization percentage
