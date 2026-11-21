@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-21T05:43:50Z",
+ "updated": "2026-11-21T05:45:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "skills/flydsl-kernel-authoring-contract-and-branch-cost",
    "event": "pull_request",
    "title": "[Skills] flydsl-kernel-authoring: cost of small runtime ifs; contract fastmath and bit-exact fast paths",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634",
    "created_at": "2026-11-21T05:42:07Z",
-   "updated_at": "2026-11-21T05:42:07Z",
+   "updated_at": "2026-11-21T05:43:40Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:43:36Z",
+     "completed_at": "2026-11-21T05:43:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987056",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:43:36Z",
+     "completed_at": "2026-11-21T05:43:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987082"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:43:36Z",
+     "completed_at": "2026-11-21T05:43:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987112"
+    }
+   ]
   },
   {
    "run_id": 44872021042,
@@ -25,13 +56,44 @@
    "branch": "skills/prefetch-data-load-provable-guard",
    "event": "pull_request",
    "title": "[Skills] prefetch-data-load: keep the prefetch guard provable from the loop bound",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042",
    "created_at": "2026-11-21T05:41:07Z",
-   "updated_at": "2026-11-21T05:41:21Z",
+   "updated_at": "2026-11-21T05:42:40Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:42:36Z",
+     "completed_at": "2026-11-21T05:42:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747509"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:42:36Z",
+     "completed_at": "2026-11-21T05:42:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747543",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:42:36Z",
+     "completed_at": "2026-11-21T05:42:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747550"
+    }
+   ]
   },
   {
    "run_id": 44871955568,
