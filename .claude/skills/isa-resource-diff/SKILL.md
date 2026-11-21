@@ -28,7 +28,8 @@ catch resource regressions that functional tests do not surface.
 | Which LLVM knob moves these numbers, and did it apply? | `/llvm` (compile hints, function attributes, `-mllvm` flags) |
 
 This skill measures **resources, not time**. A clean result here does not mean
-performance is unchanged — it means register/LDS/spill pressure is unchanged.
+performance is unchanged — it means no kernel lost occupancy or grew spills or
+scratch.
 A regression here is a strong, cheap signal that is usually worth acting on
 before profiling, because spilling and occupancy cliffs dominate most kernel
 slowdowns. See §7 of `docs/kernel_tuning_guide.md` for what to do about one.
@@ -85,20 +86,51 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py summarize /tmp/isa-bef
 python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff baseline.json /tmp/isa-after
 ```
 
+### Every specialization from one run: read the JIT cache
+
+Dump directories keep one kernel per name (see Pitfalls), so a parametrized
+kernel family needs one process per shape. Instead, run the whole family once
+per side into a fresh JIT cache (disk cache on, the default), and pass the
+cache directory where a dump directory goes:
+
+```bash
+FLYDSL_RUNTIME_CACHE_DIR=/tmp/jit-before python3 -m pytest tests/kernels/test_softmax.py -q
+# apply the change
+FLYDSL_RUNTIME_CACHE_DIR=/tmp/jit-after python3 -m pytest tests/kernels/test_softmax.py -q
+python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff /tmp/jit-before /tmp/jit-after
+```
+
+Each row is one compiled kernel binary, keyed
+`<jit function>@<binary hash>::<kernel>`. A `binary` column says
+`identical`/`changed`, and a `binaries: N identical, M changed` line follows the
+count line. A changed binary is paired with the other side's by kernel name when
+that name is left over exactly once per side; otherwise both stay unpaired and
+the run exits 2. A cache entry holds only the kernel metadata, so `arch_vgpr`,
+`numbered_sgpr` and the instruction counts are `n/a`; use dumps for those, and
+do not mix a cache with a dump directory (exit 2). Entries are read with
+`pickletools`, without unpickling or importing FlyDSL. Observed on gfx942: a
+26-case family compiled into 32 binaries per side; one diff showed 24
+identical and the VGPR/spill/scratch deltas of the 8 that changed.
+
 ## Reading the output
 
 ```
-* = regression trigger; other columns are informational.
+* = regression trigger; (*) = trigger only where occupancy is n/a; other columns are informational.
+  occupancy = waves/SIMD allowed by vgpr, sgpr and lds_static_bytes.
   vgpr = total (arch+acc, LLVM's occupancy number); arch_vgpr/agpr are its split -- do not add them.
-kernel                               *vgpr     arch_vgpr  agpr ... *lds_static_bytes lds_read ...
--------------------------------------------------------------------------------------------------
-gemm::d128_fmha_fwd_kernel_0 942->960(+18) 942->960(+18)     0 ... 212992->229376(+16384)      12
+kernel                          *occupancy        (*)vgpr ... *vgpr_spill ... (*)lds_static_bytes ...
+-----------------------------------------------------------------------------------------------------
+attn_tile_kernel [case_c4096]            2   252->256(+4) ...           0 ...  10112->15488(+5376) ...
+attn_tile_kernel [case_c8192]     2->1(-1)  252->264(+12) ...           0 ...                10112 ...
 
-compared 1 of 1 kernels; 0 unchanged; 1 changed; worsened: 2; improved: 0
+compared 2 of 2 kernels; 0 unchanged; 2 changed; worsened: 1; improved: 0
 RESULT: REGRESSION
 ```
 
-Only changed and problematic kernels are printed. The **last** stdout line is
+Only changed and problematic kernels are printed. A row reads `<kernel>` for a
+`<kernel>/` dump directory, and `<kernel> [<dir>]` when the directory sits
+deeper, e.g. one subdirectory per test case; long `<dir>` parts are shortened
+with `~`. `--json PATH` keeps the full keys. The **last** stdout line is
 always the `RESULT:` verdict and matches the exit code exactly — script against
 that line, not against a fixed number of them: when there are problems, a count of
 untrustworthy items is printed above it.
@@ -107,23 +139,30 @@ untrustworthy items is printed above it.
 
 | Column | Trigger | Read from | What it is |
 |---|---|---|---|
-| `vgpr` | yes | `.vgpr_count` metadata | The count that decides occupancy: `arch + accumulator` where the register file is unified (gfx90a and later MFMA-capable parts), `max(arch, accumulator)` where it is split (gfx908) or where there are no AGPRs at all |
+| `occupancy` | yes (a drop) | derived | Waves per SIMD allowed by `vgpr` (512-entry unified file, blocks of 8), `sgpr` (LLVM's gfx9 table) and `lds_static_bytes` (how many workgroups of `.max_flat_workgroup_size` threads fit in one CU's LDS), capped at 8. Modeled for gfx90a, gfx940-gfx942 (64 KiB LDS per CU) and gfx950 (160 KiB); `n/a` elsewhere |
+| `vgpr` | where `occupancy` is `n/a` | `.vgpr_count` metadata | The count that decides occupancy: `arch + accumulator` where the register file is unified (gfx90a and later MFMA-capable parts), `max(arch, accumulator)` where it is split (gfx908) or where there are no AGPRs at all |
 | `arch_vgpr` | no | `.set` symbol `num_vgpr` | The arch VGPR count on its own |
 | `agpr` | no | `.set` symbol `num_agpr` | The accumulator VGPR count on its own |
-| `sgpr` | yes | `.sgpr_count` metadata | SGPRs including the fixed extras (VCC, XNACK, FLAT_SCRATCH) |
+| `sgpr` | where `occupancy` is `n/a` | `.sgpr_count` metadata | SGPRs including the fixed extras (VCC, XNACK, FLAT_SCRATCH) |
 | `numbered_sgpr` | no | `.set` symbol `numbered_sgpr` | SGPRs without those extras; tells a real increase from VCC becoming live |
 | `vgpr_spill` | yes | `.vgpr_spill_count` metadata | VGPRs the allocator spilled |
 | `sgpr_spill` | yes | `.sgpr_spill_count` metadata | SGPRs the allocator spilled |
 | `scratch_bytes` | yes | `.private_segment_fixed_size` metadata | Private segment per work-item; exact on every target |
-| `lds_static_bytes` | yes | `.group_segment_fixed_size` metadata | Statically allocated LDS per work-group |
+| `lds_static_bytes` | where `occupancy` is `n/a` | `.group_segment_fixed_size` metadata | Statically allocated LDS per work-group |
 | `lds_read` / `lds_write` | no | instruction count | `ds_read`/`ds_load` and `ds_write`/`ds_store` sites |
 | `scratch_store` / `scratch_load` | no | instruction count | `scratch_*` sites; `n/a` where spilling goes through `buffer_*` |
 | `matrix_ops` | no | instruction count | MFMA / WMMA / sparse-MFMA (`v_smfmac_*`) sites |
 
-Three things are easy to misread:
+Four things are easy to misread:
 
+- **A VGPR, SGPR or LDS increase alone is not a regression where `occupancy`
+  is known.** 252 -> 256 VGPRs on gfx942 stays at 2 waves/SIMD; 252 -> 264
+  drops to 1, and only that one counts. A few more KiB of LDS that still leave
+  room for as many workgroups also count as nothing. The raw counts stay in
+  the table, and spills and scratch remain triggers on every target.
 - **Do not add `arch_vgpr` and `agpr` to `vgpr`.** `vgpr` is LLVM's own
-  occupancy number and is the only VGPR-family trigger; the other two are shown so
+  occupancy number and the only VGPR-family input to `occupancy` (and the
+  VGPR trigger where `occupancy` is `n/a`); the other two are shown so
   you can tell *which half* moved, not so you can total them. On a unified register
   file `vgpr` already *is* their sum; on gfx908, where the files are split, it is
   `max(arch, agpr)` — which is still the occupancy number there, since a wave that
@@ -140,8 +179,8 @@ Three things are easy to misread:
 
 | Code | stdout | Meaning | What an agent should do |
 |---|---|---|---|
-| `0` | `RESULT: OK` | Everything comparable, no trigger increased | Proceed |
-| `1` | `RESULT: REGRESSION` | Everything comparable, a trigger increased | Investigate — this is a real finding |
+| `0` | `RESULT: OK` | Everything comparable, no trigger worsened | Proceed |
+| `1` | `RESULT: REGRESSION` | Everything comparable, a trigger worsened | Investigate — this is a real finding |
 | `2` | `RESULT: NOT TRUSTWORTHY` | The tool cannot answer | **Fix the inputs and rerun. Do not report "no regression"** |
 
 Exit `1` is a claim about the code under test; exit `2` is a claim about the
@@ -170,6 +209,7 @@ Map the column that moved to a cause, then follow `docs/kernel_tuning_guide.md`:
 
 | Column increased | Usual cause |
 |---|---|
+| `occupancy` (dropped) | `vgpr`, `sgpr` or `lds_static_bytes` crossed a step; see which of them moved |
 | `vgpr` | More live values; larger tiles or deeper pipelining/unrolling |
 | `vgpr_spill` / `sgpr_spill` / `scratch_bytes` | Register pressure crossed the budget — normally the most damaging of these signals |
 | `lds_static_bytes` | Bigger shared tiles or added double buffering; may cross an occupancy step |
@@ -186,10 +226,22 @@ These silently produce a *confident wrong answer* if ignored:
 - **Dump directories are keyed by kernel name only, with no specialization key.**
   Every JIT specialization of one kernel writes to the same directory and
   overwrites the previous one, so a parametrized test leaves only its last
-  variant. Diff one shape at a time when the answer must be exact.
+  variant. Diff one shape at a time when the answer must be exact, or read
+  the JIT cache instead (one row per binary).
 - **A cache hit produces no dump at all.** Hence `FLYDSL_RUNTIME_ENABLE_CACHE=0`
   on both sides. Without it a kernel can silently vanish from one side, which
   the tool reports as `ONLY IN BEFORE` and exit 2.
+- **`FLYDSL_RUNTIME_ENABLE_CACHE=0` turns off the disk cache only.** FlyDSL's
+  in-memory cache and host-side memos (a `functools.lru_cache` around a
+  compile function, a dict of compiled launchers) still skip recompiling a
+  kernel that an earlier call in the same process built. A run that dumps
+  several test cases into per-case directories from one process therefore
+  writes a shared kernel (a reduce or planning kernel, say) only into the first
+  case's directory, and diffing a later case reports `ONLY IN BEFORE/AFTER`
+  even when the kernel of interest compared cleanly. Dump each case from a
+  fresh process, or restrict the verdict with `diff --kernel REGEX`: it
+  compares only kernels whose name matches and lists the rest without
+  comparing them.
 - **`lds_static_bytes` is static LDS only.** A kernel using
   `SharedAllocator(static=False)` reports `0` no matter how much LDS it takes at
   dispatch; the tool prints a `dynamic LDS in use` note for it. LDS regressions
