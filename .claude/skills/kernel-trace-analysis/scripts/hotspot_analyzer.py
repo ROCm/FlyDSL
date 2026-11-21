@@ -238,6 +238,14 @@ def print_source_detail(hotspot, source_cache, context=3):
         print(f"      stall={fmt_cycles(inst.stall_cycles):>7}  type={inst.stall_type:<12}  {inst.asm}")
 
 
+def find_kernel_trace_csvs(dispatch_dir):
+    """``*kernel_trace*.csv`` files in the dispatch dir and its parent."""
+    candidates = []
+    for base in (dispatch_dir, os.path.dirname(os.path.abspath(dispatch_dir))):
+        candidates += glob.glob(os.path.join(base, "*kernel_trace*.csv"))
+    return candidates
+
+
 def read_kernel_metadata(dispatch_dir, kernel_filter=""):
     """Read authoritative resource counts from ``out_kernel_trace.csv`` if present.
 
@@ -256,9 +264,7 @@ def read_kernel_metadata(dispatch_dir, kernel_filter=""):
       2. Bidirectional name heuristic against the directory basename (legacy
          path for timestamped dirs like ``20240101_120000_pa_decode_kernel``).
     """
-    candidates = []
-    for base in (dispatch_dir, os.path.dirname(os.path.abspath(dispatch_dir))):
-        candidates += glob.glob(os.path.join(base, "*kernel_trace*.csv"))
+    candidates = find_kernel_trace_csvs(dispatch_dir)
 
     dir_name = os.path.basename(os.path.abspath(dispatch_dir))
     # Extract the dispatch id from rocprofv3's ui_output_agent_<N>_dispatch_<id> layout.
@@ -487,7 +493,13 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
 def print_reg_pressure(reg_info):
     print_header("Register Pressure & Occupancy")
     print(f"  Architecture:   {reg_info['arch']}")
-    if not reg_info["has_meta"]:
+    if not reg_info["has_meta"] and not reg_info.get("csv_found", True):
+        print(
+            "  (no *kernel_trace*.csv next to the dispatch dir — capture with kernel tracing: "
+            "`sys_trace: true` in input.yaml, or `--kernel-trace` next to `--att`; "
+            "LDS/SGPR limits are unknown, occupancy below is an upper bound)"
+        )
+    elif not reg_info["has_meta"]:
         print(
             "  (kernel_trace CSV not matched — accum/LDS/SGPR estimated from ISA only; "
             "pass --kernel <name_substr> to enable CSV metadata lookup)"
@@ -506,7 +518,10 @@ def print_reg_pressure(reg_info):
     if reg_info["sgpr"] > 0:
         print(f"  SGPR:           {reg_info['sgpr']}  -> {reg_info['sgpr_limit']} waves/SIMD")
 
-    print(f"\n  occupancy:      {reg_info['occupancy']} waves/SIMD  (bound by {reg_info['bound_by']})")
+    if reg_info["has_meta"]:
+        print(f"\n  occupancy:      {reg_info['occupancy']} waves/SIMD  (bound by {reg_info['bound_by']})")
+    else:
+        print(f"\n  occupancy:      <= {reg_info['occupancy']} waves/SIMD  (VGPR only; LDS/SGPR limits unknown)")
     if reg_info["next_occ"] is not None and reg_info["bound_by"] == "VGPR":
         print(
             f"  -> {reg_info['next_occ']} waves requires combined VGPR (arch+accum) "
@@ -562,6 +577,7 @@ def main():
 
     meta = read_kernel_metadata(args.dispatch_dir, kernel_filter=args.kernel)
     reg_info = detect_arch_and_reg_pressure(instructions, meta)
+    reg_info["csv_found"] = bool(find_kernel_trace_csvs(args.dispatch_dir))
     print_reg_pressure(reg_info)
 
     print_stall_type_summary(instructions, total_stall)
