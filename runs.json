@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-21T06:30:47Z",
+ "updated": "2026-11-21T09:24:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44886913473,
+   "pr": 1431,
+   "commit": "2995f67edea0170f757eab40808d735547e3e075",
+   "branch": "jli/llvm-upgrade-e2ce52c885",
+   "event": "pull_request",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44886913473",
+   "created_at": "2026-11-21T08:52:36Z",
+   "updated_at": "2026-11-21T09:21:22Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-21T09:21:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44886913473/job/136801049773"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-21T09:21:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44886913473/job/136801049776"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-21T09:21:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44886913473/job/136801049833"
+    }
+   ]
+  },
   {
    "run_id": 44873698294,
    "pr": 1464,
@@ -2030,52 +2073,6 @@
      "started_at": "2026-11-18T12:11:11Z",
      "completed_at": "2026-11-18T12:22:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269156606/job/134858121529"
-    }
-   ]
-  },
-  {
-   "run_id": 44269143520,
-   "pr": 1435,
-   "commit": "2fb50de05ce68beb61cf03fd785db9e4dd2eed6d",
-   "branch": "phil/fc7-source-ir-cache",
-   "event": "pull_request",
-   "title": "[Tests] Keep tests that read source_ir off the JIT disk cache",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520",
-   "created_at": "2026-11-18T08:41:18Z",
-   "updated_at": "2026-11-18T14:29:35Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T14:06:05Z",
-     "completed_at": "2026-11-18T14:29:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134857782965",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T11:18:13Z",
-     "completed_at": "2026-11-18T11:29:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134857785394"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T11:19:14Z",
-     "completed_at": "2026-11-18T12:06:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269143520/job/134857785461"
     }
    ]
   }
