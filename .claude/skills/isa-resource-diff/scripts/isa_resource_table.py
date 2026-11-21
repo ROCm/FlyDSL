@@ -1431,6 +1431,251 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
 
 
 # --------------------------------------------------------------------------------------
+# Control flow: loops, per-block op order, VGPR liveness estimate
+# --------------------------------------------------------------------------------------
+#
+# The resource table answers "how many registers", not "what does the hot loop do".
+# A change can keep every count above and still make a loop wait `vmcnt(0)` where it
+# used to keep loads in flight, or add a branch around a prefetch.  `loops` prints,
+# per loop (or per basic block), its instruction mix, its lowest `vmcnt` wait and
+# the order of its memory, MFMA, wait and barrier instructions as a token string,
+# so two builds can be compared with a plain text diff.
+
+TERMINATORS = ("s_branch", "s_cbranch_", "s_endpgm", "s_setpc_b64")
+RE_VMCNT = re.compile(r"\bvmcnt\((\d+)\)")
+RE_LGKMCNT = re.compile(r"\blgkmcnt\((\d+)\)")
+RE_WAIT_IMM = re.compile(r"^\s*(0x[0-9a-fA-F]+|\d+)")
+RE_VREG = re.compile(r"(?<![\w.])([va])(?:\[(\d+):(\d+)\]|(\d+)(?!\w))")
+COUNTS = ("instr", "valu", "mfma", "s_nop", "v_cmp", "v_cndmask", "scratch")
+
+# A VGPR first operand is a use, not a def, for these.
+NO_VGPR_DEF = (
+    "s_",
+    "buffer_store",
+    "global_store",
+    "flat_store",
+    "scratch_store",
+    "v_cmp",
+    "v_readlane",
+    "v_readfirstlane",
+    "exp",
+)
+# The destination is also read (accumulating or lane-merging writes).
+DEF_ALSO_USE = ("v_fmac", "v_mac", "v_pk_fmac", "v_dot2c", "v_dot4c", "v_dot8c", "v_writelane")
+DS_DEF = ("ds_read", "ds_load", "ds_bpermute", "ds_permute", "ds_swizzle", "ds_append", "ds_consume")
+
+
+@dataclass
+class Block:
+    name: str
+    instructions: list = field(default_factory=list)  # (mnemonic, text)
+    successors: list = field(default_factory=list)
+
+
+def _token(mnemonic: str, text: str) -> list:
+    if mnemonic.startswith(("buffer_load", "global_load", "flat_load")):
+        return ["LD"]
+    if mnemonic.startswith(("buffer_store", "global_store", "flat_store")):
+        return ["ST"]
+    if mnemonic.startswith("scratch_load"):
+        return ["SL"]
+    if mnemonic.startswith("scratch_store"):
+        return ["SS"]
+    if mnemonic.startswith(("ds_read", "ds_load")):
+        return ["DR"]
+    if mnemonic.startswith(("ds_write", "ds_store")):
+        return ["DW"]
+    if _categorize(mnemonic) == "matrix_ops":
+        return ["M"]
+    if mnemonic == "s_waitcnt":
+        vm, lgkm = RE_VMCNT.search(text), RE_LGKMCNT.search(text)
+        return ([f"W{vm.group(1)}"] if vm else []) + ([f"K{lgkm.group(1)}"] if lgkm else [])
+    if mnemonic in ("s_wait_loadcnt", "s_wait_dscnt"):  # gfx12 and later
+        m = RE_WAIT_IMM.match(text[len(mnemonic) :])
+        return [("W" if mnemonic == "s_wait_loadcnt" else "K") + str(int(m.group(1), 0))] if m else []
+    if mnemonic.startswith("s_barrier"):
+        return ["BAR"]
+    if mnemonic.startswith("s_cbranch_"):
+        return ["BR"]
+    return []
+
+
+def _run_length(tokens: list) -> str:
+    out = []
+    for token in tokens:
+        if out and out[-1][0] == token:
+            out[-1][1] += 1
+        else:
+            out.append([token, 1])
+    return " ".join(token if n == 1 else f"{token}x{n}" for token, n in out)
+
+
+def _registers(text: str) -> set:
+    found = set()
+    for kind, lo, hi, single in RE_VREG.findall(text):
+        first, last = (int(lo), int(hi)) if lo else (int(single), int(single))
+        offset = 0 if kind == "v" else 1 << 16  # AGPRs share the unified file but not the names
+        found.update(range(offset + first, offset + last + 1))
+    return found
+
+
+def _defs_uses(mnemonic: str, text: str) -> tuple:
+    """(VGPR/AGPR defs, uses) of one instruction -- a syntactic estimate.
+
+    The first operand is the destination except for stores, compares, lane reads,
+    scalar ops, LDS ops without a return value and atomics without one.  Writes under
+    a partial EXEC are treated as full writes, so divergent code reads low.
+    """
+    rest = text[len(mnemonic) :]
+    first, _, others = rest.partition(",")
+    if mnemonic.startswith("ds_"):
+        has_def = mnemonic.startswith(DS_DEF) or "_rtn" in mnemonic
+    elif "atomic" in mnemonic:
+        has_def = re.search(r"\b(?:glc|sc0)\b", rest) is not None
+    else:
+        has_def = not mnemonic.startswith(NO_VGPR_DEF)
+    if not has_def:
+        return set(), _registers(rest)
+    defs = _registers(first)
+    uses = _registers(others)
+    if mnemonic.startswith(DEF_ALSO_USE):
+        uses |= defs
+    return defs, uses
+
+
+def _blocks(lines: list) -> list:
+    """Basic blocks of one kernel body, with successor indices."""
+    blocks = [Block("entry")]
+
+    def unnamed(block):
+        return not block.instructions and (block.name == "entry" or block.name.endswith("+"))
+
+    for line in lines:
+        if line and line[0] not in " \t":
+            m = RE_LABEL.match(line)
+            if m and unnamed(blocks[-1]):
+                blocks[-1].name = _unquote(m.group("name"))
+            elif m:
+                blocks.append(Block(_unquote(m.group("name"))))
+            continue
+        stripped = line.split(";", 1)[0].strip()
+        if not stripped or stripped[0] == ".":
+            continue
+        m = RE_MNEMONIC.match(line)
+        if not m:
+            continue
+        mnemonic = m.group("m")
+        blocks[-1].instructions.append((mnemonic, stripped))
+        if mnemonic.startswith(TERMINATORS):
+            blocks.append(Block(f"{blocks[-1].name}+"))
+    if unnamed(blocks[-1]):
+        blocks.pop()
+
+    index = {block.name: i for i, block in enumerate(blocks)}
+    for i, block in enumerate(blocks):
+        mnemonic, text = block.instructions[-1] if block.instructions else ("", "")
+        target = text.split()[1] if mnemonic.startswith(("s_branch", "s_cbranch_")) and len(text.split()) > 1 else None
+        if target is not None and target in index:
+            block.successors.append(index[target])
+        if mnemonic not in ("s_branch", "s_endpgm", "s_setpc_b64") and i + 1 < len(blocks):
+            block.successors.append(i + 1)
+    return blocks
+
+
+def _liveness(blocks: list) -> list:
+    """Per block: (max live VGPRs+AGPRs, the instruction at that point)."""
+    info = [[_defs_uses(m, t) for m, t in block.instructions] for block in blocks]
+    live_in = [set() for _ in blocks]
+    changed = True
+    while changed:
+        changed = False
+        for i in reversed(range(len(blocks))):
+            live = set().union(*(live_in[s] for s in blocks[i].successors))
+            for defs, uses in reversed(info[i]):
+                live = (live - defs) | uses
+            if live != live_in[i]:
+                live_in[i] = live
+                changed = True
+    peaks = []
+    for i, block in enumerate(blocks):
+        live = set().union(*(live_in[s] for s in block.successors))
+        best = (len(live), "")
+        for (defs, uses), (_, text) in zip(reversed(info[i]), reversed(block.instructions)):
+            # Pressure at an instruction: what is live after it plus what it writes.
+            best = max(best, (len(live | defs), text), key=lambda p: p[0])
+            live = (live - defs) | uses
+        peaks.append(best)
+    return peaks
+
+
+def _region_line(blocks: list, peaks: list | None) -> str:
+    counts = dict.fromkeys(COUNTS, 0)
+    tokens, waits = [], []
+    for block in blocks:
+        for mnemonic, text in block.instructions:
+            counts["instr"] += 1
+            matrix = _categorize(mnemonic) == "matrix_ops"
+            counts["mfma"] += matrix
+            counts["valu"] += mnemonic.startswith("v_") and not matrix
+            counts["s_nop"] += mnemonic == "s_nop"
+            counts["v_cmp"] += mnemonic.startswith("v_cmp")
+            counts["v_cndmask"] += mnemonic.startswith("v_cndmask")
+            counts["scratch"] += mnemonic.startswith("scratch_")
+            for token in _token(mnemonic, text):
+                tokens.append(token)
+                if token[0] == "W":
+                    waits.append(int(token[1:]))
+    line = " ".join(f"{key} {counts[key]}" for key in COUNTS)
+    line += f" vmcnt_min {min(waits) if waits else '-'}"
+    if peaks is not None:
+        live, at = max(peaks, key=lambda p: p[0])
+        line += f" live ~{live} at `{at}`"
+    return line + "\n      " + (_run_length(tokens) or "(no memory/MFMA/wait ops)")
+
+
+def flow_report(lines: list, all_blocks: bool, live: bool) -> list:
+    blocks = _blocks(lines)
+    peaks = _liveness(blocks) if live else None
+    out = []
+    if all_blocks:
+        for i, block in enumerate(blocks):
+            out.append(f"  block {block.name}: " + _region_line([block], peaks and [peaks[i]]))
+    else:
+        loops: dict = {}
+        for i, block in enumerate(blocks):
+            for target in block.successors:
+                if target <= i:  # a back edge: the loop spans the blocks in between
+                    loops[target] = max(loops.get(target, i), i)
+        for number, (head, tail) in enumerate(sorted(loops.items()), start=1):
+            region = blocks[head : tail + 1]
+            out.append(
+                f"  loop {number} {blocks[head].name} - {blocks[tail].name}: "
+                + _region_line(region, peaks and peaks[head : tail + 1])
+            )
+        if not loops:
+            out.append("  no loops")
+    if live:
+        top, at = max(peaks, key=lambda p: p[0]) if peaks else (0, "")
+        out.insert(0, f"  live VGPRs (estimate) max ~{top} at `{at}`")
+    return out
+
+
+def _kernel_bodies(path: Path) -> list:
+    """(kernel name, body lines, allocated vgpr) for every kernel in one ISA file."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    scan = _scan_text(text)
+    out = []
+    for entry in scan.entries:
+        name, _ = _kernel_name(entry)
+        terminator = scan.sizes.get(name)
+        if not name or name not in scan.labels or terminator not in scan.labels:
+            raise SnapshotError(f"{path}: cannot find the body of kernel {name!r}")
+        out.append((name, lines[scan.labels[name] + 1 : scan.labels[terminator]], entry.get("vgpr_count", "?")))
+    return out
+
+
+# --------------------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------------------
 
@@ -1520,6 +1765,45 @@ def do_summarize(
     return 0
 
 
+def do_loops(
+    target: str | Path,
+    *,
+    kernel: re.Pattern | None = None,
+    all_blocks: bool = False,
+    live: bool = False,
+    output: TextIO | None = None,
+) -> int:
+    output = output if output is not None else sys.stdout
+    root = Path(target)
+    if root.is_file():
+        files = [root]
+        root = root.parent
+    elif root.is_dir():
+        by_directory: dict = {}
+        for path in sorted(root.rglob("*final_isa.s")):
+            by_directory.setdefault(path.parent, []).append(path)
+        if not by_directory:
+            raise SnapshotError(f"no *final_isa.s under {root} (is FLYDSL_DUMP_IR set?)")
+        files = [_pick_stage_file(by_directory[d])[0] for d in sorted(by_directory)]
+    else:
+        raise SnapshotError(f"input not found: {root}")
+
+    shown = 0
+    for path in files:
+        directory = path.parent.relative_to(root)
+        for name, lines, vgpr in _kernel_bodies(path):
+            if kernel is not None and not kernel.search(name):
+                continue
+            where = (directory.parent if directory.name == name else directory).as_posix()
+            print(f"{name}{'' if where == '.' else f' [{where}]'}: vgpr {vgpr}", file=output)
+            for line in flow_report(lines, all_blocks, live):
+                print(line, file=output)
+            shown += 1
+    if not shown:
+        raise SnapshotError("no kernel to report" + (f" matches {kernel.pattern!r}" if kernel else ""))
+    return 0
+
+
 def _regex(text: str) -> re.Pattern:
     # argparse reports ArgumentTypeError with exit 2; an uncaught re.error would exit 1,
     # which reads as a regression.
@@ -1549,6 +1833,12 @@ def _create_parser() -> argparse.ArgumentParser:
         metavar="REGEX",
         help="compare only kernels whose name matches REGEX (re.search); the rest are listed, not compared",
     )
+
+    loops = commands.add_parser("loops", help="per-loop instruction mix and memory/MFMA/wait order")
+    loops.add_argument("target", type=Path, help="a dump directory or one *final_isa.s file")
+    loops.add_argument("--kernel", type=_regex, metavar="REGEX", help="only kernels whose name matches REGEX")
+    loops.add_argument("--blocks", action="store_true", help="one entry per basic block instead of per loop")
+    loops.add_argument("--live", action="store_true", help="add a VGPR liveness estimate (max live, and where)")
     return parser
 
 
@@ -1557,6 +1847,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "diff":
             return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet, kernel=args.kernel)
+        if args.command == "loops":
+            return do_loops(args.target, kernel=args.kernel, all_blocks=args.blocks, live=args.live)
         return do_summarize(args.dump_dir, json_path=args.json, quiet=args.quiet)
     except SnapshotError as exc:
         print(f"error: {exc}", file=sys.stderr)
