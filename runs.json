@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-21T05:45:35Z",
+ "updated": "2026-11-21T05:48:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44872275091,
+   "pr": 1461,
+   "commit": "87dfae9a2847083abd7b9cf2123f0cd705754ad4",
+   "branch": "skills/kernel-trace-analysis-no-kernel-trace-csv",
+   "event": "pull_request",
+   "title": "[Skills] kernel-trace-analysis: report a missing kernel-trace CSV and bound the occupancy",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091",
+   "created_at": "2026-11-21T05:44:29Z",
+   "updated_at": "2026-11-21T05:46:32Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:46:27Z",
+     "completed_at": "2026-11-21T05:46:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679947"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:46:28Z",
+     "completed_at": "2026-11-21T05:46:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679968"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:46:28Z",
+     "completed_at": "2026-11-21T05:46:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679973",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 44872096634,
    "pr": 1460,
@@ -2032,21 +2078,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262529742/job/134667286257"
     }
    ]
-  },
-  {
-   "run_id": 44262402390,
-   "pr": null,
-   "commit": "b8023a054f53888d858cef5462d7d1801925012e",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Introduce fx.range expr as the carrier of loop pragma (#1426)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262402390",
-   "created_at": "2026-11-18T07:53:27Z",
-   "updated_at": "2026-11-18T07:56:34Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
