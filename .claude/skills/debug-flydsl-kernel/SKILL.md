@@ -229,6 +229,29 @@ vec = Vec.from_elements([scalar_i32], fx.Int32)
 vec.store(lds_ptr, [idx])
 ```
 
+### 6.6 `TypeError: Cannot extract IR values from <object>` at a runtime `if`/`for`
+
+The AST rewriter turns every local that a runtime `if`, `for` or `while` body
+assigns into region state (an `scf.if` result or a loop-carried value), and also
+every local that the body *calls a method on*: `_collect_assigned_vars` in
+`python/flydsl/compiler/ast_rewriter.py` adds call bases to the state list and
+exempts only `self`. A local that holds a plain Python object, such as a
+config or traits dataclass, has no IR values to yield, so tracing fails at the
+`if`/`for` line and names that object:
+```python
+t = self.traits
+# WRONG: t becomes scf.if state -> TypeError: Cannot extract IR values from Traits(...)
+if warp != owner:
+    self.lds.store(off, fx.Float32, o[t.o_slot(0, vh)])
+
+# CORRECT: hoist the call (and the value it computes) above the branch
+slot = t.o_slot(0, vh)
+if warp != owner:
+    self.lds.store(off, fx.Float32, o[slot])
+```
+Inside the body, call methods only on `self` (`self.traits.o_slot(...)` is
+fine) or on module-level names such as `fx`.
+
 ## 7. GPU Hang
 
 ### 7.1 Infinite runtime loop
@@ -273,6 +296,7 @@ sudo amd-smi reset -G -g <gpu_index>
 - [ ] `buffer_load` offset units match dtype (bytes/4 for i32)
 - [ ] Vector stores use `Vector` values (not scalars)
 - [ ] `range(..., init=...)` state uses internal types, unwrapped only at hard boundaries
+- [ ] No method calls on locals holding plain Python objects inside a runtime `if`/`for` body (hoist them)
 - [ ] Output written to correct partition slot (`part_z`, not absolute index)
 - [ ] `exp_sums`/`max_logits` strides match actual tensor layout
 - [ ] Softmax guards against `-inf - (-inf) = NaN`
