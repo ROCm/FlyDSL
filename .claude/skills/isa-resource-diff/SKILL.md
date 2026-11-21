@@ -86,6 +86,32 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py summarize /tmp/isa-bef
 python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff baseline.json /tmp/isa-after
 ```
 
+### Every specialization from one run: read the JIT cache
+
+Dump directories keep one kernel per name (see Pitfalls), so a parametrized
+kernel family needs one process per shape. Instead, run the whole family once
+per side into a fresh JIT cache (disk cache on, the default), and pass the
+cache directory where a dump directory goes:
+
+```bash
+FLYDSL_RUNTIME_CACHE_DIR=/tmp/jit-before python3 -m pytest tests/kernels/test_softmax.py -q
+# apply the change
+FLYDSL_RUNTIME_CACHE_DIR=/tmp/jit-after python3 -m pytest tests/kernels/test_softmax.py -q
+python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff /tmp/jit-before /tmp/jit-after
+```
+
+Each row is one compiled kernel binary, keyed
+`<jit function>@<binary hash>::<kernel>`. A `binary` column says
+`identical`/`changed`, and a `binaries: N identical, M changed` line follows the
+count line. A changed binary is paired with the other side's by kernel name when
+that name is left over exactly once per side; otherwise both stay unpaired and
+the run exits 2. A cache entry holds only the kernel metadata, so `arch_vgpr`,
+`numbered_sgpr` and the instruction counts are `n/a`; use dumps for those, and
+do not mix a cache with a dump directory (exit 2). Entries are read with
+`pickletools`, without unpickling or importing FlyDSL. Observed on gfx942: a
+26-case family compiled into 32 binaries per side; one diff showed 24
+identical and the VGPR/spill/scratch deltas of the 8 that changed.
+
 ## Reading the output
 
 ```
@@ -200,7 +226,8 @@ These silently produce a *confident wrong answer* if ignored:
 - **Dump directories are keyed by kernel name only, with no specialization key.**
   Every JIT specialization of one kernel writes to the same directory and
   overwrites the previous one, so a parametrized test leaves only its last
-  variant. Diff one shape at a time when the answer must be exact.
+  variant. Diff one shape at a time when the answer must be exact, or read
+  the JIT cache instead (one row per binary).
 - **A cache hit produces no dump at all.** Hence `FLYDSL_RUNTIME_ENABLE_CACHE=0`
   on both sides. Without it a kernel can silently vanish from one side, which
   the tool reports as `ONLY IN BEFORE` and exit 2.
