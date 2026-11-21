@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-21T05:55:39Z",
+ "updated": "2026-11-21T06:02:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44873276341,
+   "pr": 1463,
+   "commit": "293b5caf862a4c7dc7f9629825203a4524adb822",
+   "branch": "skills/isa-resource-diff-loops-liveness",
+   "event": "pull_request",
+   "title": "[Skills] isa-resource-diff: add loops to diff hot-loop wait order and VGPR liveness",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341",
+   "created_at": "2026-11-21T05:57:49Z",
+   "updated_at": "2026-11-21T05:59:56Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:59:52Z",
+     "completed_at": "2026-11-21T05:59:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752396"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:59:51Z",
+     "completed_at": "2026-11-21T05:59:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752407"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-21T05:59:52Z",
+     "completed_at": "2026-11-21T05:59:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752411",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 44872877791,
    "pr": 1462,
@@ -2030,52 +2076,6 @@
      "started_at": "2026-11-18T11:24:28Z",
      "completed_at": "2026-11-18T11:44:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44269129027/job/134858474437"
-    }
-   ]
-  },
-  {
-   "run_id": 44262804346,
-   "pr": null,
-   "commit": "508c2429c442af00fcbe042be82eb13912a65243",
-   "branch": "main",
-   "event": "push",
-   "title": "[Misc] Bump version to 0.5.1 (#1433)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346",
-   "created_at": "2026-11-18T07:56:33Z",
-   "updated_at": "2026-11-18T09:29:20Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:40:34Z",
-     "completed_at": "2026-11-18T09:07:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965171"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:15:21Z",
-     "completed_at": "2026-11-18T08:43:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965244",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T08:24:52Z",
-     "completed_at": "2026-11-18T08:32:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44262804346/job/134667965549"
     }
    ]
   }
