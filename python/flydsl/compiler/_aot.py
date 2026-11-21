@@ -512,6 +512,9 @@ def _materialize_aot_runtime(archive: Path) -> Tuple[bytes, frozenset[str]]:
                 linker,
                 "-r",
                 "--build-id=none",
+                # The archive's DWARF is about 16x the size of a typical kernel
+                # and would be copied into every exported object.
+                "--strip-debug",
                 "-o",
                 str(output_path),
                 "--whole-archive",
