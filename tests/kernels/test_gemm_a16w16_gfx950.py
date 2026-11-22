@@ -553,20 +553,23 @@ def test_gemm_a16w16_acc_tuned_policies(
     "split_k, use_half_tile_interleaved",
     [(1, False), (3, False), (1, True), (3, True)],
 )
+# With a 128x128 tile and fp32 output, the HTI epilogue also copies C rows that the other wave group wrote to LDS.
+@pytest.mark.parametrize("block_mn", [64, 128])
 def test_gemm_a16w16_acc_fp32_output(
     layout: str,
     dtype: torch.dtype,
     has_bias: bool,
     split_k: int,
     use_half_tile_interleaved: bool,
+    block_mn: int,
 ):
     args = _TestArgs(
         dtype=dtype,
-        m=64,
-        n=64,
+        m=block_mn,
+        n=block_mn,
         k=768,
-        block_m=64,
-        block_n=64,
+        block_m=block_mn,
+        block_n=block_mn,
         block_k=64,
         stages=2,
         m_waves=2,

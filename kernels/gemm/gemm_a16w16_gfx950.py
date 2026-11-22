@@ -1120,6 +1120,8 @@ def gemm_a16w16_hti_gfx950_kernel(
     consume(c01, a0, b1, True)
     rocdl.s_barrier()
     a1 = load_a_fragment(1, 1)
+    # The other wave group overwrites these A bytes with C01 right after this barrier: finish the reads first.
+    rocdl.s_waitcnt(lgkmcnt=0)
     rocdl.s_barrier()
     rocdl.sched_barrier(0)
     store_half_tile_to_lds(0, 0, c00)
@@ -1143,13 +1145,20 @@ def gemm_a16w16_hti_gfx950_kernel(
         store_half_tile_to_global(1, 1)
         splitk_protocol.finish_split(split_k)
     else:
-        wait_vmcnt_and_barrier(0)
+        # As in the split-K path, re-align the two wave groups. Each barrier below orders C tile LDS stores and
+        # loads across waves, so it also waits for this wave's LDS operations.
+        if wid // n_waves == 0:
+            rocdl.s_barrier()
+        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+        rocdl.s_barrier()
         store_half_tile_to_global(0, 0)
         store_half_tile_to_global(0, 1)
-        wait_vmcnt_and_barrier(0)
+        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+        rocdl.s_barrier()
         store_half_tile_to_lds(1, 0, c10)
         store_half_tile_to_lds(1, 1, c11)
-        wait_vmcnt_and_barrier(0)
+        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0)
+        rocdl.s_barrier()
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
 
