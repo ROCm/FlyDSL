@@ -503,8 +503,9 @@ def _run_link_tool(command, description: str) -> None:
 def _materialize_aot_runtime(archive: Path) -> Tuple[bytes, frozenset[str]]:
     """Return the complete runtime object and its actual global symbol set."""
     linker = shutil.which("ld.lld") or shutil.which("ld")
-    if linker is None:
-        raise FileNotFoundError("export_to_c: a relocatable linker is required")
+    objcopy = shutil.which("llvm-objcopy") or shutil.which("objcopy")
+    if linker is None or objcopy is None:
+        raise FileNotFoundError("export_to_c: a relocatable linker and objcopy are required")
     with tempfile.TemporaryDirectory(prefix="flydsl-aot-runtime-") as tmp:
         output_path = Path(tmp) / "runtime.o"
         _run_link_tool(
@@ -512,9 +513,6 @@ def _materialize_aot_runtime(archive: Path) -> Tuple[bytes, frozenset[str]]:
                 linker,
                 "-r",
                 "--build-id=none",
-                # The archive's DWARF is about 16x the size of a typical kernel
-                # and would be copied into every exported object.
-                "--strip-debug",
                 "-o",
                 str(output_path),
                 "--whole-archive",
@@ -523,6 +521,10 @@ def _materialize_aot_runtime(archive: Path) -> Tuple[bytes, frozenset[str]]:
             ],
             "materialize the backend AOT runtime",
         )
+        # The archive's DWARF is about 16x the size of a typical kernel and would
+        # be copied into every exported object. ld.lld ignores --strip-debug
+        # under -r, so strip with objcopy.
+        _run_link_tool([objcopy, "--strip-debug", str(output_path)], "strip the backend AOT runtime")
         data = output_path.read_bytes()
     return data, frozenset(_global_symbols(data))
 
