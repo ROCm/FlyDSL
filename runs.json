@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-22T18:25:11Z",
+ "updated": "2026-11-22T21:23:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45063912891,
+   "pr": 1479,
+   "commit": "9906a79763196c3855b025b69274847c4d48c46b",
+   "branch": "users/merrittttt/flash-attn-kv-pad-dispatch",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix wrong flash_attn_generic cross-attention results when seq_len_kv % 64 != 0",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45063912891",
+   "created_at": "2026-11-22T20:00:19Z",
+   "updated_at": "2026-11-22T20:00:19Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
+  {
+   "run_id": 45063108713,
+   "pr": 1478,
+   "commit": "1ee4438c33dd432f087472e811de43698ddc7bc0",
+   "branch": "users/merrittttt/moe-sorting-p23-barrier",
+   "event": "pull_request",
+   "title": "[Bugfix] Add the missing barrier before p23_kernel overwrites cumsum in moe_sorting",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45063108713",
+   "created_at": "2026-11-22T19:51:25Z",
+   "updated_at": "2026-11-22T19:51:25Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
   {
    "run_id": 45032631676,
    "pr": 1380,
@@ -2203,64 +2233,6 @@
      "started_at": "2026-11-19T06:02:34Z",
      "completed_at": "2026-11-19T06:14:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44463861206/job/135370681471"
-    }
-   ]
-  },
-  {
-   "run_id": 44454013744,
-   "pr": 1374,
-   "commit": "0556505ab5877ba66b794f73bf1a8cbd4f36a1a3",
-   "branch": "rdna4-mxfp4-upstream",
-   "event": "pull_request",
-   "title": "[Kernel] Add native RDNA4 MXFP4 \u00d7 FP8 dense GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44454013744",
-   "created_at": "2026-11-19T03:48:42Z",
-   "updated_at": "2026-11-19T03:48:42Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 44439072195,
-   "pr": 1431,
-   "commit": "3535e8cf77bdb693b740e7ee9178ca7b96f6561d",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195",
-   "created_at": "2026-11-19T01:43:41Z",
-   "updated_at": "2026-11-19T03:02:58Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-19T02:08:21Z",
-     "completed_at": "2026-11-19T02:24:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705030"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-19T02:08:33Z",
-     "completed_at": "2026-11-19T02:50:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705053"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T02:18:26Z",
-     "completed_at": "2026-11-19T02:28:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705063"
     }
    ]
   }
