@@ -353,12 +353,14 @@ def build_rmsnorm_module(
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
+            # Stride the scalar tail over the block, which can have fewer threads than tail elements.
             if const_expr(TAIL_ELEMS > 0):
-                if tid < TAIL_ELEMS:
-                    tail_idx = tid + VEC_ELEMS
-                    x_tail_e = row_in[tail_idx]
-                    x_tail = x_tail_e.to(fx.Float32)
-                    thread_sumsq = thread_sumsq + x_tail * x_tail
+                for tail_base in range_constexpr(0, TAIL_ELEMS, BLOCK_THREADS):
+                    if tid + tail_base < TAIL_ELEMS:
+                        tail_idx = tid + tail_base + VEC_ELEMS
+                        x_tail_e = row_in[tail_idx]
+                        x_tail = x_tail_e.to(fx.Float32)
+                        thread_sumsq = thread_sumsq + x_tail * x_tail
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -384,15 +386,16 @@ def build_rmsnorm_module(
                     _store_vec(output_copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
 
             if const_expr(TAIL_ELEMS > 0):
-                if tid < TAIL_ELEMS:
-                    tail_idx = tid + VEC_ELEMS
-                    x_tail_e = row_in[tail_idx]
-                    g_tail_e = Gamma_buf[tail_idx]
-                    x_tail = x_tail_e.to(fx.Float32)
-                    g_tail = g_tail_e if weight_dtype_str == "f32" else g_tail_e.to(fx.Float32)
-                    y_tail = (x_tail * rrms) * g_tail
-                    y_tail_e = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
-                    row_out[tail_idx] = y_tail_e
+                for tail_base in range_constexpr(0, TAIL_ELEMS, BLOCK_THREADS):
+                    if tid + tail_base < TAIL_ELEMS:
+                        tail_idx = tid + tail_base + VEC_ELEMS
+                        x_tail_e = row_in[tail_idx]
+                        g_tail_e = Gamma_buf[tail_idx]
+                        x_tail = x_tail_e.to(fx.Float32)
+                        g_tail = g_tail_e if weight_dtype_str == "f32" else g_tail_e.to(fx.Float32)
+                        y_tail = (x_tail * rrms) * g_tail
+                        y_tail_e = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
+                        row_out[tail_idx] = y_tail_e
 
         else:
             # Scalar fallback for arbitrary N.

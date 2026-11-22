@@ -1637,6 +1637,26 @@ def test_rmsnorm_small_n_mixed_weight_tail_and_rstd():
     torch.testing.assert_close(rstd, expected_rstd, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("block_threads", [1, 2, 4])
+@pytest.mark.parametrize("N", [14, 15])
+def test_rmsnorm_tail_longer_than_block(N, block_threads):
+    """The scalar tail after the vec8 prefix (N % 8 elements) can outnumber the block's threads."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    M = 3
+    torch.manual_seed(N + block_threads)
+    x = torch.randn((M, N), device=device, dtype=DTYPE_BF16)
+    weight = torch.rand((N,), device=device, dtype=DTYPE_BF16)
+    output = torch.full_like(x, float("nan"))
+    stream = torch.cuda.current_stream(device)
+
+    launcher = build_rmsnorm_module(N, "bf16", BLOCK_THREADS=block_threads)
+    compiled = flyc.compile(launcher, x, weight, output, M, stream)
+    compiled(x, weight, output, M, stream)
+    torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(output.to(DTYPE_FP32), _reference_rmsnorm(x, weight), rtol=1e-2, atol=2e-2)
+
+
 def test_rmsnorm_bwd_dispatch_boundary():
     """The hybrid selector is the single authority for atomic vs two-stage."""
     device = torch.device("cuda", torch.cuda.current_device())
