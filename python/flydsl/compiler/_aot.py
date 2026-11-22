@@ -922,8 +922,11 @@ class _AOTCompiledFunction:
         file_path: Union[str, "os.PathLike[str]"],
         file_name: str,
         function_prefix: str = "",
-    ) -> None:
-        """Write ``<file_name>.o`` (``.obj`` on Windows) and ``<file_name>.h`` into ``file_path``."""
+    ) -> Dict[str, Any]:
+        """Write ``<file_name>.o`` (``.obj`` on Windows) and ``<file_name>.h`` into ``file_path``.
+
+        Returns a fresh copy of the metadata embedded as ``<symbol>__metadata``.
+        """
         import flydsl
 
         object_path, function_name, header_path = _resolve_export_paths(file_path, file_name, function_prefix)
@@ -999,3 +1002,4 @@ class _AOTCompiledFunction:
         with _output_directory_lock(object_path.parent):
             _write_atomically(object_path, data)
             _write_atomically(header_path, header)
+        return json.loads(metadata)

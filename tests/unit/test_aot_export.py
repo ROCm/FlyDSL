@@ -443,7 +443,8 @@ device_runtime.get_device_runtime = unexpected_device_runtime
 
 out = Path(sys.argv[1])
 compiled = flyc.compile(axpy, _ptr(), _ptr(), 256, 1.0)
-assert compiled.export_to_c(out, "cpu_only", "cpu_only_kernel") is None
+metadata = compiled.export_to_c(out, "cpu_only", "cpu_only_kernel")
+assert metadata["symbol"] == "cpu_only_kernel" and metadata["arch"] == "gfx950"
 assert (out / f"cpu_only{OBJ}").stat().st_size > 0
 assert (out / "cpu_only.h").stat().st_size > 0
 """
@@ -1172,7 +1173,7 @@ class TestExport:
     def test_export_usage(self, compiled, tmp_path):
         out = tmp_path / "artifacts"
         out.mkdir()
-        assert compiled._export_to_c(out, "axpy_file", "aoti_axpy") is None
+        assert compiled._export_to_c(out, "axpy_file", "aoti_axpy")["symbol"] == "aoti_axpy"
         assert (out / f"axpy_file{OBJ}").is_file()
         assert (out / "axpy_file.h").is_file()
         assert sorted(path.name for path in out.iterdir()) == sorted([*OUTPUT_LOCK, "axpy_file.h", f"axpy_file{OBJ}"])
@@ -1181,12 +1182,31 @@ class TestExport:
         assert LINK_METADATA[0] in (out / f"axpy_file{OBJ}").read_bytes()
         assert LINK_METADATA[1] in (out / f"axpy_file{OBJ}").read_bytes()
 
-        assert compiled._export_to_c(out, "default_name") is None
+        assert compiled._export_to_c(out, "default_name")["symbol"] == "default_name"
         assert "default_name" in _object_symbols(out / f"default_name{OBJ}")
-        assert compiled._export_to_c(out, "empty_prefix", "") is None
+        assert compiled._export_to_c(out, "empty_prefix", "")["symbol"] == "empty_prefix"
         assert "empty_prefix" in _object_symbols(out / f"empty_prefix{OBJ}")
-        assert compiled._export_to_c(out, "keyword_prefix", function_prefix="keyword_symbol") is None
+        assert compiled._export_to_c(out, "keyword_prefix", function_prefix="keyword_symbol")["symbol"] == (
+            "keyword_symbol"
+        )
         assert "keyword_symbol" in _object_symbols(out / f"keyword_prefix{OBJ}")
+
+    def test_export_returns_the_embedded_metadata(self, compiled, tmp_path):
+        metadata = compiled._export_to_c(tmp_path, "axpy", "aoti_axpy")
+        embedded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+        assert embedded in (tmp_path / f"axpy{OBJ}").read_bytes()
+        assert metadata["schema_version"] == 3
+        assert metadata["metadata_symbol"] == "aoti_axpy__metadata"
+        kinds = ["pointer", "pointer", "scalar", "scalar", "stream"]
+        assert [slot["kind"] for slot in metadata["abi"]] == kinds
+        assert [p["name"] for p in metadata["params"]] == ["X", "Y", "n", "alpha", "stream"]
+
+        # Each call returns its own copy: changing one changes no later export.
+        metadata["abi"].clear()
+        metadata["params"][0]["name"] = "changed"
+        again = compiled._export_to_c(tmp_path, "axpy_again", "aoti_axpy_again")
+        assert [slot["kind"] for slot in again["abi"]] == kinds
+        assert again["params"][0]["name"] == "X"
 
     def test_metadata_and_symbols(self, compiled, tmp_path):
         out = tmp_path / "with space"
@@ -1404,7 +1424,7 @@ class TestEndToEnd:
 
         monkeypatch.setattr(jit_function.JitFunction, "_trace", unexpected_compile)
 
-        assert compiled.export_to_c(tmp_path, "compiled_axpy", "compiled_axpy_entry") is None
+        assert compiled.export_to_c(tmp_path, "compiled_axpy", "compiled_axpy_entry")["symbol"] == "compiled_axpy_entry"
         so = _link_shared(tmp_path, [tmp_path / f"compiled_axpy{OBJ}"], "libcompiled_axpy.so")
         loaded = _Loaded(ctypes.CDLL(str(so)), compiled._aot_compiled, "compiled_axpy_entry")
         assert loaded.init() == 0 and loaded.load(-1) == 0
