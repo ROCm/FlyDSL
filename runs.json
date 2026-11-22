@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-22T13:46:26Z",
+ "updated": "2026-11-22T15:24:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45032631676,
+   "pr": 1380,
+   "commit": "625daa07b812ee924017f20d981b7f5da7fb6ea5",
+   "branch": "feat/windows-ci",
+   "event": "pull_request",
+   "title": "[Windows][CI] Add a Windows gfx1201 GPU workflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45032631676",
+   "created_at": "2026-11-22T14:24:15Z",
+   "updated_at": "2026-11-22T14:52:56Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T14:52:56Z",
+     "completed_at": "2026-11-22T15:02:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45032631676/job/137244525825"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-22T14:43:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45032631676/job/137244525842"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-22T14:43:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45032631676/job/137244525917"
+    }
+   ]
+  },
   {
    "run_id": 45022205473,
    "pr": null,
@@ -2217,21 +2260,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44439072195/job/135284705063"
     }
    ]
-  },
-  {
-   "run_id": 44352053921,
-   "pr": 1421,
-   "commit": "2d57589aa4efba9b6799f82e8528e52332aa66dd",
-   "branch": "pr/softmax-wide-rows",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Split wide softmax rows across blocks",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44352053921",
-   "created_at": "2026-11-18T16:51:29Z",
-   "updated_at": "2026-11-18T16:51:29Z",
-   "actor": "Monstertail",
-   "jobs": []
   }
  ]
 }
