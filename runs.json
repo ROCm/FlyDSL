@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-11-22T09:23:58Z",
+ "updated": "2026-11-22T10:40:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45008740871,
+   "pr": 1476,
+   "commit": "7fd2e28ed808a34eff12f3aaf3ceebd9978e79b8",
+   "branch": "users/merrittttt/rmsnorm-tail-stride",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix dropped rmsnorm tail elements when BLOCK_THREADS < N % 8",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45008740871",
+   "created_at": "2026-11-22T09:41:11Z",
+   "updated_at": "2026-11-22T09:41:11Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
+  {
+   "run_id": 45008489375,
+   "pr": 1475,
+   "commit": "1c8596225a03f588fdb31aec7afc0cdf5b3d8ea3",
+   "branch": "fix/sched-pin-spill",
+   "event": "pull_request",
+   "title": "[LLVM] Fix VGPR spills from strict sched.vgpr pins on gfx1250",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45008489375",
+   "created_at": "2026-11-22T09:37:58Z",
+   "updated_at": "2026-11-22T10:37:18Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T10:16:21Z",
+     "completed_at": "2026-11-22T10:25:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45008489375/job/137172201901"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T10:06:47Z",
+     "completed_at": "2026-11-22T10:32:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45008489375/job/137172201948",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T10:07:22Z",
+     "completed_at": "2026-11-22T10:34:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45008489375/job/137172201964"
+    }
+   ]
+  },
   {
    "run_id": 44996706413,
    "pr": 1465,
@@ -2138,36 +2199,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344329178",
    "created_at": "2026-11-18T16:11:37Z",
    "updated_at": "2026-11-18T16:11:37Z",
-   "actor": "Monstertail",
-   "jobs": []
-  },
-  {
-   "run_id": 44344328188,
-   "pr": 1442,
-   "commit": "f9c5ad73f4fef4ef66c136c7546a56bbea99ee90",
-   "branch": "pr/layernorm-fwd",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Multi-row blocks and f32 vectorisation for LayerNorm forward",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344328188",
-   "created_at": "2026-11-18T16:11:37Z",
-   "updated_at": "2026-11-18T16:11:37Z",
-   "actor": "Monstertail",
-   "jobs": []
-  },
-  {
-   "run_id": 44344315512,
-   "pr": 1443,
-   "commit": "e430e3a1a1367018b9dca7926aa3f06a61fd04c5",
-   "branch": "pr/layernorm-smoothquant",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Register-cached vectorised LayerNorm smooth quant",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44344315512",
-   "created_at": "2026-11-18T16:11:32Z",
-   "updated_at": "2026-11-18T16:11:32Z",
    "actor": "Monstertail",
    "jobs": []
   }
