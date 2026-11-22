@@ -1242,6 +1242,8 @@ class TestExport:
             "uint8_t e, uint16_t f, uint32_t g, uint64_t h, bool i, uint16_t j, uint16_t k, float m, "
             "double p, void *stream)"
         ) in header
+        # Float16 / BFloat16 scalars are raw bits; the header says which parameters.
+        assert "16-bit float parameters are raw bit patterns (j: IEEE binary16 bits; k: bfloat16 bits)" in header
         # The header compiles as C and C++ (static size assertions included).
         for lang, std in (("c", "-std=c11"), ("c++", "-std=c++17")):
             _check_header(tmp_path / "echo.h", lang, std)
@@ -1251,21 +1253,31 @@ class TestExport:
         tensor._export_to_c(tmp_path, "t", "tadd")
         theader = (tmp_path / "t.h").read_text()
         assert TADD_LAYOUT in theader
+        assert "raw bit patterns" not in theader
         assert f"sizeof(tadd_A_layout_t) == {tensor._abi[1].size}" in theader
         _check_header(tmp_path / "t.h", "c")
 
     @needs_cc
     def test_header_parameter_names_avoid_c_keywords(self, tmp_path):
         @flyc.jit
-        def keywords(new: fx.Pointer, args: fx.Int32, default: fx.Float32, _Alignas: fx.Int32, __private: fx.Int32):
+        def keywords(
+            new: fx.Pointer,
+            args: fx.Int32,
+            default: fx.Float32,
+            _Alignas: fx.Int32,
+            __private: fx.Int32,
+            short: fx.Float16,
+        ):
             _axpy_kernel(new, new, args, default).launch(grid=(1, 1, 1), block=(64, 1, 1))
 
-        compiled = _aot_view(keywords, _ptr(), 4, 1.0, 0, 0)
+        compiled = _aot_view(keywords, _ptr(), 4, 1.0, 0, 0, 1.0)
         compiled._export_to_c(tmp_path, "kw")
+        header = (tmp_path / "kw.h").read_text()
         assert (
             "kw_call(void *new_, int32_t args, float default_, int32_t flydsl_Alignas_, "
-            "int32_t flydsl__private, void *stream)"
-        ) in (tmp_path / "kw.h").read_text()
+            "int32_t flydsl__private, uint16_t short_, void *stream)"
+        ) in header
+        assert "raw bit patterns (short_: IEEE binary16 bits)" in header
         for lang in ("c", "c++"):
             _check_header(tmp_path / "kw.h", lang)
 
