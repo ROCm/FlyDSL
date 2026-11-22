@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-22T06:30:49Z",
+ "updated": "2026-11-22T07:07:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44995272344,
+   "pr": null,
+   "commit": "c072d00159c9d30f9a326164b58a15add7bb0cb2",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Give pip-ROCm an unversioned libamdhip64.so before the wheel tes\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44995272344",
+   "created_at": "2026-11-22T06:46:56Z",
+   "updated_at": "2026-11-22T07:02:46Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-22T07:03:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44995272344/job/137128317621"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-22T07:03:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44995272344/job/137128317636"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-22T07:02:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44995272344/job/137128317673"
+    }
+   ]
+  },
   {
    "run_id": 44986981799,
    "pr": 1475,
@@ -10,11 +53,11 @@
    "branch": "fix/sched-pin-spill",
    "event": "pull_request",
    "title": "[LLVM] Fix VGPR spills from strict sched.vgpr pins on gfx1250",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799",
    "created_at": "2026-11-22T04:53:04Z",
-   "updated_at": "2026-11-22T06:27:56Z",
+   "updated_at": "2026-11-22T07:05:28Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -41,10 +84,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-22T06:26:45Z",
-     "completed_at": null,
+     "completed_at": "2026-11-22T07:05:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799/job/137105022285"
     }
    ]
@@ -2065,40 +2108,6 @@
    "updated_at": "2026-11-18T16:11:11Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 44308611453,
-   "pr": 1404,
-   "commit": "07e9c7afbde386a51b86a42158e670231c0b46c7",
-   "branch": "moe/k5p-pr",
-   "event": "pull_request",
-   "title": "[Kernel] Add gfx1100 bf16 MoE (grouped WMMA GEMM + wave32 routing)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44308611453",
-   "created_at": "2026-11-18T12:55:47Z",
-   "updated_at": "2026-11-18T14:26:48Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T13:38:19Z",
-     "completed_at": "2026-11-18T13:57:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44308611453/job/134840883712"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-18T13:46:10Z",
-     "completed_at": "2026-11-18T13:47:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44308611453/job/134840883760"
-    }
-   ]
   }
  ]
 }
