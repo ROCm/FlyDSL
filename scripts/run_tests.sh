@@ -96,7 +96,8 @@ for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/
         echo "  SKIP  ${name}  (requires: ${allowed_arches}; arch: ${_gpu_arch})"
         continue
     fi
-    output=$(python3 "${example}" 2>&1) || {
+    # Trace files (examples/07) go to the run's scratch directory, not the checkout.
+    output=$(FLYDSL_KTRACE_DUMP_DIR="${FLYDSL_KTRACE_DUMP_DIR:-${RUN_TMP}}" python3 "${example}" 2>&1) || {
         echo "  FAIL  ${name}"; echo "$output" | tail -10 | sed 's/^/        /'; exit 1
     }
     if echo "$output" | grep -qE "Result correct: False|All passed: False"; then
