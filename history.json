@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-22T02:52:18Z",
+ "updated": "2026-11-22T03:02:04Z",
  "repo": "ROCm/FlyDSL",
  "records": [
   {
@@ -188319,6 +188319,847 @@
    "commit": "73cd55e94ed8be754c2b2663e5d15065ac1cea76",
    "pr": 1465,
    "run_id": 44972095450,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "flash_attn",
+   "shape": "B16S8192H16Hkv16D128_causal",
+   "dtype": "bf16",
+   "metric": "TFLOPS",
+   "value": 287.0,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 286.0,
+    "ratio": 1.003,
+    "delta_pct": 0.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 287.5,
+    "ratio": 0.998,
+    "delta_pct": -0.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "flash_attn",
+   "shape": "B32S8192H8Hkv8D128_causal",
+   "dtype": "bf16",
+   "metric": "TFLOPS",
+   "value": 292.1,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 291.3,
+    "ratio": 1.003,
+    "delta_pct": 0.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 292.2,
+    "ratio": 1.0,
+    "delta_pct": -0.0
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "flash_attn",
+   "shape": "B4S8192H64Hkv64D128_causal",
+   "dtype": "bf16",
+   "metric": "TFLOPS",
+   "value": 383.0,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 381.8,
+    "ratio": 1.003,
+    "delta_pct": 0.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 383.5,
+    "ratio": 0.999,
+    "delta_pct": -0.1
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "flash_attn",
+   "shape": "B4S8192H64Hkv8D128_causal",
+   "dtype": "bf16",
+   "metric": "TFLOPS",
+   "value": 396.8,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 395.7,
+    "ratio": 1.003,
+    "delta_pct": 0.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 397.6,
+    "ratio": 0.998,
+    "delta_pct": -0.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "16x40960x5120_tile16x128x256",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 117.06,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 117.52,
+    "ratio": 0.996,
+    "delta_pct": -0.4
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 117.88,
+    "ratio": 0.993,
+    "delta_pct": -0.7
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "16x77824x5120_tile16x128x256",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 135.07,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 134.29,
+    "ratio": 1.006,
+    "delta_pct": 0.6
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 136.12,
+    "ratio": 0.992,
+    "delta_pct": -0.8
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "256x2112x7168_tile64x64x256",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 283.47,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 278.64,
+    "ratio": 1.017,
+    "delta_pct": 1.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 284.84,
+    "ratio": 0.995,
+    "delta_pct": -0.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "5120x5120x8320_tile64x256x128",
+   "dtype": "bf16",
+   "metric": "TFLOPS",
+   "value": 675.43,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 699.55,
+    "ratio": 0.966,
+    "delta_pct": -3.4
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 670.24,
+    "ratio": 1.008,
+    "delta_pct": 0.8
+   },
+   "regression": true,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "5120x5120x8320_tile64x256x128",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 1229.35,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1234.97,
+    "ratio": 0.995,
+    "delta_pct": -0.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1238.2,
+    "ratio": 0.993,
+    "delta_pct": -0.7
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "512x2112x7168_tile64x64x256",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 495.79,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 493.28,
+    "ratio": 1.005,
+    "delta_pct": 0.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 482.01,
+    "ratio": 1.029,
+    "delta_pct": 2.9
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "8192x8192x8192_tile128x256x128",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 1397.68,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1406.17,
+    "ratio": 0.994,
+    "delta_pct": -0.6
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1390.93,
+    "ratio": 1.005,
+    "delta_pct": 0.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "9728x8192x8320_tile64x256x128",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 1304.11,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1295.55,
+    "ratio": 1.007,
+    "delta_pct": 0.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1293.84,
+    "ratio": 1.008,
+    "delta_pct": 0.8
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "gemm",
+   "shape": "9728x8192x8320_tile64x256x128",
+   "dtype": "int8",
+   "metric": "TFLOPS",
+   "value": 1283.87,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1267.78,
+    "ratio": 1.013,
+    "delta_pct": 1.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1268.86,
+    "ratio": 1.012,
+    "delta_pct": 1.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm1",
+   "shape": "t32768-d8192x8192-e16k4",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 663.98,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 663.65,
+    "ratio": 1.0,
+    "delta_pct": 0.0
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 664.78,
+    "ratio": 0.999,
+    "delta_pct": -0.1
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm1",
+   "shape": "t64-d6144x1024-e128k8",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 35.24,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 35.25,
+    "ratio": 1.0,
+    "delta_pct": -0.0
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 35.46,
+    "ratio": 0.994,
+    "delta_pct": -0.6
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm2_atomic",
+   "shape": "t32768-d8192x8192-e16k4",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 1071.38,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1063.19,
+    "ratio": 1.008,
+    "delta_pct": 0.8
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1066.5,
+    "ratio": 1.005,
+    "delta_pct": 0.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm2_atomic",
+   "shape": "t64-d6144x1024-e128k8",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 32.7,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 32.92,
+    "ratio": 0.993,
+    "delta_pct": -0.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 34.26,
+    "ratio": 0.954,
+    "delta_pct": -4.6
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm2_reduce",
+   "shape": "t32768-d8192x8192-e16k4",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 1098.38,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 1093.69,
+    "ratio": 1.004,
+    "delta_pct": 0.4
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 1096.4,
+    "ratio": 1.002,
+    "delta_pct": 0.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_gemm2_reduce",
+   "shape": "t64-d6144x1024-e128k8",
+   "dtype": "fp8",
+   "metric": "TFLOPS",
+   "value": 33.74,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 33.71,
+    "ratio": 1.001,
+    "delta_pct": 0.1
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 33.77,
+    "ratio": 0.999,
+    "delta_pct": -0.1
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s1",
+   "shape": "t128-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 31.82,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 31.37,
+    "ratio": 1.014,
+    "delta_pct": 1.4
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 33.34,
+    "ratio": 0.954,
+    "delta_pct": -4.6
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s1",
+   "shape": "t256-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 59.9,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 58.33,
+    "ratio": 1.027,
+    "delta_pct": 2.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 60.28,
+    "ratio": 0.994,
+    "delta_pct": -0.6
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s1",
+   "shape": "t512-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 112.72,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 115.58,
+    "ratio": 0.975,
+    "delta_pct": -2.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 114.42,
+    "ratio": 0.985,
+    "delta_pct": -1.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s2_atomic",
+   "shape": "t128-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 31.3,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 30.23,
+    "ratio": 1.035,
+    "delta_pct": 3.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 31.25,
+    "ratio": 1.002,
+    "delta_pct": 0.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s2_atomic",
+   "shape": "t256-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 57.23,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 55.84,
+    "ratio": 1.025,
+    "delta_pct": 2.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 56.56,
+    "ratio": 1.012,
+    "delta_pct": 1.2
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "moe_w4a16_s2_atomic",
+   "shape": "t512-d7168x256-e384k8",
+   "dtype": "int4_bf16",
+   "metric": "TFLOPS",
+   "value": 103.54,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 99.87,
+    "ratio": 1.037,
+    "delta_pct": 3.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 98.63,
+    "ratio": 1.05,
+    "delta_pct": 5.0
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "rmsnorm",
+   "shape": "32768x8192",
+   "dtype": "bf16",
+   "metric": "TB/s",
+   "value": 4.416,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 4.446,
+    "ratio": 0.993,
+    "delta_pct": -0.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 4.445,
+    "ratio": 0.993,
+    "delta_pct": -0.7
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "softmax",
+   "shape": "32768x8192",
+   "dtype": "bf16",
+   "metric": "TB/s",
+   "value": 4.009,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 4.072,
+    "ratio": 0.985,
+    "delta_pct": -1.5
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 4.061,
+    "ratio": 0.987,
+    "delta_pct": -1.3
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "softmax_bwd",
+   "shape": "1024x65536",
+   "dtype": "bf16",
+   "metric": "TB/s",
+   "value": 2.519,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 2.512,
+    "ratio": 1.003,
+    "delta_pct": 0.3
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 2.584,
+    "ratio": 0.975,
+    "delta_pct": -2.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
+   "source": "ci",
+   "runner": "linux-flydsl-mi325-1",
+   "arch": "gfx942"
+  },
+  {
+   "op": "softmax_bwd",
+   "shape": "1024x8192",
+   "dtype": "bf16",
+   "metric": "TB/s",
+   "value": 3.934,
+   "status": "ok",
+   "vs_main": {
+    "label": "main@304d4412",
+    "baseline": 4.045,
+    "ratio": 0.973,
+    "delta_pct": -2.7
+   },
+   "vs_tag": {
+    "tag": "v0.5.1.dev1059",
+    "baseline": 3.874,
+    "ratio": 1.015,
+    "delta_pct": 1.5
+   },
+   "regression": false,
+   "extra": null,
+   "ts": "2026-11-22T03:00:02Z",
+   "commit": "cb5dd8eb64e6badaedd04436b3edd031e0b89315",
+   "pr": 1474,
+   "run_id": 44972638720,
    "source": "ci",
    "runner": "linux-flydsl-mi325-1",
    "arch": "gfx942"
