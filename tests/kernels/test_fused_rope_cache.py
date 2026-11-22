@@ -55,7 +55,11 @@ import pytest
 import torch
 
 from flydsl.runtime.device import get_rocm_arch as _get_rocm_arch
-from kernels.attention.fused_rope_cache_kernel import build_fused_rope_cache_module
+from kernels.attention.fused_rope_cache_kernel import WARP_SIZE, build_fused_rope_cache_module
+
+# head_dim=96 takes 2 elements per lane on wave64; on wave32 it would take 3, which the kernel's
+# lane shuffle does not handle.
+_wave64_only = pytest.mark.skipif(WARP_SIZE != 64, reason="head_dim=96 is supported on wave64 only")
 
 # ---------------------------------------------------------------------------
 # Skip if no GPU
@@ -549,6 +553,7 @@ def test_decode_flash(num_q_heads, num_kv_heads, head_dim):
         (8, 1, 128),  # Qwen3-72B TP8 (same shape as Llama-70B TP8)
         (64, 8, 64),  # GPT-OSS TP1
         (8, 1, 64),  # GPT-OSS TP8
+        pytest.param(32, 32, 96, marks=_wave64_only),  # Phi-3-mini TP1
     ],
     ids=[
         "Llama8B-TP1",
@@ -561,6 +566,7 @@ def test_decode_flash(num_q_heads, num_kv_heads, head_dim):
         "Qwen72B-TP8",
         "GPTOSS-TP1",
         "GPTOSS-TP8",
+        "Phi3mini-TP1",
     ],
 )
 def test_flash_bf16(num_tokens, num_q_heads, num_kv_heads, head_dim):
@@ -589,8 +595,9 @@ def test_flash_bf16(num_tokens, num_q_heads, num_kv_heads, head_dim):
         (4, 1, 128),  # Llama-8B TP8
         (8, 1, 128),  # Llama-70B TP8
         (8, 1, 64),  # GPT-OSS TP8
+        pytest.param(8, 8, 96, marks=_wave64_only),  # Phi-3-mini TP4
     ],
-    ids=["Llama8B-TP1", "Llama8B-TP8", "Llama70B-TP8", "GPTOSS-TP8"],
+    ids=["Llama8B-TP1", "Llama8B-TP8", "Llama70B-TP8", "GPTOSS-TP8", "Phi3mini-TP4"],
 )
 def test_nonflash_bf16(num_tokens, num_q_heads, num_kv_heads, head_dim):
     """Non-flash (ATOM-default) layout, bf16."""
