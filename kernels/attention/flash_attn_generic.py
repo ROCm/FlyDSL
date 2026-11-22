@@ -218,6 +218,16 @@ def build_flash_attn_func_module_primary(
         except (TypeError, ValueError):
             return None
 
+    def _extract_seq_len_kv(kwargs, seq_len):
+        """Return the launch-time seq_len_kv (default: seq_len) as int, or None if not statically known."""
+        S_kv = kwargs.get("seq_len_kv", None)
+        if S_kv is None:
+            return seq_len
+        try:
+            return int(S_kv)
+        except (TypeError, ValueError):
+            return None
+
     def _guard_seqlen(_dispatched):
         """Enforce the only correctness floor (seq_len >= 1). A symbolic/non-int
         seq_len is let through; dense routing is a perf policy, not a bound."""
@@ -688,8 +698,10 @@ def build_flash_attn_func_module_primary(
         )
 
         def _pad_dispatch(*args, **kwargs):
+            # The unmasked build needs whole 64-wide KV tiles, so check seq_len_kv (default: seq_len) too.
             S_int = _extract_seq_len(args, kwargs)
-            if S_int is not None and S_int % 64 == 0:
+            S_kv_int = _extract_seq_len_kv(kwargs, S_int)
+            if S_int is not None and S_int % 64 == 0 and S_kv_int is not None and S_kv_int % 64 == 0:
                 return _launch_skip(*args, **kwargs)
             return _launch_mask(*args, **kwargs)
 
