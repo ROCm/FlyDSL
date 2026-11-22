@@ -631,6 +631,16 @@ public:
     if (failed(offset))
       return failure();
     auto offsetInt = offset->asRef().getLeaf().scale();
+    // A 4- or 6-bit element does not start on every byte, and the lowered
+    // pointer addresses bytes: `group` elements fill a whole number of bytes. A
+    // static offset must be a multiple of it; a dynamic one is assumed to be, as
+    // the buffer path assumes at the access.
+    int64_t elemBits = flyPtrTy.getRef().storageElementBitWidth();
+    int64_t group = 8 / std::gcd(elemBits, int64_t{8});
+    if (offsetInt.isStatic() && offsetInt.staticValue() % group != 0)
+      return op.emitOpError() << "offset " << offsetInt.staticValue() << " into " << elemBits
+                              << "-bit elements does not land on a byte; it must be a multiple of "
+                              << group;
     Value offsetVal;
     if (offsetInt.isStatic() && llvm::isInt<32>(offsetInt.staticValue())) {
       offsetVal = arith::ConstantIntOp::create(rewriter, loc, offsetInt.staticValue(), 32);
@@ -655,6 +665,19 @@ public:
       return failure();
 
     Type elemTy = projectToLLVMCompatibleElemTy(flyPtrTy.getElemTy());
+    if (group != 1) {
+      // A GEP steps by the alloc size, a whole byte for i4 and i6, but the
+      // elements are packed: step in bytes instead.
+      Type offsetTy = offsetVal.getType();
+      offsetVal = arith::ShRSIOp::create(
+          rewriter, loc, offsetVal,
+          arith::ConstantIntOp::create(rewriter, loc, offsetTy, llvm::Log2_64(group)));
+      if (int64_t groupBytes = elemBits * group / 8; groupBytes != 1)
+        offsetVal = arith::MulIOp::create(
+            rewriter, loc, offsetVal,
+            arith::ConstantIntOp::create(rewriter, loc, offsetTy, groupBytes));
+      elemTy = rewriter.getI8Type();
+    }
     Value gep = LLVM::GEPOp::create(rewriter, loc, ptrTy, elemTy, base, ValueRange{offsetVal});
     rewriter.replaceOp(op, gep);
     return success();
