@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-22T12:26:57Z",
+ "updated": "2026-11-22T12:29:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45022205473,
+   "pr": null,
+   "commit": "fe81c40773431335c9f77ccd196a7adc0e3126d7",
+   "branch": "main",
+   "event": "push",
+   "title": "Revert \"[compiler][kernel] strict pin agpr feature and kernel example\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45022205473",
+   "created_at": "2026-11-22T12:25:32Z",
+   "updated_at": "2026-11-22T12:26:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45021934381,
    "pr": 1477,
@@ -2184,21 +2199,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/44352053921",
    "created_at": "2026-11-18T16:51:29Z",
    "updated_at": "2026-11-18T16:51:29Z",
-   "actor": "Monstertail",
-   "jobs": []
-  },
-  {
-   "run_id": 44352051602,
-   "pr": 1422,
-   "commit": "9b2a3a3b93ff7f165b2ca777069ec66524010efd",
-   "branch": "pr/mxfp8-small-tiles",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add 128x128 and 64x64 tiles to the MXFP8 8-wave GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44352051602",
-   "created_at": "2026-11-18T16:51:28Z",
-   "updated_at": "2026-11-18T16:51:28Z",
    "actor": "Monstertail",
    "jobs": []
   }
