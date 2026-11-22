@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-22T03:26:03Z",
+ "updated": "2026-11-22T06:30:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 44986981799,
+   "pr": 1475,
+   "commit": "1c8596225a03f588fdb31aec7afc0cdf5b3d8ea3",
+   "branch": "fix/sched-pin-spill",
+   "event": "pull_request",
+   "title": "[LLVM] Fix VGPR spills from strict sched.vgpr pins on gfx1250",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799",
+   "created_at": "2026-11-22T04:53:04Z",
+   "updated_at": "2026-11-22T06:27:56Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T05:18:03Z",
+     "completed_at": "2026-11-22T05:50:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799/job/137105022222",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-22T05:17:46Z",
+     "completed_at": "2026-11-22T05:24:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799/job/137105022259"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-22T06:26:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44986981799/job/137105022285"
+    }
+   ]
+  },
   {
    "run_id": 44972638720,
    "pr": 1474,
@@ -2051,52 +2097,6 @@
      "started_at": "2026-11-18T13:46:10Z",
      "completed_at": "2026-11-18T13:47:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44308611453/job/134840883760"
-    }
-   ]
-  },
-  {
-   "run_id": 44299424804,
-   "pr": 1438,
-   "commit": "66e7b458c429a30ddf1526cfb2e21b22cf73e799",
-   "branch": "pr/enh-rocdl-fastmath-ops",
-   "event": "pull_request",
-   "title": "[ROCDL] Convert more math ops with afn flag to native rocdl ops",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44299424804",
-   "created_at": "2026-11-18T11:57:52Z",
-   "updated_at": "2026-11-18T14:12:01Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T13:21:05Z",
-     "completed_at": "2026-11-18T13:45:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44299424804/job/134830445688",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T13:20:42Z",
-     "completed_at": "2026-11-18T14:12:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44299424804/job/134830445721"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-18T13:32:14Z",
-     "completed_at": "2026-11-18T13:43:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44299424804/job/134830445820"
     }
    ]
   }
