@@ -506,7 +506,7 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
  bool SIRegisterInfo::getRegAllocationHints(Register VirtReg,
                                             ArrayRef<MCPhysReg> Order,
                                             SmallVectorImpl<MCPhysReg> &Hints,
-@@ -4159,6 +4191,122 @@
+@@ -4159,6 +4191,125 @@
      }
      return false;
    }
@@ -622,9 +622,12 @@ diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/
 +      if (getHWRegIndex(PhysReg) == TargetIdx && InFile(PhysReg))
 +        Hints.push_back(PhysReg);
 +    }
-+    // Strict is a hard constraint. If none matched, allocation fails instead
-+    // of silently using the other file.
-+    return Strict;
++    // Strict is a hard constraint. If no register matched, the target is
++    // reserved for this function (for example by the WWM registers of SGPR
++    // spills, which are moved after RA). Making that hard would only force a
++    // spill, so fall back to a soft hint; the register class still keeps the
++    // value in its file.
++    return Strict && !Hints.empty();
 +  }
    default:
      return TargetRegisterInfo::getRegAllocationHints(VirtReg, Order, Hints, MF,
@@ -1085,7 +1088,7 @@ diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp b/llvm/lib/Target/AMDGPU
 new file mode 100644
 --- /dev/null
 +++ b/llvm/lib/Target/AMDGPU/AMDGPUSchedBank.cpp
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,441 @@
 +//===-- AMDGPUSchedBank.cpp --------------------------------------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1457,8 +1460,14 @@ new file mode 100644
 +      // A strict exact-register pin must keep its own def until after RA:
 +      // a plain COPY gets coalesced and the hint can be dropped with it. For
 +      // AGPR it also keeps the AGPR operand constraint. expandPostRAPseudo
-+      // turns the pseudo into a physreg copy.
-+      if (Kind != SHK_Bank && Strict) {
++      // turns the pseudo into a physreg copy. A VGPR or SGPR pin to an exact
++      // register whose source has other uses becomes a COPY instead: RA sees
++      // the pseudo's result as a new value, so while the source stays live
++      // the two take a register each, where a COPY coalesces them into one.
++      // The source carries the same hint, so the coalesced value keeps it.
++      bool KeepPseudo = Kind == SHK_AGPR || AnyReg || !SrcReg.isVirtual() ||
++                        MRI.hasOneNonDBGUse(SrcReg);
++      if (Kind != SHK_Bank && Strict && KeepPseudo) {
 +        Changed = true;
 +        continue;
 +      }
@@ -1630,12 +1639,13 @@ diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir b/llvm/test/CodeGen/AM
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr-hints.mir
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,102 @@
 +# RUN: llc -mtriple=amdgcn -mcpu=gfx1250 -run-pass=amdgpu-sched-bank -o - %s | FileCheck %s
 +
 +# The AMDGPUSchedBank pass attaches exact register allocation hints (not
 +# printed in MIR). Soft pins are lowered to a plain COPY; strict pins keep the
-+# pseudo until expandPostRAPseudo.
++# pseudo until expandPostRAPseudo, except a VGPR or SGPR pin to an exact register
++# whose source has other uses, which is lowered to a COPY.
 +
 +---
 +# CHECK-LABEL: name: lower_sched_vgpr_b32
@@ -1716,11 +1726,27 @@ new file mode 100644
 +    $vgpr0 = COPY %3
 +    SI_RETURN_TO_EPILOG $vgpr0
 +...
++
++---
++# CHECK-LABEL: name: lower_sched_vgpr_shared_src
++# CHECK: %1:vgpr_32 = COPY %0
++# CHECK-NOT: V_SCHEDULE_VGPR_B32
++name: lower_sched_vgpr_shared_src
++tracksRegLiveness: true
++body: |
++  bb.0:
++    liveins: $vgpr0
++    %0:vgpr_32 = COPY $vgpr0
++    %1:vgpr_32 = V_SCHEDULE_VGPR_B32 %0, 42, 1, implicit $exec
++    %2:vgpr_32 = V_ADD_U32_e32 %0, %1, implicit $exec
++    $vgpr0 = COPY %2
++    SI_RETURN_TO_EPILOG $vgpr0
++...
 diff --git a/llvm/test/CodeGen/AMDGPU/sched-gpr.ll b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
 new file mode 100644
 --- /dev/null
 +++ b/llvm/test/CodeGen/AMDGPU/sched-gpr.ll
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,170 @@
 +; RUN: llc -mtriple=amdgcn -mcpu=gfx1250 < %s | FileCheck -check-prefix=GCN %s
 +
 +; Verify that llvm.amdgcn.schedule.{vgpr,sgpr} steer register allocation to
@@ -1859,6 +1885,22 @@ new file mode 100644
 +}
 +
 +; --------------------------------------------------------------------------
++; A strict pin whose register is reserved (here beyond amdgpu-num-vgpr) can't be
++; met; it falls back to a soft hint instead of failing allocation.
++
++; GCN-LABEL: {{^}}vgpr40_reserved:
++; GCN-NOT: v40
++; GCN-NOT: scratch_
++; GCN: s_endpgm
++define amdgpu_kernel void @vgpr40_reserved(ptr addrspace(1) %out, ptr addrspace(1) %in) #1 {
++  %a = load volatile <4 x float>, ptr addrspace(1) %in
++  %c = call <4 x float> @llvm.amdgcn.sched.vgpr.v4f32(<4 x float> %a, i32 40, i32 1)
++  %d = fadd <4 x float> %c, %c
++  store <4 x float> %d, ptr addrspace(1) %out
++  ret void
++}
++
++; --------------------------------------------------------------------------
 +; Without hint: register allocator uses default low-numbered registers.
 +; Verify no high-numbered VGPRs appear.
 +
@@ -1874,6 +1916,7 @@ new file mode 100644
 +}
 +
 +attributes #0 = { "amdgpu-flat-work-group-size"="32,32" "amdgpu-waves-per-eu"="1,1" }
++attributes #1 = { "amdgpu-num-vgpr"="32" }
 diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
 --- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
 +++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
