@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-11-23T07:14:50Z",
+ "updated": "2026-11-23T07:46:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45133251316,
+   "pr": null,
+   "commit": "9614720c254e0aadb77afe7cf00fb11eea700a41",
+   "branch": "main",
+   "event": "push",
+   "title": "[compiler][opt] tie the same vgpr when strict pin a register number (\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316",
+   "created_at": "2026-11-23T07:44:05Z",
+   "updated_at": "2026-11-23T07:44:35Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 45130395175,
+   "pr": 1444,
+   "commit": "081ff0e0feb6af9372f8ce752f1aa28842a2aa31",
+   "branch": "jli/sched-vgpr-tied",
+   "event": "pull_request",
+   "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175",
+   "created_at": "2026-11-23T07:20:39Z",
+   "updated_at": "2026-11-23T07:23:04Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 45129515117,
+   "pr": 1484,
+   "commit": "57e36c0c21c78db1961d9b5d016748d1b02bbfa7",
+   "branch": "feat/compiled-function-code-object",
+   "event": "pull_request",
+   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117",
+   "created_at": "2026-11-23T07:13:19Z",
+   "updated_at": "2026-11-23T07:25:03Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:25:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117/job/137546008036"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:25:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117/job/137546008050"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:25:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117/job/137546008096"
+    }
+   ]
+  },
   {
    "run_id": 45127020995,
    "pr": null,
@@ -10,13 +83,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Fly] Resolve register addresses by dataflow in rmem SSA promotion (#\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995",
    "created_at": "2026-11-23T06:51:51Z",
-   "updated_at": "2026-11-23T06:53:51Z",
+   "updated_at": "2026-11-23T07:44:28Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T07:22:27Z",
+     "completed_at": "2026-11-23T07:44:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995/job/137545003321"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T07:27:19Z",
+     "completed_at": "2026-11-23T07:44:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995/job/137545003388"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T07:22:27Z",
+     "completed_at": "2026-11-23T07:44:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995/job/137545003486"
+    }
+   ]
   },
   {
    "run_id": 45126744320,
@@ -40,19 +141,19 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855",
    "created_at": "2026-11-23T06:46:08Z",
-   "updated_at": "2026-11-23T07:07:28Z",
+   "updated_at": "2026-11-23T07:20:32Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T07:07:28Z",
+     "started_at": "2026-11-23T07:20:31Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327563"
     },
@@ -74,29 +175,29 @@
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281",
    "created_at": "2026-11-23T06:45:20Z",
-   "updated_at": "2026-11-23T07:07:30Z",
+   "updated_at": "2026-11-23T07:15:13Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T07:07:30Z",
+     "started_at": "2026-11-23T07:14:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340139"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T07:08:45Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T07:34:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340250"
     }
    ]
@@ -562,7 +663,7 @@
   },
   {
    "run_id": 45088544559,
-   "pr": 1444,
+   "pr": null,
    "commit": "2d634564743356dadbdcfda40195b513d510a0b3",
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
@@ -2171,51 +2272,6 @@
    "created_at": "2026-11-19T12:22:45Z",
    "updated_at": "2026-11-19T12:23:59Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44522953130,
-   "pr": null,
-   "commit": "88f7231c38f576c2c25826a6fc2c596f49be4cad",
-   "branch": "main",
-   "event": "push",
-   "title": "[Tests] Honour FLY_BUILD_DIR in tests/conftest.py (#1434)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44522953130",
-   "created_at": "2026-11-19T12:20:22Z",
-   "updated_at": "2026-11-19T12:22:46Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44522695548,
-   "pr": null,
-   "commit": "d2e7143cd71214a2937cd924f4dfc30bc56dfbb8",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Stop dropping a return inside a traced if branch (#1436)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44522695548",
-   "created_at": "2026-11-19T12:18:42Z",
-   "updated_at": "2026-11-19T12:20:24Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44518539134,
-   "pr": null,
-   "commit": "d28eb15eaa4d59f18a80bb4774d1283ff8324ec9",
-   "branch": "pr/paged-fp8-split-kv",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Split the KV range of under-filled paged FP8 attention calls",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44518539134",
-   "created_at": "2026-11-19T11:51:29Z",
-   "updated_at": "2026-11-19T11:51:29Z",
-   "actor": "Monstertail",
    "jobs": []
   }
  ]
