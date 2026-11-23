@@ -194,8 +194,10 @@ LogicalResult compileAssemblyObjects(gpu::BinaryOp binary, const KernelEntries &
     if (entries != kernelEntries.end())
       kernels = getKernelTable(binary.getContext(), entries->second, *hsaco);
 
+    // Tag the HSACO as `bin`, matching what upstream ROCDL serialization emits
+    // for format=fatbin (it downgrades fatbin to binary).
     compiled.push_back(gpu::ObjectAttr::get(
-        object.getTarget(), gpu::CompilationTarget::Fatbin,
+        object.getTarget(), gpu::CompilationTarget::Binary,
         StringAttr::get(binary.getContext(), StringRef(hsaco->data(), hsaco->size())),
         object.getProperties(), kernels));
     changed = true;
