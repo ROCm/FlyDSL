@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T11:47:19Z",
+ "updated": "2026-11-23T11:50:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45167856920",
    "created_at": "2026-11-23T11:44:19Z",
-   "updated_at": "2026-11-23T11:44:50Z",
+   "updated_at": "2026-11-23T11:47:33Z",
    "actor": "jli-melchior",
    "jobs": []
   },
