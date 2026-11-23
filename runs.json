@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-23T04:24:47Z",
+ "updated": "2026-11-23T05:48:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45114102127,
+   "pr": 1483,
+   "commit": "c80aca6a69ff89e96af9b65a401eb1bee16eb879",
+   "branch": "fix/external-codegen-link-compat",
+   "event": "pull_request",
+   "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_codegen returns",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127",
+   "created_at": "2026-11-23T04:49:21Z",
+   "updated_at": "2026-11-23T05:46:25Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T05:04:21Z",
+     "completed_at": "2026-11-23T05:33:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801182",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T05:02:54Z",
+     "completed_at": "2026-11-23T05:37:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801184"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T05:11:35Z",
+     "completed_at": "2026-11-23T05:41:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801295"
+    }
+   ]
+  },
   {
    "run_id": 45108011622,
    "pr": 1486,
@@ -2161,52 +2207,6 @@
    "updated_at": "2026-11-19T11:23:46Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 44514047676,
-   "pr": 1412,
-   "commit": "cb2aefaf77f5651bd96902055283780e0305208c",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676",
-   "created_at": "2026-11-19T11:21:12Z",
-   "updated_at": "2026-11-19T13:41:19Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T13:16:36Z",
-     "completed_at": "2026-11-19T13:29:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671421"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T13:01:02Z",
-     "completed_at": "2026-11-19T13:37:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671523",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T13:02:09Z",
-     "completed_at": "2026-11-19T13:37:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44514047676/job/135577671561"
-    }
-   ]
   }
  ]
 }
