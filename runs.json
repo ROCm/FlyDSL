@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T15:24:33Z",
+ "updated": "2026-11-23T16:45:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45219472072,
+   "pr": 1412,
+   "commit": "8c39dc5949556654716e7bed4f53a120e85311d2",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45219472072",
+   "created_at": "2026-11-23T16:42:13Z",
+   "updated_at": "2026-11-23T16:42:40Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 45215141622,
+   "pr": 1412,
+   "commit": "724199cb6bb84435cf5ade46aef77c059de81a7b",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45215141622",
+   "created_at": "2026-11-23T16:19:11Z",
+   "updated_at": "2026-11-23T16:42:27Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 45186528094,
    "pr": 1490,
@@ -2195,95 +2225,6 @@
      "started_at": "2026-11-21T02:00:59Z",
      "completed_at": "2026-11-21T02:11:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44851075691/job/136687149691"
-    }
-   ]
-  },
-  {
-   "run_id": 44842430752,
-   "pr": 1431,
-   "commit": "488e208f67b38f307917ac54d42d567d71caf323",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752",
-   "created_at": "2026-11-21T00:14:03Z",
-   "updated_at": "2026-11-21T02:12:13Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T00:39:51Z",
-     "completed_at": "2026-11-21T00:50:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368051"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-21T01:12:32Z",
-     "completed_at": "2026-11-21T02:02:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368072"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-21T00:40:38Z",
-     "completed_at": "2026-11-21T01:00:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44842430752/job/136663368084"
-    }
-   ]
-  },
-  {
-   "run_id": 44726992619,
-   "pr": 1456,
-   "commit": "054ad3efa64492a7195dfb41c52191cf7a1fb731",
-   "branch": "pr/fix-promote-regmem-cf",
-   "event": "pull_request",
-   "title": "[Fly] Resolve register addresses by dataflow in rmem SSA promotion",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44726992619",
-   "created_at": "2026-11-20T11:21:52Z",
-   "updated_at": "2026-11-20T12:18:14Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:57:42Z",
-     "completed_at": "2026-11-20T12:06:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44726992619/job/136266228105"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:42:45Z",
-     "completed_at": "2026-11-20T12:13:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44726992619/job/136266228138",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:42:45Z",
-     "completed_at": "2026-11-20T12:10:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44726992619/job/136266228239"
     }
    ]
   }
