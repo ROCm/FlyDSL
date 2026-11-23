@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T00:46:33Z",
+ "updated": "2026-11-23T01:09:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45092731956,
+   "pr": null,
+   "commit": "39d1b66bee66c2df86097eb61237e044e04ca4b7",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Tag fly-emit-gpu-binary output as binary, not fatbin (#1480)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45092731956",
+   "created_at": "2026-11-23T01:07:28Z",
+   "updated_at": "2026-11-23T01:07:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 45092642964,
+   "pr": null,
+   "commit": "287a01ce877a366ab437143c6665ac937b0d42ce",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bin] Build the embedded AOT runtime without debug info (#1465)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45092642964",
+   "created_at": "2026-11-23T01:06:35Z",
+   "updated_at": "2026-11-23T01:07:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45089731805,
    "pr": 1480,
@@ -10,13 +40,41 @@
    "branch": "fix/emit-gpu-binary-format",
    "event": "pull_request",
    "title": "[Bugfix] Tag fly-emit-gpu-binary output as binary, not fatbin",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805",
    "created_at": "2026-11-23T00:36:11Z",
-   "updated_at": "2026-11-23T00:38:03Z",
+   "updated_at": "2026-11-23T01:06:35Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T01:06:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438667"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T01:07:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438774"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T01:07:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438850"
+    }
+   ]
   },
   {
    "run_id": 45088544559,
@@ -29,9 +87,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559",
    "created_at": "2026-11-23T00:24:03Z",
-   "updated_at": "2026-11-23T00:25:43Z",
+   "updated_at": "2026-11-23T01:04:43Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T00:54:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664283"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T01:04:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664333"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-23T00:54:37Z",
+     "completed_at": "2026-11-23T00:55:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664380"
+    }
+   ]
   },
   {
    "run_id": 45063912891,
@@ -460,7 +546,7 @@
   },
   {
    "run_id": 44972095450,
-   "pr": 1465,
+   "pr": null,
    "commit": "73cd55e94ed8be754c2b2663e5d15065ac1cea76",
    "branch": "aot-strip-runtime-debug",
    "event": "pull_request",
@@ -552,7 +638,7 @@
   },
   {
    "run_id": 44914177061,
-   "pr": 1465,
+   "pr": null,
    "commit": "6b823840871f8ec35cf514a3b3d0cefd5c847e88",
    "branch": "aot-strip-runtime-debug",
    "event": "pull_request",
@@ -2081,98 +2167,6 @@
    "updated_at": "2026-11-19T08:41:48Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 44480054376,
-   "pr": 1447,
-   "commit": "88788c04d47ca8e3525caa847282ba7c1ccad324",
-   "branch": "skills/isa-resource-diff-compile-only-host-queries",
-   "event": "pull_request",
-   "title": "[Skills] isa-resource-diff: compile-only runs still see the local GPU in host code",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480054376",
-   "created_at": "2026-11-19T07:29:53Z",
-   "updated_at": "2026-11-19T07:31:35Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:31Z",
-     "completed_at": "2026-11-19T07:31:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480054376/job/135410431934"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:31Z",
-     "completed_at": "2026-11-19T07:31:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480054376/job/135410431960"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:31Z",
-     "completed_at": "2026-11-19T07:31:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480054376/job/135410432093",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44480050501,
-   "pr": 1446,
-   "commit": "4bf00df632439e1b84e623bac00e498691a8a75b",
-   "branch": "skills/prefetch-data-load-isa-order",
-   "event": "pull_request",
-   "title": "[Skills] prefetch-data-load: check that the ISA keeps the loads early",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480050501",
-   "created_at": "2026-11-19T07:29:51Z",
-   "updated_at": "2026-11-19T07:31:36Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:31Z",
-     "completed_at": "2026-11-19T07:31:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480050501/job/135410438981",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:32Z",
-     "completed_at": "2026-11-19T07:31:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480050501/job/135410439020"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T07:31:32Z",
-     "completed_at": "2026-11-19T07:31:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44480050501/job/135410439100"
-    }
-   ]
   }
  ]
 }
