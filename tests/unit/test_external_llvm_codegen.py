@@ -324,6 +324,8 @@ def test_jit_links_isa_left_by_a_replaced_external_codegen(tmp_path, monkeypatch
     from flydsl.compiler import external_llvm
     from flydsl.compiler.jit_function import _run_pipeline
 
+    # Pin the target so the test also runs on GPU-less runners.
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
     monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(_make_fake_llvm(tmp_path)))
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
 
