@@ -76,6 +76,8 @@ endif()
 add_library(FlyRocmAotRuntime STATIC FlyRocmAotRuntime.cpp)
 target_compile_definitions(FlyRocmAotRuntime PRIVATE FLYDSL_AOT_RUNTIME_EMBEDDED=1)
 target_compile_features(FlyRocmAotRuntime PRIVATE cxx_std_17)
+# Exports copy this archive into every object, so leave out its debug info.
+target_compile_options(FlyRocmAotRuntime PRIVATE -g0)
 target_link_libraries(FlyRocmAotRuntime PRIVATE hip::host hip::amdhip64 ${CMAKE_DL_LIBS})
 set_target_properties(FlyRocmAotRuntime PROPERTIES
   OUTPUT_NAME "fly_rocm_aot_runtime"

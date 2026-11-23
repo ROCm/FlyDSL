@@ -949,6 +949,8 @@ def test_find_aot_runtime_archive():
 
         runtime_object, symbols = aot._materialize_aot_runtime(archive)
         assert runtime_object.startswith(b"\x7fELF")
+        # Its debug info would otherwise be copied into every exported object.
+        assert b".debug_" not in runtime_object
     assert {"flydslAotModuleLaunchKernel", "hipModuleLoadData", "malloc"} <= symbols
 
 
