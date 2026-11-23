@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T12:16:27Z",
+ "updated": "2026-11-23T12:31:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276",
    "created_at": "2026-11-23T12:13:49Z",
-   "updated_at": "2026-11-23T12:14:13Z",
+   "updated_at": "2026-11-23T12:27:30Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T12:27:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073260"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T12:27:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073282"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T12:28:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073308"
+    }
+   ]
   },
   {
    "run_id": 45167856920,
@@ -190,11 +218,11 @@
    "branch": "experiment/register-placement-sched-hints",
    "event": "pull_request",
    "title": "[Feat] Introduce experimental register_allocation on ROCDL",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855",
    "created_at": "2026-11-23T09:33:05Z",
-   "updated_at": "2026-11-23T09:45:07Z",
+   "updated_at": "2026-11-23T12:18:46Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -221,9 +249,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T09:45:06Z",
+     "started_at": "2026-11-23T12:18:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195938"
     }
