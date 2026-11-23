@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T01:15:05Z",
+ "updated": "2026-11-23T01:17:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Version] Bump version to 0.5.3 (#1481)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093216251",
    "created_at": "2026-11-23T01:12:21Z",
-   "updated_at": "2026-11-23T01:12:48Z",
+   "updated_at": "2026-11-23T01:13:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -132,10 +132,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T01:04:42Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T01:13:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664333"
     },
     {
