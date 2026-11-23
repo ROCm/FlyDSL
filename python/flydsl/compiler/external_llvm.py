@@ -124,6 +124,48 @@ def _replace_gpu_module_with_binary_op(module: ir.Module, external_binary_module
     gpu_module.erase()
 
 
+def _has_assembly_objects(module: ir.Module) -> bool:
+    from .._mlir.dialects import gpu
+
+    return any(
+        gpu.ObjectAttr(obj).format == gpu.CompilationTarget.Assembly
+        for op in module.body.operations
+        if op.operation.name == "gpu.binary"
+        for obj in ir.ArrayAttr(op.operation.attributes["objects"])
+    )
+
+
+def link_external_assembly(module: ir.Module, binary_fragment: str) -> None:
+    """Assemble+link the Assembly objects an external ``format=isa`` codegen left in ``module``.
+
+    External ROCDL serialization stops at format=isa so it never spawns ld.lld;
+    the in-process LLD path finishes the link. Only Assembly objects are
+    touched, so this is a no-op once they are linked. The JIT also calls it
+    after ``run_external_binary_codegen``, so a replacement of that hook that
+    only runs ``binary_fragment`` (the pre-0.5.1 contract) still yields a
+    loadable binary.
+    """
+    from .backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD, rocm_toolkit_path
+
+    if not (HAS_INPROCESS_LLD and "format=isa" in binary_fragment and _has_assembly_objects(module)):
+        return
+    toolkit = rocm_toolkit_path()
+    link_opts = 'opts=""'
+    if toolkit:
+        link_opts = f'toolkit="{toolkit}" {link_opts}'
+    link_pipeline = f"builtin.module({FLY_GPU_BINARY_PASS}{{{link_opts}}})"
+    try:
+        pm = PassManager.parse(link_pipeline, context=module.context)
+        pm.enable_verifier(True)
+        pm.run(module.operation)
+    except Exception as exc:
+        raise ExternalLLVMError(
+            "In-process LLD failed to link the external LLVM Assembly into a fatbin.\n"
+            f"pipeline: {link_pipeline}\n"
+            f"error: {exc}"
+        ) from exc
+
+
 def run_external_binary_codegen(
     module: ir.Module,
     binary_fragment: str,
@@ -206,27 +248,7 @@ def run_external_binary_codegen(
             external_output_path.read_text(encoding="utf-8"), context=module.context
         )
         _replace_gpu_module_with_binary_op(module, external_binary_module)
-
-        # External ROCDL serialization stops at format=isa so it never spawns
-        # ld.lld. Finish assemble+link with the in-process LLD path.
-        from .backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD, rocm_toolkit_path
-
-        if HAS_INPROCESS_LLD and "format=isa" in binary_fragment:
-            toolkit = rocm_toolkit_path()
-            link_opts = 'opts=""'
-            if toolkit:
-                link_opts = f'toolkit="{toolkit}" {link_opts}'
-            link_pipeline = f"builtin.module({FLY_GPU_BINARY_PASS}{{{link_opts}}})"
-            try:
-                pm = PassManager.parse(link_pipeline, context=module.context)
-                pm.enable_verifier(True)
-                pm.run(module.operation)
-            except Exception as exc:
-                raise ExternalLLVMError(
-                    "In-process LLD failed to link the external LLVM Assembly into a fatbin.\n"
-                    f"pipeline: {link_pipeline}\n"
-                    f"error: {exc}"
-                ) from exc
+        link_external_assembly(module, binary_fragment)
 
         output_path.write_text(
             module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info), encoding="utf-8"
