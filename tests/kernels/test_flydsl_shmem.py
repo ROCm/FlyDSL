@@ -20,7 +20,7 @@ import sys
 
 import pytest
 
-pytest.importorskip("mori", reason="mori package required for shmem tests")
+pytest.importorskip("mori.ir.flydsl.runtime", reason="mori with flydsl bitcode runtime required for shmem tests")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FLYDSL_PY = os.path.join(_HERE, "../../python")
