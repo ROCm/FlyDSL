@@ -902,26 +902,25 @@ template <class Cat> Layout<Cat> nullspace(const ComposedLayout<Cat> &) {
   return make_layout(IntTuple<Cat>::getOne(), IntTuple<Cat>::getZero());
 }
 
+/// The Fly type syntax: a composed inner function continues the chain and a composed outer layout
+/// is bracketed, so `S<3,4,3> o 0 o 64:1 o 2 o [32:1 o 1 o 8:4]` composes from the left.
 template <class Cat> void print(const ComposedLayout<Cat> &value, llvm::raw_ostream &os) {
-  bool nestedInner = std::holds_alternative<ComposedLayout<Cat>>(value.inner());
-  if (nestedInner)
-    os << '[';
   print(value.inner(), os);
-  if (nestedInner)
-    os << ']';
   os << " o ";
   print(value.offset(), os);
   os << " o ";
+  bool nestedOuter = std::holds_alternative<ComposedLayout<Cat>>(value.outer());
+  if (nestedOuter)
+    os << '[';
   print(value.outer(), os);
+  if (nestedOuter)
+    os << ']';
 }
 
 namespace detail {
 
-template <class Cat> std::optional<ComposedInner<Cat>> parseComposedInner(llvm::StringRef text) {
-  if (text.starts_with('[') && detail::findMatching(text, 0, '[', ']') == text.size() - 1) {
-    auto value = ComposedLayout<Cat>::fromString(text.drop_front().drop_back());
-    return value ? std::optional<ComposedInner<Cat>>(*value) : std::nullopt;
-  }
+/// The first inner function of a chain: a swizzle or a layout.
+template <class Cat> std::optional<ComposedInner<Cat>> parseInnerFunction(llvm::StringRef text) {
   if (text.starts_with("CS<")) {
     auto value = CoordSwizzle<Cat>::fromString(text);
     return value ? std::optional<ComposedInner<Cat>>(*value) : std::nullopt;
@@ -934,6 +933,24 @@ template <class Cat> std::optional<ComposedInner<Cat>> parseComposedInner(llvm::
   return value ? std::optional<ComposedInner<Cat>>(*value) : std::nullopt;
 }
 
+/// An outer layout of a chain: a layout, or a bracketed composed layout.
+template <class Cat> std::optional<ComposedOuter<Cat>> parseOuterLayout(llvm::StringRef text) {
+  if (text.starts_with('[') && findMatching(text, 0, '[', ']') == text.size() - 1) {
+    auto value = ComposedLayout<Cat>::fromString(text.drop_front().drop_back());
+    return value ? std::optional<ComposedOuter<Cat>>(*value) : std::nullopt;
+  }
+  auto value = Layout<Cat>::fromString(text);
+  return value ? std::optional<ComposedOuter<Cat>>(*value) : std::nullopt;
+}
+
+template <class Cat> std::optional<ComposedInner<Cat>> parseComposedInner(llvm::StringRef text) {
+  if (findTopLevel(text, " o ") != llvm::StringRef::npos) {
+    auto value = ComposedLayout<Cat>::fromString(text);
+    return value ? std::optional<ComposedInner<Cat>>(*value) : std::nullopt;
+  }
+  return parseInnerFunction<Cat>(text);
+}
+
 template <class Cat> std::optional<AnyLayout<Cat>> parseAnyLayout(llvm::StringRef text);
 
 } // namespace detail
@@ -943,16 +960,27 @@ std::optional<ComposedLayout<Cat>> ComposedLayout<Cat>::fromString(llvm::StringR
   auto first = detail::findTopLevel(text, " o ");
   if (first == llvm::StringRef::npos)
     return std::nullopt;
-  auto remainder = text.drop_front(first + 3);
-  auto second = detail::findTopLevel(remainder, " o ");
-  if (second == llvm::StringRef::npos)
+  auto inner = detail::parseInnerFunction<Cat>(text.take_front(first));
+  if (!inner)
     return std::nullopt;
-  auto inner = detail::parseComposedInner<Cat>(text.take_front(first));
-  auto offset = IntTuple::fromString(remainder.take_front(second));
-  auto outer = detail::parseAnyLayout<Cat>(remainder.drop_front(second + 3));
-  if (!inner || !offset || !outer)
-    return std::nullopt;
-  return ComposedLayout(std::move(*inner), std::move(*offset), std::move(*outer));
+  // Each `o offset o outer` composes the chain parsed so far.
+  auto rest = text.drop_front(first + 3);
+  while (true) {
+    auto second = detail::findTopLevel(rest, " o ");
+    if (second == llvm::StringRef::npos)
+      return std::nullopt;
+    auto offset = IntTuple::fromString(rest.take_front(second));
+    rest = rest.drop_front(second + 3);
+    auto next = detail::findTopLevel(rest, " o ");
+    auto outer = detail::parseOuterLayout<Cat>(rest.take_front(next));
+    if (!offset || !outer)
+      return std::nullopt;
+    auto composed = ComposedLayout(std::move(*inner), std::move(*offset), std::move(*outer));
+    if (next == llvm::StringRef::npos)
+      return composed;
+    inner = ComposedInner<Cat>(std::move(composed));
+    rest = rest.drop_front(next + 3);
+  }
 }
 
 namespace detail {

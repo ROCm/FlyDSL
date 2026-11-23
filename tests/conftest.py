@@ -14,8 +14,18 @@ import pytest
 
 _repo_root = Path(__file__).resolve().parents[1]
 
+
+def _fly_build_dir():
+    """The build scripts/run_tests.sh tests: FLY_BUILD_DIR (relative to the repo root), else build-fly/."""
+    build_dir = os.environ.get("FLY_BUILD_DIR")
+    if not build_dir:
+        return _repo_root / "build-fly"
+    build_dir = Path(build_dir)
+    return build_dir if build_dir.is_absolute() else _repo_root / build_dir
+
+
 # New Fly dialect build
-_fly_pkg_dir = _repo_root / "build-fly" / "python_packages"
+_fly_pkg_dir = _fly_build_dir() / "python_packages"
 if _fly_pkg_dir.exists():
     _p = str(_fly_pkg_dir)
     _already = _p in sys.path or any(os.path.isdir(ep) and os.path.samefile(ep, _p) for ep in sys.path if ep)
@@ -134,6 +144,28 @@ def pytest_configure(config):
         os.environ["FLYDSL_COMPILE_BACKEND"] = backend
     if arch:
         os.environ["FLYDSL_GPU_ARCH"] = arch
+
+    # The session tests another build when a plugin (-p) or sitecustomize imported
+    # flydsl before this conftest put the selected one on sys.path, or when
+    # FLY_BUILD_DIR holds no package.
+    flydsl = sys.modules.get("flydsl")
+    selected = _fly_pkg_dir / "flydsl"
+    if flydsl is not None and (selected.is_dir() or os.environ.get("FLY_BUILD_DIR")):
+        loaded = Path(flydsl.__file__).parent
+        if not (selected.is_dir() and os.path.samefile(loaded, selected)):
+            config.issue_config_time_warning(
+                pytest.PytestConfigWarning(f"testing flydsl from {loaded}, not from the selected {selected}"),
+                stacklevel=2,
+            )
+
+
+def pytest_report_collectionfinish(config):
+    # Unlike pytest_report_header, this line survives scripts/run_tests.sh's --no-header.
+    try:
+        import flydsl
+    except ImportError as error:
+        return f"flydsl: not importable ({error})"
+    return f"flydsl: {flydsl.__version__} from {Path(flydsl.__file__).parent}"
 
 
 def pytest_sessionfinish(session, exitstatus):

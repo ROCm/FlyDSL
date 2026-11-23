@@ -275,6 +275,13 @@ OpFoldResult GetScalarOp::fold(FoldAdaptor) {
   return IntegerAttr::get(getResult().getType(), leaf.staticValue());
 }
 
+OpFoldResult GetIterOp::fold(FoldAdaptor) {
+  auto makeViewOp = getMemref().getDefiningOp<MakeViewOp>();
+  if (makeViewOp && makeViewOp.getIter().getType() == getType())
+    return makeViewOp.getIter();
+  return {};
+}
+
 FLY_INFER_RETURN_TYPES(GetLeavesOp) {
   // The scalars Core binds the profile to, with the Fly fast-divmod handle.
   OpBuilder builder(context);

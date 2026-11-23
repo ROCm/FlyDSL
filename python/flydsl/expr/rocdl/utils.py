@@ -6,6 +6,25 @@ from ...runtime.device import get_rocm_arch
 from ..numeric import Numeric
 
 
+def _check_numeric_type(what, ty, supported):
+    """Check that ``ty`` is one of the DSL numeric types in ``supported``."""
+    if ty not in supported:
+        names = ", ".join(t.__name__ for t in supported) or "none"
+        raise ValueError(f"{what} has no instruction for {ty.__name__}; supported: {names}")
+
+
+def _check_mfma_shape(what, shapes, m, n, k, elem_ty_a, elem_ty_b):
+    """Reject an MFMA atom with no instruction; ``shapes`` maps an (A, B) DSL type pair to its ``(M, N, K)``."""
+    types = (elem_ty_a, elem_ty_b)
+    name = f"({elem_ty_a.__name__}, {elem_ty_b.__name__})"
+    if types not in shapes:
+        supported = ", ".join(f"({a.__name__}, {b.__name__})" for a, b in shapes)
+        raise ValueError(f"{what} has no instruction for {name}; supported: {supported}")
+    if (m, n, k) not in shapes[types]:
+        supported = ", ".join("x".join(map(str, mnk)) for mnk in shapes[types])
+        raise ValueError(f"{what} has no {m}x{n}x{k} instruction for {name}; supported: {supported}")
+
+
 def require_lds_dma_support(what):
     """Reject global -> LDS direct loads (``buffer_load_* ... lds``) on gfx11.
 

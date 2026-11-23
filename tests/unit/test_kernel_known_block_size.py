@@ -148,6 +148,13 @@ def _launch_named_pending_twice(x: fx.Tensor, stream: fx.Stream = fx.Stream(None
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_disk_cache(monkeypatch):
+    # These tests read CompiledArtifact.source_ir, which an artifact loaded from
+    # the disk cache does not carry, so a warm cache would turn it into None.
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+
+
 def _get_source_ir(launch_fn, *args):
     """Call the JIT function once, then return the source IR string."""
     launch_fn(*args, stream=torch.cuda.current_stream())

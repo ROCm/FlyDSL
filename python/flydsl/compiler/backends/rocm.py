@@ -456,7 +456,8 @@ class RocmBackend(BaseBackend):
         toolkit = rocm_toolkit_path()
         return f"rocm-bitcode:{_device_bitcode_fingerprint(toolkit)}"
 
-    def jit_runtime_lib_basenames(self) -> List[str]:
+    @classmethod
+    def jit_runtime_lib_basenames(cls) -> List[str]:
         if os.name == "nt":
             return ["fly_jit_runtime.dll", "mlir_c_runner_utils.dll"]
         return [

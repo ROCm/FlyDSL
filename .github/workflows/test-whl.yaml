@@ -70,6 +70,13 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools"
           docker exec flydsl_test bash -c "python3 -m pip install --no-index --find-links=/dist flydsl"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
+          # TheRock pip-ROCm (7.14 image): hipcc links against _rocm_sdk_core, which only
+          # ships libamdhip64.so.N. The AOT export tests link with -lamdhip64, so add the
+          # unversioned dev symlink. No-op on images without _rocm_sdk_core.
+          docker exec flydsl_test bash -c '
+            core="$(python3 -c "import _rocm_sdk_core; print(_rocm_sdk_core.__path__[0])" 2>/dev/null)" || exit 0
+            cd "${core}/lib" && { [ -e libamdhip64.so ] || ln -sv "$(ls libamdhip64.so.[0-9]* | sort -V | tail -n1)" libamdhip64.so; }
+          '
           docker exec flydsl_test bash -c "mkdir -p /flydsl/build-fly/bin && cp /dist/fly-opt /flydsl/build-fly/bin/fly-opt && chmod +x /flydsl/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
