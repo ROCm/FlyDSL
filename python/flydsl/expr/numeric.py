@@ -484,7 +484,7 @@ class Numeric(metaclass=NumericMeta):
 
     def __dsl_not__(self):
         b = self.__dsl_bool__()
-        if isinstance(b.value, bool):
+        if b.is_static():
             return Boolean(not b.value)
         zero = arith_const(0, T.bool())
         return Boolean(b.ir_value().__eq__(zero))
@@ -492,14 +492,14 @@ class Numeric(metaclass=NumericMeta):
     def __dsl_and__(self, other):
         lhs = self.__dsl_bool__()
         rhs = as_numeric(other).__dsl_bool__()
-        if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
+        if lhs.is_static() and rhs.is_static():
             return Boolean(lhs.value and rhs.value)
         return Boolean(lhs.ir_value().__and__(rhs.ir_value()))
 
     def __dsl_or__(self, other):
         lhs = self.__dsl_bool__()
         rhs = as_numeric(other).__dsl_bool__()
-        if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
+        if lhs.is_static() and rhs.is_static():
             return Boolean(lhs.value or rhs.value)
         return Boolean(lhs.ir_value().__or__(rhs.ir_value()))
 
