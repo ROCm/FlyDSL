@@ -455,7 +455,6 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # lane -> (rank-local warp id, lane-in-warp) under packed launch.
         warp_id = _u(lane_i32) // threads_per_rank_i32
         lane_id = _u(lane_i32) % threads_per_rank_i32
-        thread_pack_start = bid_i32 * threads_per_rank_i32 + lane_id
         pack_stride = fx.grid_dim.x * threads_per_rank_i32
 
         lds = fx.SharedAllocator().allocate(SharedStorage2Stage).peek()
@@ -471,12 +470,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         def _build_reduce_body(cur, smem_base_expr=None):
             """Emit reduce body: load → smem → barrier1 → warp0 reduce → [barrier2]."""
             elem_off_i32 = cur * _ELEMS_PER_PACK
-            raw = _load_v4i32(in_rsrc_desc, elem_off_i32)
             if const_expr(smem_base_expr is None):
                 smem_idx = lane_i32
             else:
                 smem_idx = smem_base_expr + lane_i32
-            fx.ptr_store(raw, smem_ptr + (smem_idx * _ELEMS_PER_PACK))
+            in_part = cur < end_pack
+            if in_part:
+                raw = _load_v4i32(in_rsrc_desc, elem_off_i32)
+                fx.ptr_store(raw, smem_ptr + (smem_idx * _ELEMS_PER_PACK))
             gpu.barrier()  # barrier 1: all warps have written smem
 
             if warp_id == 0:
@@ -503,22 +504,25 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     out_raw = acc.to(half_dtype).bitcast(fx.Int32)
                 pack_rel_idx = cur - start_pack
                 rel_elem_off_i32 = pack_rel_idx * _ELEMS_PER_PACK
-                _store_v4i32(tmp_out_rsrc_desc, rel_elem_off_i32, out_raw)
+                if in_part:
+                    _store_v4i32(tmp_out_rsrc_desc, rel_elem_off_i32, out_raw)
 
-        thread_start_pack = start_pack + thread_pack_start
+        # The trip count is the block's, not the thread's: with world_size 4 a rank's lanes span two waves, and a
+        # wave that left the loop early would pass the barriers below, and the end sync, before its peers finish.
+        block_start_pack = start_pack + bid_i32 * threads_per_rank_i32
         if const_expr(_use_single_buf_2stage):
             # Single buffer: 8KB LDS, 2 barriers per iteration.
-            for cur in range(thread_start_pack, end_pack, pack_stride):
-                _build_reduce_body(cur, smem_base_expr=None)
+            for row in range(block_start_pack, end_pack, pack_stride):
+                _build_reduce_body(row + lane_id, smem_base_expr=None)
                 gpu.barrier()  # barrier 2: protect smem before next iter's writes
         else:
             # Double buffer: 16KB LDS, 1 barrier per iteration (parity trick).
             # The parity alternates between the two smem halves so warp-0 reads
             # from half-A while all warps write the next pack to half-B.
             parity = 0
-            for cur in range(thread_start_pack, end_pack, pack_stride):
+            for row in range(block_start_pack, end_pack, pack_stride):
                 smem_base = parity * threads
-                _build_reduce_body(cur, smem_base_expr=smem_base)
+                _build_reduce_body(row + lane_id, smem_base_expr=smem_base)
                 # No barrier 2: parity ensures next iteration writes to opposite
                 # smem half, so warp-0 reads and all-warp writes are disjoint.
                 parity = 1 - parity

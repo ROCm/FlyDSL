@@ -350,8 +350,10 @@ class FlyDSLAllreduce:
             self._input_buffer_ptrs[i] = self._input_buffer_ptrs[0]
 
         ws, rk = self.world_size, self.rank
-        rotated_input_buf_ptrs = [self._input_buffer_ptrs[(rk + i) % ws] for i in range(8)]
-        self._gpu_input_buffer_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
+        # Input pointers stay in rank order: the kernels add the ranks in this order, and only the same order on
+        # every rank gives every rank the same rounding.
+        input_buf_ptrs = self._input_buffer_ptrs[:8]
+        self._gpu_input_buffer_ptrs_array = torch.tensor(input_buf_ptrs, dtype=torch.int64, device=self.device)
 
         rotated_tmp_ptrs = [self._tmp_ptrs[(rk + i) % ws] for i in range(8)]
         self._gpu_tmp_ptrs_array = torch.tensor(rotated_tmp_ptrs, dtype=torch.int64, device=self.device)
@@ -382,7 +384,7 @@ class FlyDSLAllreduce:
         self._graph_inp = None
         self._graph_out = None
         self._graph_use_write_mode = False
-        self._gpu_graph_in_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
+        self._gpu_graph_in_ptrs_array = torch.tensor(input_buf_ptrs, dtype=torch.int64, device=self.device)
         # Accumulated IPC base ptrs opened for cudagraph captures.
         # New captures APPEND; handles are never closed until close() is called.
         # This prevents UAF when multiple CUDAGraphs are captured on the same
@@ -392,9 +394,7 @@ class FlyDSLAllreduce:
             self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device
         )
         # unreg_list: entries captured during graph recording, pending IPC registration.
-        # Format: [(tensor, per_call_ptrs, rotated), ...]
-        #   rotated=True  → inp, rotate by rank before writing ptrs
-        #   rotated=False → out (write-mode), use rank-order ptrs
+        # Format: [(tensor, per_call_ptrs), ...]; inp and out (write-mode) alike get rank-order ptrs.
         # _register_graph_tensors processes and clears this list after each capture.
         self._graph_ipc_unreg_list: list = []
         # Per-capture dedup cache: data_ptr -> per_call_ptrs tensor already queued.
@@ -531,7 +531,7 @@ class FlyDSLAllreduce:
         self._out_ptrs_cache = {"ptr": ptr, "arr": arr, "bases": new_bases}
         return arr
 
-    def _get_or_create_graph_ptrs(self, tensor, rotated: bool):
+    def _get_or_create_graph_ptrs(self, tensor, is_input: bool):
         """Return per-call ptrs tensor for cudagraph recording.
 
         Checks two caches in priority order:
@@ -544,14 +544,14 @@ class FlyDSLAllreduce:
         _graph_ipc_unreg_list, and store in _graph_ptrs_cache.
 
         Args:
-            tensor:  inp tensor (rotated=True) or out tensor (rotated=False).
-            rotated: True  -> rotate ptrs by rank (inp, non-write-mode).
-                     False -> rank-order ptrs (out, write-mode).
+            tensor:   inp tensor (is_input=True) or out tensor (is_input=False, write-mode).
+            is_input: True  -> inp (non-write-mode).
+                      False -> out (write-mode).
         """
         ptr = int(tensor.data_ptr())
 
         # Write-mode out: check IPC registration cache first.
-        if not rotated:
+        if not is_input:
             _ipc = self._out_ptrs_cache
             if _ipc is not None and _ipc.get("ptr") == ptr:
                 return _ipc["arr"]
@@ -563,7 +563,7 @@ class FlyDSLAllreduce:
 
         # First occurrence: allocate placeholder and enqueue in unreg_list.
         per_call_ptrs = torch.empty(8, dtype=torch.int64, device=self.device)
-        self._graph_ipc_unreg_list.append((tensor, per_call_ptrs, rotated))
+        self._graph_ipc_unreg_list.append((tensor, per_call_ptrs))
         self._graph_ptrs_cache[ptr] = per_call_ptrs
         return per_call_ptrs
 
@@ -584,7 +584,7 @@ class FlyDSLAllreduce:
 
         # 1. Collect handle+offset for EVERY captured inp into ONE list
         my_handle_list = []
-        for tensor, _, _rotated in entries:
+        for tensor, _ in entries:
             alloc_base = self._get_alloc_base_ptr(int(tensor.data_ptr()))
             off = int(tensor.data_ptr()) - alloc_base
             handle = self._get_mem_handle_bytes(alloc_base)
@@ -593,14 +593,12 @@ class FlyDSLAllreduce:
         # 2. ONE collective — each rank sends its full list, receives all others'
         all_ranks_handles = self._gather_object_list_via_broadcast(self.group, my_handle_list)
 
-        # 3. For each entry, build pointer array and update in-place.
-        #    rotated=True  → inp: rotate by rank  (read from peer GPU inputs)
-        #    rotated=False → out: rank-order (write-mode broadcasts to all outs)
+        # 3. For each entry, build the rank-order pointer array and update in-place.
         #
         # IMPORTANT: do NOT close handles from previous captures here.
         # Old CUDAGraphs may still reference those IPC mappings.  Handles
         # are accumulated in _graph_ipc_reg_list and released only in close().
-        for entry_idx, (tensor, per_call_ptrs, rotated) in enumerate(entries):
+        for entry_idx, (tensor, per_call_ptrs) in enumerate(entries):
             ptrs = [0] * 8
             for r in range(ws):
                 hb, o = all_ranks_handles[r][entry_idx]
@@ -612,11 +610,7 @@ class FlyDSLAllreduce:
                     ptrs[r] = peer_base + o
             for i in range(ws, 8):
                 ptrs[i] = ptrs[0]
-            if rotated:
-                final = [ptrs[(rk + i) % ws] for i in range(8)]
-            else:
-                final = ptrs[:8]
-            per_call_ptrs.copy_(torch.tensor(final, dtype=torch.int64, device=self.device))
+            per_call_ptrs.copy_(torch.tensor(ptrs[:8], dtype=torch.int64, device=self.device))
 
         # unreg_list fully processed → clear so next capture starts clean.
         self._graph_ipc_unreg_list = []
