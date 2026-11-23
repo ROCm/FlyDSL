@@ -8,11 +8,14 @@
 Run with pytest, or use the CLI below for correctness and throughput measurements.
 """
 
-import copy
+import argparse
 import functools
+import itertools
+import math
 import os
 import statistics
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -38,9 +41,12 @@ from tests.test_common import run_perftest  # noqa: E402
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
-_BENCH_WARMUP = 50
-_BENCH_ITERS = 100  # Timed launches per round.
-_BENCH_ROUNDS = 10
+# One round = idle GPU, untimed launches, then one timed batch; the median batch mean is reported.
+_BENCH_IDLE_S = 1.0
+_BENCH_WARMUP = 10
+_BENCH_ITERS = 50
+_BENCH_ROUNDS = 3
+_E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 @dataclass(frozen=True)
@@ -125,10 +131,49 @@ def _pointer(tensor, unsigned=False):
     return flyc.from_c_void_p(fx.Uint8 if unsigned else fx.Int8, tensor.data_ptr(), assumed_align=16)
 
 
-def _operand(rows, K, fp4, const_val, out_dtype, signed=False):
+def _trig_mx(rows, K, fp4):
+    """cos(uniform angle) per element with one E8M0 scale per 32 (rounded mean element exponent), mantissas truncated."""
+    grid = torch.tensor(_E2M1, dtype=torch.float64, device="cuda")
+    mbits = 1 if fp4 else 3
+    step = max(1, (1 << 25) // K)
+    data, scales = [], []
+    for r0 in range(0, rows, step):
+        n = min(step, rows - r0)
+        angle = torch.rand((n, K), device="cuda", dtype=torch.float64) * (2 * math.pi)
+        mant, exp = torch.frexp(torch.cos(angle))
+        exp = (exp - 1).double().view(n, K // 32, 32)
+        scale = torch.floor(exp.mean(-1) + 127.5)
+        frac = torch.floor((mant.abs() * 2 - 1) * 2**mbits) / 2**mbits + 1
+        val = (torch.where(mant < 0, -frac, frac).view_as(exp) * torch.exp2(exp - scale.unsqueeze(-1) + 127)).view(n, K)
+        mag = val.abs()
+        if fp4:
+            code = torch.bucketize(mag.clamp(max=6), grid, right=True) - 1
+            data.append(utils.pack_uint4(code.to(torch.uint8) | ((val < 0).to(torch.uint8) << 3)))
+        else:
+            q = val.clamp(-448, 448).float().to(torch.float8_e4m3fn)
+            raw = q.view(torch.uint8)
+            data.append(raw - (((raw & 0x7F) > 0) & (q.double().abs() > mag)).to(torch.uint8))
+        scales.append(scale.to(torch.uint8))
+    return torch.cat(data), torch.cat(scales)
+
+
+def _uniform_mx(rows, K, fp4):
+    """x ~ U[0, 1) rounded to E4M3 / E2M1 with a random power-of-two E8M0 scale (exponent -3..3) per 32 elements."""
+    x = torch.rand((rows, K), device="cuda")
+    data = (utils.f32_to_mxfp4(x) if fp4 else x.to(torch.float8_e4m3fn)).view(torch.uint8)
+    return data, utils.random_e8m0(rows, K // 32, low_exp=124, high_exp=130, device="cuda")
+
+
+_GENERATED = {"trig": _trig_mx, "uniform": _uniform_mx}
+
+
+def _operand(rows, K, fp4, init, out_dtype, signed=False):
+    """Packed data, its f32 decode and, for the generated inits, the E8M0 scales that belong to the data."""
     decode = utils.mxfp4_to_f32 if fp4 else utils.fp8_e4m3_to_f32
+    kind, _, value = init.partition(",")
     cols = K // 2 if fp4 else K
-    if const_val is None:
+    scale = None
+    if kind == "random":
         # Use a moderate range for f16 and cancellation cases; other bf16 cases
         # exercise the full FP8 exponent range with the original tolerances.
         data = (
@@ -140,7 +185,8 @@ def _operand(rows, K, fp4, const_val, out_dtype, signed=False):
         )
         if signed and not fp4:
             data |= torch.randint(0, 2, data.shape, dtype=torch.uint8, device="cuda") << 7
-    else:
+    elif kind == "const":
+        const_val = float(value)
         codes = torch.arange(16 if fp4 else 256, dtype=torch.uint8).view(1, -1)
         values = decode(codes)[0, ::2] if fp4 else decode(codes)[0]
         matches = (values == const_val).nonzero()
@@ -148,7 +194,9 @@ def _operand(rows, K, fp4, const_val, out_dtype, signed=False):
             raise ValueError(f"{const_val} is not exactly representable in {'fp4' if fp4 else 'fp8'}")
         code = int(matches[0, 0])
         data = torch.full((rows, cols), code | (code << 4) if fp4 else code, dtype=torch.uint8, device="cuda")
-    return data, decode(data)
+    else:
+        data, scale = _GENERATED[kind](rows, K, fp4)
+    return data, decode(data), scale
 
 
 def _preshuffle_scale(scale):
@@ -159,7 +207,7 @@ def _preshuffle_scale(scale):
     return scale.view(blocks, 32, cols // 4, 4).permute(0, 2, 1, 3).contiguous().view(blocks, -1)
 
 
-def _scales_and_reference(cfg, a, b, out_dtype, const_val, scale_scale):
+def _scales_and_reference(cfg, a, b, out_dtype, const, scale_scale, scales=None):
     M, K = a.shape
     N = b.shape[0]
     if cfg.scale == "ptpc":
@@ -167,7 +215,7 @@ def _scales_and_reference(cfg, a, b, out_dtype, const_val, scale_scale):
         def scale(rows):
             values = (
                 torch.full((rows,), scale_scale, device="cuda")
-                if const_val is not None
+                if const
                 else (scale_scale * (0.5 + torch.rand(rows, device="cuda")))
             )
             return values.float().contiguous()
@@ -186,11 +234,11 @@ def _scales_and_reference(cfg, a, b, out_dtype, const_val, scale_scale):
 
     def scale(rows):
         groups = max(1, (K + block - 1) // block) if cfg.launch is launch_gemm_a4w4 else K // block
-        if const_val is None:
+        if not const:
             return utils.random_e8m0(rows, groups, low_exp=low, high_exp=high, device="cuda")
         return torch.full((rows, groups), min(max(127, low), high), dtype=torch.uint8, device="cuda")
 
-    sa, sb = scale(M), scale(N if block == 32 else N // block)
+    sa, sb = scales or (scale(M), scale(N if block == 32 else N // block))
     a_scale = utils.e8m0_to_f32(sa).repeat_interleave(block, dim=1)[:, :K]
     b_scale = utils.e8m0_to_f32(sb).repeat_interleave(block, dim=1)[:, :K]
     if block == 128:
@@ -202,6 +250,8 @@ def _scales_and_reference(cfg, a, b, out_dtype, const_val, scale_scale):
     if cfg.fp4_w and out_dtype != "f16" and cfg.launch is not launch_gemm_a4w4:
         peak_exp = max(0, int(sa.max()) - 127) + max(0, int(sb.max()) - 127)
         tol = (min(5e-2, 1e-2 + 3e-3 * peak_exp), max(5e-2, K * (0.6 + 1.5 * peak_exp)))
+    if scales:
+        tol = (1e-2, 0.5)
     if block == 32:
         sa = torch.nn.functional.pad(sa, (0, (-sa.shape[1]) % 4), value=127)
         sb = torch.nn.functional.pad(sb, (0, (-sb.shape[1]) % 4), value=127)
@@ -216,14 +266,16 @@ class _Run:
     tolerance: tuple[float, float]
     launch: Callable[[], None]
     buffers: tuple  # Keep tensor allocations alive while launch arguments hold raw pointers.
-    bind: Callable | None = None
+    seed: int  # the random seed this run's operands were generated with (set it with torch.manual_seed to replay)
 
     def check_output(self, output):
         torch.cuda.synchronize()
         M, N = self.reference.shape
         actual = output[:M, :N]
         assert torch.isfinite(self.reference).all(), "reference overflowed; adjust the test inputs"
-        torch.testing.assert_close(actual.float(), self.reference, rtol=self.tolerance[0], atol=self.tolerance[1])
+        torch.testing.assert_close(
+            actual.float(), self.reference, rtol=self.tolerance[0], atol=self.tolerance[1], msg=f"seed={self.seed}"
+        )
         assert torch.isnan(output[M:]).all(), f"store wrote past M={M}"
         assert torch.isnan(output[:M, N:]).all(), f"store wrote into ldc padding past N={N}"
 
@@ -251,7 +303,7 @@ def _execute(
     cluster_m=1,
     cluster_n=1,
     scale_scale=1.0,
-    const_val=None,
+    init="random",
     c_guard_rows=0,
     split_k=1,
     b_preshuffle=True,
@@ -260,7 +312,6 @@ def _execute(
     fused_splitk=False,
     bounded_m=None,
     signed=False,
-    seed=0,
 ):
     """Prepare operands and reference, then compile GEMM and its optional FP32 reducer once."""
     M, N, K = shape
@@ -268,17 +319,20 @@ def _execute(
     general_a4w4 = cfg.launch is launch_gemm_a4w4
     if general_a4w4:
         fused_splitk = split_k > 1
-    torch.manual_seed(seed)
+    seed = torch.seed()  # a fresh seed every run; it is reported if a check fails
     packed_k = max(32, (K + 31) // 32 * 32) if cfg.launch is launch_gemm_a4w4 else K
-    a, a_f32 = _operand(M, packed_k, cfg.fp4_act, const_val, out_dtype, signed)
-    b, b_f32 = _operand(N, packed_k, cfg.fp4_w, const_val, out_dtype, signed)
+    a, a_f32, a_scale = _operand(M, packed_k, cfg.fp4_act, init, out_dtype, signed)
+    b, b_f32, b_scale = _operand(N, packed_k, cfg.fp4_w, init, out_dtype, signed)
     if cfg.launch is launch_gemm_a4w4:
         for operand in (a, b):
             operand[:, (K + 1) // 2 :] = 0
             if K % 2:
                 operand[:, K // 2] &= 0x0F
         a_f32, b_f32 = a_f32[:, :K], b_f32[:, :K]
-    sa, sb, ref, tol, stride_sa = _scales_and_reference(cfg, a_f32, b_f32, out_dtype, const_val, scale_scale)
+    scales = None if a_scale is None else (a_scale, b_scale)
+    sa, sb, ref, tol, stride_sa = _scales_and_reference(
+        cfg, a_f32, b_f32, out_dtype, init.startswith("const"), scale_scale, scales
+    )
     if split_k > 1 and not cfg.scheduled and cfg.launch is not launch_gemm_a4w4:
         tol = (tol[0], tol[1] + split_k * float(ref.abs().max()) * 2**-8)
     lda, ldc = packed_k + lda_extra, N + ldc_extra
@@ -316,33 +370,30 @@ def _execute(
     if cfg.compute:
         tail += (() if cfg.fp4_act else (persistent_n_tiles,)) + (fused_splitk, bounded_m)
 
-    def make_args(out, a, b, sa, sb, partials):
-        buffers = (partials, ptr(a), ptr(b), sa, sb) if tensor_args else tuple(ptr(t) for t in (partials, a, b, sa, sb))
-        return (
-            *buffers,
-            M,
-            torch.cuda.current_stream(),
-            N,
-            K,
-            *((stride_sa,) if not cfg.fp4_w else ()),
-            lda,
-            ldc,
-            *((ptr(out),) if cfg.compute or general_a4w4 else ()),
-            tm,
-            tn,
-            tk,
-            mw,
-            nw,
-            int(out_dtype == "f16"),
-            nb,
-            cluster_m,
-            cluster_n,
-            *((cfg.scale != "ptpc", 128 if cfg.scale == "ptpc" else cfg.scale) if not cfg.fp4_w else ()),
-            split_k,
-            *tail,
-        )
-
-    args = make_args(out, a, b, sa, sb, partials)
+    buffers = (partials, ptr(a), ptr(b), sa, sb) if tensor_args else tuple(ptr(t) for t in (partials, a, b, sa, sb))
+    args = (
+        *buffers,
+        M,
+        torch.cuda.current_stream(),
+        N,
+        K,
+        *((stride_sa,) if not cfg.fp4_w else ()),
+        lda,
+        ldc,
+        *((ptr(out),) if cfg.compute or general_a4w4 else ()),
+        tm,
+        tn,
+        tk,
+        mw,
+        nw,
+        int(out_dtype == "f16"),
+        nb,
+        cluster_m,
+        cluster_n,
+        *((cfg.scale != "ptpc", 128 if cfg.scale == "ptpc" else cfg.scale) if not cfg.fp4_w else ()),
+        split_k,
+        *tail,
+    )
     compiled = flyc.compile(cfg.launch, *args)  # Also executes the first launch.
     reduce, reduce_args = None, ()
     if split_k > 1 and not fused_splitk:
@@ -361,18 +412,12 @@ def _execute(
             *reduce_args,
         )
 
-    def bind(out, a, b, sa, sb, partials):
-        args = make_args(out, a, b, sa, sb, partials)
-        bound_reduce_args = (_pointer(partials, True), _pointer(out, True), *reduce_args[2:]) if reduce else ()
+    def launch():
+        compiled(*args)
+        if reduce is not None:
+            reduce(*reduce_args)
 
-        def launch():
-            compiled(*args)
-            if reduce is not None:
-                reduce(*bound_reduce_args)
-
-        return launch
-
-    return _Run(out, ref, tol, bind(out, a, b, sa, sb, partials), (a, b, sa, sb, partials), bind)
+    return _Run(out, ref, tol, launch, (a, b, sa, sb, partials), seed)
 
 
 def _unsupported(cfg, shape, tile, options):
@@ -426,6 +471,10 @@ def _unsupported(cfg, shape, tile, options):
             f"K must be divisible by the scale block size {cfg.scale}",
         ),
         (cfg.scale == 128 and N % 128 != 0, "blockscale N must be divisible by 128"),
+        (
+            options.get("init", "random") in _GENERATED and cfg.scale != 32,
+            "trig and uniform need 32-element E8M0 scales",
+        ),
         (
             options.get("a_preshuffle")
             and (
@@ -490,7 +539,8 @@ def _cases():
                 yield _case(mode, f"fused-f16-{sk}", (17, 65, 257), split_k=sk, out_dtype="f16", ldc_extra=32)
             yield _case(mode, "fused-padded-cluster", (65, 137, 1057), split_k=4, cluster_m=2, cluster_n=2)
             yield _case(mode, "fused-short-k-nb2", (17, 65, 1), (16, 128, 128, 1, 4, 2), split_k=4)
-            yield _case(mode, "constant", const_val=0.5)
+            yield _case(mode, "constant", init="const,0.5")
+            yield from (_case(mode, init, init=init) for init in _GENERATED)
             yield _case(mode, "cluster-padded", (65, 137, 1057), cluster_m=2, cluster_n=2, repeats=32)
             yield _case(
                 mode,
@@ -526,7 +576,9 @@ def _cases():
             )
         if cfg.supports_out_dtype:
             yield _case(mode, "f16", out_dtype="f16", scale_scale=0.02 if cfg.scale == "ptpc" else 1.0)
-        yield _case(mode, "constant", const_val=0.5)
+        yield _case(mode, "constant", init="const,0.5")
+        if cfg.scale == 32:
+            yield from (_case(mode, init, init=init) for init in _GENERATED)
         if not cfg.fp4_act:  # FP4 random inputs already include both signs.
             yield _case(mode, "signed-operands", signed=True)
         if mode == "mxscale_a8w8":
@@ -652,7 +704,7 @@ def _cases():
                     out_dtype="f16",
                     lda_extra=128,
                     ldc_extra=64,
-                    const_val=0.5,
+                    init="const,0.5",
                 )
             if cfg.fp4_act:
                 yield _case(
@@ -693,47 +745,17 @@ def test_gemm(gemm, options):
     gemm.check(repeats=options.get("repeats", 0))
 
 
-@pytest.mark.parametrize("mode", ("mxscale_a8w8", "mxscale_a8w4", "a4w4"))
-@pytest.mark.parametrize("split_k", (1, 2))
-def test_rebind_gemm_buffers(mode, split_k):
-    """Rotated inputs, scales, output and split-K scratch must all use the new allocations."""
-    cfg = _MODES[mode]
-    shape, tile = (64, 256, 1536), (64, 128, 256, 2, 2, 3)
-    options = dict(b_preshuffle=False, cluster_n=2, split_k=split_k, c_guard_rows=16, ldc_extra=32)
-    assert _unsupported(cfg, shape, tile, options) is None
-    run = _execute(cfg, shape, tile, **options)
-    run.check()
-    original = (run.output, *run.buffers)
-    tensors = copy.deepcopy(original)
-    assert all(old.data_ptr() != new.data_ptr() for old, new in zip(original, tensors))
-    assert (tensors[0] is tensors[-1]) == (split_k == 1)
-    for tensor in original:
-        tensor.fill_(float("nan") if tensor.is_floating_point() else 0)
-    tensors[0].fill_(float("nan"))
-    tensors[-1].fill_(float("nan"))
-    launch = run.bind(*tensors)
-    for _ in range(3):
-        launch()
-    run.check_output(tensors[0])
-    assert torch.isnan(run.output).all(), "rotated launch wrote to the original output"
-    assert torch.isnan(run.buffers[-1]).all(), "rotated launch wrote to the original scratch"
-
-
-@pytest.mark.parametrize("rotate", (False, True))
-def test_benchmark_rejects_stale_output(monkeypatch, rotate):
-    """A skipped launch must fail even if C was copied from a correct result."""
+def test_benchmark_rejects_stale_output(monkeypatch):
+    """A skipped launch must fail even if C already holds a correct result."""
     module = sys.modules[__name__]
-    for name, value in (("_BENCH_WARMUP", 0), ("_BENCH_ITERS", 3), ("_BENCH_ROUNDS", 1)):
+    for name, value in (("_BENCH_IDLE_S", 0), ("_BENCH_WARMUP", 0), ("_BENCH_ITERS", 3), ("_BENCH_ROUNDS", 1)):
         monkeypatch.setattr(module, name, value)
     monkeypatch.setenv("FLYDSL_PERFTEST_USE_EVENTS", "1")
     run = _execute(_MODES["mxscale_a8w8"], (64, 256, 1536), (64, 128, 256, 2, 2, 3), b_preshuffle=False)
     run.check()
-    if rotate:
-        run.bind = lambda output, *buffers: run.launch if output is run.output else lambda: None
-    else:
-        run.launch = lambda: None
+    run.launch = lambda: None
     with pytest.raises(AssertionError):
-        (_bench_rotate_us if rotate else _bench_us)(run)
+        _bench_us(run)
 
 
 def test_a8w8_row_major_rejects_small_k():
@@ -766,61 +788,17 @@ def test_a4w4_k_is_runtime_in_jit_cache(monkeypatch):
 
 
 def _bench_us(run):
-    """Median per-launch latency (us) from saturated back-to-back throughput."""
-    for _ in range(_BENCH_WARMUP):
-        run.launch()
-    torch.cuda.synchronize()
+    """Median over rounds of the mean per-launch latency (us) of one timed batch, each round starting on an idle GPU."""
     samples = []
     for _ in range(_BENCH_ROUNDS):
-        start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
-        start.record()
-        for _ in range(_BENCH_ITERS):
-            run.launch()
-        end.record()
         torch.cuda.synchronize()
-        samples.append(start.elapsed_time(end) * 1e3 / _BENCH_ITERS)
+        time.sleep(_BENCH_IDLE_S)
+        _, us = run_perftest(run.launch, num_iters=_BENCH_ITERS, num_warmup=_BENCH_WARMUP, num_rotate_args=1)
+        samples.append(us)
     run.check()
     run.output.fill_(float("nan"))
     run.launch()
     run.check()
-    print("round means (us):", ", ".join(f"{us:.3f}" for us in samples))
-    return statistics.median(samples)
-
-
-def _bench_rotate_us(run):
-    """Use the BF16 harness's rotation helper and validate every rotated output."""
-    samples = []
-    for round_idx in range(_BENCH_ROUNDS):
-        launches = {}
-        run.output.fill_(float("nan"))
-
-        def launch(*tensors):
-            key = tensors[0].data_ptr()
-            if key not in launches:
-                # Bind once per allocation, keeping pointer conversion out of steady-state timing.
-                launches[key] = (run.bind(*tensors), tensors)
-            launches[key][0]()
-
-        _, us = run_perftest(
-            launch,
-            run.output,
-            *run.buffers,
-            num_iters=_BENCH_ITERS,
-            num_warmup=_BENCH_WARMUP if round_idx == 0 else 0,
-            num_rotate_args=0,
-        )
-        assert len(launches) > 1, "rotation requires at least two buffer sets"
-        for bound_launch, tensors in launches.values():
-            run.check_output(tensors[0])
-            # The helper clones C after its memory-profiling launch. Poison and
-            # rerun each set outside timing so a stale copied result cannot pass.
-            tensors[0].fill_(float("nan"))
-            bound_launch()
-            run.check_output(tensors[0])
-        samples.append(us)
-        if round_idx == 0:
-            storage_bytes = sum({t.data_ptr(): t.untyped_storage().nbytes() for t in tensors}.values())
-            print(f"rotate: {len(launches)} buffer sets, {len(launches) * storage_bytes / 2**30:.3f} GiB; all checked")
     print("round means (us):", ", ".join(f"{us:.3f}" for us in samples))
     return statistics.median(samples)
 
@@ -850,14 +828,11 @@ def _per_run(groups: list, n_modes: int, n_shapes: int, name: str) -> list:
     return groups
 
 
-def _parse_init_mode(value: str) -> float | None:
-    """'random' -> None (random fill); 'const,<float>' -> that constant A/B fill value (scales go constant too)."""
-    if value == "random":
-        return None
-    kind, _, num = value.partition(",")
-    if kind != "const" or not num:
-        raise SystemExit(f"--init-mode expects 'random' or 'const,<float>', got {value!r}")
-    return float(num)
+def _init_mode(value: str) -> str:
+    kind, _, arg = value.partition(",")
+    if kind == "const" and arg or kind in (*_GENERATED, "random") and not arg:
+        return value
+    raise argparse.ArgumentTypeError(f"expected trig, uniform, random or const,<float>, got {value!r}")
 
 
 def _print_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -874,8 +849,6 @@ def _print_table(headers: list[str], rows: list[list[str]]) -> None:
 
 
 def _main():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Manual correctness/perf run for the gfx1250 GEMM kernels. Every mode runs every shape; "
         "-tiles/-warps/-nb/-cluster/-ps/-sk take one value, one per mode, or one per (mode, shape) run.",
@@ -892,22 +865,10 @@ def _main():
     parser.add_argument(
         "-bench",
         action="store_true",
-        help=f"measure perf: {_BENCH_WARMUP} warmup launches, {_BENCH_ROUNDS} rounds of {_BENCH_ITERS} launches",
-    )
-    parser.add_argument(
-        "-rotate",
-        "-rotate_buf",
-        action="store_true",
-        help="benchmark with run_perftest's auto-sized rotating A/B/scales/output/scratch buffers (needs -bench)",
+        help=f"measure perf: {_BENCH_ROUNDS} rounds of {_BENCH_WARMUP} cold + {_BENCH_ITERS} timed launches on an idle GPU",
     )
     parser.add_argument("-sk", "--split-k", nargs="+", type=int, default=[1], help="K splits per run (default 1)")
     parser.add_argument("--fused-splitk", action="store_true", help="reduce K splits within each hardware cluster")
-    parser.add_argument(
-        "-no-b-preshuffle",
-        dest="b_preshuffle",
-        action="store_false",
-        help="disable B preshuffle where row-major B is supported (default: enabled)",
-    )
     parser.add_argument(
         "-ps",
         nargs="+",
@@ -925,16 +886,25 @@ def _main():
         help="A-preshuffle variant(s) to run: 0 (row-major) and/or 1 (2x128-tiled A); default both",
     )
     parser.add_argument(
+        "--bpre",
+        nargs="+",
+        type=int,
+        choices=[0, 1],
+        default=[1],
+        metavar="0|1",
+        help="B-preshuffle variant(s) of the general kernels: 1 (16x16-tiled B) and/or 0 (row-major B); default 1",
+    )
+    parser.add_argument(
         "--init-mode",
         nargs="+",
-        default=["random", "const,0.5"],
+        type=_init_mode,
+        default=["trig", "uniform", "random", "const,0.5"],
         metavar="MODE",
-        help="A/B/scale fill(s) to run: 'random' and/or 'const,<float>' (default: both)",
+        help="A/B/scale fills to run. trig: cos(uniform angle), scales from the block mean exponent, A == B; "
+        "uniform: U[0,1) values, scale exponent uniform in -3..3; random: stock integer codes; const,<float>",
     )
     args = parser.parse_args()
     args.mode = ["mxscale_a8w8" if mode == "a8w8" else mode for mode in args.mode]
-    if args.rotate and not args.bench:
-        parser.error("-rotate requires -bench")
     if args.bench:
         # Use the shared helper's HIP-event path, without profiler sample filtering.
         os.environ["FLYDSL_PERFTEST_USE_EVENTS"] = "1"
@@ -961,56 +931,58 @@ def _main():
         cfg = _MODES[mode]
         out_dtype = args.out_dtype if cfg.supports_out_dtype else "bf16"
         config = "t{},{},{} w{},{} nb{} c{},{}".format(*tile_cfg, cluster_m, cluster_n)
-        if args.rotate:
-            config += " rotate"
         if ps > 1:
             config += f" ps{ps}"
         if split_k > 1:
             config += f" sk{split_k}" + (" fused" if args.fused_splitk else "")
-        if cfg.launch is launch_gemm_a8w8 or mode in ("mxscale_a8w4", "a4w4"):
-            config += f" b={'preshuffle' if args.b_preshuffle else 'row-major+pad'}"
-        for apre in args.apre:
+        for apre, bpre, init in itertools.product(args.apre, [1] if cfg.scheduled else args.bpre, args.init_mode):
             kwargs = {
                 "cluster_m": cluster_m,
                 "cluster_n": cluster_n,
                 "a_preshuffle": bool(apre),
+                "b_preshuffle": bool(bpre),
                 "persistent_n_tiles": ps,
                 "split_k": split_k,
                 "fused_splitk": args.fused_splitk,
+                "init": init,
             }
-            if cfg.launch is launch_gemm_a8w8 or mode in ("mxscale_a8w4", "a4w4"):
-                kwargs["b_preshuffle"] = args.b_preshuffle
             if cfg.supports_out_dtype:
                 kwargs["out_dtype"] = args.out_dtype
+            label = [mode, str(M), str(N), str(K), config, out_dtype, str(apre), str(bpre), init]
             skip = _unsupported(cfg, (M, N, K), tile_cfg, kwargs)
             if skip is not None:
-                rows.append([mode, str(M), str(N), str(K), config, out_dtype, str(apre), "-", "-", "-", "-", "SKIP"])
-                print(f"\n{mode} {M}x{N}x{K} apre={apre}: skipped, {skip}\n")
+                rows.append([*label, "-", "-", "-", "SKIP"])
+                print(f"\n{mode} {M}x{N}x{K} apre={apre} bpre={bpre} {init}: skipped, {skip}\n")
                 continue
-            for init in args.init_mode:
-                kwargs["const_val"] = _parse_init_mode(init)
-                run = _execute(cfg, (M, N, K), tile_cfg, **kwargs)
-                error = None
-                try:
-                    run.check()
-                except AssertionError as exc:
-                    error = exc
-                perf = ["-", "-", "-"]
-                if args.bench and error is None:
-                    us = _bench_rotate_us(run) if args.rotate else _bench_us(run)
+            run = _execute(cfg, (M, N, K), tile_cfg, **kwargs)
+            result, perf = "PASS", ["-", "-", "-"]
+            try:
+                run.check()
+                if args.bench:
+                    us = _bench_us(run)
                     moved = _bytes_moved(cfg, M, N, K)
                     perf = [f"{us:.3f}", f"{2.0 * M * N * K / us / 1e6:.2f}", f"{moved / us / 1e6:.3f}"]
-                    try:
-                        run.check()
-                    except AssertionError as exc:
-                        error = exc
-                result = "PASS" if error is None else "FAIL"
-                rows.append([mode, str(M), str(N), str(K), config, out_dtype, str(apre), init, *perf, result])
-                if error is not None:
-                    print(f"\n{mode} {M}x{N}x{K} apre={apre} {init}: {error}\n")
+            except AssertionError as exc:
+                result = "FAIL"
+                print(f"\n{mode} {M}x{N}x{K} apre={apre} bpre={bpre} {init}: {exc}\n")
+            rows.append([*label, *perf, result])
 
     print()
-    headers = ["mode", "M", "N", "K", "config", "out", "apre", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"]
+    headers = [
+        "mode",
+        "M",
+        "N",
+        "K",
+        "config",
+        "out",
+        "apre",
+        "bpre",
+        "init",
+        "latency us",
+        "TFLOPS",
+        "BW TB/s",
+        "result",
+    ]
     _print_table(headers, rows)
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)
