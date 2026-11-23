@@ -10,7 +10,7 @@ import threading
 import zlib
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
@@ -456,8 +456,29 @@ class CompiledArtifact:
                 print("=" * 60)
                 print(self._source_ir)
 
-    def max_blocks_per_cu(self) -> int:
+    def binaries(self) -> Dict[str, bytes]:
+        """GPU code objects of this artifact, keyed by ``gpu.binary`` symbol name.
+
+        Each value is the raw object the JIT loads for that binary, independent
+        of how its format is printed in :attr:`ir`.
+        """
         from .._mlir.dialects import gpu
+        from .jit_function import _create_mlir_context
+
+        binaries = {}
+
+        def visit(op):
+            if op.name == "gpu.binary":
+                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
+                objects = ir.ArrayAttr(op.attributes["objects"])
+                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = gpu.ObjectAttr(objects[0]).object
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        return binaries
+
+    def max_blocks_per_cu(self) -> int:
         from .jit_function import _create_mlir_context
 
         def constant(value):
@@ -467,14 +488,10 @@ class CompiledArtifact:
                 raise ValueError("max_blocks_per_cu() needs constant block and smem sizes")
             return ir.IntegerAttr(value.owner.attributes["value"]).value
 
-        binaries, launches = {}, set()
+        launches = set()
 
         def visit(op):
-            if op.name == "gpu.binary":
-                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
-                objects = ir.ArrayAttr(op.attributes["objects"])
-                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = gpu.ObjectAttr(objects[0]).object
-            elif op.name == "gpu.launch_func":
+            if op.name == "gpu.launch_func":
                 launch = op.opview
                 block = constant(launch.blockSizeX) * constant(launch.blockSizeY) * constant(launch.blockSizeZ)
                 launches.add((*ir.SymbolRefAttr(launch.kernel).value, block, constant(launch.dynamicSharedMemorySize)))
@@ -486,7 +503,7 @@ class CompiledArtifact:
             raise ValueError(f"max_blocks_per_cu() needs exactly one kernel launch, found {len(launches)}")
         module_name, kernel_name, block, smem = launches.pop()
         lib = ctypes.CDLL(_resolve_runtime_libs()[0])
-        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(binaries[module_name], kernel_name.encode(), block, smem)
+        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(self.binaries()[module_name], kernel_name.encode(), block, smem)
         if blocks <= 0:
             raise RuntimeError("max_blocks_per_cu(): HIP occupancy query failed")
         return blocks
