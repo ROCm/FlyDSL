@@ -518,4 +518,5 @@ Which layout operation do I need?
 | `include/flydsl/Dialect/Fly/IR/FlyOps.td` | Fly dialect op definitions |
 | `lib/Dialect/Fly/IR/FlyOps.cpp` | Type inference for composition, product, divide (Fly) |
 | `include/flydsl/Core/Algebra/Layout.hpp` | Layout algebra algorithms (composition, product, divide) |
-| `tests/mlir/LayoutAlgebra/*.mlir` | Layout algebra MLIR lit tests |
+| `tests/core/*.cpp` | Layout algebra unit tests of the Core library |
+| `tests/mlir/Dialect/Fly/*.mlir` | Fly type syntax and the type inference of each operation |

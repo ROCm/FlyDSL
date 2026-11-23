@@ -682,13 +682,16 @@ class MlirCompiler:
                 if asm_for_isa is not None:
                     if not external_binary:
                         isa_stage = f"{next_stage:02d}_final_isa"
-                        isa_out = _dump_isa(
-                            dump_dir=dump_dir,
-                            ctx=module.context,
-                            asm=asm_for_isa,
-                            verify=env.debug.enable_verifier,
-                            stage_name=isa_stage,
-                        )
+                        # The in-process LLD link above resets every LLVM cl::opt to its
+                        # default, so re-apply llvm_options for this second codegen.
+                        with _llvm_options(llvm_opts) if llvm_opts else nullcontext():
+                            isa_out = _dump_isa(
+                                dump_dir=dump_dir,
+                                ctx=module.context,
+                                asm=asm_for_isa,
+                                verify=env.debug.enable_verifier,
+                                stage_name=isa_stage,
+                            )
                         if isa_out is not None:
                             print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
                     else:

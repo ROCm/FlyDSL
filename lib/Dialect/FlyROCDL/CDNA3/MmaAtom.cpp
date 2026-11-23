@@ -85,21 +85,26 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
+  // FP8 / BF8 in either format: gfx942 reads the FNUZ ones, gfx950 the OCP ones.
   auto isValidElemType = [](Type ty) {
-    return ty.isF16() || ty.isBF16() || ty.isF32() || isa<Float8E4M3FNUZType>(ty) ||
-           isa<Float8E5M2FNUZType>(ty) || isa<Float8E4M3FNType>(ty);
+    return ty.isF16() || ty.isBF16() || ty.isF32() ||
+           isa<Float8E4M3FNUZType, Float8E5M2FNUZType, Float8E4M3FNType, Float8E5M2Type>(ty);
   };
   if (!isValidElemType(elemTyA)) {
-    return emitError() << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyA;
+    return emitError()
+           << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, f8E4M3FN, f8E5M2, got "
+           << elemTyA;
   }
   if (!isValidElemType(elemTyB)) {
-    return emitError() << "elemTyB must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyB;
+    return emitError()
+           << "elemTyB must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, f8E4M3FN, f8E5M2, got "
+           << elemTyB;
   }
   return success();
 }
 
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty) || isa<Float8E4M3FNType>(ty); }
-static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType, Float8E4M3FNType>(ty); }
+static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType, Float8E5M2Type>(ty); }
 
 static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_t k = 0) {
   if (elemTy.isF32())
@@ -116,8 +121,14 @@ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_t k =
     }
     return VectorType::get({vecSize}, elemTy);
   }
-  if (elemTy.getIntOrFloatBitWidth() == 8)
-    return IntegerType::get(ctx, 64);
+  if (elemTy.getIntOrFloatBitWidth() == 8) {
+    // 8 bytes per lane travel as an i64, 16 bytes (gfx950 i8 16x16x64 / 32x32x32) as 4 x i32.
+    int64_t bytes = mn * k / 64;
+    if (bytes == 8)
+      return IntegerType::get(ctx, 64);
+    if (bytes == 16)
+      return VectorType::get({4}, IntegerType::get(ctx, 32));
+  }
   return nullptr;
 }
 
@@ -210,6 +221,8 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 
   DISPATCH_MFMA_SSA(16, 32, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_16x16x32_i8)
   DISPATCH_MFMA_SSA(32, 16, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_32x32x16_i8)
+  DISPATCH_MFMA_SSA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_16x16x64_i8)
+  DISPATCH_MFMA_SSA(32, 32, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_32x32x32_i8)
 
 #undef DISPATCH_MFMA_SSA
 

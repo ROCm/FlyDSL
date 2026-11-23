@@ -107,6 +107,12 @@ The header exposes two calling styles:
   module and loads it on the current device before each call. It intentionally
   does not unload automatically, so asynchronous launches remain safe.
 
+The packed entry returns 0 once all its launches are submitted. Otherwise it
+returns the first error: a HIP error code, -1 if the module is not
+initialized, or -2 if it is not loaded on the current device. A call stops at
+its first failed launch and skips the remaining ones; launches it already
+submitted still run.
+
 The current exporter targets 64-bit little-endian Linux ELF hosts and uses
 GNU-compatible relocatable linking and ``objcopy`` tools. The ROCm adapter
 requires HIP and pthread. Exported objects are tied to the host ABI and GPU
@@ -208,6 +214,40 @@ combinations and returns ``None`` instead of a callable.
 Export currently supports tensor, pointer, scalar, structure, and stream
 arguments whose lowered types have a supported C ABI. Unsupported launchers
 report the export error when ``export_to_c`` is called.
+
+Loading an exported object
+--------------------------
+
+``flyc.load_module(path)`` loads an object written by ``export_to_c`` back into
+the current process and returns a ``CompiledFunction``:
+
+.. code-block:: python
+
+   fn = flyc.load_module(output / "vector_add.o")
+   fn(A, B, A.numel())
+
+The object is linked in memory by the in-process JIT linker, so no system
+linker, compiler, or shared library on disk is involved. Loading runs the
+object's module initialization and loads its GPU module on the current device.
+The function loads the module on any other device the first time it is called
+there, so only devices it runs on hold a copy. The module is unloaded from every
+device when the returned function is garbage collected. Each load is
+independent, so loading the same file twice links it twice.
+
+The returned function is called like the one ``flyc.compile`` returns. It
+takes the launcher's arguments positionally, ignores ``Constexpr`` arguments
+(their values are part of the object), and fills omitted trailing arguments
+from the launcher's defaults, which the export records with each parameter's
+name, kind, and annotation. Tensors are passed as framework tensors or DLPack
+objects, pointers as integers or pointer wrappers, and streams as stream
+objects or ``None``. A launch uses the current HIP device. A failed call
+raises ``RuntimeError`` with the error code; as with the packed entry, its
+remaining launches are skipped.
+
+``load_module`` supports Linux x86-64 objects only. It rejects an object from
+a different metadata schema version, so objects must be exported again after
+a FlyDSL upgrade that changes the schema. The loaded function cannot be
+exported again, and ``max_blocks_per_cu()`` is not available on it.
 
 ROCDL operations
 -----------------

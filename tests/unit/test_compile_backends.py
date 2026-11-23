@@ -69,3 +69,42 @@ def test_registering_extra_backend_does_not_change_default(monkeypatch):
     assert backends.compile_backend_name() == "rocm"
     assert backends.get_backend(arch="gfx942").target.backend == "rocm"
     assert backends.get_backend("dummy", arch="dummy0").target.backend == "dummy"
+
+
+def test_runtime_lib_basenames_accepts_classmethod_and_instance_method(monkeypatch):
+    backends = _load_backends(monkeypatch)
+    detected = []
+
+    class _Base(backends.BaseBackend):
+        @staticmethod
+        def supports_target(target):
+            return True
+
+        @staticmethod
+        def detect_target():
+            detected.append(True)
+            return backends.GPUTarget(backend="dummy", arch="dummy0", warp_size=1)
+
+        def pipeline_fragments(self, *, compile_hints):
+            return []
+
+        def gpu_module_targets(self, *, compile_hints, link_libs=()):
+            return []
+
+    class _InstanceBackend(_Base):
+        def jit_runtime_lib_basenames(self):
+            return ["libinstance.so"]
+
+    class _ClassBackend(_Base):
+        @classmethod
+        def jit_runtime_lib_basenames(cls):
+            return ["libclass.so"]
+
+    backends.register_backend("dummy_instance", _InstanceBackend)
+    backends.register_backend("dummy_class", _ClassBackend)
+
+    # A classmethod resolves without detecting a GPU target.
+    assert backends._runtime_lib_basenames("dummy_class") == ["libclass.so"]
+    assert not detected
+    # An instance method keeps working through a backend instance.
+    assert backends._runtime_lib_basenames("dummy_instance") == ["libinstance.so"]

@@ -2,6 +2,16 @@
 // Copyright (c) 2026 FlyDSL Project Contributors
 // RUN: %fly-opt %s --split-input-file --verify-diagnostics
 
+// An error in the Core result of an operation is reported on the operation.
+func.func @non_injective_complement(%layout: !fly.layout<(3,2):(1,2)>, %codomain: !fly.int_tuple<12>) {
+  // expected-error @+2 {{invalid layout algebra result: !non-injective-layout (in complement)}}
+  // expected-error @+1 {{failed to infer returned types}}
+  %0 = fly.complement(%layout, %codomain) : (!fly.layout<(3,2):(1,2)>, !fly.int_tuple<12>) -> !fly.layout<1:0>
+  return
+}
+
+// -----
+
 // A fragment covers whole tiles of the tiled MMA (32x16x16 here): an extent that is not a multiple
 // of the tile would make it, and the copies through it, reach past the view. Two atoms along M
 // make the M tile 32, so each check is against its own mode's tile.

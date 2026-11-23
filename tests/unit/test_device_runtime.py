@@ -3,6 +3,9 @@
 
 """device runtime registry and compile-backend pairing."""
 
+import os
+import types
+
 import pytest
 
 import flydsl.runtime.device_runtime as dr
@@ -102,3 +105,20 @@ def test_pairing_from_env_mismatch_raises(monkeypatch):
     monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "not_a_registered_kind")
     with pytest.raises(RuntimeError, match="requires device runtime kind"):
         dr.ensure_compile_runtime_pairing_from_env("rocm")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux soname lookup")
+def test_hip_loader_finds_versioned_soname_7(monkeypatch):
+    """ROCm can ship only libamdhip64.so.7, without an unversioned libamdhip64.so."""
+    from flydsl.runtime.device_runtime import rocm
+
+    def cdll(name):
+        if name != "libamdhip64.so.7":
+            raise OSError(name)
+        return types.SimpleNamespace(name=name, hipGetDevice=types.SimpleNamespace())
+
+    monkeypatch.setattr(rocm.ctypes, "CDLL", cdll)
+    monkeypatch.setattr(rocm, "_HIP_LIB", None)
+    monkeypatch.setattr(rocm, "_HIP_LIB_TRIED", False)
+    rocm._hip_get_device()
+    assert rocm._HIP_LIB is not None and rocm._HIP_LIB.name == "libamdhip64.so.7"

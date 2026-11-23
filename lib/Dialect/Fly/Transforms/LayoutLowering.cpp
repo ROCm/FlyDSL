@@ -219,7 +219,8 @@ template <class AttrT> void appendAttrPrintf(AttrT attr, std::string &format) {
   format += StringRef(text).drop_front(prefix.size()).str();
 }
 
-/// A composed layout prints as CuTe does: `inner o offset o outer`.
+/// A composed layout prints as its type does: `inner o offset o outer`, where a composed inner
+/// continues the chain and a composed outer is bracketed.
 bool appendComposedPrintf(PatternRewriter &rewriter,
                           const core::ComposedLayout<core::EmitOp> &value, core::EmitContext &ctx,
                           std::string &format, SmallVectorImpl<Value> &args) {
@@ -241,6 +242,12 @@ bool appendComposedPrintf(PatternRewriter &rewriter,
   format += " o ";
   ok = ok && appendIntTuplePrintf(rewriter, value.offset(), ctx, format, args);
   format += " o ";
+  if (auto *outer = std::get_if<core::ComposedLayout<core::EmitOp>>(&value.outer())) {
+    format += "[";
+    ok = ok && appendComposedPrintf(rewriter, *outer, ctx, format, args);
+    format += "]";
+    return ok;
+  }
   return ok && appendLayoutPrintf(rewriter, value.outer(), ctx, format, args);
 }
 
