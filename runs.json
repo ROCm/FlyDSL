@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-23T12:14:02Z",
+ "updated": "2026-11-23T12:16:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45172308276,
+   "pr": 1431,
+   "commit": "430c8cbd82339bde863b342e581680deda2542f2",
+   "branch": "jli/llvm-upgrade-e2ce52c885",
+   "event": "pull_request",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276",
+   "created_at": "2026-11-23T12:13:49Z",
+   "updated_at": "2026-11-23T12:14:13Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 45167856920,
    "pr": 1431,
@@ -11,10 +26,10 @@
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45167856920",
    "created_at": "2026-11-23T11:44:19Z",
-   "updated_at": "2026-11-23T12:11:12Z",
+   "updated_at": "2026-11-23T12:14:06Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -1151,7 +1166,9 @@
      "started_at": "2026-11-22T14:43:45Z",
      "completed_at": "2026-11-22T15:54:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45032631676/job/137244525842",
-     "log_fetch_failed": true
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2329,49 +2346,6 @@
      "started_at": "2026-11-20T04:20:47Z",
      "completed_at": "2026-11-20T04:46:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082175"
-    }
-   ]
-  },
-  {
-   "run_id": 44666027169,
-   "pr": null,
-   "commit": "7c41b4123f68eb48d7dfbf52a1a1941c928a0b59",
-   "branch": "fix/get-iter-fold",
-   "event": "pull_request",
-   "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169",
-   "created_at": "2026-11-20T03:11:35Z",
-   "updated_at": "2026-11-20T03:52:09Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-20T03:47:03Z",
-     "completed_at": "2026-11-20T03:51:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528467"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-20T03:50:02Z",
-     "completed_at": "2026-11-20T03:52:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528498"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-20T03:47:23Z",
-     "completed_at": "2026-11-20T03:52:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44666027169/job/136068528537"
     }
    ]
   }
