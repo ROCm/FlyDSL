@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T03:50:26Z",
+ "updated": "2026-11-23T03:52:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "phil/subbyte-view-byte-offset",
    "event": "pull_request",
    "title": "[Bugfix] Step 4 and 6-bit view offsets in bytes",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288",
    "created_at": "2026-11-23T02:09:39Z",
-   "updated_at": "2026-11-23T03:16:53Z",
+   "updated_at": "2026-11-23T03:49:06Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -84,11 +84,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T03:15:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288/job/137454047138"
+     "completed_at": "2026-11-23T03:49:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288/job/137454047138",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -374,11 +377,11 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559",
    "created_at": "2026-11-23T00:24:03Z",
-   "updated_at": "2026-11-23T03:25:31Z",
+   "updated_at": "2026-11-23T03:49:44Z",
    "actor": "jli-melchior",
    "jobs": [
     {
