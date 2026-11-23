@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-23T08:11:34Z",
+ "updated": "2026-11-23T08:26:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45138300271,
+   "pr": null,
+   "commit": "28a4ebca35baecba96c0b651f17a2eba01c8c72b",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_cod\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271",
+   "created_at": "2026-11-23T08:24:01Z",
+   "updated_at": "2026-11-23T08:24:48Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45135322709,
    "pr": 1431,
@@ -25,38 +40,38 @@
    "branch": "main",
    "event": "push",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number (\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316",
    "created_at": "2026-11-23T07:44:05Z",
-   "updated_at": "2026-11-23T08:07:33Z",
+   "updated_at": "2026-11-23T08:24:35Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T08:24:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627200"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T08:24:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627201"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T08:24:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627321"
     }
    ]
@@ -327,7 +342,7 @@
   },
   {
    "run_id": 45114102127,
-   "pr": 1483,
+   "pr": null,
    "commit": "c80aca6a69ff89e96af9b65a401eb1bee16eb879",
    "branch": "fix/external-codegen-link-compat",
    "event": "pull_request",
@@ -511,7 +526,7 @@
   },
   {
    "run_id": 45094754994,
-   "pr": 1483,
+   "pr": null,
    "commit": "6d305e45e3e5c9116a8325bd4e7601ad667097ec",
    "branch": "fix/external-codegen-link-compat",
    "event": "pull_request",
@@ -2289,52 +2304,6 @@
    "updated_at": "2026-11-19T13:07:43Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 44523471852,
-   "pr": null,
-   "commit": "802b3c92d6d4813b92a213b468959eb9dd520d85",
-   "branch": "main",
-   "event": "push",
-   "title": "[Tests] Keep tests that read source_ir off the JIT disk cache (#1435)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852",
-   "created_at": "2026-11-19T12:23:43Z",
-   "updated_at": "2026-11-19T14:34:05Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T13:35:53Z",
-     "completed_at": "2026-11-19T14:34:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595763118",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T13:04:05Z",
-     "completed_at": "2026-11-19T13:16:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595764804"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T12:55:15Z",
-     "completed_at": "2026-11-19T13:21:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44523471852/job/135595765864"
-    }
-   ]
   }
  ]
 }
