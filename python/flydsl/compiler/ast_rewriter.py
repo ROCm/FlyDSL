@@ -18,7 +18,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
 from ..expr.meta import capture_user_location, file_location, thunk_runner
-from ..expr.numeric import Numeric
+from ..expr.numeric import Boolean, Numeric
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -662,20 +662,30 @@ class RewriteBoolOps(Transformer):
         # `and` and `or` each have an identity (True / False) and an absorbing element
         # (False / True). An operand already known to be one of them needs no op: the identity
         # leaves the accumulator alone, the absorbing element decides the chain.
+        # A chain therefore carries the truth of the operands rather than an operand itself:
+        # one whose truth is known at trace time is a Boolean, not the bool or int Python would
+        # have returned. Operands of other types still fold through `dsl_and_` / `dsl_or_`.
         combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
         identity = not is_or
-        result = identity
+        result = Boolean(identity)
         for operand in operands:
             value = next(operand)
             # A DSL value holds an ir.Value only while it is dynamic, so one that does not is
-            # just a compile-time bool, and folds like one.
+            # just a compile-time bool, and folds like one. A dynamic one becomes a Boolean, so
+            # the chain is an i1 however its operands were typed.
             if isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
-                value = bool(value.value)
-            if isinstance(value, bool):
-                if value is identity:
+                value = Boolean(bool(value.value))
+            elif isinstance(value, Numeric) and not isinstance(value, Boolean):
+                value = value.__dsl_bool__()
+            elif isinstance(value, bool):
+                value = Boolean(value)
+            elif isinstance(value, int):
+                value = Boolean(bool(value))
+            if isinstance(value, Boolean) and value.is_static():
+                if bool(value.value) is identity:
                     continue
-                return is_or
-            result = value if isinstance(result, bool) else combine(result, value)
+                return Boolean(is_or)
+            result = value if (isinstance(result, Boolean) and result.is_static()) else combine(result, value)
         return result
 
     @staticmethod

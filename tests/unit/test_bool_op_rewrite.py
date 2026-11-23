@@ -59,7 +59,10 @@ def test_walrus_in_later_operand_binds_in_the_function():
     def f(x):
         return (x > 0 and (y := x + 1)), y
 
-    assert ASTRewriter.transform(f)(2) == (3, 3)
+    # An operand whose truth is known folds away, so the chain is a Boolean rather than the
+    # operand Python would return; the walrus still binds in the function.
+    chain, bound = ASTRewriter.transform(f)(2)
+    assert bool(chain) and bound == 3
 
 
 def _walrus_in_a_dynamic_chain(a, b):
