@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T08:09:37Z",
+ "updated": "2026-11-23T08:11:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number (\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316",
    "created_at": "2026-11-23T07:44:05Z",
-   "updated_at": "2026-11-23T07:46:36Z",
+   "updated_at": "2026-11-23T08:07:33Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T08:07:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627200"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T08:07:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627201"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T08:07:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627321"
+    }
+   ]
   },
   {
    "run_id": 45130395175,
@@ -68,9 +96,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T07:54:44Z",
+     "started_at": "2026-11-23T08:09:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175/job/137557522806"
     }
@@ -111,10 +139,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T07:45:37Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T08:08:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117/job/137546008096"
     }
    ]
@@ -184,11 +212,11 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855",
    "created_at": "2026-11-23T06:46:08Z",
-   "updated_at": "2026-11-23T07:20:32Z",
+   "updated_at": "2026-11-23T08:09:04Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -206,10 +234,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T07:08:13Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T08:09:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327591"
     }
    ]
