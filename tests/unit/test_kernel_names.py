@@ -16,9 +16,6 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
-EM_AMDGPU = 224
-
-
 @flyc.kernel
 def _first(x: fx.Tensor):
     pass
@@ -36,7 +33,7 @@ def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
     _first(x).launch(grid=(2, 1, 1), block=(64, 1, 1), stream=stream)
 
 
-def test_kernel_names_and_code_object():
+def test_kernel_names():
     # CPU tensors are compile placeholders, so nothing is launched.
     compiled = flyc.compile(_launch, torch.zeros(64))
 
@@ -45,8 +42,6 @@ def test_kernel_names_and_code_object():
     assert [n.rsplit("_", 1)[0] for n in names] == ["_first", "_second", "_first"]
     assert len(set(names)) == 3
 
-    code = compiled.code_object()
-    assert code[:4] == b"\x7fELF"
-    assert int.from_bytes(code[18:20], "little") == EM_AMDGPU
+    (code,) = compiled.binaries().values()
     for name in names:
         assert name.encode() in code

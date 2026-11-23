@@ -60,7 +60,7 @@ On first call, ``@flyc.jit`` runs the following pipeline:
       - ``fly-promote-regmem-to-vectorssa``
       - ``convert-fly-to-rocdl``
       - ``canonicalize``
-      - ``gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
+      - ``gpu.module(convert-scf-to-cf, cse, convert-rocdl-math-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
 
    B. ``binary_prep_fragments`` (→ LLVM):
 
@@ -166,6 +166,18 @@ Calls to the returned ``CompiledFunction`` dispatch directly without constructin
 or looking up a JIT cache key. ``flyc.compile`` itself uses the existing JIT
 specialization cache.
 
+``CompiledFunction.binaries()`` returns the GPU code objects of the
+specialization as a ``dict`` mapping each ``gpu.binary`` symbol name to the raw
+bytes the JIT loads, for example an HSACO ELF on ROCm. Use it to inspect
+register, LDS, or ISA properties of a kernel instead of parsing the printed IR,
+whose format keywords are not a stable interface.
+
+``CompiledFunction.kernel_names()`` returns the symbols of the GPU kernels the
+launcher launches, in the order their launches appear in the launcher. Each
+launch site compiles its own kernel, so a kernel function launched from two
+sites is listed under two symbols. These are the symbols to look up in the
+objects from ``binaries()``.
+
 The same compiled specialization can be exported as a position-independent
 host object with a generated C header:
 
@@ -215,23 +227,6 @@ Export currently supports tensor, pointer, scalar, structure, and stream
 arguments whose lowered types have a supported C ABI. Unsupported launchers
 report the export error when ``export_to_c`` is called.
 
-Inspecting a compiled function
-------------------------------
-
-A ``CompiledFunction`` from ``flyc.compile`` also describes the GPU code it
-loads, without launching it:
-
-- ``kernel_names()`` -- symbols of the GPU kernels the launcher launches, in the
-  order their launches appear in the launcher. Each launch site compiles its own
-  kernel, so a kernel function launched from two sites is listed under two
-  symbols.
-- ``code_object()`` -- the linked GPU code object (an HSACO ELF on ROCm) as
-  ``bytes``, for tools that read its kernel metadata or load it themselves.
-  Raises ``ValueError`` unless the launcher compiles to exactly one GPU module.
-- ``max_blocks_per_cu()`` -- the most resident blocks of the launched kernel per
-  CU on the current device. Needs exactly one launch with constant block and
-  shared-memory sizes.
-
 Loading an exported object
 --------------------------
 
@@ -264,8 +259,8 @@ remaining launches are skipped.
 ``load_module`` supports Linux x86-64 objects only. It rejects an object from
 a different metadata schema version, so objects must be exported again after
 a FlyDSL upgrade that changes the schema. The loaded function cannot be
-exported again, and ``kernel_names()``, ``code_object()`` and
-``max_blocks_per_cu()`` are not available on it.
+exported again, and ``max_blocks_per_cu()``, ``binaries()`` and
+``kernel_names()`` are not available on it.
 
 ROCDL operations
 -----------------
