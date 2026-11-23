@@ -1432,7 +1432,7 @@ class CompiledFunction:
         return self._keepalive.max_blocks_per_cu()
 
     def kernel_names(self) -> List[str]:
-        """Symbols of the GPU kernels this function launches, in launch order, without repeats."""
+        """Symbols of the GPU kernels this function launches, one per launch site, in the order the sites appear."""
         return self._keepalive.kernel_names()
 
     def code_object(self) -> bytes:

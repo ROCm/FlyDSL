@@ -221,8 +221,10 @@ Inspecting a compiled function
 A ``CompiledFunction`` from ``flyc.compile`` also describes the GPU code it
 loads, without launching it:
 
-- ``kernel_names()`` -- symbols of the GPU kernels the launcher launches, in
-  launch order, without repeats.
+- ``kernel_names()`` -- symbols of the GPU kernels the launcher launches, in the
+  order their launches appear in the launcher. Each launch site compiles its own
+  kernel, so a kernel function launched from two sites is listed under two
+  symbols.
 - ``code_object()`` -- the linked GPU code object (an HSACO ELF on ROCm) as
   ``bytes``, for tools that read its kernel metadata or load it themselves.
   Raises ``ValueError`` unless the launcher compiles to exactly one GPU module.

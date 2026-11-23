@@ -456,10 +456,27 @@ class CompiledArtifact:
                 print("=" * 60)
                 print(self._source_ir)
 
-    def max_blocks_per_cu(self) -> int:
+    def _gpu_code(self, launch_info):
+        """``({gpu.binary name: (format, object bytes)}, [launch_info(op) per gpu.launch_func])`` of the module."""
         from .._mlir.dialects import gpu
         from .jit_function import _create_mlir_context
 
+        binaries, launches = {}, []
+
+        def visit(op):
+            if op.name == "gpu.binary":
+                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
+                obj = gpu.ObjectAttr(ir.ArrayAttr(op.attributes["objects"])[0])
+                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = (obj.format, obj.object)
+            elif op.name == "gpu.launch_func":
+                launches.append(launch_info(op.opview))
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        return binaries, launches
+
+    def max_blocks_per_cu(self) -> int:
         def constant(value):
             if value is None:
                 return 0
@@ -467,63 +484,34 @@ class CompiledArtifact:
                 raise ValueError("max_blocks_per_cu() needs constant block and smem sizes")
             return ir.IntegerAttr(value.owner.attributes["value"]).value
 
-        binaries, launches = {}, set()
+        def launch_info(launch):
+            block = constant(launch.blockSizeX) * constant(launch.blockSizeY) * constant(launch.blockSizeZ)
+            return (*ir.SymbolRefAttr(launch.kernel).value, block, constant(launch.dynamicSharedMemorySize))
 
-        def visit(op):
-            if op.name == "gpu.binary":
-                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
-                objects = ir.ArrayAttr(op.attributes["objects"])
-                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = gpu.ObjectAttr(objects[0]).object
-            elif op.name == "gpu.launch_func":
-                launch = op.opview
-                block = constant(launch.blockSizeX) * constant(launch.blockSizeY) * constant(launch.blockSizeZ)
-                launches.add((*ir.SymbolRefAttr(launch.kernel).value, block, constant(launch.dynamicSharedMemorySize)))
-            return ir.WalkResult.ADVANCE
-
-        with _create_mlir_context():
-            ir.Module.parse(self._ir_text).operation.walk(visit)
+        binaries, launches = self._gpu_code(launch_info)
+        launches = set(launches)
         if len(launches) != 1:
             raise ValueError(f"max_blocks_per_cu() needs exactly one kernel launch, found {len(launches)}")
         module_name, kernel_name, block, smem = launches.pop()
         lib = ctypes.CDLL(_resolve_runtime_libs()[0])
-        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(binaries[module_name], kernel_name.encode(), block, smem)
+        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(binaries[module_name][1], kernel_name.encode(), block, smem)
         if blocks <= 0:
             raise RuntimeError("max_blocks_per_cu(): HIP occupancy query failed")
         return blocks
 
-    def _gpu_code(self):
-        """``({gpu.binary name: object attr}, [kernel symbol per gpu.launch_func])`` of the lowered module."""
-        from .._mlir.dialects import gpu
-        from .jit_function import _create_mlir_context
-
-        objects, kernels = {}, []
-
-        def visit(op):
-            if op.name == "gpu.binary":
-                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
-                obj = gpu.ObjectAttr(ir.ArrayAttr(op.attributes["objects"])[0])
-                objects[ir.StringAttr(op.attributes["sym_name"]).value] = (obj.format, obj.object)
-            elif op.name == "gpu.launch_func":
-                kernels.append(ir.SymbolRefAttr(op.opview.kernel).value[-1])
-            return ir.WalkResult.ADVANCE
-
-        with _create_mlir_context():
-            ir.Module.parse(self._ir_text).operation.walk(visit)
-        return objects, kernels
-
     def kernel_names(self) -> List[str]:
-        _, kernels = self._gpu_code()
+        _, kernels = self._gpu_code(lambda launch: ir.SymbolRefAttr(launch.kernel).value[-1])
         return list(dict.fromkeys(kernels))
 
     def code_object(self) -> bytes:
         from .._mlir.dialects import gpu
 
-        objects, _ = self._gpu_code()
-        if len(objects) != 1:
-            raise ValueError(f"code_object() needs exactly one GPU module, found {len(objects)}")
-        ((fmt, data),) = objects.values()
-        if fmt == gpu.CompilationTarget.Assembly:
-            raise ValueError("code_object(): the GPU module holds assembly, not a linked code object")
+        binaries, _ = self._gpu_code(lambda launch: None)
+        if len(binaries) != 1:
+            raise ValueError(f"code_object() needs exactly one GPU module, found {len(binaries)}")
+        ((fmt, data),) = binaries.values()
+        if fmt not in (gpu.CompilationTarget.Binary, gpu.CompilationTarget.Fatbin):
+            raise ValueError("code_object(): the GPU module does not hold a linked code object")
         return data
 
     @property

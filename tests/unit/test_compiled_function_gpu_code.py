@@ -33,14 +33,17 @@ def _second(x: fx.Tensor):
 def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
     _first(x).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
     _second(x).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+    _first(x).launch(grid=(2, 1, 1), block=(64, 1, 1), stream=stream)
 
 
 def test_kernel_names_and_code_object():
     # CPU tensors are compile placeholders, so nothing is launched.
     compiled = flyc.compile(_launch, torch.zeros(64))
 
+    # One symbol per launch site: the second launch of _first is its own kernel.
     names = compiled.kernel_names()
-    assert [n.rsplit("_", 1)[0] for n in names] == ["_first", "_second"]
+    assert [n.rsplit("_", 1)[0] for n in names] == ["_first", "_second", "_first"]
+    assert len(set(names)) == 3
 
     code = compiled.code_object()
     assert code[:4] == b"\x7fELF"
