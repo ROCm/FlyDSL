@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T09:36:23Z",
+ "updated": "2026-11-23T09:40:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45148800055,
+   "pr": 1484,
+   "commit": "59791917bd675f169261a009c03433ee5b34421d",
+   "branch": "feat/compiled-function-code-object",
+   "event": "pull_request",
+   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055",
+   "created_at": "2026-11-23T09:37:57Z",
+   "updated_at": "2026-11-23T09:38:08Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 45148736684,
+   "pr": 1484,
+   "commit": "bff4f6eb295879edfe1f8289047c0da72ac8e207",
+   "branch": "feat/compiled-function-code-object",
+   "event": "pull_request",
+   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148736684",
+   "created_at": "2026-11-23T09:37:31Z",
+   "updated_at": "2026-11-23T09:37:59Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45148063855,
    "pr": 1401,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855",
    "created_at": "2026-11-23T09:33:05Z",
-   "updated_at": "2026-11-23T09:33:34Z",
+   "updated_at": "2026-11-23T09:35:13Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -105,19 +135,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T08:47:47Z",
+     "started_at": "2026-11-23T09:34:09Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383730"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-23T09:19:49Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T09:37:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383848"
     }
    ]
@@ -218,11 +248,11 @@
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
    "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117",
    "created_at": "2026-11-23T07:13:19Z",
-   "updated_at": "2026-11-23T08:37:21Z",
+   "updated_at": "2026-11-23T09:37:55Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -2278,97 +2308,6 @@
    "updated_at": "2026-11-19T21:20:10Z",
    "actor": "Monstertail",
    "jobs": []
-  },
-  {
-   "run_id": 44597956894,
-   "pr": 1412,
-   "commit": "fe24bc7f8919b47801dcb32621b2a0f2cb5520f5",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894",
-   "created_at": "2026-11-19T19:24:18Z",
-   "updated_at": "2026-11-19T21:45:35Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T20:00:34Z",
-     "completed_at": "2026-11-19T20:38:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508333",
-     "machine": "smci355-ccs-aus-n11-05",
-     "host_model": "MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T19:56:24Z",
-     "completed_at": "2026-11-19T20:05:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508466"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T19:53:30Z",
-     "completed_at": "2026-11-19T21:45:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44597956894/job/135835508757"
-    }
-   ]
-  },
-  {
-   "run_id": 44582599858,
-   "pr": 1412,
-   "commit": "338ede956956116678c8647557faeaa4d1167722",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582599858",
-   "created_at": "2026-11-19T17:57:01Z",
-   "updated_at": "2026-11-19T18:57:58Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T18:30:35Z",
-     "completed_at": "2026-11-19T18:40:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582599858/job/135782042432"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T18:21:50Z",
-     "completed_at": "2026-11-19T18:55:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582599858/job/135782042586"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T18:22:12Z",
-     "completed_at": "2026-11-19T18:57:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582599858/job/135782043388",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
