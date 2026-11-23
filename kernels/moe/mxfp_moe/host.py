@@ -202,6 +202,9 @@ def flydsl_mxfp4_gemm2(
     _cshuffle_default = epilog == "nonatomic" and BM == 128
     if (BM, use_nt, epilog) not in _G2_SUPPORTED:
         raise NotImplementedError(f"mxfp_moe gemm2 unsupported variant (BM={BM}, use_nt={use_nt}, epilog={epilog})")
+    if flat_out_scale is None and epilog in ("nonatomic_fp8", "nonatomic_mxfp4"):
+        # These epilogs store the output scales through flat_out_scale; the 1-byte dummy below is not enough.
+        raise ValueError(f"mxfp_moe gemm2 epilog={epilog} writes output scales and needs flat_out_scale")
 
     if xcd_swizzle == 0 and epilog in ("nonatomic", "nonatomic_fp8"):
         xcd_swizzle = 3

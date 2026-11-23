@@ -944,6 +944,32 @@ def test_mxfp_moe_variants(a_dtype, variant):
     )
 
 
+@pytest.mark.parametrize("epilog", ["nonatomic_fp8", "nonatomic_mxfp4"])
+def test_mxfp_moe_gemm2_quantizing_epilog_needs_out_scale(epilog):
+    """These epilogs store the output scales, so a missing flat_out_scale is rejected before launch."""
+    with pytest.raises(ValueError, match="flat_out_scale"):
+        flydsl_mxfp4_gemm2(
+            inter_sorted_quant=None,
+            inter_sorted_shuffled_scale=None,
+            w2_u8=None,
+            w2_scale_u8=None,
+            sorted_expert_ids=None,
+            cumsum_tensor=None,
+            sorted_token_ids=None,
+            sorted_weights=None,
+            flat_out=None,
+            M_logical=1,
+            max_sorted=128,
+            BM=128,
+            use_nt=False,
+            epilog=epilog,
+            NE=1,
+            D_HIDDEN=256,
+            D_INTER=256,
+            topk=1,
+        )
+
+
 @pytest.mark.skipif(not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)")
 @pytest.mark.parametrize("w_dtype", ["mxfp4", "bf16"], ids=["a16w4", "a16w16"])
 @pytest.mark.parametrize(
