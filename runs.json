@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-23T09:52:38Z",
+ "updated": "2026-11-23T10:14:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45153897198,
+   "pr": 1484,
+   "commit": "eddabe2b709ea2ea26d6c2dd9bcaf464055a5d7d",
+   "branch": "feat/compiled-function-code-object",
+   "event": "pull_request",
+   "title": "[Feat] Add CompiledFunction.kernel_names()",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45153897198",
+   "created_at": "2026-11-23T10:12:06Z",
+   "updated_at": "2026-11-23T10:12:41Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45150541252,
    "pr": 1431,
@@ -10,11 +25,11 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45150541252",
    "created_at": "2026-11-23T09:49:51Z",
-   "updated_at": "2026-11-23T09:50:35Z",
+   "updated_at": "2026-11-23T09:51:43Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -24,14 +39,42 @@
    "commit": "59791917bd675f169261a009c03433ee5b34421d",
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
-   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "[Feat] Add CompiledFunction.kernel_names()",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055",
    "created_at": "2026-11-23T09:37:57Z",
-   "updated_at": "2026-11-23T09:43:59Z",
+   "updated_at": "2026-11-23T10:12:29Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T09:59:58Z",
+     "completed_at": "2026-11-23T10:12:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055/job/137615593181"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T09:59:58Z",
+     "completed_at": "2026-11-23T10:12:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055/job/137615593206"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-23T09:59:58Z",
+     "completed_at": "2026-11-23T10:12:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055/job/137615593282"
+    }
+   ]
   },
   {
    "run_id": 45148736684,
@@ -39,7 +82,7 @@
    "commit": "bff4f6eb295879edfe1f8289047c0da72ac8e207",
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
-   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "title": "[Feat] Add CompiledFunction.kernel_names()",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148736684",
@@ -65,9 +108,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T09:45:06Z",
+     "started_at": "2026-11-23T09:53:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195316"
     },
@@ -290,7 +333,7 @@
    "commit": "57e36c0c21c78db1961d9b5d016748d1b02bbfa7",
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
-   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "title": "[Feat] Add CompiledFunction.kernel_names()",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45129515117",
@@ -652,7 +695,7 @@
    "commit": "ddc44ed5eef4d650d414762f4255a5add04d47b6",
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
-   "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
+   "title": "[Feat] Add CompiledFunction.kernel_names()",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307",
@@ -2297,43 +2340,6 @@
      "started_at": "2026-11-20T01:04:23Z",
      "completed_at": "2026-11-20T01:15:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44648896330/job/136019624904"
-    }
-   ]
-  },
-  {
-   "run_id": 44625929762,
-   "pr": 1453,
-   "commit": "368083e8d930033c298e11e8cd70c50714a6649f",
-   "branch": "pr/mx-preshuffle-w4-v2",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Pick the MXFP4 GEMM geometry from M and pipeline its fp4 K loop",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762",
-   "created_at": "2026-11-19T22:09:52Z",
-   "updated_at": "2026-11-20T07:39:04Z",
-   "actor": "Monstertail",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T06:29:18Z",
-     "completed_at": "2026-11-20T07:39:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762/job/136093481668"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T05:08:21Z",
-     "completed_at": "2026-11-20T05:33:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44625929762/job/136093481693",
-     "machine": "cv350-1e707-c03-2",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
