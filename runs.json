@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T12:33:40Z",
+ "updated": "2026-11-23T12:59:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -68,20 +68,20 @@
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
    "title": "[Feat] Add CompiledFunction.kernel_names()",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45153897198",
    "created_at": "2026-11-23T10:12:06Z",
-   "updated_at": "2026-11-23T11:03:50Z",
+   "updated_at": "2026-11-23T12:57:00Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T12:29:52Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T12:43:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45153897198/job/137648505269"
     },
     {
