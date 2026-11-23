@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T12:31:21Z",
+ "updated": "2026-11-23T12:33:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,9 +20,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T12:27:30Z",
+     "started_at": "2026-11-23T12:28:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073260"
     },
@@ -78,9 +78,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T11:03:50Z",
+     "started_at": "2026-11-23T12:29:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45153897198/job/137648505269"
     },
@@ -218,11 +218,11 @@
    "branch": "experiment/register-placement-sched-hints",
    "event": "pull_request",
    "title": "[Feat] Introduce experimental register_allocation on ROCDL",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855",
    "created_at": "2026-11-23T09:33:05Z",
-   "updated_at": "2026-11-23T12:18:46Z",
+   "updated_at": "2026-11-23T12:29:23Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -249,10 +249,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T12:18:46Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T12:29:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195938"
     }
    ]
