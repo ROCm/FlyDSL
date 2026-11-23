@@ -1431,6 +1431,10 @@ class CompiledFunction:
         """Max resident blocks of this kernel per CU on the current device, without launching it."""
         return self._keepalive.max_blocks_per_cu()
 
+    def binaries(self) -> Dict[str, bytes]:
+        """GPU code objects of this specialization, keyed by ``gpu.binary`` symbol name."""
+        return self._keepalive.binaries()
+
     def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> None:
         """Export this specialization as a standalone ``.o`` and C header.
 
