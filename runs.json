@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T09:40:38Z",
+ "updated": "2026-11-23T09:43:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
    "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148800055",
    "created_at": "2026-11-23T09:37:57Z",
-   "updated_at": "2026-11-23T09:38:08Z",
+   "updated_at": "2026-11-23T09:39:46Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -92,9 +92,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T08:37:44Z",
+     "started_at": "2026-11-23T09:40:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855407"
     },
@@ -202,19 +202,19 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175",
    "created_at": "2026-11-23T07:20:39Z",
-   "updated_at": "2026-11-23T07:54:44Z",
+   "updated_at": "2026-11-23T09:38:25Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-23T07:54:44Z",
+     "started_at": "2026-11-23T09:38:25Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175/job/137557522694"
     },
