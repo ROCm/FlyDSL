@@ -74,7 +74,7 @@ endif()
 # registry in FlyPythonCAPI.so → "does not refer to a registered pass".
 #
 # Instead, pass registration is done through CAPI functions
-# (mlirRegisterFlyPasses, mlirRegisterConvertROCDLFastMathOpsPass,
+# (mlirRegisterFlyPasses, mlirRegisterConvertROCDLMathOpsPass,
 # mlirRegisterFlyToROCDLConversionPass) defined in
 # the CAPI libraries (MLIRCPIFly, MLIRCPIFlyROCDL). These are already in
 # FlyPythonCAPI.so, so ::mlir::registerPass() resolves to the correct

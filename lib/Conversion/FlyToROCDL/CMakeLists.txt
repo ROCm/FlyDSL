@@ -24,8 +24,10 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRGPUDialect
   MLIRGPUTransforms
   MLIRIR
+  MLIRLLVMCommonConversion
   MLIRLLVMDialect
   MLIRMathDialect
+  MLIRMathToROCDL
   MLIRPass
   MLIRROCDLDialect
   MLIRROCDLTarget
