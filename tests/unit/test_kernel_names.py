@@ -29,16 +29,18 @@ def _second(x: fx.Tensor):
 
 @flyc.jit
 def _launch(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-    _first(x).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+    first = _first(x)
+    first.launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
     _second(x).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
     _first(x).launch(grid=(2, 1, 1), block=(64, 1, 1), stream=stream)
+    first.launch(grid=(3, 1, 1), block=(64, 1, 1), stream=stream)
 
 
 def test_kernel_names():
     # CPU tensors are compile placeholders, so nothing is launched.
     compiled = flyc.compile(_launch, torch.zeros(64))
 
-    # One symbol per launch site: the second launch of _first is its own kernel.
+    # One symbol per kernel call: the second _first(x) is its own kernel, the relaunch of the first is not.
     names = compiled.kernel_names()
     assert [n.rsplit("_", 1)[0] for n in names] == ["_first", "_second", "_first"]
     assert len(set(names)) == 3

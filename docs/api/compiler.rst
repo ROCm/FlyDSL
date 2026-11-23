@@ -173,10 +173,11 @@ register, LDS, or ISA properties of a kernel instead of parsing the printed IR,
 whose format keywords are not a stable interface.
 
 ``CompiledFunction.kernel_names()`` returns the symbols of the GPU kernels the
-launcher launches, in the order their launches appear in the launcher. Each
-launch site compiles its own kernel, so a kernel function launched from two
-sites is listed under two symbols. These are the symbols to look up in the
-objects from ``binaries()``.
+launcher launches, without repeats, in the order their first launches appear in
+the launcher. Each call of a kernel function compiles its own kernel, so a
+kernel function called twice is listed under two symbols, while one call
+launched twice is listed once. These are the symbols to look up in the objects
+from ``binaries()``.
 
 The same compiled specialization can be exported as a position-independent
 host object with a generated C header:

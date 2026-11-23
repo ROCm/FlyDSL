@@ -479,7 +479,7 @@ class CompiledArtifact:
         return binaries
 
     def kernel_names(self) -> List[str]:
-        """Symbols of the GPU kernels this artifact launches, one per launch site, in the order the sites appear."""
+        """Symbols of the GPU kernels this artifact launches, without repeats, in the order they are first launched."""
         from .jit_function import _create_mlir_context
 
         kernels = []
@@ -491,7 +491,7 @@ class CompiledArtifact:
 
         with _create_mlir_context():
             ir.Module.parse(self._ir_text).operation.walk(visit)
-        return kernels
+        return list(dict.fromkeys(kernels))
 
     def max_blocks_per_cu(self) -> int:
         from .jit_function import _create_mlir_context
