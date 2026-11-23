@@ -16,6 +16,7 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
 
+
 @flyc.kernel
 def _first(x: fx.Tensor):
     pass
