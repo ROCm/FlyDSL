@@ -86,10 +86,25 @@ def _masked_axpby_kernel(
                 and in_bounds
             )
 
+    # A chain decided entirely at trace time is still a DSL value: a plain Python bool has no
+    # `select`, and the chain's type would otherwise depend on whether its operands happened to
+    # be compile-time.
+    gate = traits.CHECK_N and traits.GUARD_TAIL
+    assert isinstance(gate, fx.Boolean), f"a compile-time chain must stay a DSL value, got {type(gate)}"
+    scale = gate.select(fx.Float32(1.0), fx.Float32(0.0))
+
+    # A chain carries the truth of its operands: an int folds by its truth rather than being
+    # returned, and a dynamic operand that is not a Boolean comes back as an i1.
+    stages = traits.STAGES and traits.CHECK_N
+    assert isinstance(stages, fx.Boolean), f"an int operand must fold by its truth, got {type(stages)}"
+    row = tid and traits.CHECK_N
+    assert isinstance(row, fx.Boolean), f"a dynamic operand must fold to a Boolean, got {type(row)}"
+    assert str(row.ir_value().type) == "i1", f"the chain must be an i1, got {row.ir_value().type}"
+
     copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)
     fx.copy(copy_atom, thr_gA, thr_rA, pred=thr_pC)
     fx.copy(copy_atom, thr_gB, thr_rB, pred=thr_pC)
-    thr_rC.store(thr_rA.load() * alpha + thr_rB.load() * beta)
+    thr_rC.store((thr_rA.load() * alpha + thr_rB.load() * beta) * scale)
     fx.copy(copy_atom, thr_rC, thr_gC, pred=thr_pC)
 
 
@@ -143,6 +158,16 @@ def _run(traits, monkeypatch):
 
 
 def test_masked_axpby_is_correct(monkeypatch):
+    _, a, b, c = _run(_Traits(), monkeypatch)
+    torch.testing.assert_close(c, a * 2.0 + b * 3.0, rtol=1e-5, atol=1e-5)
+
+
+def test_a_chain_is_a_dsl_value_whatever_its_operands(monkeypatch):
+    """The kernel asserts the chain's type while tracing, and scales the result through it.
+
+    Without the normalisation the compile-time chain is a plain Python bool, whose `select` call
+    raises, and the chain over a dynamic integer keeps that integer's width instead of i1.
+    """
     _, a, b, c = _run(_Traits(), monkeypatch)
     torch.testing.assert_close(c, a * 2.0 + b * 3.0, rtol=1e-5, atol=1e-5)
 
