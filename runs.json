@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T03:25:16Z",
+ "updated": "2026-11-23T03:28:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -328,21 +328,21 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559",
    "created_at": "2026-11-23T00:24:03Z",
-   "updated_at": "2026-11-23T01:45:14Z",
+   "updated_at": "2026-11-23T03:25:31Z",
    "actor": "jli-melchior",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T00:54:33Z",
-     "completed_at": "2026-11-23T01:45:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664283"
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T03:25:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137466974310"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -351,16 +351,16 @@
      "conclusion": "success",
      "started_at": "2026-11-23T01:04:42Z",
      "completed_at": "2026-11-23T01:13:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664333"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137466976002"
     },
     {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-23T00:54:37Z",
-     "completed_at": "2026-11-23T00:55:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664380"
+     "conclusion": "success",
+     "started_at": "2026-11-23T00:54:33Z",
+     "completed_at": "2026-11-23T01:45:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137467005357"
     }
    ]
   },
