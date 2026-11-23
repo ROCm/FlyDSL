@@ -3832,6 +3832,17 @@ def _rand_lse(*shape, dtype, device="cuda"):
     return torch.randn(*shape, device=device, dtype=dtype)
 
 
+def test_dense_rejects_non_contiguous_out():
+    """A non-contiguous ``out`` cannot be written in place, so it is rejected."""
+    B, S, H, D = 1, 64, 4, 64
+    q = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    k = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    v = _rand_lse(B, S, H, D, dtype=torch.bfloat16)
+    out = torch.empty(B, H, S, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2)
+    with pytest.raises(ValueError, match="contiguous"):
+        flydsl_flash_attn_func(q, k, v, out=out)
+
+
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize(
     "B,S,H,Hkv,D,dtype",
