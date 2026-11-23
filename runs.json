@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T10:14:28Z",
+ "updated": "2026-11-23T10:49:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45153897198",
    "created_at": "2026-11-23T10:12:06Z",
-   "updated_at": "2026-11-23T10:12:41Z",
+   "updated_at": "2026-11-23T10:41:06Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -29,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45150541252",
    "created_at": "2026-11-23T09:49:51Z",
-   "updated_at": "2026-11-23T09:51:43Z",
+   "updated_at": "2026-11-23T10:28:10Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T10:32:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45150541252/job/137630247640"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T10:28:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45150541252/job/137630247679"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T10:28:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45150541252/job/137630247840"
+    }
+   ]
   },
   {
    "run_id": 45148800055,
@@ -117,11 +145,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T09:48:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195553"
+     "completed_at": "2026-11-23T10:30:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195553",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -288,20 +319,20 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175",
    "created_at": "2026-11-23T07:20:39Z",
-   "updated_at": "2026-11-23T09:38:25Z",
+   "updated_at": "2026-11-23T10:47:25Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T09:38:25Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T10:47:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45130395175/job/137557522694"
     },
     {
