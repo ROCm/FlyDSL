@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T09:30:41Z",
+ "updated": "2026-11-23T09:36:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45148063855,
+   "pr": 1401,
+   "commit": "23fbd3e04d13c56029f81285a577fcdc6daefe4e",
+   "branch": "experiment/register-placement-sched-hints",
+   "event": "pull_request",
+   "title": "[Feat] Introduce experimental register_allocation on ROCDL",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855",
+   "created_at": "2026-11-23T09:33:05Z",
+   "updated_at": "2026-11-23T09:33:34Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 45147318657,
+   "pr": 1401,
+   "commit": "4762ac0a678e2b5fb515614c9d2ad8f10607aa24",
+   "branch": "experiment/register-placement-sched-hints",
+   "event": "pull_request",
+   "title": "[Feat] Introduce experimental register_allocation on ROCDL",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45147318657",
+   "created_at": "2026-11-23T09:28:18Z",
+   "updated_at": "2026-11-23T09:33:22Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 45138300271,
    "pr": null,
@@ -20,11 +50,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T08:54:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855382"
+     "completed_at": "2026-11-23T09:33:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855382",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2336,36 +2369,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 44582354281,
-   "pr": 1412,
-   "commit": "abdcef9e119adc1e55bf4c9dd774f7233adb7657",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44582354281",
-   "created_at": "2026-11-19T17:55:35Z",
-   "updated_at": "2026-11-19T17:57:16Z",
-   "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 44530386920,
-   "pr": null,
-   "commit": "e5e616e27b85e21585e3c1d8e68642e16a1d74cb",
-   "branch": "pr/mx-preshuffle-w4-v2",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Pick the MXFP4 GEMM geometry from M and pipeline its fp4 K loop",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44530386920",
-   "created_at": "2026-11-19T13:07:43Z",
-   "updated_at": "2026-11-19T13:07:43Z",
-   "actor": "Monstertail",
-   "jobs": []
   }
  ]
 }
