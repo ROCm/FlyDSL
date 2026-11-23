@@ -1120,3 +1120,133 @@ jobs:
         run: |
           docker stop flydsl_test
           docker rm flydsl_test
+
+  # ---------------------------------------------------------------------------
+  # Downstream mono unit tests against this change's FlyDSL wheel: ATOM's
+  # monokernel tests and sgl-amd-mono's unit tests. Both target gfx950, so
+  # they run on MI35x only. Both images are Python 3.12, matching the CI wheel.
+  # ---------------------------------------------------------------------------
+  downstream-mono:
+    needs: [check-signal, detect-changes, prepare-mlir]
+    if: >-
+      ${{ !cancelled()
+          && needs.check-signal.result == 'success'
+          && needs.prepare-mlir.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
+    name: ${{ matrix.name }} unit tests
+    timeout-minutes: 60
+    env:
+      CI_CONTAINER: flydsl-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+      # Keep checkout independent of runner-local git-cache rewrites.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
+    strategy:
+      matrix:
+        include:
+          - name: atom-mono
+            repository: ROCm/ATOM
+            image: rocm/atom-dev:latest
+            # The shallow checkout has no tags for setuptools-scm.
+            install: >-
+              SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ATOM=0.0.0+flydsl.ci python3 -m pip install --no-deps -e . &&
+              python3 -m pip install pytest msgpack quart requests einops
+            # tests/plugin/ is excluded as in ATOM's own unit runner: its tests
+            # install sys.modules stubs that leak into native tests.
+            test: >-
+              mapfile -t tests < <(find tests -name 'test*mono*.py' -not -path 'tests/plugin/*' | sort) &&
+              python3 -m pytest -v -rs --junitxml=/downstream/report.xml "${tests[@]}"
+          - name: sgl-amd-mono
+            repository: sgl-project/sgl-amd-mono
+            # Empty: the newest rocm10 mi35x rocm/sgl-dev image, as sgl-amd-mono's own PR test uses.
+            image: ''
+            install: python3 -m pip install --no-deps -e . && python3 -m pip install pytest
+            test: python3 -m pytest -v -rA --junitxml=/downstream/report.xml test/unit
+      fail-fast: false
+    runs-on: linux-flydsl-mi35x-1
+    steps:
+      - name: Checkout ${{ matrix.repository }}
+        uses: actions/checkout@v4
+        env:
+          # Keep checkout independent of runner-local git-cache rewrites.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
+        with:
+          repository: ${{ matrix.repository }}
+          ref: main
+          path: downstream
+
+      # Self-hosted workspaces persist; discard wheels and reports from earlier runs.
+      - name: Remove stale files
+        run: rm -rf "${GITHUB_WORKSPACE:?}/downstream-wheels" "${GITHUB_WORKSPACE:?}/downstream/report.xml"
+
+      - name: Download FlyDSL CI wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-ci-wheels-${{ github.run_id }}
+          path: downstream-wheels
+
+      - name: Resolve image
+        id: image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IMAGE}" ]; then
+            tag="$(curl -sfL 'https://hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&ordering=last_updated&name=-rocm10-mi35x-' \
+              | grep -oE '"name": *"v[0-9][0-9A-Za-z.]*-rocm10-mi35x-[0-9]{8}"' | cut -d'"' -f4 \
+              | sort -t- -k4 -r | head -n1)"
+            [ -n "${tag}" ] || { echo "No rocm10 mi35x rocm/sgl-dev image found"; exit 1; }
+            IMAGE="rocm/sgl-dev:${tag}"
+          fi
+          echo "image=${IMAGE}" >>"${GITHUB_OUTPUT}"
+          echo "Image: ${IMAGE}"
+
+      - name: Start container
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker rm -f "${CI_CONTAINER}" >/dev/null 2>&1 || true
+          if [ -f /etc/podinfo/gha-render-devices ]; then
+            ci_device_flags="$(</etc/podinfo/gha-render-devices)"
+            read -r -a ci_device_args <<<"${ci_device_flags//$'\n'/ }"
+          else
+            ci_device_args=(--device /dev/dri)
+          fi
+          docker run -dt --pull always --network=host --user root --device=/dev/kfd \
+            "${ci_device_args[@]}" \
+            -v "${GITHUB_WORKSPACE}/downstream:/downstream" \
+            -v "${GITHUB_WORKSPACE}/downstream-wheels:/flydsl-ci-wheels:ro" \
+            --ipc=host --group-add video --shm-size 16g --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined -w /downstream \
+            --name "${CI_CONTAINER}" "${IMAGE}"
+
+      - name: Install ${{ matrix.name }} and FlyDSL wheel
+        env:
+          INSTALL_CMD: ${{ matrix.install }}
+        run: |
+          set -euo pipefail
+          (cd downstream-wheels/pr && sha256sum -c SHA256SUMS)
+          docker exec "${CI_CONTAINER}" bash -c "set -euo pipefail; ${INSTALL_CMD}"
+          docker exec "${CI_CONTAINER}" bash -c 'python3 -m pip install --force-reinstall --no-deps /flydsl-ci-wheels/pr/*.whl'
+          docker exec "${CI_CONTAINER}" python3 -c 'import flydsl; print("flydsl", flydsl.__version__, flydsl.__file__)'
+
+      - name: Run ${{ matrix.name }} unit tests
+        timeout-minutes: 40
+        env:
+          TEST_CMD: ${{ matrix.test }}
+        run: docker exec "${CI_CONTAINER}" bash -c "set -euo pipefail; ${TEST_CMD}"
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-unit-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: downstream/report.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f "${CI_CONTAINER}" >/dev/null 2>&1 || true
