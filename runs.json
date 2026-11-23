@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T01:09:26Z",
+ "updated": "2026-11-23T01:15:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45093216251,
+   "pr": null,
+   "commit": "86d10f361a052cf09461499627ff3099bcadde9c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Version] Bump version to 0.5.3 (#1481)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093216251",
+   "created_at": "2026-11-23T01:12:21Z",
+   "updated_at": "2026-11-23T01:12:48Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 45093008529,
+   "pr": 1481,
+   "commit": "5d4b096cb23ba0442e2fd9eea17afe8c7aca53dd",
+   "branch": "chore/bump-0.5.3",
+   "event": "pull_request",
+   "title": "[Misc] Bump version to 0.5.3",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093008529",
+   "created_at": "2026-11-23T01:10:18Z",
+   "updated_at": "2026-11-23T01:12:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45092731956,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Tag fly-emit-gpu-binary output as binary, not fatbin (#1480)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45092731956",
    "created_at": "2026-11-23T01:07:28Z",
-   "updated_at": "2026-11-23T01:07:51Z",
+   "updated_at": "2026-11-23T01:12:39Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2106,67 +2136,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 44490248298,
-   "pr": 1449,
-   "commit": "43bde5a45369be3fd474d93cd9ec975cdec6e0fc",
-   "branch": "pr/test-prune-layout",
-   "event": "pull_request",
-   "title": "[Tests] Move layout algebra checks to the Core tests ",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298",
-   "created_at": "2026-11-19T08:45:01Z",
-   "updated_at": "2026-11-19T10:56:18Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:05:31Z",
-     "completed_at": "2026-11-19T09:13:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565418"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:06:01Z",
-     "completed_at": "2026-11-19T09:37:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565509"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:05:45Z",
-     "completed_at": "2026-11-19T09:28:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490248298/job/135453565510",
-     "machine": "smci350-rck-g03-b05-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44489790809,
-   "pr": 1448,
-   "commit": "8b2291b91702998b30d283766460b5461d83240f",
-   "branch": "pr/flash-fwd-paged",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Pick the paged flash-attention CTA height from the launch shape",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44489790809",
-   "created_at": "2026-11-19T08:41:48Z",
-   "updated_at": "2026-11-19T08:41:48Z",
-   "actor": "Monstertail",
-   "jobs": []
   }
  ]
 }
