@@ -1,8 +1,96 @@
 {
  "schema": 1,
- "updated": "2026-11-23T12:59:25Z",
+ "updated": "2026-11-23T14:23:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45186528094,
+   "pr": 1490,
+   "commit": "d5323fef7338e9e451e582fcfcba60365900a1e0",
+   "branch": "fix/mxfp-moe-gemm2-out-scale",
+   "event": "pull_request",
+   "title": "[Bugfix] Require flat_out_scale for the quantizing mxfp_moe gemm2 epilogs",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45186528094",
+   "created_at": "2026-11-23T13:42:10Z",
+   "updated_at": "2026-11-23T13:42:10Z",
+   "actor": "Nikunj-Mehndiratta",
+   "jobs": []
+  },
+  {
+   "run_id": 45186478904,
+   "pr": 1489,
+   "commit": "cb7ff1131169fb757dacdedeedd9cd0209e8d552",
+   "branch": "fix/flash-attn-non-contiguous-out",
+   "event": "pull_request",
+   "title": "[Bugfix] Reject a non-contiguous out in flydsl_flash_attn_func",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45186478904",
+   "created_at": "2026-11-23T13:41:52Z",
+   "updated_at": "2026-11-23T13:41:52Z",
+   "actor": "Nikunj-Mehndiratta",
+   "jobs": []
+  },
+  {
+   "run_id": 45181651587,
+   "pr": 1488,
+   "commit": "de65aba72ab55c76a378a7cb896f1dbf8244285e",
+   "branch": "aoli/gfx1250-fp8fp4-test-bench",
+   "event": "pull_request",
+   "title": "[Test] Bench gfx1250 FP8/FP4 GEMM per launch batch; add trig/uniform inits",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45181651587",
+   "created_at": "2026-11-23T13:12:39Z",
+   "updated_at": "2026-11-23T14:20:23Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T13:35:49Z",
+     "completed_at": "2026-11-23T14:20:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45181651587/job/137729278232"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T13:46:55Z",
+     "completed_at": "2026-11-23T14:05:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45181651587/job/137729278274"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-23T13:35:28Z",
+     "completed_at": "2026-11-23T13:36:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45181651587/job/137729278638"
+    }
+   ]
+  },
+  {
+   "run_id": 45180315742,
+   "pr": 1487,
+   "commit": "d2e917f65e2da9453a4c2962bca26038f0dae7c2",
+   "branch": "fix/device-printf-line-buffered-stdout",
+   "event": "pull_request",
+   "title": "[Bugfix] Line-buffer the C stdout stream so device printf shows in Jupyter and piped logs",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45180315742",
+   "created_at": "2026-11-23T13:04:35Z",
+   "updated_at": "2026-11-23T13:04:35Z",
+   "actor": "Nikunj-Mehndiratta",
+   "jobs": []
+  },
   {
    "run_id": 45172308276,
    "pr": 1431,
@@ -10,38 +98,41 @@
    "branch": "jli/llvm-upgrade-e2ce52c885",
    "event": "pull_request",
    "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276",
    "created_at": "2026-11-23T12:13:49Z",
-   "updated_at": "2026-11-23T12:27:30Z",
+   "updated_at": "2026-11-23T13:15:44Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T12:28:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073260"
+     "completed_at": "2026-11-23T13:02:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073260",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-23T12:27:30Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T12:57:30Z",
+     "completed_at": "2026-11-23T13:15:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073282"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T12:28:44Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T13:01:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45172308276/job/137692073308"
     }
    ]
@@ -2193,187 +2284,6 @@
      "started_at": "2026-11-20T11:42:45Z",
      "completed_at": "2026-11-20T12:10:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44726992619/job/136266228239"
-    }
-   ]
-  },
-  {
-   "run_id": 44722333778,
-   "pr": 1455,
-   "commit": "9adc80667b46238566e2f886f223b6f8aab15499",
-   "branch": "pr/fix-rocdl-math-ocml",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778",
-   "created_at": "2026-11-20T10:48:33Z",
-   "updated_at": "2026-11-20T12:56:17Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:39:10Z",
-     "completed_at": "2026-11-20T11:48:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778/job/136264681787"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:39:26Z",
-     "completed_at": "2026-11-20T12:19:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778/job/136264681892",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T11:39:19Z",
-     "completed_at": "2026-11-20T12:56:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44722333778/job/136264681915"
-    }
-   ]
-  },
-  {
-   "run_id": 44714560430,
-   "pr": null,
-   "commit": "723ac511a09571f5e2b52feba1b1e9ca4d2058c4",
-   "branch": "pr/fix-rocdl-math-ocml",
-   "event": "pull_request",
-   "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430",
-   "created_at": "2026-11-20T09:53:45Z",
-   "updated_at": "2026-11-20T10:48:52Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T10:15:34Z",
-     "completed_at": "2026-11-20T10:41:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853024"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T10:25:33Z",
-     "completed_at": "2026-11-20T10:33:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853060"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-20T10:15:23Z",
-     "completed_at": "2026-11-20T10:48:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44714560430/job/136224853265"
-    }
-   ]
-  },
-  {
-   "run_id": 44671774123,
-   "pr": null,
-   "commit": "304d441202a30e524971a0de49233121e5d17a51",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Fold fly.get_iter of fly.make_view (#1454)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123",
-   "created_at": "2026-11-20T04:03:04Z",
-   "updated_at": "2026-11-20T08:16:26Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T05:02:58Z",
-     "completed_at": "2026-11-20T05:51:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666585",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T04:47:18Z",
-     "completed_at": "2026-11-20T04:55:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666607"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T05:07:24Z",
-     "completed_at": "2026-11-20T08:16:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44671774123/job/136088666617"
-    }
-   ]
-  },
-  {
-   "run_id": 44670570441,
-   "pr": 1454,
-   "commit": "34dfe1a6e459daf3ff57cad0afe2ff76890e874e",
-   "branch": "fix/get-iter-fold",
-   "event": "pull_request",
-   "title": "[Bugfix] Fold fly.get_iter of fly.make_view",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441",
-   "created_at": "2026-11-20T03:51:57Z",
-   "updated_at": "2026-11-20T06:31:33Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T05:07:22Z",
-     "completed_at": "2026-11-20T06:31:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082091"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T04:06:10Z",
-     "completed_at": "2026-11-20T04:33:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082118",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-20T04:20:47Z",
-     "completed_at": "2026-11-20T04:46:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44670570441/job/136075082175"
     }
    ]
   }
