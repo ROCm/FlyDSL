@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T06:54:47Z",
+ "updated": "2026-11-23T07:14:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995",
    "created_at": "2026-11-23T06:51:51Z",
-   "updated_at": "2026-11-23T06:52:14Z",
+   "updated_at": "2026-11-23T06:53:51Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,13 +40,32 @@
    "branch": "pr/fp8-8wave-tail-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855",
    "created_at": "2026-11-23T06:46:08Z",
-   "updated_at": "2026-11-23T06:48:46Z",
+   "updated_at": "2026-11-23T07:07:28Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:07:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327563"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:08:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327591"
+    }
+   ]
   },
   {
    "run_id": 45126253281,
@@ -55,13 +74,32 @@
    "branch": "pr/fp4-4wave-race",
    "event": "pull_request",
    "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281",
    "created_at": "2026-11-23T06:45:20Z",
-   "updated_at": "2026-11-23T06:47:02Z",
+   "updated_at": "2026-11-23T07:07:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:07:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340139"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-23T07:08:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340250"
+    }
+   ]
   },
   {
    "run_id": 45123913009,
@@ -70,38 +108,41 @@
    "branch": "fix/external-codegen-link-compat",
    "event": "pull_request",
    "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_codegen returns",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009",
    "created_at": "2026-11-23T06:24:45Z",
-   "updated_at": "2026-11-23T06:39:18Z",
+   "updated_at": "2026-11-23T07:12:57Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T06:39:30Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T07:00:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009/job/137528954681"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T06:39:51Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009/job/137528954704"
+     "completed_at": "2026-11-23T07:12:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009/job/137528954704",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T06:40:08Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T07:06:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009/job/137528954707"
     }
    ]
