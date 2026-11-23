@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-23T01:17:21Z",
+ "updated": "2026-11-23T01:47:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45094754994,
+   "pr": 1483,
+   "commit": "6d305e45e3e5c9116a8325bd4e7601ad667097ec",
+   "branch": "fix/external-codegen-link-compat",
+   "event": "pull_request",
+   "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_codegen returns",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45094754994",
+   "created_at": "2026-11-23T01:28:20Z",
+   "updated_at": "2026-11-23T01:29:59Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 45093572120,
+   "pr": 1482,
+   "commit": "8cfcdb4a3b41ca26e655f8d358ab9c6a636c7c06",
+   "branch": "ci/downstream-mono-unit-tests",
+   "event": "pull_request",
+   "title": "CI: run ATOM and sgl-amd-mono unit tests against the PR wheel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093572120",
+   "created_at": "2026-11-23T01:15:52Z",
+   "updated_at": "2026-11-23T01:18:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45093216251,
    "pr": null,
@@ -70,20 +100,20 @@
    "branch": "fix/emit-gpu-binary-format",
    "event": "pull_request",
    "title": "[Bugfix] Tag fly-emit-gpu-binary output as binary, not fatbin",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805",
    "created_at": "2026-11-23T00:36:11Z",
-   "updated_at": "2026-11-23T01:06:35Z",
+   "updated_at": "2026-11-23T01:24:41Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-23T01:06:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T01:24:41Z",
+     "completed_at": "2026-11-23T01:35:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438667"
     },
     {
@@ -98,11 +128,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T01:07:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438850"
+     "completed_at": "2026-11-23T01:37:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45089731805/job/137425438850",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -113,20 +146,20 @@
    "branch": "jli/sched-vgpr-tied",
    "event": "pull_request",
    "title": "[compiler][opt] tie the same vgpr when strict pin a register number",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559",
    "created_at": "2026-11-23T00:24:03Z",
-   "updated_at": "2026-11-23T01:04:43Z",
+   "updated_at": "2026-11-23T01:45:14Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T00:54:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T01:45:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137421664283"
     },
     {
@@ -2073,67 +2106,6 @@
      "started_at": "2026-11-19T10:43:54Z",
      "completed_at": "2026-11-19T11:16:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44494980309/job/135475741786"
-    }
-   ]
-  },
-  {
-   "run_id": 44492545607,
-   "pr": null,
-   "commit": "00a6ac9459dca558e4e3bc6e31184e296fcdfcc7",
-   "branch": "aot-load-module",
-   "event": "pull_request",
-   "title": "[AOT] Add flyc.load_module to load export_to_c objects in-process",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44492545607",
-   "created_at": "2026-11-19T09:01:00Z",
-   "updated_at": "2026-11-19T09:02:25Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 44490557186,
-   "pr": 1450,
-   "commit": "285cc0df01ea35f84fc836a89bac361d9aa64a14",
-   "branch": "pr/fix-lds-dma-m0",
-   "event": "pull_request",
-   "title": "[Feat] Model LDS DMA copy atoms at wave granularity",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186",
-   "created_at": "2026-11-19T08:47:07Z",
-   "updated_at": "2026-11-19T10:43:04Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:36:12Z",
-     "completed_at": "2026-11-19T10:07:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186/job/135466502534"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:38:10Z",
-     "completed_at": "2026-11-19T10:42:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186/job/135466502547"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-19T09:32:26Z",
-     "completed_at": "2026-11-19T10:00:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44490557186/job/135466502678",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
