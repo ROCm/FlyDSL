@@ -652,7 +652,7 @@ class MlirCompiler:
 
                 next_stage = stage_num_base + len(dump_fragments)
                 if external_binary:
-                    from .external_llvm import run_external_binary_codegen
+                    from .external_llvm import link_external_assembly, run_external_binary_codegen
 
                     llir = _extract_llvm_ir(module)
                     stage_name = f"{next_stage:02d}_external_binary"
@@ -663,6 +663,7 @@ class MlirCompiler:
                         work_dir=dump_dir,
                         stage_prefix=stage_name,
                     )
+                    link_external_assembly(module, binary_fragment)
                     module.operation.verify()
                     print(f"[flydsl.compile] dump {stage_name}_input -> {dump_dir / f'{stage_name}_input.mlir'}")
                     print(
@@ -698,7 +699,7 @@ class MlirCompiler:
                         print("[flydsl.compile] ISA dump skipped (external LLVM mode)")
             else:
                 if external_binary:
-                    from .external_llvm import run_external_binary_codegen
+                    from .external_llvm import link_external_assembly, run_external_binary_codegen
 
                     _run_pipeline(
                         module,
@@ -712,6 +713,7 @@ class MlirCompiler:
                         binary_fragment,
                         llvm_options=llvm_opts,
                     )
+                    link_external_assembly(module, binary_fragment)
                     module.operation.verify()
                 else:
                     _run_pipeline(

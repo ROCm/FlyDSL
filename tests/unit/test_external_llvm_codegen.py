@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
 from flydsl._mlir.passmanager import PassManager
@@ -13,6 +15,7 @@ from flydsl.compiler.backends.rocm import FLY_GPU_BINARY_PASS, HAS_INPROCESS_LLD
 from flydsl.compiler.external_llvm import (
     _format_llvm_cli_options,
     external_llvm_fingerprint,
+    link_external_assembly,
     run_external_binary_codegen,
 )
 from flydsl.compiler.jit_function import _create_mlir_context
@@ -279,3 +282,55 @@ def test_format_llvm_cli_options():
     # is cl::opt<cl::boolOrDefault>, so `=4` is rejected by LLVM itself.
     assert _format_llvm_cli_options({"amdgpu-schedule-metric-bias": 25}) == ["--amdgpu-schedule-metric-bias=25"]
     assert _format_llvm_cli_options({}) == []
+
+
+def _assembly_module(ctx):
+    """``_MODULE_WITH_HOST`` after an in-process ``format=isa`` serialization."""
+    module = ir.Module.parse(_MODULE_WITH_HOST, context=ctx)
+    PassManager.parse('builtin.module(gpu-module-to-binary{format=isa opts=""})', context=ctx).run(module.operation)
+    return module
+
+
+@pytest.mark.skipif(not HAS_INPROCESS_LLD, reason="external codegen stops at format=isa only with in-process LLD")
+def test_link_external_assembly_links_isa_and_is_idempotent():
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = _assembly_module(ctx)
+        assert "assembly = " in str(module)
+
+        link_external_assembly(module, 'gpu-module-to-binary{format=isa opts=""}')
+        linked = str(module)
+        assert 'bin = "\\7FELF' in linked
+        assert "assembly = " not in linked
+
+        link_external_assembly(module, 'gpu-module-to-binary{format=isa opts=""}')
+        assert str(module) == linked
+
+
+@flyc.kernel
+def _add_one_kernel(X: fx.Pointer):
+    X[fx.thread_idx.x] = X[fx.thread_idx.x] + 1.0
+
+
+@flyc.jit
+def _add_one(X: fx.Pointer):
+    _add_one_kernel(X).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+
+@pytest.mark.skipif(not HAS_INPROCESS_LLD, reason="external codegen stops at format=isa only with in-process LLD")
+def test_jit_links_isa_left_by_a_replaced_external_codegen(tmp_path, monkeypatch):
+    """A replacement of ``run_external_binary_codegen`` that only runs ``binary_fragment``
+    in process (the hook's pre-0.5.1 contract) still yields a linked binary."""
+    from flydsl.compiler import external_llvm
+    from flydsl.compiler.jit_function import _run_pipeline
+
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_DIR", str(_make_fake_llvm(tmp_path)))
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path / "cache"))
+
+    def in_process_codegen(module, binary_fragment, **_):
+        _run_pipeline(module, [binary_fragment], verifier=False, print_after_all=False)
+
+    monkeypatch.setattr(external_llvm, "run_external_binary_codegen", in_process_codegen)
+
+    compiled = flyc.compile(_add_one, flyc.from_c_void_p(fx.Float32, 0), compile_only=True)
+    assert 'bin = "\\7FELF' in compiled._keepalive.ir
