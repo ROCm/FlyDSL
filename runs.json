@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-23T03:52:33Z",
+ "updated": "2026-11-23T04:15:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -102,20 +102,20 @@
    "branch": "feat/compiled-function-code-object",
    "event": "pull_request",
    "title": "[Feat] Add CompiledFunction.kernel_names() and code_object()",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307",
    "created_at": "2026-11-23T01:47:13Z",
-   "updated_at": "2026-11-23T02:19:42Z",
+   "updated_at": "2026-11-23T04:12:58Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T03:44:50Z",
-     "completed_at": null,
+     "completed_at": "2026-11-23T03:59:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307/job/137447013992"
     },
     {
@@ -387,11 +387,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-23T03:32:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137466974310"
+     "completed_at": "2026-11-23T04:05:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45088544559/job/137466974310",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
