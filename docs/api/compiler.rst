@@ -215,6 +215,21 @@ Export currently supports tensor, pointer, scalar, structure, and stream
 arguments whose lowered types have a supported C ABI. Unsupported launchers
 report the export error when ``export_to_c`` is called.
 
+Inspecting a compiled function
+------------------------------
+
+A ``CompiledFunction`` from ``flyc.compile`` also describes the GPU code it
+loads, without launching it:
+
+- ``kernel_names()`` -- symbols of the GPU kernels the launcher launches, in
+  launch order, without repeats.
+- ``code_object()`` -- the linked GPU code object (an HSACO ELF on ROCm) as
+  ``bytes``, for tools that read its kernel metadata or load it themselves.
+  Raises ``ValueError`` unless the launcher compiles to exactly one GPU module.
+- ``max_blocks_per_cu()`` -- the most resident blocks of the launched kernel per
+  CU on the current device. Needs exactly one launch with constant block and
+  shared-memory sizes.
+
 Loading an exported object
 --------------------------
 
@@ -247,7 +262,8 @@ remaining launches are skipped.
 ``load_module`` supports Linux x86-64 objects only. It rejects an object from
 a different metadata schema version, so objects must be exported again after
 a FlyDSL upgrade that changes the schema. The loaded function cannot be
-exported again, and ``max_blocks_per_cu()`` is not available on it.
+exported again, and ``kernel_names()``, ``code_object()`` and
+``max_blocks_per_cu()`` are not available on it.
 
 ROCDL operations
 -----------------

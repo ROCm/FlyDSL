@@ -122,6 +122,12 @@ class _LoadedModule:
     def max_blocks_per_cu(self) -> int:
         raise NotImplementedError("max_blocks_per_cu() is not available for a function from flyc.load_module")
 
+    def kernel_names(self):
+        raise NotImplementedError("kernel_names() is not available for a function from flyc.load_module")
+
+    def code_object(self):
+        raise NotImplementedError("code_object() is not available for a function from flyc.load_module")
+
 
 def load_module(path: Union[str, "os.PathLike[str]"]) -> CompiledFunction:
     """Load an object written by :meth:`CompiledFunction.export_to_c` into this process.

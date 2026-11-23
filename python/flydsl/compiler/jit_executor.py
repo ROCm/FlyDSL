@@ -491,6 +491,41 @@ class CompiledArtifact:
             raise RuntimeError("max_blocks_per_cu(): HIP occupancy query failed")
         return blocks
 
+    def _gpu_code(self):
+        """``({gpu.binary name: object attr}, [kernel symbol per gpu.launch_func])`` of the lowered module."""
+        from .._mlir.dialects import gpu
+        from .jit_function import _create_mlir_context
+
+        objects, kernels = {}, []
+
+        def visit(op):
+            if op.name == "gpu.binary":
+                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
+                obj = gpu.ObjectAttr(ir.ArrayAttr(op.attributes["objects"])[0])
+                objects[ir.StringAttr(op.attributes["sym_name"]).value] = (obj.format, obj.object)
+            elif op.name == "gpu.launch_func":
+                kernels.append(ir.SymbolRefAttr(op.opview.kernel).value[-1])
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        return objects, kernels
+
+    def kernel_names(self) -> List[str]:
+        _, kernels = self._gpu_code()
+        return list(dict.fromkeys(kernels))
+
+    def code_object(self) -> bytes:
+        from .._mlir.dialects import gpu
+
+        objects, _ = self._gpu_code()
+        if len(objects) != 1:
+            raise ValueError(f"code_object() needs exactly one GPU module, found {len(objects)}")
+        ((fmt, data),) = objects.values()
+        if fmt == gpu.CompilationTarget.Assembly:
+            raise ValueError("code_object(): the GPU module holds assembly, not a linked code object")
+        return data
+
     @property
     def ir(self) -> str:
         return self._ir_text
