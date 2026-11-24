@@ -541,6 +541,10 @@ def compile_preshuffle_gemm(
             if const_expr(use_async_copy):
                 if const_expr(do_next):
                     dma_a_to_lds(next_k_val, a_write)
+                    # The s_waitcnt(num_b_loads) below relies on the A DMA issuing before
+                    # the B loads; without this fence the scheduler hoists B above the DMA
+                    # and the wait degrades to vmcnt(0).
+                    rocdl.sched_barrier(0)
                     fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
                 mma_kloop(a_read, cur_frag_B)
                 if const_expr(enable_scheduler):
