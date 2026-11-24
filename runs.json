@@ -1,8 +1,79 @@
 {
  "schema": 1,
- "updated": "2026-11-23T21:24:21Z",
+ "updated": "2026-11-24T00:33:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45290819082,
+   "pr": 1494,
+   "commit": "3936aa5471dd2b4547b7b15039d2f27f27463afe",
+   "branch": "pr/allreduce-rank-agree",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix custom all-reduce outputs that differ between ranks",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082",
+   "created_at": "2026-11-23T23:40:20Z",
+   "updated_at": "2026-11-24T00:07:27Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-24T00:07:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082/job/138111194220"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-24T00:07:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082/job/138111194324"
+    }
+   ]
+  },
+  {
+   "run_id": 45290787922,
+   "pr": 1492,
+   "commit": "44a34088b6f722dfa9c8d65e6d6e4ddb77636622",
+   "branch": "pr/allreduce-ipc-base",
+   "event": "pull_request",
+   "title": "[Bugfix] Export custom all-reduce IPC buffers at their allocation base",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290787922",
+   "created_at": "2026-11-23T23:40:06Z",
+   "updated_at": "2026-11-24T00:31:11Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T23:55:29Z",
+     "completed_at": "2026-11-24T00:27:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290787922/job/138105715354"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-23T23:55:31Z",
+     "completed_at": "2026-11-24T00:31:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290787922/job/138105715433",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 45242406235,
    "pr": 1412,
@@ -2161,98 +2232,6 @@
      "started_at": "2026-11-21T05:43:36Z",
      "completed_at": "2026-11-21T05:43:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987112"
-    }
-   ]
-  },
-  {
-   "run_id": 44872021042,
-   "pr": 1459,
-   "commit": "724409682a10f1b491782a9af39f2a7916704959",
-   "branch": "skills/prefetch-data-load-provable-guard",
-   "event": "pull_request",
-   "title": "[Skills] prefetch-data-load: keep the prefetch guard provable from the loop bound",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042",
-   "created_at": "2026-11-21T05:41:07Z",
-   "updated_at": "2026-11-21T05:42:40Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:42:36Z",
-     "completed_at": "2026-11-21T05:42:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747509"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:42:36Z",
-     "completed_at": "2026-11-21T05:42:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747543",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:42:36Z",
-     "completed_at": "2026-11-21T05:42:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872021042/job/136748747550"
-    }
-   ]
-  },
-  {
-   "run_id": 44871955568,
-   "pr": 1458,
-   "commit": "40a51163530d4a597135d429319bcf281058ffaa",
-   "branch": "skills/debug-flydsl-kernel-call-base-state",
-   "event": "pull_request",
-   "title": "[Skills] debug-flydsl-kernel: method calls on locals in a runtime if/for make them region state",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568",
-   "created_at": "2026-11-21T05:40:18Z",
-   "updated_at": "2026-11-21T05:41:54Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:41:50Z",
-     "completed_at": "2026-11-21T05:41:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552855",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:41:49Z",
-     "completed_at": "2026-11-21T05:41:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552860"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:41:49Z",
-     "completed_at": "2026-11-21T05:41:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44871955568/job/136748552873"
     }
    ]
   }
