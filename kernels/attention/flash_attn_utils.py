@@ -3682,7 +3682,10 @@ class DualwaveKernelContext:
     def init_atoms_and_lds_ptrs(self):
         self.load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         self.store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
-        self.dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        # Async DMA: the explicit vmcnt waits order it against the LDS reads. The
+        # synchronous atom lets LLVM wait for every outstanding DMA (vmcnt(0)) before
+        # each ds_read_b64_tr_b16, since it cannot tell the K/V buffers apart.
+        self.dma_atom = fx.make_copy_atom(fx.rocdl.cdna4.BufferLoadAsyncLDS128b(), 128)
         self.mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, self.elem_dtype))
         self.o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         self.lds_ptr_ty = fx.PointerType.get(self.elem_dtype.ir_type, 2, self.traits.DMA_BYTES)
