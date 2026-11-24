@@ -1,8 +1,96 @@
 {
  "schema": 1,
- "updated": "2026-11-24T01:07:19Z",
+ "updated": "2026-11-24T03:28:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45317002749,
+   "pr": 1497,
+   "commit": "79483009fb58c68267d82cdf9461b69b25a5bd59",
+   "branch": "users/merrittttt/vector-add-example-tail",
+   "event": "pull_request",
+   "title": "[Bugfix] Require N % 4 == 0 in the vectorAdd example",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45317002749",
+   "created_at": "2026-11-24T03:05:15Z",
+   "updated_at": "2026-11-24T03:05:15Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
+  {
+   "run_id": 45315072262,
+   "pr": 1488,
+   "commit": "ebeb28a5feb8d634d47eb7431c90993de4be12e7",
+   "branch": "aoli/gfx1250-fp8fp4-test-bench",
+   "event": "pull_request",
+   "title": "[Test] Bench gfx1250 FP8/FP4 GEMM per launch batch; add trig/uniform inits",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262",
+   "created_at": "2026-11-24T02:48:40Z",
+   "updated_at": "2026-11-24T03:17:38Z",
+   "actor": "aoli26",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-24T03:03:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132673"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-24T03:03:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132822"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-24T03:17:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132956"
+    }
+   ]
+  },
+  {
+   "run_id": 45311979030,
+   "pr": 1496,
+   "commit": "a5f726d883af6c60d844a3d7c12cee1b59246352",
+   "branch": "users/merrittttt/gemm-a16w16-swizzle-bk32",
+   "event": "pull_request",
+   "title": "[Bugfix] Size the gemm_a16w16 gfx950 LDS swizzle to block_k",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030",
+   "created_at": "2026-11-24T02:23:12Z",
+   "updated_at": "2026-11-24T02:23:12Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
+  {
+   "run_id": 45310213083,
+   "pr": 1495,
+   "commit": "932e4cfa3695d0ad7ddbeba622a6927f741615e0",
+   "branch": "users/merrittttt/fused-rope-pair-lane",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix the NeoX pair lane in fused_rope_cache for head_dim=96",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083",
+   "created_at": "2026-11-24T02:08:45Z",
+   "updated_at": "2026-11-24T02:08:45Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
   {
    "run_id": 45290819082,
    "pr": 1494,
@@ -2051,190 +2139,6 @@
      "machine": null,
      "host_model": null,
      "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44873276341,
-   "pr": 1463,
-   "commit": "293b5caf862a4c7dc7f9629825203a4524adb822",
-   "branch": "skills/isa-resource-diff-loops-liveness",
-   "event": "pull_request",
-   "title": "[Skills] isa-resource-diff: add loops to diff hot-loop wait order and VGPR liveness",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341",
-   "created_at": "2026-11-21T05:57:49Z",
-   "updated_at": "2026-11-21T05:59:56Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:59:52Z",
-     "completed_at": "2026-11-21T05:59:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752396"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:59:51Z",
-     "completed_at": "2026-11-21T05:59:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752407"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:59:52Z",
-     "completed_at": "2026-11-21T05:59:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873276341/job/136752752411",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44872877791,
-   "pr": 1462,
-   "commit": "2980f6ae0907d602f9c54c6c900f259f802627a2",
-   "branch": "skills/isa-resource-diff-occupancy-verdict",
-   "event": "pull_request",
-   "title": "[Skills] isa-resource-diff: occupancy as the regression trigger, readable row labels, diff --kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791",
-   "created_at": "2026-11-21T05:52:22Z",
-   "updated_at": "2026-11-21T05:54:00Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:53:54Z",
-     "completed_at": "2026-11-21T05:53:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391768",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:53:55Z",
-     "completed_at": "2026-11-21T05:53:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391786"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:53:55Z",
-     "completed_at": "2026-11-21T05:53:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872877791/job/136751391851"
-    }
-   ]
-  },
-  {
-   "run_id": 44872275091,
-   "pr": 1461,
-   "commit": "87dfae9a2847083abd7b9cf2123f0cd705754ad4",
-   "branch": "skills/kernel-trace-analysis-no-kernel-trace-csv",
-   "event": "pull_request",
-   "title": "[Skills] kernel-trace-analysis: report a missing kernel-trace CSV and bound the occupancy",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091",
-   "created_at": "2026-11-21T05:44:29Z",
-   "updated_at": "2026-11-21T05:46:32Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:46:27Z",
-     "completed_at": "2026-11-21T05:46:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679947"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:46:28Z",
-     "completed_at": "2026-11-21T05:46:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679968"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:46:28Z",
-     "completed_at": "2026-11-21T05:46:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872275091/job/136749679973",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44872096634,
-   "pr": 1460,
-   "commit": "f8f06f0b9fe9cdcc0aa56b39b777059fc5607fcf",
-   "branch": "skills/flydsl-kernel-authoring-contract-and-branch-cost",
-   "event": "pull_request",
-   "title": "[Skills] flydsl-kernel-authoring: cost of small runtime ifs; contract fastmath and bit-exact fast paths",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634",
-   "created_at": "2026-11-21T05:42:07Z",
-   "updated_at": "2026-11-21T05:43:40Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:43:36Z",
-     "completed_at": "2026-11-21T05:43:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987056",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:43:36Z",
-     "completed_at": "2026-11-21T05:43:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987082"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T05:43:36Z",
-     "completed_at": "2026-11-21T05:43:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44872096634/job/136748987112"
     }
    ]
   }
