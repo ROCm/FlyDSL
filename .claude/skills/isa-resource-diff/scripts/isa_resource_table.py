@@ -9,10 +9,16 @@ The tool is self-contained and only consumes ``*final_isa.s`` files produced by
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff /tmp/before /tmp/after
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py summarize <dump-dir> --json snapshot.json
     python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff before.json after.json
+    python3 .claude/skills/isa-resource-diff/scripts/isa_resource_table.py diff /tmp/before /tmp/after --kernel REGEX
 
 ``diff`` accepts either two dump directories or two JSON snapshots, and the two
 sides may be mixed.  Every metric is scoped to one kernel, even when an ISA file
 contains multiple kernels.
+
+A FlyDSL JIT cache directory (``FLYDSL_RUNTIME_CACHE_DIR``) is accepted in place of a
+dump directory.  It gives one row per compiled kernel -- every specialization, from
+one run -- with the counts of the kernel metadata and a hash of its binary, but no
+assembler symbols and no instruction counts.
 
 The tool is architecture-general.  Register counts come from the per-kernel
 ``.set <kernel>.num_vgpr`` / ``.num_agpr`` / ``.numbered_sgpr`` assembler symbols,
@@ -25,6 +31,10 @@ Each metric cell is one of three states: a parsed value, ``n/a`` when the quanti
 does not exist on the target, or ``?`` when the tool could not read something it
 claims to report.  Only the third is a failure: the tool exits 1 for a resource
 regression and 2 whenever it cannot produce a trustworthy answer.
+
+On targets with an occupancy model (gfx90a and later CDNA), the regression trigger
+for registers and LDS is the derived ``occupancy`` (waves per SIMD) rather than the
+raw ``vgpr``, ``sgpr`` and ``lds_static_bytes`` counts, which are then informational.
 """
 
 import sys
@@ -42,15 +52,18 @@ if sys.version_info < (3, 10):  # pragma: no cover - exercised via subprocess
     raise SystemExit(2)
 
 import argparse  # noqa: E402  - imports must follow the interpreter guard
+import hashlib  # noqa: E402
 import json  # noqa: E402
+import pickletools  # noqa: E402
 import re  # noqa: E402
 import traceback  # noqa: E402
+import zlib  # noqa: E402
 from bisect import bisect_left  # noqa: E402
 from dataclasses import dataclass, field, replace  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import TextIO  # noqa: E402
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TOOL_NAME = "isa_resource_table"
 
 
@@ -132,6 +145,7 @@ INFO = "info"
 METADATA = "metadata"
 SYMBOL = "symbol"
 INSTRUCTION = "instruction"
+DERIVED = "derived"
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,7 @@ class Metric:
 # two regressions, and would flag moving accumulators into AGPRs -- which the kernel
 # tuning guide recommends -- as a regression.
 METRICS = (
+    Metric("occupancy", TRIGGER, DERIVED, "occupancy"),
     Metric("vgpr", TRIGGER, METADATA, "vgpr_count"),
     Metric("arch_vgpr", INFO, SYMBOL, "num_vgpr"),
     Metric("agpr", INFO, SYMBOL, "num_agpr"),
@@ -166,11 +181,18 @@ METRICS = (
 KEYS = tuple(metric.key for metric in METRICS)
 BY_KEY = {metric.key: metric for metric in METRICS}
 TRIGGERS = frozenset(metric.key for metric in METRICS if metric.kind == TRIGGER)
+# Waves per SIMD: more is better.  Every other metric worsens when it grows.
+HIGHER_IS_BETTER = frozenset({"occupancy"})
+# What `occupancy` is computed from.  They are triggers only where `occupancy` is n/a:
+# where it is known, 252 -> 256 VGPRs or a few more KiB of LDS that keep the waves per
+# SIMD are not a regression, and a change that does lose a wave shows up as one.
+OCCUPANCY_INPUTS = frozenset({"vgpr", "sgpr", "lds_static_bytes"})
 
 KNOWN_SET_SUFFIXES = frozenset({"num_vgpr", "num_agpr", "numbered_sgpr", "private_seg_size"})
 
 LEGEND = (
-    "* = regression trigger; other columns are informational.\n"
+    "* = regression trigger; (*) = trigger only where occupancy is n/a; other columns are informational.\n"
+    "  occupancy = waves/SIMD allowed by vgpr, sgpr and lds_static_bytes.\n"
     "  vgpr = total (arch+acc, LLVM's occupancy number); arch_vgpr/agpr are its split "
     "-- do not add them."
 )
@@ -181,6 +203,28 @@ LEGEND = (
 # --------------------------------------------------------------------------------------
 
 RE_PROC = re.compile(r"^gfx([0-9a-f]{3,})$")
+
+
+@dataclass(frozen=True)
+class OccupancyModel:
+    vgprs: int  # VGPRs one SIMD can hand out per lane (arch + accumulator on a unified file)
+    vgpr_granule: int
+    max_waves: int  # per SIMD
+    lds_bytes: int  # per CU
+    simds: int = 4  # per CU
+
+
+# gfx90a and later CDNA: one unified 512-entry VGPR file, allocated in blocks of 8, at
+# most 8 waves per SIMD (LLVM AMDGPU's own occupancy model); LDS per CU from the CDNA3
+# and CDNA4 ISA guides.  Targets missing here get `occupancy` n/a, and `vgpr`, `sgpr`
+# and `lds_static_bytes` stay the triggers there.
+OCCUPANCY_MODELS = {
+    "gfx90a": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx940": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx941": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx942": OccupancyModel(512, 8, 8, 64 * 1024),
+    "gfx950": OccupancyModel(512, 8, 8, 160 * 1024),
+}
 # FeatureArchitectedFlatScratch on gfx9: these spill through scratch_*, gfx90a does not.
 GFX9_FLAT_SCRATCH = frozenset({"gfx940", "gfx941", "gfx942", "gfx950"})
 HIGHEST_KNOWN_GEN = 13
@@ -477,6 +521,7 @@ class KernelRecord:
     source: str = ""
     notes: tuple = ()
     problems: tuple = ()
+    binary: str = ""  # hash of the code object, when read from a JIT cache
 
     @property
     def unparsed_keys(self) -> tuple:
@@ -525,6 +570,39 @@ def _symbol_cell(symbols: dict, name: str, metric: Metric) -> Cell:
     if value < 0:
         return Cell.unparsed(f".set {name}.{metric.field} is negative: {value}")
     return Cell.of(value)
+
+
+def _sgpr_waves(sgprs: int) -> int:
+    """LLVM's GCNSubtarget::getOccupancyWithNumSGPRs for gfx8 and gfx9."""
+    for limit, waves in ((80, 10), (88, 9), (100, 8)):
+        if sgprs <= limit:
+            return waves
+    return 7
+
+
+def _occupancy_cell(entry: dict, metrics: dict, arch: Arch) -> Cell:
+    """Waves per SIMD that the VGPR, SGPR and static-LDS footprint allow.
+
+    VGPR-bound waves are ``vgprs // round_up(vgpr, granule)``, as in the
+    kernel-trace-analysis skill; LDS-bound waves are the workgroups that fit in one
+    CU's LDS times the waves per workgroup, spread over the CU's SIMDs.
+    """
+    model = OCCUPANCY_MODELS.get(arch.processor or "")
+    if model is None:
+        return Cell.na(f"no occupancy model for {arch.processor or 'an unidentified target'}")
+    vgpr, sgpr, lds = metrics["vgpr"], metrics["sgpr"], metrics["lds_static_bytes"]
+    if any(cell.state != VALUE for cell in (vgpr, sgpr, lds)):
+        return Cell.unparsed("occupancy needs vgpr, sgpr and lds_static_bytes")
+    allocated = -(-max(vgpr.value, 1) // model.vgpr_granule) * model.vgpr_granule
+    waves = min(model.max_waves, model.vgprs // allocated, _sgpr_waves(sgpr.value))
+    if lds.value:
+        size = _metadata_cell(entry, Metric("", INFO, METADATA, "max_flat_workgroup_size"))
+        wave = _metadata_cell(entry, Metric("", INFO, METADATA, "wavefront_size"))
+        if size.state != VALUE or wave.state != VALUE or not size.value or not wave.value:
+            return Cell.unparsed("occupancy needs .max_flat_workgroup_size and .wavefront_size")
+        waves_per_group = -(-size.value // wave.value)
+        waves = min(waves, model.lds_bytes // lds.value * waves_per_group // model.simds)
+    return Cell.of(waves)
 
 
 def _instruction_cells(counts: dict, arch: Arch, body_error: str | None) -> tuple:
@@ -620,6 +698,7 @@ def parse_isa(path: str | Path) -> tuple:
         counts, body_error = _body_counts(scan, name)
         instruction_cells, notes, instruction_problems = _instruction_cells(counts, arch, body_error)
         metrics.update(instruction_cells)
+        metrics["occupancy"] = _occupancy_cell(entry, metrics, arch)
 
         notes = list(notes)
         lds_static = metrics["lds_static_bytes"]
@@ -704,6 +783,7 @@ class Snapshot:
             "kernels": {
                 key: {
                     "source": record.source,
+                    "binary": record.binary,
                     "arch": record.arch.to_json(),
                     "notes": list(record.notes),
                     "problems": list(record.problems),
@@ -746,6 +826,8 @@ def collect(root: str | Path) -> Snapshot:
     by_directory: dict = {}
     for path in sorted(root.rglob("*final_isa.s")):
         by_directory.setdefault(path.parent, []).append(path)
+    if not by_directory and any(root.rglob("*.pkl")):
+        return collect_jit_cache(root)
     if not by_directory:
         raise SnapshotError(f"no *final_isa.s under {root} (is FLYDSL_DUMP_IR set?)")
 
@@ -814,6 +896,91 @@ def collect(root: str | Path) -> Snapshot:
     return Snapshot(kernels=kernels, warnings=tuple(warnings), problems=tuple(problems))
 
 
+# One `gpu.binary` op per compiled module; its `#rocdl.target` names the chip and its
+# `#gpu.kernel_metadata` entries carry the same counts as the ISA's `.amdgpu_metadata`.
+RE_GPU_BINARY = re.compile(r"^\s*gpu\.binary\s+@")
+RE_ROCDL_TARGET = re.compile(r"#rocdl\.target<([^>]*)>")
+RE_ATTR_STRING = re.compile(r'\b(chip|features)\s*=\s*"([^"]*)"')
+RE_KERNEL_METADATA = re.compile(r'#gpu\.kernel_metadata<"([^"]+)".*?metadata\s*=\s*\{([^}]*)\}')
+RE_METADATA_INT = re.compile(r"(\w+)\s*=\s*(-?\d+)\s*:\s*i\d+")
+CACHE_NA = "not recorded in a JIT cache entry (kernel metadata only)"
+
+
+def _cache_ir(data: bytes) -> str | None:
+    """The compiled IR in one FlyDSL JIT cache entry, read without unpickling it.
+
+    An entry pickles a ``CompiledArtifact`` whose state keeps the IR as
+    zlib-compressed bytes under ``ir_zlib`` (``ir_text`` in older versions).
+    Walking the opcode stream with ``pickletools`` finds it without importing
+    FlyDSL and without running anything the file contains.
+    """
+    key = None
+    for opcode, arg, _ in pickletools.genops(data):
+        if key == "ir_zlib" and isinstance(arg, bytes):
+            return zlib.decompress(arg).decode("utf-8")
+        if key == "ir_text" and isinstance(arg, str):
+            return arg
+        if isinstance(arg, str):
+            key = arg
+        elif "PUT" not in opcode.name and opcode.name != "MEMOIZE":
+            key = None
+    return None
+
+
+def _cache_arch(target: str) -> Arch:
+    fields = dict(RE_ATTR_STRING.findall(target))
+    # `+xnack,-sramecc` in the attribute is `xnack+:sramecc-` in a target ID.
+    features = [f[1:] + f[0] for f in fields.get("features", "").split(",") if f[:1] in ("+", "-")]
+    return parse_target_id(":".join([f"amdgcn-amd-amdhsa--{fields.get('chip', '')}"] + features))
+
+
+def collect_jit_cache(root: Path) -> Snapshot:
+    """One record per distinct kernel binary in a FlyDSL JIT cache directory.
+
+    Keys are ``<jit function directory>@<binary hash>::<kernel name>``: kernel names
+    alone do not identify specializations (a compile hint, for one, changes the
+    binary but not the name).  ``diff`` then pairs identical binaries by key and a
+    changed one by kernel name when that name is left over exactly once per side;
+    anything more ambiguous stays unpaired.
+    """
+    kernels: dict = {}
+    problems: list = []
+    for path in sorted(root.rglob("*.pkl")):
+        try:
+            ir = _cache_ir(path.read_bytes())
+        except Exception as exc:  # noqa: BLE001 - any damage makes this entry unreadable, not the run
+            problems.append(f"{path}: unreadable JIT cache entry ({type(exc).__name__}: {exc})")
+            continue
+        if ir is None:
+            problems.append(f"{path}: no compiled IR in this JIT cache entry")
+            continue
+        relative_dir = path.parent.relative_to(root).as_posix()
+        for line in ir.splitlines():
+            if not RE_GPU_BINARY.match(line):
+                continue
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+            target = RE_ROCDL_TARGET.search(line)
+            arch = _cache_arch(target.group(1) if target else "")
+            for name, body in RE_KERNEL_METADATA.findall(line):
+                entry = dict(RE_METADATA_INT.findall(body))
+                metrics = {
+                    metric.key: _metadata_cell(entry, metric) if metric.source == METADATA else Cell.na(CACHE_NA)
+                    for metric in METRICS
+                }
+                if "agpr_count" in entry:  # the ISA path reads it from `.set`; the cache has only metadata
+                    metrics["agpr"] = _metadata_cell(entry, Metric("agpr", INFO, METADATA, "agpr_count"))
+                metrics["occupancy"] = _occupancy_cell(entry, metrics, arch)
+                key = f"{'' if relative_dir == '.' else relative_dir}@{digest}::{name}"
+                kernels.setdefault(key, KernelRecord(name, arch, metrics, str(path.relative_to(root)), binary=digest))
+    if not kernels:
+        raise SnapshotError(f"no compiled kernels in the JIT cache under {root}")
+    warnings = (
+        "read from a FlyDSL JIT cache: kernel metadata only (no .set symbols, no instruction counts). "
+        "Use a fresh FLYDSL_RUNTIME_CACHE_DIR per side so stale entries do not mix in.",
+    )
+    return Snapshot(kernels=kernels, warnings=warnings, problems=tuple(problems))
+
+
 def load_snapshot(path: str | Path) -> Snapshot:
     path = Path(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -845,6 +1012,7 @@ def load_snapshot(path: str | Path) -> Snapshot:
             source=str(body.get("source") or ""),
             notes=tuple(body.get("notes") or ()),
             problems=tuple(body.get("problems") or ()),
+            binary=str(body.get("binary") or ""),
         )
 
     # `collect()` folds each record's problems into the snapshot's; a snapshot that did
@@ -910,9 +1078,30 @@ class DiffRow:
         return after_cell.value - before_cell.value
 
     @property
+    def binary_changed(self) -> bool | None:
+        """None unless both sides carry a binary hash (JIT cache input)."""
+        if not self.comparable or not self.before.binary or not self.after.binary:
+            return None
+        return self.before.binary != self.after.binary
+
+    @property
     def changed(self) -> bool:
         """The single definition of 'this kernel changed', used by every caller."""
-        return any(self.delta(key) for key in KEYS)
+        return bool(self.binary_changed) or any(self.delta(key) for key in KEYS)
+
+    @property
+    def trigger_keys(self) -> tuple:
+        """`occupancy` where both sides have it, else the raw inputs it would replace."""
+        if self.delta("occupancy") is not None:
+            return tuple(key for key in KEYS if key in TRIGGERS and key not in OCCUPANCY_INPUTS)
+        return tuple(key for key in KEYS if key in TRIGGERS and key != "occupancy")
+
+    def worsening(self, key: str) -> int | None:
+        """The delta signed so that positive always means worse."""
+        delta = self.delta(key)
+        if delta is None:
+            return None
+        return -delta if key in HIGHER_IS_BETTER else delta
 
 
 @dataclass(frozen=True)
@@ -948,8 +1137,8 @@ class Comparison:
         for row in self.rows:
             if not row.comparable:
                 continue
-            for key in TRIGGERS:
-                delta = row.delta(key)
+            for key in row.trigger_keys:
+                delta = row.worsening(key)
                 if delta is not None and predicate(delta):
                     total += 1
         return total
@@ -963,6 +1152,11 @@ class Comparison:
     @property
     def verdict(self) -> str:
         return {0: "RESULT: OK", 1: "RESULT: REGRESSION", 2: "RESULT: NOT TRUSTWORTHY"}[self.exit_code]
+
+
+def _layout(key: str) -> str:
+    """The directory part of a key, without a JIT cache row's binary hash."""
+    return re.sub(r"@[0-9a-f]{16}$", "", key.rpartition("::")[0])
 
 
 def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
@@ -986,6 +1180,8 @@ def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
             right_keys = right_by.get(kernel, [])
             if len(left_keys) == 1 and len(right_keys) == 1:
                 pairs[left_keys[0]] = right_keys[0]
+                if _layout(left_keys[0]) == _layout(right_keys[0]):
+                    continue  # JIT cache rows: same place, different binary -- the expected pairing
                 notes.append(
                     "matched by kernel name across differing layouts:\n"
                     f"      before  {left_keys[0]}\n"
@@ -994,7 +1190,32 @@ def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
     return pairs, tuple(notes)
 
 
-def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
+def _select(snapshot: Snapshot, pattern: re.Pattern) -> tuple:
+    """(the snapshot restricted to kernels whose name matches, the keys left out).
+
+    Problems that belong to a left-out kernel go with it; problems of a whole file
+    stay, because they may hide a kernel that would have matched.
+    """
+    kept = {key: record for key, record in snapshot.kernels.items() if pattern.search(key.rpartition("::")[2])}
+    dropped = sorted(snapshot.kernels.keys() - kept.keys())
+    prefixes = tuple(f"{key}: " for key in dropped)
+    problems = tuple(problem for problem in snapshot.problems if not prefixes or not problem.startswith(prefixes))
+    return replace(snapshot, kernels=kept, problems=problems), dropped
+
+
+def compare_snapshots(before: Snapshot, after: Snapshot, kernel: re.Pattern | None = None) -> Comparison:
+    selection_notes: list = []
+    if kernel is not None:
+        before, dropped_before = _select(before, kernel)
+        after, dropped_after = _select(after, kernel)
+        dropped = sorted(set(dropped_before) | set(dropped_after))
+        if dropped:
+            shown = "".join(f"\n      {_label(key)}" for key in dropped[:20])
+            more = f"\n      ... and {len(dropped) - 20} more" if len(dropped) > 20 else ""
+            selection_notes.append(
+                f"--kernel {kernel.pattern!r} left {len(dropped)} kernel(s) out of the comparison "
+                f"({len(dropped_before)} before, {len(dropped_after)} after):{shown}{more}"
+            )
     problems = list(before.problems) + list(after.problems)
     if not before or not after:
         problems.append(f"one or both inputs contain no kernels (before={len(before)}, after={len(after)})")
@@ -1045,7 +1266,7 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
         rows=tuple(rows),
         problems=tuple(problems),
         warnings=tuple(before.warnings) + tuple(after.warnings),
-        notes=tuple(notes),
+        notes=tuple(selection_notes) + tuple(notes),
         total_kernels=total,
     )
 
@@ -1054,7 +1275,6 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
 # Rendering
 # --------------------------------------------------------------------------------------
 
-MIN_NAME_WIDTH = 20
 MAX_NAME_WIDTH = 60
 NAME_TAIL = 12
 MIN_CELL_WIDTH = 5
@@ -1070,14 +1290,28 @@ def _abbreviate(name: str, width: int) -> str:
     return name[:head] + "~" + name[-NAME_TAIL:]
 
 
+def _label(key: str) -> str:
+    """``<kernel> [<directory>]`` for a ``<directory>/<kernel>::<kernel>`` key.
+
+    FLYDSL_DUMP_IR names each directory after its kernel, so the key repeats the
+    kernel name, and in a tree with one directory per test case the case name comes
+    first.  Abbreviating the whole key then cut out the kernel name; here the kernel
+    name is kept whole and only the directory is shortened.
+    """
+    directory, separator, name = key.rpartition("::")
+    if not separator:
+        return key
+    if directory and Path(directory).name == name:
+        directory = Path(directory).parent.as_posix()
+    if directory in ("", "."):
+        return name
+    return f"{name} [{_abbreviate(directory, MAX_NAME_WIDTH)}]"
+
+
 def _name_column(names: list) -> dict:
-    if not names:
-        return {}
-    longest = max(len(name) for name in names)
-    width = min(max(MIN_NAME_WIDTH, longest), MAX_NAME_WIDTH)
-    shown = {name: _abbreviate(name, width) for name in names}
+    shown = {name: _label(name) for name in names}
     if len(set(shown.values())) != len(shown):
-        # Rows must never be indistinguishable; drop the cap rather than the identity.
+        # Rows must never be indistinguishable; drop the abbreviation rather than the identity.
         return {name: name for name in names}
     return shown
 
@@ -1101,7 +1335,12 @@ def _format_table(headers: list, rows: list) -> list:
 
 
 def _header_cells() -> list:
-    return ["kernel"] + [("*" + key if key in TRIGGERS else key) for key in KEYS]
+    def marked(key):
+        if key in OCCUPANCY_INPUTS:
+            return "(*)" + key
+        return "*" + key if key in TRIGGERS else key
+
+    return ["kernel"] + [marked(key) for key in KEYS]
 
 
 def _cell_text(cell: Cell) -> str:
@@ -1113,13 +1352,14 @@ def _cell_text(cell: Cell) -> str:
 def render_snapshot(snapshot: Snapshot, output: TextIO, error: TextIO | None = None) -> None:
     error = error if error is not None else sys.stderr
     names = _name_column(sorted(snapshot.kernels))
+    hashed = any(record.binary for record in snapshot.kernels.values())
     rows = []
     for key in sorted(snapshot.kernels):
         record = snapshot.kernels[key]
-        rows.append([names[key]] + [_cell_text(record.metrics[k]) for k in KEYS])
+        rows.append([names[key]] + [_cell_text(record.metrics[k]) for k in KEYS] + ([record.binary] if hashed else []))
 
     print(LEGEND, file=output)
-    for line in _format_table(_header_cells(), rows):
+    for line in _format_table(_header_cells() + (["binary"] if hashed else []), rows):
         print(line, file=output)
 
     for key in sorted(snapshot.kernels):
@@ -1145,14 +1385,17 @@ def _render_problems(warnings, problems, output: TextIO, error: TextIO) -> None:
 def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> None:
     printable = [row for row in comparison.rows if not row.comparable or row.changed]
     names = _name_column([row.name for row in printable])
+    hashed = [row for row in comparison.rows if row.binary_changed is not None]
+    headers = _header_cells() + (["binary"] if hashed else [])
+    padding = [""] * (len(headers) - 2)
 
     rows = []
     for row in printable:
         if row.side is not None:
-            rows.append([names[row.name], row.side] + [""] * (len(KEYS) - 1))
+            rows.append([names[row.name], row.side] + padding)
             continue
         if row.blocked:
-            rows.append([names[row.name], "BLOCKED: " + row.blocked[0]] + [""] * (len(KEYS) - 1))
+            rows.append([names[row.name], "BLOCKED: " + row.blocked[0]] + padding)
             continue
         cells = [names[row.name]]
         for key in KEYS:
@@ -1163,10 +1406,12 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
                 cells.append(f"{before_value}->{after_value}({delta:+d})")
             else:
                 cells.append(_cell_text(row.after.metrics[key]))
+        if hashed:
+            cells.append({True: "changed", False: "identical", None: ""}[row.binary_changed])
         rows.append(cells)
 
     print(LEGEND, file=output)
-    for line in _format_table(_header_cells(), rows):
+    for line in _format_table(headers, rows):
         print(line, file=output)
 
     for note in comparison.notes:
@@ -1178,8 +1423,256 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
         f"worsened: {comparison.worsened_metrics}; improved: {comparison.improved_metrics}",
         file=output,
     )
+    if hashed:
+        same = sum(1 for row in hashed if not row.binary_changed)
+        print(f"binaries: {same} identical, {len(hashed) - same} changed", file=output)
     _render_problems(comparison.warnings, comparison.problems, output, error)
     print(comparison.verdict, file=output)
+
+
+# --------------------------------------------------------------------------------------
+# Control flow: loops, per-block op order, VGPR liveness estimate
+# --------------------------------------------------------------------------------------
+#
+# The resource table answers "how many registers", not "what does the hot loop do".
+# A change can keep every count above and still make a loop wait `vmcnt(0)` where it
+# used to keep loads in flight, or add a branch around a prefetch.  `loops` prints,
+# per loop (or per basic block), its instruction mix, its lowest `vmcnt` wait and
+# the order of its memory, MFMA, wait and barrier instructions as a token string,
+# so two builds can be compared with a plain text diff.
+
+TERMINATORS = ("s_branch", "s_cbranch_", "s_endpgm", "s_setpc_b64")
+RE_VMCNT = re.compile(r"\bvmcnt\((\d+)\)")
+RE_LGKMCNT = re.compile(r"\blgkmcnt\((\d+)\)")
+RE_WAIT_IMM = re.compile(r"^\s*(0x[0-9a-fA-F]+|\d+)")
+RE_VREG = re.compile(r"(?<![\w.])([va])(?:\[(\d+):(\d+)\]|(\d+)(?!\w))")
+COUNTS = ("instr", "valu", "mfma", "s_nop", "v_cmp", "v_cndmask", "scratch")
+
+# A VGPR first operand is a use, not a def, for these.
+NO_VGPR_DEF = (
+    "s_",
+    "buffer_store",
+    "global_store",
+    "flat_store",
+    "scratch_store",
+    "v_cmp",
+    "v_readlane",
+    "v_readfirstlane",
+    "exp",
+)
+# The destination is also read (accumulating or lane-merging writes).
+DEF_ALSO_USE = ("v_fmac", "v_mac", "v_pk_fmac", "v_dot2c", "v_dot4c", "v_dot8c", "v_writelane")
+DS_DEF = ("ds_read", "ds_load", "ds_bpermute", "ds_permute", "ds_swizzle", "ds_append", "ds_consume")
+
+
+@dataclass
+class Block:
+    name: str
+    instructions: list = field(default_factory=list)  # (mnemonic, text)
+    successors: list = field(default_factory=list)
+
+
+def _token(mnemonic: str, text: str) -> list:
+    if mnemonic.startswith(("buffer_load", "global_load", "flat_load")):
+        return ["LD"]
+    if mnemonic.startswith(("buffer_store", "global_store", "flat_store")):
+        return ["ST"]
+    if mnemonic.startswith("scratch_load"):
+        return ["SL"]
+    if mnemonic.startswith("scratch_store"):
+        return ["SS"]
+    if mnemonic.startswith(("ds_read", "ds_load")):
+        return ["DR"]
+    if mnemonic.startswith(("ds_write", "ds_store")):
+        return ["DW"]
+    if _categorize(mnemonic) == "matrix_ops":
+        return ["M"]
+    if mnemonic == "s_waitcnt":
+        vm, lgkm = RE_VMCNT.search(text), RE_LGKMCNT.search(text)
+        return ([f"W{vm.group(1)}"] if vm else []) + ([f"K{lgkm.group(1)}"] if lgkm else [])
+    if mnemonic in ("s_wait_loadcnt", "s_wait_dscnt"):  # gfx12 and later
+        m = RE_WAIT_IMM.match(text[len(mnemonic) :])
+        return [("W" if mnemonic == "s_wait_loadcnt" else "K") + str(int(m.group(1), 0))] if m else []
+    if mnemonic.startswith("s_barrier"):
+        return ["BAR"]
+    if mnemonic.startswith("s_cbranch_"):
+        return ["BR"]
+    return []
+
+
+def _run_length(tokens: list) -> str:
+    out = []
+    for token in tokens:
+        if out and out[-1][0] == token:
+            out[-1][1] += 1
+        else:
+            out.append([token, 1])
+    return " ".join(token if n == 1 else f"{token}x{n}" for token, n in out)
+
+
+def _registers(text: str) -> set:
+    found = set()
+    for kind, lo, hi, single in RE_VREG.findall(text):
+        first, last = (int(lo), int(hi)) if lo else (int(single), int(single))
+        offset = 0 if kind == "v" else 1 << 16  # AGPRs share the unified file but not the names
+        found.update(range(offset + first, offset + last + 1))
+    return found
+
+
+def _defs_uses(mnemonic: str, text: str) -> tuple:
+    """(VGPR/AGPR defs, uses) of one instruction -- a syntactic estimate.
+
+    The first operand is the destination except for stores, compares, lane reads,
+    scalar ops, LDS ops without a return value and atomics without one.  Writes under
+    a partial EXEC are treated as full writes, so divergent code reads low.
+    """
+    rest = text[len(mnemonic) :]
+    first, _, others = rest.partition(",")
+    if mnemonic.startswith("ds_"):
+        has_def = mnemonic.startswith(DS_DEF) or "_rtn" in mnemonic
+    elif "atomic" in mnemonic:
+        has_def = re.search(r"\b(?:glc|sc0)\b", rest) is not None
+    else:
+        has_def = not mnemonic.startswith(NO_VGPR_DEF)
+    if not has_def:
+        return set(), _registers(rest)
+    defs = _registers(first)
+    uses = _registers(others)
+    if mnemonic.startswith(DEF_ALSO_USE):
+        uses |= defs
+    return defs, uses
+
+
+def _blocks(lines: list) -> list:
+    """Basic blocks of one kernel body, with successor indices."""
+    blocks = [Block("entry")]
+
+    def unnamed(block):
+        return not block.instructions and (block.name == "entry" or block.name.endswith("+"))
+
+    for line in lines:
+        if line and line[0] not in " \t":
+            m = RE_LABEL.match(line)
+            if m and unnamed(blocks[-1]):
+                blocks[-1].name = _unquote(m.group("name"))
+            elif m:
+                blocks.append(Block(_unquote(m.group("name"))))
+            continue
+        stripped = line.split(";", 1)[0].strip()
+        if not stripped or stripped[0] == ".":
+            continue
+        m = RE_MNEMONIC.match(line)
+        if not m:
+            continue
+        mnemonic = m.group("m")
+        blocks[-1].instructions.append((mnemonic, stripped))
+        if mnemonic.startswith(TERMINATORS):
+            blocks.append(Block(f"{blocks[-1].name}+"))
+    if unnamed(blocks[-1]):
+        blocks.pop()
+
+    index = {block.name: i for i, block in enumerate(blocks)}
+    for i, block in enumerate(blocks):
+        mnemonic, text = block.instructions[-1] if block.instructions else ("", "")
+        target = text.split()[1] if mnemonic.startswith(("s_branch", "s_cbranch_")) and len(text.split()) > 1 else None
+        if target is not None and target in index:
+            block.successors.append(index[target])
+        if mnemonic not in ("s_branch", "s_endpgm", "s_setpc_b64") and i + 1 < len(blocks):
+            block.successors.append(i + 1)
+    return blocks
+
+
+def _liveness(blocks: list) -> list:
+    """Per block: (max live VGPRs+AGPRs, the instruction at that point)."""
+    info = [[_defs_uses(m, t) for m, t in block.instructions] for block in blocks]
+    live_in = [set() for _ in blocks]
+    changed = True
+    while changed:
+        changed = False
+        for i in reversed(range(len(blocks))):
+            live = set().union(*(live_in[s] for s in blocks[i].successors))
+            for defs, uses in reversed(info[i]):
+                live = (live - defs) | uses
+            if live != live_in[i]:
+                live_in[i] = live
+                changed = True
+    peaks = []
+    for i, block in enumerate(blocks):
+        live = set().union(*(live_in[s] for s in block.successors))
+        best = (len(live), "")
+        for (defs, uses), (_, text) in zip(reversed(info[i]), reversed(block.instructions)):
+            # Pressure at an instruction: what is live after it plus what it writes.
+            best = max(best, (len(live | defs), text), key=lambda p: p[0])
+            live = (live - defs) | uses
+        peaks.append(best)
+    return peaks
+
+
+def _region_line(blocks: list, peaks: list | None) -> str:
+    counts = dict.fromkeys(COUNTS, 0)
+    tokens, waits = [], []
+    for block in blocks:
+        for mnemonic, text in block.instructions:
+            counts["instr"] += 1
+            matrix = _categorize(mnemonic) == "matrix_ops"
+            counts["mfma"] += matrix
+            counts["valu"] += mnemonic.startswith("v_") and not matrix
+            counts["s_nop"] += mnemonic == "s_nop"
+            counts["v_cmp"] += mnemonic.startswith("v_cmp")
+            counts["v_cndmask"] += mnemonic.startswith("v_cndmask")
+            counts["scratch"] += mnemonic.startswith("scratch_")
+            for token in _token(mnemonic, text):
+                tokens.append(token)
+                if token[0] == "W":
+                    waits.append(int(token[1:]))
+    line = " ".join(f"{key} {counts[key]}" for key in COUNTS)
+    line += f" vmcnt_min {min(waits) if waits else '-'}"
+    if peaks is not None:
+        live, at = max(peaks, key=lambda p: p[0])
+        line += f" live ~{live} at `{at}`"
+    return line + "\n      " + (_run_length(tokens) or "(no memory/MFMA/wait ops)")
+
+
+def flow_report(lines: list, all_blocks: bool, live: bool) -> list:
+    blocks = _blocks(lines)
+    peaks = _liveness(blocks) if live else None
+    out = []
+    if all_blocks:
+        for i, block in enumerate(blocks):
+            out.append(f"  block {block.name}: " + _region_line([block], peaks and [peaks[i]]))
+    else:
+        loops: dict = {}
+        for i, block in enumerate(blocks):
+            for target in block.successors:
+                if target <= i:  # a back edge: the loop spans the blocks in between
+                    loops[target] = max(loops.get(target, i), i)
+        for number, (head, tail) in enumerate(sorted(loops.items()), start=1):
+            region = blocks[head : tail + 1]
+            out.append(
+                f"  loop {number} {blocks[head].name} - {blocks[tail].name}: "
+                + _region_line(region, peaks and peaks[head : tail + 1])
+            )
+        if not loops:
+            out.append("  no loops")
+    if live:
+        top, at = max(peaks, key=lambda p: p[0]) if peaks else (0, "")
+        out.insert(0, f"  live VGPRs (estimate) max ~{top} at `{at}`")
+    return out
+
+
+def _kernel_bodies(path: Path) -> list:
+    """(kernel name, body lines, allocated vgpr) for every kernel in one ISA file."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    scan = _scan_text(text)
+    out = []
+    for entry in scan.entries:
+        name, _ = _kernel_name(entry)
+        terminator = scan.sizes.get(name)
+        if not name or name not in scan.labels or terminator not in scan.labels:
+            raise SnapshotError(f"{path}: cannot find the body of kernel {name!r}")
+        out.append((name, lines[scan.labels[name] + 1 : scan.labels[terminator]], entry.get("vgpr_count", "?")))
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -1195,10 +1688,11 @@ def do_diff(
     error: TextIO | None = None,
     json_path: str | Path | None = None,
     quiet: bool = False,
+    kernel: re.Pattern | None = None,
 ) -> int:
     output = output if output is not None else sys.stdout
     error = error if error is not None else sys.stderr
-    comparison = compare_snapshots(load_input(before_path), load_input(after_path))
+    comparison = compare_snapshots(load_input(before_path), load_input(after_path), kernel)
     if json_path is not None:
         Path(json_path).write_text(
             json.dumps(_comparison_json(comparison), indent=2, sort_keys=True) + "\n",
@@ -1230,6 +1724,7 @@ def _comparison_json(comparison: Comparison) -> dict:
                 "side": row.side,
                 "blocked": list(row.blocked),
                 "deltas": {key: row.delta(key) for key in KEYS if row.delta(key)},
+                "binary_changed": row.binary_changed,
             }
             for row in comparison.rows
             if not row.comparable or row.changed
@@ -1270,6 +1765,54 @@ def do_summarize(
     return 0
 
 
+def do_loops(
+    target: str | Path,
+    *,
+    kernel: re.Pattern | None = None,
+    all_blocks: bool = False,
+    live: bool = False,
+    output: TextIO | None = None,
+) -> int:
+    output = output if output is not None else sys.stdout
+    root = Path(target)
+    if root.is_file():
+        files = [root]
+        root = root.parent
+    elif root.is_dir():
+        by_directory: dict = {}
+        for path in sorted(root.rglob("*final_isa.s")):
+            by_directory.setdefault(path.parent, []).append(path)
+        if not by_directory:
+            raise SnapshotError(f"no *final_isa.s under {root} (is FLYDSL_DUMP_IR set?)")
+        files = [_pick_stage_file(by_directory[d])[0] for d in sorted(by_directory)]
+    else:
+        raise SnapshotError(f"input not found: {root}")
+
+    shown = 0
+    for path in files:
+        directory = path.parent.relative_to(root)
+        for name, lines, vgpr in _kernel_bodies(path):
+            if kernel is not None and not kernel.search(name):
+                continue
+            where = (directory.parent if directory.name == name else directory).as_posix()
+            print(f"{name}{'' if where == '.' else f' [{where}]'}: vgpr {vgpr}", file=output)
+            for line in flow_report(lines, all_blocks, live):
+                print(line, file=output)
+            shown += 1
+    if not shown:
+        raise SnapshotError("no kernel to report" + (f" matches {kernel.pattern!r}" if kernel else ""))
+    return 0
+
+
+def _regex(text: str) -> re.Pattern:
+    # argparse reports ArgumentTypeError with exit 2; an uncaught re.error would exit 1,
+    # which reads as a regression.
+    try:
+        return re.compile(text)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid regex {text!r}: {exc}") from None
+
+
 def _create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1284,6 +1827,18 @@ def _create_parser() -> argparse.ArgumentParser:
     diff.add_argument("after", type=Path, help="after dump directory or JSON snapshot")
     diff.add_argument("--json", type=Path, metavar="PATH", help="write the comparison as JSON")
     diff.add_argument("-q", "--quiet", action="store_true", help="suppress the table")
+    diff.add_argument(
+        "--kernel",
+        type=_regex,
+        metavar="REGEX",
+        help="compare only kernels whose name matches REGEX (re.search); the rest are listed, not compared",
+    )
+
+    loops = commands.add_parser("loops", help="per-loop instruction mix and memory/MFMA/wait order")
+    loops.add_argument("target", type=Path, help="a dump directory or one *final_isa.s file")
+    loops.add_argument("--kernel", type=_regex, metavar="REGEX", help="only kernels whose name matches REGEX")
+    loops.add_argument("--blocks", action="store_true", help="one entry per basic block instead of per loop")
+    loops.add_argument("--live", action="store_true", help="add a VGPR liveness estimate (max live, and where)")
     return parser
 
 
@@ -1291,7 +1846,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _create_parser().parse_args(argv)
     try:
         if args.command == "diff":
-            return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet)
+            return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet, kernel=args.kernel)
+        if args.command == "loops":
+            return do_loops(args.target, kernel=args.kernel, all_blocks=args.blocks, live=args.live)
         return do_summarize(args.dump_dir, json_path=args.json, quiet=args.quiet)
     except SnapshotError as exc:
         print(f"error: {exc}", file=sys.stderr)
