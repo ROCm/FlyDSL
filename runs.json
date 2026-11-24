@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-24T16:57:39Z",
+ "updated": "2026-11-24T18:25:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45455838769,
+   "pr": 1501,
+   "commit": "1c0de3ea0cd4f17431e06b6af8db3633069a1c12",
+   "branch": "reble/pa-decode-mfma-interleave",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] PA decode: interleave independent MFMA chains",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45455838769",
+   "created_at": "2026-11-24T18:06:13Z",
+   "updated_at": "2026-11-24T18:08:38Z",
+   "actor": "reble",
+   "jobs": []
+  },
   {
    "run_id": 45415491312,
    "pr": 1431,
@@ -2053,52 +2068,6 @@
      "started_at": "2026-11-22T07:23:50Z",
      "completed_at": "2026-11-22T07:56:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44996706413/job/137133033466",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44996680918,
-   "pr": null,
-   "commit": "23b9fd75a2b7988634869f3d8a8ce5de9c1704df",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Re-apply llvm_options for the final ISA dump (#1474)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44996680918",
-   "created_at": "2026-11-22T07:06:07Z",
-   "updated_at": "2026-11-22T08:58:09Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T07:49:50Z",
-     "completed_at": "2026-11-22T08:58:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44996680918/job/137132853610"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T08:00:10Z",
-     "completed_at": "2026-11-22T08:11:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44996680918/job/137132853620"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T07:23:06Z",
-     "completed_at": "2026-11-22T07:55:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44996680918/job/137132853638",
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
