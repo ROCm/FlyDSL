@@ -1,0 +1,207 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FlyDSL Project Contributors
+
+"""CDNA3 (gfx942) instruction wrappers, one per Copy / MMA ISA instruction the gfx942 ISA supports
+(including the LDS (DS) reads, writes, atomics and cross-lane instructions).
+
+Each is named by its mnemonic (``V_MFMA_F32_16X16X16_F16``, ``BUFFER_LOAD_DWORDX4``). Operands take DSL values,
+``fx.Pointer`` or Python literals; immediates take Python literals; results are DSL values. Register
+operands also take ``fx.Tensor`` register memory, and ``out=`` stores a result to a tensor. MFMA
+wrappers backed by a FlyROCDL atom expose its layouts (``layout_A_tv`` ... / ``layout_src_tv`` ...). LDS DMA is
+async only: synchronize explicitly.
+
+``PROVISIONAL`` names the VALU instructions (conversions, dot products, lane instructions) also exported for now;
+``ScheduleRegion`` does not order them yet.
+"""
+
+from ._copy import (
+    BUFFER_ATOMIC_ADD_F32,
+    BUFFER_ATOMIC_ADD_F64,
+    BUFFER_ATOMIC_CMPSWAP,
+    BUFFER_ATOMIC_CMPSWAP_X2,
+    BUFFER_ATOMIC_MAX_F64,
+    BUFFER_ATOMIC_PK_ADD_F16,
+    BUFFER_ATOMIC_SMAX,
+    BUFFER_ATOMIC_SMAX_X2,
+    BUFFER_ATOMIC_UMIN,
+    BUFFER_ATOMIC_UMIN_X2,
+    BUFFER_LOAD_DWORD,
+    BUFFER_LOAD_DWORD_LDS,
+    BUFFER_LOAD_DWORDX2,
+    BUFFER_LOAD_DWORDX3,
+    BUFFER_LOAD_DWORDX4,
+    BUFFER_LOAD_UBYTE,
+    BUFFER_LOAD_UBYTE_LDS,
+    BUFFER_LOAD_USHORT,
+    BUFFER_LOAD_USHORT_LDS,
+    BUFFER_STORE_BYTE,
+    BUFFER_STORE_DWORD,
+    BUFFER_STORE_DWORDX2,
+    BUFFER_STORE_DWORDX3,
+    BUFFER_STORE_DWORDX4,
+    BUFFER_STORE_SHORT,
+    DS_BPERMUTE_B32,
+    DS_PERMUTE_B32,
+    DS_READ_B32,
+    DS_READ_B64,
+    DS_READ_B96,
+    DS_READ_B128,
+    DS_READ_I8,
+    DS_READ_I16,
+    DS_READ_U8,
+    DS_READ_U16,
+    DS_SWIZZLE_B32,
+    DS_WRITE_B8,
+    DS_WRITE_B16,
+    DS_WRITE_B32,
+    DS_WRITE_B64,
+    DS_WRITE_B96,
+    DS_WRITE_B128,
+    GLOBAL_LOAD_LDS_DWORD,
+    GLOBAL_LOAD_LDS_UBYTE,
+    GLOBAL_LOAD_LDS_USHORT,
+    S_BUFFER_LOAD_DWORD,
+    S_BUFFER_LOAD_DWORDX2,
+    S_BUFFER_LOAD_DWORDX4,
+    S_BUFFER_LOAD_DWORDX8,
+    S_BUFFER_LOAD_DWORDX16,
+)
+from ._copy import (
+    DS_ATOMICS as _DS_ATOMICS,
+)
+from ._mma import (
+    V_MFMA_F32_4X4X1_16B_F32,
+    V_MFMA_F32_4X4X4_16B_BF16,
+    V_MFMA_F32_4X4X4_16B_F16,
+    V_MFMA_F32_16X16X1_4B_F32,
+    V_MFMA_F32_16X16X4_4B_BF16,
+    V_MFMA_F32_16X16X4_4B_F16,
+    V_MFMA_F32_16X16X4_F32,
+    V_MFMA_F32_16X16X8_XF32,
+    V_MFMA_F32_16X16X16_BF16,
+    V_MFMA_F32_16X16X16_F16,
+    V_MFMA_F32_32X32X1_2B_F32,
+    V_MFMA_F32_32X32X2_F32,
+    V_MFMA_F32_32X32X4_2B_BF16,
+    V_MFMA_F32_32X32X4_2B_F16,
+    V_MFMA_F32_32X32X4_XF32,
+    V_MFMA_F32_32X32X8_BF16,
+    V_MFMA_F32_32X32X8_F16,
+    V_MFMA_F64_4X4X4_4B_F64,
+    V_MFMA_F64_16X16X4_F64,
+    V_MFMA_I32_4X4X4_16B_I8,
+    V_MFMA_I32_16X16X4_4B_I8,
+    V_MFMA_I32_16X16X32_I8,
+    V_MFMA_I32_32X32X4_2B_I8,
+    V_MFMA_I32_32X32X16_I8,
+    fp8_mfmas,
+)
+from ._provisional import CDNA3 as _PROVISIONAL
+
+# gfx942 reads fp8 / bf8 data in the FNUZ formats.
+_FP8_MFMAS = fp8_mfmas("gfx942")
+V_MFMA_F32_16X16X32_BF8_BF8 = _FP8_MFMAS["V_MFMA_F32_16X16X32_BF8_BF8"]
+V_MFMA_F32_16X16X32_BF8_FP8 = _FP8_MFMAS["V_MFMA_F32_16X16X32_BF8_FP8"]
+V_MFMA_F32_16X16X32_FP8_BF8 = _FP8_MFMAS["V_MFMA_F32_16X16X32_FP8_BF8"]
+V_MFMA_F32_16X16X32_FP8_FP8 = _FP8_MFMAS["V_MFMA_F32_16X16X32_FP8_FP8"]
+V_MFMA_F32_32X32X16_BF8_BF8 = _FP8_MFMAS["V_MFMA_F32_32X32X16_BF8_BF8"]
+V_MFMA_F32_32X32X16_BF8_FP8 = _FP8_MFMAS["V_MFMA_F32_32X32X16_BF8_FP8"]
+V_MFMA_F32_32X32X16_FP8_BF8 = _FP8_MFMAS["V_MFMA_F32_32X32X16_FP8_BF8"]
+V_MFMA_F32_32X32X16_FP8_FP8 = _FP8_MFMAS["V_MFMA_F32_32X32X16_FP8_FP8"]
+
+# The LDS atomics (``DS_ADD_U32``, ``DS_ADD_RTN_U32``, ...), generated from a table in ``_copy``.
+globals().update((i.__name__, i) for i in _DS_ATOMICS)
+
+#: Provisional members (``_provisional``): VALU conversions, dot products and lane instructions that ScheduleRegion
+#: does not order yet. Kept apart from the list below and appended to ``__all__``.
+PROVISIONAL = [i.__name__ for i in _PROVISIONAL]
+globals().update((i.__name__, i) for i in _PROVISIONAL)
+
+__all__ = [
+    # MMA instructions
+    "V_MFMA_F32_16X16X16_BF16",
+    "V_MFMA_F32_16X16X16_F16",
+    "V_MFMA_F32_16X16X1_4B_F32",
+    "V_MFMA_F32_16X16X32_BF8_BF8",
+    "V_MFMA_F32_16X16X32_BF8_FP8",
+    "V_MFMA_F32_16X16X32_FP8_BF8",
+    "V_MFMA_F32_16X16X32_FP8_FP8",
+    "V_MFMA_F32_16X16X4_4B_BF16",
+    "V_MFMA_F32_16X16X4_4B_F16",
+    "V_MFMA_F32_16X16X4_F32",
+    "V_MFMA_F32_16X16X8_XF32",
+    "V_MFMA_F32_32X32X16_BF8_BF8",
+    "V_MFMA_F32_32X32X16_BF8_FP8",
+    "V_MFMA_F32_32X32X16_FP8_BF8",
+    "V_MFMA_F32_32X32X16_FP8_FP8",
+    "V_MFMA_F32_32X32X1_2B_F32",
+    "V_MFMA_F32_32X32X2_F32",
+    "V_MFMA_F32_32X32X4_2B_BF16",
+    "V_MFMA_F32_32X32X4_2B_F16",
+    "V_MFMA_F32_32X32X4_XF32",
+    "V_MFMA_F32_32X32X8_BF16",
+    "V_MFMA_F32_32X32X8_F16",
+    "V_MFMA_F32_4X4X1_16B_F32",
+    "V_MFMA_F32_4X4X4_16B_BF16",
+    "V_MFMA_F32_4X4X4_16B_F16",
+    "V_MFMA_F64_16X16X4_F64",
+    "V_MFMA_F64_4X4X4_4B_F64",
+    "V_MFMA_I32_16X16X32_I8",
+    "V_MFMA_I32_16X16X4_4B_I8",
+    "V_MFMA_I32_32X32X16_I8",
+    "V_MFMA_I32_32X32X4_2B_I8",
+    "V_MFMA_I32_4X4X4_16B_I8",
+    # Copy instructions
+    "BUFFER_LOAD_UBYTE",
+    "BUFFER_LOAD_USHORT",
+    "BUFFER_LOAD_DWORD",
+    "BUFFER_LOAD_DWORDX2",
+    "BUFFER_LOAD_DWORDX3",
+    "BUFFER_LOAD_DWORDX4",
+    "BUFFER_STORE_BYTE",
+    "BUFFER_STORE_SHORT",
+    "BUFFER_STORE_DWORD",
+    "BUFFER_STORE_DWORDX2",
+    "BUFFER_STORE_DWORDX3",
+    "BUFFER_STORE_DWORDX4",
+    "BUFFER_ATOMIC_ADD_F32",
+    "BUFFER_ATOMIC_ADD_F64",
+    "BUFFER_ATOMIC_PK_ADD_F16",
+    "BUFFER_ATOMIC_MAX_F64",
+    "BUFFER_ATOMIC_SMAX",
+    "BUFFER_ATOMIC_SMAX_X2",
+    "BUFFER_ATOMIC_UMIN",
+    "BUFFER_ATOMIC_UMIN_X2",
+    "BUFFER_ATOMIC_CMPSWAP",
+    "BUFFER_ATOMIC_CMPSWAP_X2",
+    "S_BUFFER_LOAD_DWORD",
+    "S_BUFFER_LOAD_DWORDX2",
+    "S_BUFFER_LOAD_DWORDX4",
+    "S_BUFFER_LOAD_DWORDX8",
+    "S_BUFFER_LOAD_DWORDX16",
+    "BUFFER_LOAD_UBYTE_LDS",
+    "BUFFER_LOAD_USHORT_LDS",
+    "BUFFER_LOAD_DWORD_LDS",
+    "GLOBAL_LOAD_LDS_UBYTE",
+    "GLOBAL_LOAD_LDS_USHORT",
+    "GLOBAL_LOAD_LDS_DWORD",
+    # LDS (DS) instructions
+    "DS_READ_U8",
+    "DS_READ_I8",
+    "DS_READ_U16",
+    "DS_READ_I16",
+    "DS_READ_B32",
+    "DS_READ_B64",
+    "DS_READ_B96",
+    "DS_READ_B128",
+    "DS_WRITE_B8",
+    "DS_WRITE_B16",
+    "DS_WRITE_B32",
+    "DS_WRITE_B64",
+    "DS_WRITE_B96",
+    "DS_WRITE_B128",
+    "DS_SWIZZLE_B32",
+    "DS_PERMUTE_B32",
+    "DS_BPERMUTE_B32",
+    *(i.__name__ for i in _DS_ATOMICS),
+] + PROVISIONAL

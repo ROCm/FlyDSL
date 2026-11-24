@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Register-placement hints that are not in upstream LLVM.
+"""Experimental ROCDL APIs.
 
-``rocdl.sched.bank`` / ``rocdl.sched.vgpr`` / ``rocdl.sched.sgpr`` /
-``rocdl.sched.agpr`` come from the local ``schedule-bank-and-gpr`` patch.
+- ``inst``: one wrapper per ISA instruction, by architecture (``inst.cdna3``, ``inst.cdna4``), and ``inst.ScheduleRegion``.
+- Register-placement hints that are not in upstream LLVM: ``rocdl.sched.bank`` / ``rocdl.sched.vgpr`` /
+  ``rocdl.sched.sgpr`` / ``rocdl.sched.agpr`` come from the local ``schedule-bank-and-gpr`` patch.
+
 Any path under this module is unstable (``docs/api_stability.md`` §2).
 """
 
-from ..meta import dsl_loc_tracing
+from ...meta import dsl_loc_tracing
+from . import inst as inst
 
 __all__ = [
+    "inst",
     "sched_bank",
     "sched_vgpr",
     "sched_sgpr",
@@ -19,7 +23,7 @@ __all__ = [
 
 
 def _ods(name):
-    from ..._mlir.dialects import rocdl as _rocdl
+    from ...._mlir.dialects import rocdl as _rocdl
 
     op = getattr(_rocdl, name, None)
     if op is None:
@@ -35,8 +39,8 @@ def _check_regnum(regnum):
 
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
-    from ..._mlir import ir as _ir
-    from .. import arith as _arith_ext
+    from ...._mlir import ir as _ir
+    from ... import arith as _arith_ext
 
     if isinstance(v, int):
         return _arith_ext.unwrap(_arith_ext.constant(v, type=_ir.IntegerType.get_signless(32)))
