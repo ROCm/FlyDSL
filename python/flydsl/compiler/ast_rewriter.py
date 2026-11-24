@@ -666,10 +666,12 @@ class RewriteBoolOps(Transformer):
         final = len(operands) - 1
         for index, operand in enumerate(operands):
             value = next(operand)
-            if isinstance(value, (bool, int)):
-                static = True
-            elif isinstance(value, Numeric):
+            if isinstance(value, Numeric):
                 static = value.is_static()
+            elif isinstance(value, ir.Value):
+                static = False
+            elif isinstance(value, (bool, int, float)):
+                static = True
             else:
                 warnings.warn(
                     f"`and` / `or` folds a {type(value).__name__} operand by its Python truth, "
@@ -684,10 +686,14 @@ class RewriteBoolOps(Transformer):
                         return value
                 elif bool(value) is not identity:
                     # The chain is decided whatever came before, so it needs no op.
-                    return Boolean(value)
+                    return Boolean(value) if isinstance(value, (bool, int, float, Numeric)) else value
                 elif index == final:
                     # The chain is what came before, as a predicate.
-                    return result if isinstance(result, Boolean) else result.__dsl_bool__()
+                    return (
+                        result.__dsl_bool__()
+                        if isinstance(result, Numeric) and not isinstance(result, Boolean)
+                        else result
+                    )
                 continue
             result = value if result is None else combine(result, value)
         return result

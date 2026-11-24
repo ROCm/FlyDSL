@@ -34,6 +34,7 @@ class _Traits:
         self.GUARD_TAIL = True
         self.CHECK_K = check_k
         self.STAGES = STAGES
+        self.BLOCK_N = None
 
 
 @flyc.kernel
@@ -93,6 +94,14 @@ def _masked_axpby_kernel(
     stages = traits.STAGES and traits.CHECK_N
     assert stages is traits.CHECK_N, f"an int operand must not become the chain's value, got {stages!r}"
 
+    # Ordinary Python `and` / `or` keeps its meaning: it picks a default, picks an element out
+    # of a container, and leaves the right-hand side alone once a falsy operand decided it.
+    assert (traits.BLOCK_N or 128) == 128, "`or` must hand back the default"
+    assert ((7,) and (7,)[0]) == 7, "`and` must hand back the element, not the container"
+    assert (() and ()[0]) == (), "a falsy operand must stop the chain before the subscript"
+    assert (None and None.shape) is None, "a None operand must stop the chain before the attribute"
+    assert (traits.STAGES or 0) == STAGES, "`or` must hand back the int"
+
     # A chain that reaches a run-time operand is an i1 predicate instead, whatever the operands
     # were, so it can be used as one; a plain Python bool would have no `select`.
     row = (tid >= 0) and traits.CHECK_N
@@ -130,6 +139,29 @@ def _masked_axpby(
         block=(8 * 16, 1, 1),
         stream=stream,
     )
+
+
+@flyc.kernel
+def _causal_sum_kernel(values: fx.Tensor, out: fx.Tensor, causal: fx.Int32):
+    row = fx.thread_idx.x
+    total = fx.Float32(0)
+    for key in fx.range(0, 8, 1):
+        weight = values[key]
+        # `key` is the loop variable, so this operand is a run-time value the fold must keep.
+        if causal != 0 and key > row:
+            weight = fx.Float32(0)
+        total = total + weight
+    out[row] = total
+
+
+@flyc.jit
+def _causal_sum(
+    values: fx.Tensor,
+    out: fx.Tensor,
+    causal: fx.Int32,
+    stream: fx.Stream = fx.Stream(None),
+):
+    _causal_sum_kernel(values, out, causal).launch(grid=(1, 1, 1), block=(8, 1, 1), stream=stream)
 
 
 def _run(traits, monkeypatch):
@@ -186,3 +218,19 @@ def test_a_leading_false_trait_removes_the_chain(monkeypatch):
     """CHECK_M comes first, so a False there decides the chain before any comparison runs."""
     andi, _, _, _ = _run(_Traits(check_m=False), monkeypatch)
     assert andi == 0
+
+
+def test_a_run_time_operand_is_never_dropped():
+    """A chain mixing a trait switch with a comparison on a loop variable keeps both.
+
+    The loop variable is a raw value rather than a DSL one, so a fold that reads it as
+    compile-time drops the comparison and masks every element.
+    """
+    values = torch.randn(8, dtype=torch.float32, device="cuda")
+    out = torch.zeros(8, dtype=torch.float32, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    _causal_sum(values, out, fx.Int32(1), stream=stream)
+    torch.cuda.synchronize()
+    expected = torch.stack([values[: row + 1].sum() for row in range(8)])
+    torch.testing.assert_close(out, expected, rtol=1e-5, atol=1e-5)
