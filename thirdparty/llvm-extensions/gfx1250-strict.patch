@@ -1,8 +1,8 @@
 diff --git a/clang/include/clang/Basic/BuiltinsAMDGPU.td b/clang/include/clang/Basic/BuiltinsAMDGPU.td
-index 33b12b64ba..8d1bfd0c98 100644
+index 75bc024733..7029993280 100644
 --- a/clang/include/clang/Basic/BuiltinsAMDGPU.td
 +++ b/clang/include/clang/Basic/BuiltinsAMDGPU.td
-@@ -1090,21 +1090,21 @@ def __builtin_amdgcn_cvt_pk_fp8_f16 : AMDGPUBuiltin<"short(_ExtVector<2, _Float1
+@@ -1138,21 +1138,21 @@ def __builtin_amdgcn_cvt_pk_fp8_f16 : AMDGPUBuiltin<"short(_ExtVector<2, _Float1
  def __builtin_amdgcn_cvt_pk_bf8_f16 : AMDGPUBuiltin<"short(_ExtVector<2, _Float16>)", [Const], "gfx1250-insts">;
  def __builtin_amdgcn_cvt_sr_fp8_f16 : AMDGPUBuiltin<"int(_Float16, int, unsigned int, _Constant int)", [Const], "gfx1250-insts">;
  def __builtin_amdgcn_cvt_sr_bf8_f16 : AMDGPUBuiltin<"int(_Float16, int, unsigned int, _Constant int)", [Const], "gfx1250-insts">;
@@ -40,18 +40,18 @@ index 33b12b64ba..8d1bfd0c98 100644
    let Documentation = [DocCvtScalePk32BF16BF6];
    let ArgNames = ["src", "scale", "scale_sel"];
 diff --git a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-index d2671c67b3..c9c4dadde2 100644
+index b8072571b6..d5709bb34c 100644
 --- a/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
 +++ b/llvm/include/llvm/IR/IntrinsicsAMDGPU.td
-@@ -697,6 +697,7 @@ class AMDGPUCvtScaleF32SRIntrinsic<LLVMType DstTy, LLVMType Src0Ty, string name>
-   [DstTy], [Src0Ty, llvm_i32_ty, llvm_float_ty]
- >, ClangBuiltin<"__builtin_amdgcn_"#name>;
+@@ -712,6 +712,7 @@ class AMDGPUCvtScaleF32SRIntrinsic<LLVMType DstTy, LLVMType Src0Ty, string name>
+ >, ClangBuiltin<"__builtin_amdgcn_"#name>,
+   AMDGPUExponentOnlyScale<2>;
  
 +let TargetFeatures = "block16-cvt-scale-insts" in {
  def int_amdgcn_cvt_scale_pk8_f16_fp8   : AMDGPUCvtScaleIntrinsic<llvm_v8f16_ty,   llvm_v2i32_ty, "cvt_scale_pk8_f16_fp8">;
  def int_amdgcn_cvt_scale_pk8_bf16_fp8  : AMDGPUCvtScaleIntrinsic<llvm_v8bf16_ty,  llvm_v2i32_ty, "cvt_scale_pk8_bf16_fp8">;
  def int_amdgcn_cvt_scale_pk8_f16_bf8   : AMDGPUCvtScaleIntrinsic<llvm_v8f16_ty,   llvm_v2i32_ty, "cvt_scale_pk8_f16_bf8">;
-@@ -713,6 +714,7 @@ def int_amdgcn_cvt_scale_pk16_f16_fp6  : AMDGPUCvtScaleIntrinsic<llvm_v16f16_ty,
+@@ -728,6 +729,7 @@ def int_amdgcn_cvt_scale_pk16_f16_fp6  : AMDGPUCvtScaleIntrinsic<llvm_v16f16_ty,
  def int_amdgcn_cvt_scale_pk16_bf16_fp6 : AMDGPUCvtScaleIntrinsic<llvm_v16bf16_ty, llvm_v3i32_ty, "cvt_scale_pk16_bf16_fp6">;
  def int_amdgcn_cvt_scale_pk16_f32_fp6  : AMDGPUCvtScaleIntrinsic<llvm_v16f32_ty,  llvm_v3i32_ty, "cvt_scale_pk16_f32_fp6">;
  def int_amdgcn_cvt_scale_pk16_f32_bf6  : AMDGPUCvtScaleIntrinsic<llvm_v16f32_ty,  llvm_v3i32_ty, "cvt_scale_pk16_f32_bf6">;
@@ -59,39 +59,11 @@ index d2671c67b3..c9c4dadde2 100644
  
  let TargetFeatures = "fp6bf6-to-f16bf16f32-cvt-scale-insts,wavefrontsize32" in {
    def int_amdgcn_cvt_scale_pk32_bf16_bf6 : AMDGPUCvtScaleIntrinsic<llvm_v32bf16_ty, llvm_v6i32_ty, "cvt_scale_pk32_bf16_bf6">;
-diff --git a/llvm/lib/Target/AMDGPU/AMDGPU.td b/llvm/lib/Target/AMDGPU/AMDGPU.td
-index 73464a8954..b3e81df935 100644
---- a/llvm/lib/Target/AMDGPU/AMDGPU.td
-+++ b/llvm/lib/Target/AMDGPU/AMDGPU.td
-@@ -2595,7 +2595,6 @@ def FeatureISAVersion12_50_STRICT : FeatureSet<
-    FeatureCvtNormInsts,
-    FeatureCvtPkNormVOP2Insts,
-    FeatureCvtPkNormVOP3Insts,
--   FeatureSWMMACGfx1200Insts,
-    FeatureSWMMACGfx1250Insts,
-    FeatureTransCoexecutionHazard,
-    FeatureGFX1250VALUBlockingCycles,
-@@ -2633,7 +2632,6 @@ def FeatureISAVersion12_50 : FeatureSet<
-    FeatureCvtPkNormVOP3Insts,
-    FeatureBlock16ConversionScaleInsts,
-    FeatureFP8E5M3Insts,
--   FeatureSWMMACGfx1200Insts,
-    FeatureSWMMACGfx1250Insts,
-    FeatureTransCoexecutionHazard,
-    FeatureGFX1250VALUBlockingCycles,
-@@ -2675,7 +2673,6 @@ def FeatureISAVersion12_51 : FeatureSet<
-    FeatureCvtPkNormVOP3Insts,
-    FeatureBlock16ConversionScaleInsts,
-    FeatureFP8E5M3Insts,
--   FeatureSWMMACGfx1200Insts,
-    FeatureSWMMACGfx1250Insts,
-    FeatureUseAddPC64Inst,
-    FeatureTransCoexecutionHazard,
 diff --git a/llvm/lib/Target/AMDGPU/VOP3Instructions.td b/llvm/lib/Target/AMDGPU/VOP3Instructions.td
-index 093ff8f267..0b508fac71 100644
+index d381c8e47a..ac89bc3431 100644
 --- a/llvm/lib/Target/AMDGPU/VOP3Instructions.td
 +++ b/llvm/lib/Target/AMDGPU/VOP3Instructions.td
-@@ -2540,6 +2540,7 @@ defm V_PERM_PK16_B8_U4               : VOP3Only_Real_Base_gfx1250_gfx13<0x243, 0
+@@ -2565,6 +2565,7 @@ defm V_PERM_PK16_B8_U4               : VOP3Only_Real_Base_gfx1250_gfx13<0x243, 0
  defm V_LSHL_ADD_U64                  : VOP3Only_Realtriple_gfx1250_DPP8_gfx13<0x252>;
  defm V_ASHR_PK_I8_I32                : VOP3Only_Realtriple_t16_and_fake16_gfx1250_gfx13<0x290, 0x290>;
  defm V_ASHR_PK_U8_I32                : VOP3Only_Realtriple_t16_and_fake16_gfx1250_gfx13<0x291, 0x291>;
@@ -99,7 +71,7 @@ index 093ff8f267..0b508fac71 100644
  defm V_CVT_SCALE_PK8_F16_FP4         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x29f, 0x2bd>;
  defm V_CVT_SCALE_PK8_BF16_FP4        : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a0, 0x2ba>;
  defm V_CVT_SCALE_PK8_F32_FP4         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a1, 0x2c0>;
-@@ -2549,6 +2550,7 @@ defm V_CVT_SCALE_PK8_F32_FP8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a
+@@ -2574,6 +2575,7 @@ defm V_CVT_SCALE_PK8_F32_FP8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2a
  defm V_CVT_SCALE_PK8_F16_BF8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ab, 0x2bc>;
  defm V_CVT_SCALE_PK8_BF16_BF8        : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ac, 0x2b9>;
  defm V_CVT_SCALE_PK8_F32_BF8         : VOP3Only_ScaleSel_Real_gfx1250_gfx13<0x2ad, 0x2bf>;
@@ -107,7 +79,7 @@ index 093ff8f267..0b508fac71 100644
  defm V_CVT_SCALEF32_PK8_FP4_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2b0, 0x2a0>;
  defm V_CVT_SCALEF32_PK8_FP4_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2b3, 0x29f>;
  defm V_CVT_SCALEF32_PK8_FP8_BF16     : VOP3Only_Real_Base_gfx1250_gfx13<0x2b4, 0x2a1>;
-@@ -2558,12 +2560,14 @@ defm V_CVT_SCALEF32_PK8_FP8_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c3, 0
+@@ -2583,12 +2585,14 @@ defm V_CVT_SCALEF32_PK8_FP8_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c3, 0
  defm V_CVT_SCALEF32_PK8_FP8_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c4, 0x2a2>;
  defm V_CVT_SCALEF32_PK8_BF8_F32      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c5, 0x29d>;
  defm V_CVT_SCALEF32_PK8_BF8_F16      : VOP3Only_Real_Base_gfx1250_gfx13<0x2c6, 0x29c>;
@@ -122,18 +94,6 @@ index 093ff8f267..0b508fac71 100644
  defm V_CVT_SCALEF32_PK16_FP6_F32     : VOP3Only_Real_Base_gfx1250<0x2cd>;
  defm V_CVT_SCALEF32_PK16_BF6_F32     : VOP3Only_Real_Base_gfx1250<0x2ce>;
  defm V_CVT_SCALEF32_PK16_FP6_F16     : VOP3Only_Real_Base_gfx1250<0x2cf>;
-diff --git a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.sched.group.barrier.gfx12.ll b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.sched.group.barrier.gfx12.ll
-index e7ddfc73a8..5414ace53a 100644
---- a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.sched.group.barrier.gfx12.ll
-+++ b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.sched.group.barrier.gfx12.ll
-@@ -1,7 +1,6 @@
- ; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
- ; RUN: llc -mtriple=amdgpu12.00 -misched-cluster=0 < %s | FileCheck -check-prefix=GCN %s
- ; RUN: llc -mtriple=amdgpu12.00 -misched-cluster=0 -amdgpu-igrouplp-exact-solver-max-branches=250000 < %s | FileCheck -check-prefix=EXACTCUTOFF %s
--; RUN: llc -mtriple=amdgpu12.50 -amdgpu-sched-strategy=coexec -enable-post-misched=0 < %s | FileCheck -check-prefix=COEXEC %s
- 
- declare <8 x half> @llvm.amdgcn.swmmac.f16.16x16x32.f16.v8f16.v8f16.v16f16..i16(<8 x half>, <16 x half>, <8 x half>, i16)
- 
 diff --git a/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp b/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp
 index 293738982e..e14ef59a14 100644
 --- a/mlir/lib/Dialect/AMDGPU/Utils/Chipset.cpp
