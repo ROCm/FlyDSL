@@ -24,7 +24,7 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
     src = r"""module {
       gpu.module @m {
         gpu.func @a() kernel attributes {
-          rocdl.waves_per_eu = 3 : i32,
+          rocdl.waves_per_eu = 1 : i32,
           passthrough = [["keep", "yes"]]
         } { gpu.return }
         gpu.func @b() kernel attributes {
@@ -53,6 +53,46 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
         assert 'rocdl.waves_per_eu = "2"' in funcs[name]
     assert '"keep", "yes"' in funcs["a"]
     assert "rocdl.waves_per_eu" not in funcs["helper"]
+
+
+@pytest.mark.parametrize(
+    ("arch", "hint", "expected"),
+    [
+        ("gfx942", 0, {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}),
+        ("gfx950", 0, {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}),
+        ("gfx950", 2, {"wpe2": True, "wpe_range": True, "wpe1": True, "unset": True, "explicit": False}),
+        ("gfx1250", 2, {"wpe2": False, "wpe_range": False, "wpe1": False, "unset": False, "explicit": False}),
+    ],
+)
+def test_rocm_lower_disables_agprs_at_two_or_more_waves_per_eu(arch, hint, expected):
+    backend = RocmBackend(RocmBackend.make_target(arch))
+    src = r"""module {
+      gpu.module @m {
+        gpu.func @wpe2() kernel attributes {rocdl.waves_per_eu = 2 : i32} { gpu.return }
+        gpu.func @wpe_range() kernel attributes {rocdl.waves_per_eu = "2,4"} { gpu.return }
+        gpu.func @wpe1() kernel attributes {rocdl.waves_per_eu = 1 : i32} { gpu.return }
+        gpu.func @unset() kernel { gpu.return }
+        gpu.func @explicit() kernel attributes {
+          rocdl.waves_per_eu = 2 : i32,
+          llvm.passthrough = [["amdgpu-agpr-alloc", "64"]]
+        } { gpu.return }
+        gpu.func @helper() attributes {rocdl.waves_per_eu = 2 : i32} { gpu.return }
+      }
+    }"""
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(src)
+        backend.lower_compile_hints(module, compile_hints={"waves_per_eu": hint})
+        funcs = {
+            ir.StringAttr(op.attributes["sym_name"]).value: str(op)
+            for op in module.body.operations[0].regions[0].blocks[0].operations
+        }
+
+    for name, added in expected.items():
+        assert ('["amdgpu-agpr-alloc", "0"]' in funcs[name]) == added, name
+    assert '["amdgpu-agpr-alloc", "64"]' in funcs["explicit"]
+    assert "amdgpu-agpr-alloc" not in funcs["helper"]
 
 
 @pytest.mark.parametrize(
