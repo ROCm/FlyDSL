@@ -266,7 +266,7 @@ class _Run:
     tolerance: tuple[float, float]
     launch: Callable[[], None]
     buffers: tuple  # Keep tensor allocations alive while launch arguments hold raw pointers.
-    seed: int  # the random seed this run's operands were generated with (set it with torch.manual_seed to replay)
+    seed: int  # the seed this run's operands were generated with (pass it as _execute(seed=...) or --seed to replay)
 
     def check_output(self, output):
         torch.cuda.synchronize()
@@ -312,6 +312,7 @@ def _execute(
     fused_splitk=False,
     bounded_m=None,
     signed=False,
+    seed=None,
 ):
     """Prepare operands and reference, then compile GEMM and its optional FP32 reducer once."""
     M, N, K = shape
@@ -319,7 +320,9 @@ def _execute(
     general_a4w4 = cfg.launch is launch_gemm_a4w4
     if general_a4w4:
         fused_splitk = split_k > 1
-    seed = torch.seed()  # a fresh seed every run; it is reported if a check fails
+    # A fresh seed every run, reported if a check fails; pass that seed back as `seed` to replay the run.
+    seed = torch.seed() if seed is None else seed
+    torch.manual_seed(seed)
     packed_k = max(32, (K + 31) // 32 * 32) if cfg.launch is launch_gemm_a4w4 else K
     a, a_f32, a_scale = _operand(M, packed_k, cfg.fp4_act, init, out_dtype, signed)
     b, b_f32, b_scale = _operand(N, packed_k, cfg.fp4_w, init, out_dtype, signed)
@@ -903,6 +906,12 @@ def _main():
         help="A/B/scale fills to run. trig: cos(uniform angle), scales from the block mean exponent, A == B; "
         "uniform: U[0,1) values, scale exponent uniform in -3..3; random: stock integer codes; const,<float>",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="operand seed for every run (default: a fresh one per run); use the seed a failing run reported to replay it",
+    )
     args = parser.parse_args()
     args.mode = ["mxscale_a8w8" if mode == "a8w8" else mode for mode in args.mode]
     if args.bench:
@@ -945,6 +954,7 @@ def _main():
                 "split_k": split_k,
                 "fused_splitk": args.fused_splitk,
                 "init": init,
+                "seed": args.seed,
             }
             if cfg.supports_out_dtype:
                 kwargs["out_dtype"] = args.out_dtype
