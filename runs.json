@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-11-24T09:26:22Z",
+ "updated": "2026-11-24T10:47:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45377633888,
+   "pr": 1412,
+   "commit": "b9537dce2a9eda2f5eff0667db919bd885724089",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45377633888",
+   "created_at": "2026-11-24T10:44:29Z",
+   "updated_at": "2026-11-24T10:45:03Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 45367209730,
+   "pr": 1412,
+   "commit": "f83a33f62dfdfad1043cef8aeac7276084a08c88",
+   "branch": "perf/jit-trace-speedup",
+   "event": "pull_request",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45367209730",
+   "created_at": "2026-11-24T09:39:05Z",
+   "updated_at": "2026-11-24T10:44:53Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-24T10:12:34Z",
+     "completed_at": "2026-11-24T10:24:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45367209730/job/138364452963"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-24T10:03:19Z",
+     "completed_at": "2026-11-24T10:44:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45367209730/job/138364452981"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-24T10:02:37Z",
+     "completed_at": "2026-11-24T10:39:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45367209730/job/138364453436",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
   {
    "run_id": 45346915636,
    "pr": null,
@@ -2010,98 +2071,6 @@
      "started_at": "2026-11-22T02:01:00Z",
      "completed_at": "2026-11-22T03:00:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44972638720/job/137059762317"
-    }
-   ]
-  },
-  {
-   "run_id": 44972095450,
-   "pr": null,
-   "commit": "73cd55e94ed8be754c2b2663e5d15065ac1cea76",
-   "branch": "aot-strip-runtime-debug",
-   "event": "pull_request",
-   "title": "[AOT] Build the embedded AOT runtime without debug info",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44972095450",
-   "created_at": "2026-11-22T01:34:34Z",
-   "updated_at": "2026-11-22T03:21:16Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T01:48:27Z",
-     "completed_at": "2026-11-22T02:12:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44972095450/job/137057066392"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T02:32:38Z",
-     "completed_at": "2026-11-22T03:21:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44972095450/job/137057066445"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T01:48:37Z",
-     "completed_at": "2026-11-22T02:21:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44972095450/job/137057066464",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 44969590407,
-   "pr": 1473,
-   "commit": "cc5de577cf4ef8874d418467bb103a8ede6ff421",
-   "branch": "ci/test-whl-hip-dev-symlink",
-   "event": "pull_request",
-   "title": "[CI] Give pip-ROCm an unversioned libamdhip64.so before the wheel tests",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44969590407",
-   "created_at": "2026-11-22T01:03:08Z",
-   "updated_at": "2026-11-22T02:00:51Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T01:18:02Z",
-     "completed_at": "2026-11-22T01:46:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44969590407/job/137049831718"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T01:30:12Z",
-     "completed_at": "2026-11-22T02:00:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44969590407/job/137049831728"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-22T01:18:39Z",
-     "completed_at": "2026-11-22T01:51:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44969590407/job/137049831750",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
