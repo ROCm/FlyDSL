@@ -58,10 +58,30 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
 @pytest.mark.parametrize(
     ("arch", "hint", "expected"),
     [
-        ("gfx942", 0, {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}),
-        ("gfx950", 0, {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}),
-        ("gfx950", 2, {"wpe2": True, "wpe_range": True, "wpe1": True, "unset": True, "explicit": False}),
-        ("gfx1250", 2, {"wpe2": False, "wpe_range": False, "wpe1": False, "unset": False, "explicit": False}),
+        (
+            "gfx942",
+            0,
+            {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}
+            | {"block512": True, "fwg512": True, "block256_wpe1": False},
+        ),
+        (
+            "gfx950",
+            0,
+            {"wpe2": True, "wpe_range": True, "wpe1": False, "unset": False, "explicit": False}
+            | {"block512": True, "fwg512": True, "block256_wpe1": False},
+        ),
+        (
+            "gfx950",
+            2,
+            {"wpe2": True, "wpe_range": True, "wpe1": True, "unset": True, "explicit": False}
+            | {"block512": True, "fwg512": True, "block256_wpe1": True},
+        ),
+        (
+            "gfx1250",
+            2,
+            {"wpe2": False, "wpe_range": False, "wpe1": False, "unset": False, "explicit": False}
+            | {"block512": False, "fwg512": False, "block256_wpe1": False},
+        ),
     ],
 )
 def test_rocm_lower_disables_agprs_at_two_or_more_waves_per_eu(arch, hint, expected):
@@ -72,6 +92,12 @@ def test_rocm_lower_disables_agprs_at_two_or_more_waves_per_eu(arch, hint, expec
         gpu.func @wpe_range() kernel attributes {rocdl.waves_per_eu = "2,4"} { gpu.return }
         gpu.func @wpe1() kernel attributes {rocdl.waves_per_eu = 1 : i32} { gpu.return }
         gpu.func @unset() kernel { gpu.return }
+        gpu.func @block512() kernel attributes {known_block_size = array<i32: 512, 1, 1>} { gpu.return }
+        gpu.func @fwg512() kernel attributes {rocdl.flat_work_group_size = "512,512"} { gpu.return }
+        gpu.func @block256_wpe1() kernel attributes {
+          known_block_size = array<i32: 256, 1, 1>,
+          rocdl.waves_per_eu = 1 : i32
+        } { gpu.return }
         gpu.func @explicit() kernel attributes {
           rocdl.waves_per_eu = 2 : i32,
           llvm.passthrough = [["amdgpu-agpr-alloc", "64"]]

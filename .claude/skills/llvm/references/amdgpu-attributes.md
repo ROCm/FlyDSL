@@ -47,7 +47,7 @@ may not.
 | `amdgpu-waves-per-eu` | `"<min>[,<max>]"` | The preferred occupancy control. Max 8 on CDNA, **16** on gfx1250. ⚠ Out-of-range requests are discarded wholesale, not clamped. |
 | `amdgpu-num-vgpr` | `"<N>"` | ⚠ **Deprecated** (`AMDGPUUsage.rst:2534`, "use amdgpu-waves-per-eu instead"). ⚠ **Silently doubled on gfx90a+** (`GCNSubtarget.cpp:624-626`) — see `arch-gfx950.md` §3. |
 | `amdgpu-num-sgpr` | `"<N>"` | ⚠ Deprecated (`:2537`). Zeroes the request in three separate conditions. |
-| `amdgpu-agpr-alloc` | `"<min>[,<max>]"` | Splits the unified 512 file. LLVM defaults to half the budget for AGPRs, so `RocmBackend.lower_compile_hints` adds `"0"` via `llvm.passthrough` on gfx90a/gfx94x/gfx95x kernels whose minimum waves-per-EU is >= 2, unless the kernel sets it. ⚠ **Inert on gfx1250** (no AGPRs). ⚠ UB if a function needing more AGPRs is reached from one carrying a lower bound. |
+| `amdgpu-agpr-alloc` | `"<min>[,<max>]"` | Splits the unified 512 file. LLVM defaults to half the budget for AGPRs, so `RocmBackend.lower_compile_hints` adds `"0"` via `llvm.passthrough` on gfx90a/gfx94x/gfx95x kernels whose minimum waves-per-EU is >= 2 (explicit, or forced by a workgroup of more than 256 threads), unless the kernel sets it. ⚠ **Inert on gfx1250** (no AGPRs). ⚠ UB if a function needing more AGPRs is reached from one carrying a lower bound. |
 | `amdgpu-max-num-workgroups` | `"<x>[,<y>,<z>]"` | Launch-bound hint. |
 | `amdgpu-dynamic-vgpr-block-size` | `16` or `32` | ⚠ Anything else is **silently coerced to 0 = disabled**. Unconfirmed on gfx1250. |
 | `amdgpu-cluster-dims` | dims | Only meaningful where `FeatureClusters` holds (gfx1250). FlyDSL injects this via its own `fly-rocdl-cluster-attr` pass. |

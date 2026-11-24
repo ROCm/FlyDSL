@@ -405,7 +405,9 @@ class RocmBackend(BaseBackend):
         On targets with a unified VGPR/AGPR file, kernel entries whose minimum
         waves-per-EU is >= 2 also get ``amdgpu-agpr-alloc=0`` unless they set it:
         without it LLVM reserves half of the vector registers for AGPRs, which
-        halves the VGPRs available at that occupancy and spills.
+        halves the VGPRs available at that occupancy and spills. The minimum is
+        the explicit ``rocdl.waves_per_eu`` or the one a workgroup of more than
+        256 threads forces, whichever is larger.
         """
         if compile_hints.get("maxnreg") is not None:
             raise ValueError(
@@ -430,7 +432,7 @@ class RocmBackend(BaseBackend):
             for func_op in _iter_gpu_kernel_funcs(module):
                 if wpe_str is not None:
                     func_op.attributes["rocdl.waves_per_eu"] = _ir.StringAttr.get(wpe_str)
-                if unified_agprs and _min_waves_per_eu(func_op) >= 2:
+                if unified_agprs and max(_min_waves_per_eu(func_op), _workgroup_min_waves_per_eu(func_op)) >= 2:
                     _add_passthrough_default(func_op, "amdgpu-agpr-alloc", "0")
 
     def gpu_module_targets(self, *, compile_hints: dict, link_libs: Sequence[str] = ()) -> List[str]:
@@ -556,6 +558,23 @@ def _min_waves_per_eu(func_op) -> int:
         return ir.IntegerAttr(attr).value
     except (TypeError, ValueError):
         return int(ir.StringAttr(attr).value.split(",")[0])
+
+
+def _workgroup_min_waves_per_eu(func_op) -> int:
+    """Waves per EU a kernel's largest workgroup forces on a wave64, 4-SIMD CU; 0 if unknown.
+
+    Reads ``rocdl.flat_work_group_size`` (``"min,max"``), else ``known_block_size``.
+    """
+    from ..._mlir import ir
+
+    if "rocdl.flat_work_group_size" in func_op.attributes:
+        max_threads = int(ir.StringAttr(func_op.attributes["rocdl.flat_work_group_size"]).value.split(",")[-1])
+    elif "known_block_size" in func_op.attributes:
+        dims = ir.DenseI32ArrayAttr(func_op.attributes["known_block_size"])
+        max_threads = dims[0] * dims[1] * dims[2]
+    else:
+        return 0
+    return -(-max_threads // (64 * 4))
 
 
 def _add_passthrough_default(func_op, key: str, value: str) -> None:
