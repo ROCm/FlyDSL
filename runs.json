@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-24T03:28:06Z",
+ "updated": "2026-11-24T04:01:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45320509454,
+   "pr": 1498,
+   "commit": "14b2d4e462647c83488d6a5f6fb17451e797c135",
+   "branch": "users/merrittttt/gemm-a16w16-hti-lds-races",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix cross-wave-group LDS races in the gemm_a16w16 gfx950 HTI epilogue",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454",
+   "created_at": "2026-11-24T03:34:57Z",
+   "updated_at": "2026-11-24T03:34:57Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
   {
    "run_id": 45317002749,
    "pr": 1497,
@@ -25,38 +40,41 @@
    "branch": "aoli/gfx1250-fp8fp4-test-bench",
    "event": "pull_request",
    "title": "[Test] Bench gfx1250 FP8/FP4 GEMM per launch batch; add trig/uniform inits",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262",
    "created_at": "2026-11-24T02:48:40Z",
-   "updated_at": "2026-11-24T03:17:38Z",
+   "updated_at": "2026-11-24T03:58:59Z",
    "actor": "aoli26",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-24T03:03:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132673"
+     "completed_at": "2026-11-24T03:31:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132673",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-24T03:03:29Z",
-     "completed_at": null,
+     "completed_at": "2026-11-24T03:58:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132822"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-24T03:17:37Z",
-     "completed_at": null,
+     "completed_at": "2026-11-24T03:51:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132956"
     }
    ]
@@ -2093,52 +2111,6 @@
      "started_at": "2026-11-21T10:03:23Z",
      "completed_at": "2026-11-21T10:49:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/44886913473/job/137062847561"
-    }
-   ]
-  },
-  {
-   "run_id": 44873698294,
-   "pr": 1464,
-   "commit": "3a80ff349790417eb2c914fd30d72e954c3b1a0d",
-   "branch": "skills/isa-resource-diff-jit-cache",
-   "event": "pull_request",
-   "title": "[Skills] isa-resource-diff: read a FlyDSL JIT cache, one row per specialization binary",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294",
-   "created_at": "2026-11-21T06:03:08Z",
-   "updated_at": "2026-11-21T06:04:43Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T06:04:40Z",
-     "completed_at": "2026-11-21T06:04:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946388"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T06:04:40Z",
-     "completed_at": "2026-11-21T06:04:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946395"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-21T06:04:40Z",
-     "completed_at": "2026-11-21T06:04:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/44873698294/job/136753946418",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
     }
    ]
   }
