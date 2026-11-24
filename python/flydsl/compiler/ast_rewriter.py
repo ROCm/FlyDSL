@@ -656,36 +656,40 @@ class RewriteBoolOps(Transformer):
     @staticmethod
     @thunk_runner
     def dsl_bool_op_(is_or, *operands):
-        # Fold left like Python, stopping once the chain is decided. Every operand arrives as a
+        # Fold left like Python and return an operand, not a truth. Every operand arrives as a
         # one-shot generator, so each is evaluated at most once and only if the fold reaches it.
-        # Seeding with the identity lets the first operand take the same step as the rest.
-        # `and` and `or` each have an identity (True / False) and an absorbing element
-        # (False / True). An operand already known to be one of them needs no op: the identity
-        # leaves the accumulator alone, the absorbing element decides the chain.
-        # A chain therefore carries the truth of the operands rather than an operand itself:
-        # one whose truth is known at trace time is a Boolean, not the bool or int Python would
-        # have returned. Operands of other types still fold through `dsl_and_` / `dsl_or_`.
+        # An operand whose truth is known at trace time either decides the chain, and is its
+        # value, or leaves it alone and needs no op.
         combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
         identity = not is_or
-        result = Boolean(identity)
-        for operand in operands:
+        result = None
+        final = len(operands) - 1
+        for index, operand in enumerate(operands):
             value = next(operand)
-            # A DSL value holds an ir.Value only while it is dynamic, so one that does not is
-            # just a compile-time bool, and folds like one. A dynamic one becomes a Boolean, so
-            # the chain is an i1 however its operands were typed.
-            if isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
-                value = Boolean(bool(value.value))
-            elif isinstance(value, Numeric) and not isinstance(value, Boolean):
-                value = value.__dsl_bool__()
-            elif isinstance(value, bool):
-                value = Boolean(value)
-            elif isinstance(value, int):
-                value = Boolean(bool(value))
-            if isinstance(value, Boolean) and value.is_static():
-                if bool(value.value) is identity:
-                    continue
-                return Boolean(is_or)
-            result = value if (isinstance(result, Boolean) and result.is_static()) else combine(result, value)
+            if isinstance(value, (bool, int)):
+                static = True
+            elif isinstance(value, Numeric):
+                static = value.is_static()
+            else:
+                warnings.warn(
+                    f"`and` / `or` folds a {type(value).__name__} operand by its Python truth, "
+                    "which a kernel cannot lower if the chain reaches the device",
+                    stacklevel=2,
+                )
+                static = True
+            if static:
+                if result is None:
+                    # Nothing to fold it into: the chain is decided, or this is its value.
+                    if bool(value) is not identity or index == final:
+                        return value
+                elif bool(value) is not identity:
+                    # The chain is decided whatever came before, so it needs no op.
+                    return Boolean(value)
+                elif index == final:
+                    # The chain is what came before, as a predicate.
+                    return result if isinstance(result, Boolean) else result.__dsl_bool__()
+                continue
+            result = value if result is None else combine(result, value)
         return result
 
     @staticmethod

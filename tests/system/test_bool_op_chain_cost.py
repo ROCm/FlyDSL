@@ -86,20 +86,19 @@ def _masked_axpby_kernel(
                 and in_bounds
             )
 
-    # A chain decided entirely at trace time is still a DSL value: a plain Python bool has no
-    # `select`, and the chain's type would otherwise depend on whether its operands happened to
-    # be compile-time.
+    # A chain decided at trace time hands back the operand Python would return, whatever its
+    # type, so a trait switch or an int keeps its own value.
     gate = traits.CHECK_N and traits.GUARD_TAIL
-    assert isinstance(gate, fx.Boolean), f"a compile-time chain must stay a DSL value, got {type(gate)}"
-    scale = gate.select(fx.Float32(1.0), fx.Float32(0.0))
-
-    # A chain carries the truth of its operands: an int folds by its truth rather than being
-    # returned, and a dynamic operand that is not a Boolean comes back as an i1.
+    assert gate is traits.GUARD_TAIL, f"a compile-time chain must return its last operand, got {gate!r}"
     stages = traits.STAGES and traits.CHECK_N
-    assert isinstance(stages, fx.Boolean), f"an int operand must fold by its truth, got {type(stages)}"
-    row = tid and traits.CHECK_N
-    assert isinstance(row, fx.Boolean), f"a dynamic operand must fold to a Boolean, got {type(row)}"
+    assert stages is traits.CHECK_N, f"an int operand must not become the chain's value, got {stages!r}"
+
+    # A chain that reaches a run-time operand is an i1 predicate instead, whatever the operands
+    # were, so it can be used as one; a plain Python bool would have no `select`.
+    row = (tid >= 0) and traits.CHECK_N
+    assert isinstance(row, fx.Boolean), f"a run-time chain must be a Boolean, got {type(row)}"
     assert str(row.ir_value().type) == "i1", f"the chain must be an i1, got {row.ir_value().type}"
+    scale = row.select(fx.Float32(1.0), fx.Float32(0.0))
 
     copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)
     fx.copy(copy_atom, thr_gA, thr_rA, pred=thr_pC)
@@ -163,11 +162,8 @@ def test_masked_axpby_is_correct(monkeypatch):
 
 
 def test_a_chain_is_a_dsl_value_whatever_its_operands(monkeypatch):
-    """The kernel asserts the chain's type while tracing, and scales the result through it.
-
-    Without the normalisation the compile-time chain is a plain Python bool, whose `select` call
-    raises, and the chain over a dynamic integer keeps that integer's width instead of i1.
-    """
+    """The kernel asserts what each chain shape returns while tracing, and scales its result
+    through the run-time one, which only a Boolean can do."""
     _, a, b, c = _run(_Traits(), monkeypatch)
     torch.testing.assert_close(c, a * 2.0 + b * 3.0, rtol=1e-5, atol=1e-5)
 
