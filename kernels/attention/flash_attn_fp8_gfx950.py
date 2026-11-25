@@ -330,6 +330,11 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 _pp_prio(1)
                 v_v_b = kv_lds_to_regs.load_v(b_buf)
                 v_o = _pv_part(v_p_a, v_v_a, v_o)
+                # Waves NUM_WAVES/2.. took one extra barrier before the loop (the stagger), so they run one
+                # barrier behind: when they reach this barrier, waves 0..NUM_WAVES/2-1 are at the last barrier
+                # of the iteration and go on to read the tiles copied in the previous iteration. Each wave's
+                # copies from the previous iteration must have landed first.
+                _waitcnt_vm_n(DMA_PER_ITER)
                 _phase_bar()
                 _pp_prio(0)
                 v_p_b, l_row = _softmax_part(v_s_b, l_row, m_new)
