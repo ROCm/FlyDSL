@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-25T14:50:39Z",
+ "updated": "2026-11-25T14:53:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45638180896,
+   "pr": null,
+   "commit": "0768aa599c2962ff1d381e339d1476a28e3cf01c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Docs] Acknowledge MORI in the README (#1523)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45638180896",
+   "created_at": "2026-11-25T14:48:58Z",
+   "updated_at": "2026-11-25T14:50:50Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T14:50:45Z",
+     "completed_at": "2026-11-25T14:50:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45638180896/job/139290143087"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T14:50:45Z",
+     "completed_at": "2026-11-25T14:50:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45638180896/job/139290143328",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T14:50:45Z",
+     "completed_at": "2026-11-25T14:50:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45638180896/job/139290143673"
+    }
+   ]
+  },
   {
    "run_id": 45637720125,
    "pr": 1523,
@@ -97,7 +143,7 @@
   },
   {
    "run_id": 45593100163,
-   "pr": 1523,
+   "pr": null,
    "commit": "41ecbc68459a043228c9ff6406ecb93828e8eaf7",
    "branch": "docs/ack-mori",
    "event": "pull_request",
@@ -143,7 +189,7 @@
   },
   {
    "run_id": 45592719183,
-   "pr": 1523,
+   "pr": null,
    "commit": "4210f12db0cfba6c637b0edae002c3b8ad324305",
    "branch": "docs/ack-mori",
    "event": "pull_request",
@@ -1930,52 +1976,6 @@
    "updated_at": "2026-11-23T09:37:59Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 45148063855,
-   "pr": 1401,
-   "commit": "23fbd3e04d13c56029f81285a577fcdc6daefe4e",
-   "branch": "experiment/register-placement-sched-hints",
-   "event": "pull_request",
-   "title": "[Feat] Introduce experimental register_allocation on ROCDL",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855",
-   "created_at": "2026-11-23T09:33:05Z",
-   "updated_at": "2026-11-23T12:29:23Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T09:53:36Z",
-     "completed_at": "2026-11-23T11:20:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195316"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T09:48:05Z",
-     "completed_at": "2026-11-23T10:30:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195553",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T12:18:46Z",
-     "completed_at": "2026-11-23T12:29:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45148063855/job/137608195938"
-    }
-   ]
   }
  ]
 }
