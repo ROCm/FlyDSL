@@ -47,6 +47,11 @@
         "file": "xnack-xcnt-replay-codegen.patch",
         "description": "Finish the gfx1250 xnack=any codegen override on pin 941a04e: enable XNACK on/off modes, make isXNACKEnabled follow TargetID, and emit xcnt waits plus REPLAY_MODE only when XNACK is on. Split out of xnack-any-codegen-override.patch because REPLAY_MODE is inserted later by the unclaused-vmem patch on this pin. Adapted from jli/xnack-perf (LLVM 1df311a6).",
         "upstream_status": "not yet submitted; adapted from jli/xnack-perf (LLVM 1df311a6)"
+      },
+      {
+        "file": "mlir-speculatable-div-rem.patch",
+        "description": "Mark arith.floordivsi, llvm.urem and llvm.srem as conditionally speculatable: dividing by zero (or the minimum value by -1) is undefined behavior, so they are only speculatable when the divisor is known to avoid it. With them marked Pure, rocdl-invariant-code-motion would move such a division out of a loop that may not run.",
+        "upstream_status": "merged into upstream: 5d7b436ab2ce344606f62e9e45be237b73127a75"
       }
     ],
     "extensions": []
