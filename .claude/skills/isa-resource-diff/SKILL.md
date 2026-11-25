@@ -53,7 +53,7 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa-before FLYDSL_RUNTIME_ENABLE_CACHE=0 \
     python3 -m pytest tests/kernels/test_softmax.py -q
 ```
 
-`FLYDSL_RUNTIME_ENABLE_CACHE=0` is **required, not optional** — see Pitfalls.
+`FLYDSL_RUNTIME_ENABLE_CACHE=0` is required before FlyDSL 0.5.0 and harmless after — see Pitfalls.
 
 For a target without local hardware, add `FLYDSL_GPU_ARCH=<gfx> COMPILE_ONLY=1`:
 
@@ -100,12 +100,10 @@ compared ones. It still exits 2 when nothing is common, or when a directory is
 empty on one side while the other side has kernels under it.
 
 Kernels are paired across *different* directories only with `--match-by-name`
-(for a name left over exactly once on each side). In a tree with one
-subdirectory per test case, two case directories can hold different
-specializations of one kernel name. Observed: reusing a 13-case dump against a
-fresh dump of 5 of those cases plus a new one gave 8 compared and 19 one-sided
-kernels (exit 2), and one row paired a reduce kernel dumped for a page-16 case
-with the same-named kernel dumped for a page-128 case.
+(for a name left over exactly once on each side). Use it with care: in a tree
+with one subdirectory per test case, two case directories can hold different
+specializations of one kernel name (observed: a reduce kernel dumped for a
+page-16 case paired with the same-named kernel of a page-128 case).
 
 ## Reading the output
 
@@ -146,14 +144,10 @@ untrustworthy items is printed above it.
 
 Four things are easy to misread:
 
-- **Do not add `arch_vgpr` and `agpr` to `vgpr`.** `vgpr` is LLVM's own
-  occupancy number and is the only VGPR-family trigger; the other two are shown so
-  you can tell *which half* moved, not so you can total them. On a unified register
-  file `vgpr` already *is* their sum; on gfx908, where the files are split, it is
-  `max(arch, agpr)` — which is still the occupancy number there, since a wave that
-  needs 64 arch VGPRs and 60 AGPRs occupies 64 slots in each of two 256-entry
-  files. Either way, moving accumulators into AGPRs — which the tuning guide
-  recommends — deliberately does not count as a regression.
+- **Do not add `arch_vgpr` and `agpr` to `vgpr`.** `vgpr` is LLVM's occupancy
+  number (see the table) and the only VGPR-family trigger; the other two only
+  show *which half* moved. So moving accumulators into AGPRs, which the tuning
+  guide recommends, deliberately does not count as a regression.
 - **`n/a` is not `0`.** It means the quantity does not exist on this target, e.g.
   `scratch_store`/`scratch_load` on a target that spills through `buffer_*`. Use
   `scratch_bytes`, which is exact everywhere.
@@ -162,11 +156,10 @@ Four things are easy to misread:
 - **A table with no trigger moved can still hide a changed hot loop.** Turning on
   kernarg preload (`kernarg_preload` 0 -> N, `user_sgpr` up by N) removes serial
   `s_load`s from the prologue, but it also changes the SGPR assignment, and with
-  it the scheduler's choices. Observed on gfx942: a 14-dword preload kept a
-  decode kernel's VGPR, AGPR and spill counts equal; short calls got 1-3%
-  faster, and long calls about 1% slower because one hot-loop `s_waitcnt
-  vmcnt(4)` became `vmcnt(3)`. These columns explain the SGPR delta; time the
-  change.
+  it the scheduler's choices (observed on gfx942: equal VGPR/AGPR/spill
+  counts, short calls 1-3% faster, long calls ~1% slower from one hot-loop
+  `vmcnt(4)` becoming `vmcnt(3)`). These columns explain the SGPR delta; time
+  the change.
 
 ### Exit codes
 
@@ -220,10 +213,10 @@ These silently produce a *confident wrong answer* if ignored:
   Every JIT specialization of one kernel writes to the same directory and
   overwrites the previous one, so a parametrized test leaves only its last
   variant. Diff one shape at a time when the answer must be exact.
-- **A cache hit produces no dump at all.** Hence `FLYDSL_RUNTIME_ENABLE_CACHE=0`
-  on both sides. Without it a kernel can silently vanish from one side, which
-  the tool reports as `ONLY IN BEFORE` and exit 2. The variable does not turn
-  off the in-memory cache: in one process, a case whose kernels an earlier case
+- **A cache hit produces no dump at all.** Before FlyDSL 0.5.0 a disk-cache hit
+  did; set `FLYDSL_RUNTIME_ENABLE_CACHE=0` on both sides there (0.5.0+ skips the
+  disk cache whenever it dumps). A missing kernel is reported as `ONLY IN
+  BEFORE` and exit 2. Neither turns off the in-memory cache: in one process, a case whose kernels an earlier case
   already built writes no dump, and its directory stays empty. The tool reports
   such a directory (or one with IR stages but no final ISA) and exits 2, even
   when it is empty on both sides; directories with other files are skipped.
@@ -247,12 +240,9 @@ These silently produce a *confident wrong answer* if ignored:
   or `multi_processor_count` used to size splits or grids (as
   `kernels/attention/pa_decode_fp8.py` does). If such a value picks a code path
   or becomes a compile-time constant, the dump holds the local GPU's variant
-  compiled to the target ISA. Then both sides of the diff can describe a kernel
-  the target never runs, and before/after differences can appear or vanish
-  for the wrong reason. Observed: a compile-only check on a gfx942 host
-  reported 12 changed planner kernels per target in an aiter kernel that
-  dispatched on `gcnArchName`. With the query returning the target arch, all
-  of them were identical. Dispatch on `get_rocm_arch()` in launcher code;
-  otherwise confirm on the target hardware.
+  compiled to the target ISA, and before/after differences can appear or
+  vanish for the wrong reason (observed: 12 spurious changed kernels per target
+  from a `gcnArchName` dispatch on a gfx942 host). Dispatch on
+  `get_rocm_arch()` in launcher code; otherwise confirm on the target hardware.
 - **Warnings on stderr never change the exit code.** They describe the input tree
   and are worth reading before trusting a clean result.

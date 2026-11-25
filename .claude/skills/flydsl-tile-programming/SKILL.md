@@ -17,7 +17,7 @@ Guide users through writing GPU kernels using FlyDSL's tile programming model (C
 
 **Prerequisites**: FlyDSL installed (editable mode via `pip install -e .`). GPU access required for testing.
 
-**Scope (read this first)**: This skill is the *procedure* — follow the steps in order to produce a kernel. It is the companion to the **flydsl-kernel-authoring** skill, which is the *reference* (the full layout-algebra API surface, per-op tables, environment variables, and an exhaustive troubleshooting list). When you need to look something up rather than follow a step, go to flydsl-kernel-authoring. This wizard links there instead of duplicating those tables.
+**Scope (read this first)**: This skill is the *procedure* — follow the steps in order to produce a kernel. It is the companion to the **flydsl-kernel-authoring** skill, which is the *reference* (the full layout-algebra API surface, per-op tables, environment variables, and a troubleshooting list). When you need to look something up rather than follow a step, go to flydsl-kernel-authoring. This wizard links there instead of duplicating those tables.
 
 ---
 
@@ -446,11 +446,11 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python my_kernel.py
 
 ## Step 8: Debug Common Errors
 
-If the kernel fails to compile or produces wrong results, consult the full error -> cause -> fix
-table in the **flydsl-kernel-authoring** skill (§10 Troubleshooting), which covers the common
-wizard pitfalls: Python `int` where a DSL value is expected, `NameError` inside extracted
-`__then_*` branches, missing `arith.absf`, scalar/vector mismatches, LDS overflow,
-`buffer_load` element-vs-byte offsets, `range(..., init=...)` being unrolled, and stale caches.
+If the kernel fails to compile or produces wrong results, consult the **flydsl-kernel-authoring**
+skill: §3 (Control Flow, Frontend Semantic Restrictions, Runtime Loops, Arithmetic) covers
+`NameError` after a runtime `if`, `const_expr` misuse, loop-carried state, `abs`/`absf` and
+scalar/vector arithmetic; §10 Troubleshooting covers LDS overflow, `buffer_load`
+element-vs-byte offsets, and stale caches.
 For deeper kernel-debugging methodology (all-1s test, single-partition isolation, MFMA operand
 layout checks), use the **debug-flydsl-kernel** skill.
 
