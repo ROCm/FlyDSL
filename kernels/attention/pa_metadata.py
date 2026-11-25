@@ -452,16 +452,22 @@ def _make_pa_phase_helpers(
         query_scale_lane,
         *,
         k_scale_vecs=None,
+        qk_accs=None,
     ):
         query_scale = query_scale_lane * softmax_scale
         d_out = []
-        for td in range_constexpr(TLOOP):
-            acc = fx.full(4, 0.0, fx.Float32)
+        if const_expr(qk_accs is None):
+            # Issue the TLOOP independent chains round-robin: the backend keeps
+            # this order, and back-to-back dependent MFMAs expose their latency.
+            qk_accs = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(TLOOP)]
             for k_step in range_constexpr(qkhe_loop * 2):
-                acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                    T.f32x4,
-                    [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0],
-                )
+                for td in range_constexpr(TLOOP):
+                    qk_accs[td] = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        T.f32x4,
+                        [k_ops[td][k_step], q_frags[k_step], qk_accs[td], 0, 0, 0],
+                    )
+        for td in range_constexpr(TLOOP):
+            acc = qk_accs[td]
             if const_expr(per_token_kv):
                 d_out.append(fx.Vector(acc) * (k_scale_vecs[td] * query_scale))
             else:
@@ -482,7 +488,9 @@ def _make_pa_phase_helpers(
 
         return d_out
 
-    def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs, *, v_normalization=None):
+    def _cross_warp_softmax_and_prob_pack(
+        d_out, rmax, rsum, outs, v_scale_vecs, *, v_normalization=None, next_q_frags=None, k_ops=None
+    ):
         partition_max = neg_inf
         partition_sum = zero_f
         max_vec = fx.ptr_load(softmax_base + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
@@ -492,7 +500,21 @@ def _make_pa_phase_helpers(
         new_rmax = fx.maxnumf(rmax, partition_max)
         safe_eff_max = (partition_max > neg_inf).select(new_rmax, zero_f)
         local_exp_sum = zero_f
+        # With next_q_frags, issue the next MTP group's QK MFMAs (register-only
+        # inputs) interleaved with this group's exp work.
+        qk_steps = qkhe_loop * 2
+        next_qk_accs = None
+        if const_expr(next_q_frags is not None):
+            next_qk_accs = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(TLOOP)]
         for td in range_constexpr(TLOOP):
+            if const_expr(next_q_frags is not None):
+                for k_step in range_constexpr(qk_steps):
+                    if const_expr(k_step * TLOOP // qk_steps == td):
+                        for qtd in range_constexpr(TLOOP):
+                            next_qk_accs[qtd] = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                                T.f32x4,
+                                [k_ops[qtd][k_step], next_q_frags[k_step], next_qk_accs[qtd], 0, 0, 0],
+                            )
             diff_vec = d_out[td] - safe_eff_max
             p_vec = exp2_f32_fast(diff_vec * LOG2E)
             local_exp_sum = local_exp_sum + p_vec.reduce("add")
@@ -505,11 +527,9 @@ def _make_pa_phase_helpers(
         )
         accum_scale = (rmax > neg_inf).select(exp2_f32_fast((rmax - new_rmax) * LOG2E), zero_f)
 
-        gpu.barrier()
-        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
-        for w in range_constexpr(NUM_WARPS):
-            partition_sum = partition_sum + sum_vec[w]
-
+        # P and the output rescale do not depend on the cross-warp sum, so they
+        # are finished before the sum barrier. The vmax slots were written before
+        # the previous barrier, and every warp read the previous P before it.
         if const_expr(per_token_kv):
             if const_expr(v_normalization is None):
                 v_max_global = zero_f
@@ -537,12 +557,17 @@ def _make_pa_phase_helpers(
             elem_base = prob_wr_thread_base + td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4)
             pk_vec = fx.Vector.from_elements([pk], dtype=fx.Int32)
             fx.ptr_store(pk_vec, logits_base + elem_base)
+        for vhe in range_constexpr(vhe_loop):
+            outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
+
+        gpu.barrier()
+        sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
+        for w in range_constexpr(NUM_WARPS):
+            partition_sum = partition_sum + sum_vec[w]
 
         rsum = accum_scale * rsum + partition_sum
         rmax = new_rmax
-        for vhe in range_constexpr(vhe_loop):
-            outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
-        return rmax, rsum, outs, v_correction, normalized_v_scales
+        return rmax, rsum, outs, v_correction, normalized_v_scales, next_qk_accs
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction_vec = fx.full(4, fx.Float32(v_correction), fx.Float32)
@@ -559,23 +584,24 @@ def _make_pa_phase_helpers(
                     )[0]
                 )
 
-        for vhe in range_constexpr(vhe_loop):
-            tmp_out = fx.full(4, 0.0, fx.Float32)
-            for vt in range_constexpr(VTLOOP):
-                v_i64x2 = v_ops[vt][vhe]
-                for j in range_constexpr(2):
-                    tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
+        # Round-robin over the vhe_loop independent chains (see _qk_and_intra_softmax).
+        tmp_outs = [fx.full(4, 0.0, fx.Float32) for _ in range_constexpr(vhe_loop)]
+        for vt in range_constexpr(VTLOOP):
+            for j in range_constexpr(2):
+                for vhe in range_constexpr(vhe_loop):
+                    tmp_outs[vhe] = rocdl.mfma_f32_16x16x32_fp8_fp8(
                         T.f32x4,
                         [
-                            v_i64x2[j],
+                            v_ops[vt][vhe][j],
                             p_i64_all[vt * 2 + j],
-                            tmp_out,
+                            tmp_outs[vhe],
                             0,
                             0,
                             0,
                         ],
                     )
-            outs[vhe] = tmp_out * v_correction_vec + outs[vhe]
+        for vhe in range_constexpr(vhe_loop):
+            outs[vhe] = tmp_outs[vhe] * v_correction_vec + outs[vhe]
         return outs
 
     return (
@@ -1250,6 +1276,7 @@ def compile_pa_decode_metadata(
 
                 v_normalization = None
                 new_states = []
+                next_qk_accs = None
                 for _mtp_g in range_constexpr(_mtp_groups):
                     state = cur_states[_mtp_g]
                     rmax, rsum = state[0], state[1]
@@ -1262,19 +1289,26 @@ def compile_pa_decode_metadata(
                         causal_bound_per_mtp[_mtp_g],
                         query_scale_lane=qscale_per_mtp[_mtp_g],
                         k_scale_vecs=k_scale_vecs,
+                        qk_accs=next_qk_accs,
                     )
 
                     if const_expr(per_token_kv and _mtp_g == 0):
                         _store_vmax_warp(partition_start, seq_end=context_len, v_scale_vecs=v_scale_vecs)
 
                     gpu.barrier()
-                    rmax, rsum, outs, v_correction, normalized_v_scales = _cross_warp_softmax_and_prob_pack(
-                        d_out,
-                        rmax,
-                        rsum,
-                        outs,
-                        v_scale_vecs,
-                        v_normalization=v_normalization,
+                    # Overlap the next group's QK MFMAs with this group's softmax.
+                    next_q = q_frags_per_mtp[_mtp_g + 1] if _mtp_g + 1 < _mtp_groups else None
+                    rmax, rsum, outs, v_correction, normalized_v_scales, next_qk_accs = (
+                        _cross_warp_softmax_and_prob_pack(
+                            d_out,
+                            rmax,
+                            rsum,
+                            outs,
+                            v_scale_vecs,
+                            v_normalization=v_normalization,
+                            next_q_frags=next_q,
+                            k_ops=k_ops,
+                        )
                     )
                     if const_expr(per_token_kv and _mtp_g == 0):
                         v_normalization = (v_correction, normalized_v_scales)
