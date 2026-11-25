@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-25T10:13:21Z",
+ "updated": "2026-11-25T10:15:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45592719183,
+   "pr": 1523,
+   "commit": "4210f12db0cfba6c637b0edae002c3b8ad324305",
+   "branch": "docs/ack-mori",
+   "event": "pull_request",
+   "title": "[Docs] Acknowledge MORI in the README",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592719183",
+   "created_at": "2026-11-25T10:12:22Z",
+   "updated_at": "2026-11-25T10:12:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45592461996,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][Perf] PA decode: interleave independent MFMA chains (#1501)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592461996",
    "created_at": "2026-11-25T10:10:46Z",
-   "updated_at": "2026-11-25T10:10:46Z",
+   "updated_at": "2026-11-25T10:13:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1863,49 +1878,6 @@
      "started_at": "2026-11-23T09:19:49Z",
      "completed_at": "2026-11-23T09:37:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383848"
-    }
-   ]
-  },
-  {
-   "run_id": 45133251316,
-   "pr": null,
-   "commit": "9614720c254e0aadb77afe7cf00fb11eea700a41",
-   "branch": "main",
-   "event": "push",
-   "title": "[compiler][opt] tie the same vgpr when strict pin a register number (\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316",
-   "created_at": "2026-11-23T07:44:05Z",
-   "updated_at": "2026-11-23T08:24:35Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": "2026-11-23T08:24:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627200"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": "2026-11-23T08:24:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627201"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-23T08:07:33Z",
-     "completed_at": "2026-11-23T08:24:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45133251316/job/137562627321"
     }
    ]
   }
