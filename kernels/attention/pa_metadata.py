@@ -1154,8 +1154,11 @@ def compile_pa_decode_metadata(
             qhi_per_mtp = []
             qscale_per_mtp = []
             for _mtp_g in range_constexpr(_mtp_groups):
-                if const_expr(_mtp_g > 0):
-                    gpu.barrier()
+                # Every group needs this barrier, including the first: the Q
+                # staging below overwrites LDS that other waves may still be
+                # reading (the previous group's Q, or the previous work item's
+                # P in _pv_mfma).
+                gpu.barrier()
                 _qi, _qhi, q_chunks = _prefetch_mtp_group_query(
                     q_tiles,
                     copy_q,
