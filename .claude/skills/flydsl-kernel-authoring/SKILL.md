@@ -281,14 +281,7 @@ When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid t
    dispatch()
    ```
 
-6. **Before a runtime `if`, every name that any of its branches assigns must already hold an IR value, `const_expr` branches included.** The rewriter picks the `scf.if` results by syntax, before `const_expr` is evaluated: a name assigned in an `elif const_expr(...)` branch becomes a result once it is bound anywhere earlier, even inside an `if const_expr(...)` block. Where that earlier binding is `None` or was skipped, tracing fails with `Variable(s) [...] initialized as None before a dynamic if/else (scf.if)`. Bind a placeholder of the assigned type before the chain, or move the `const_expr`-gated assignment out of it:
-   ```python
-   nxt = fx.Int32(0)        # not None, and not only under `if const_expr(PREFETCH):`
-   if tile + 1 < end:       # runtime condition -> scf.if
-       ...
-   elif const_expr(PREFETCH):
-       nxt = load_next(tile)
-   ```
+6. **Before a runtime `if`, every name that any of its branches assigns must already hold an IR value, `const_expr` branches included.** The rewriter picks the `scf.if` results by syntax, before `const_expr` is evaluated: a name assigned in an `elif const_expr(...)` branch becomes a result once it is bound anywhere earlier, even inside an `if const_expr(...)` block. Where that earlier binding is `None` or was skipped, tracing fails with `Variable(s) [...] initialized as None before a dynamic if/else (scf.if)`. Bind a placeholder of the assigned type before the chain (e.g. `nxt = fx.Int32(0)` ahead of `if tile + 1 < end: ... elif const_expr(PREFETCH): nxt = load_next(tile)`, not `None` and not only under `if const_expr(PREFETCH):`), or move the `const_expr`-gated assignment out of it.
 
 ### Runtime Loops with Loop-Carried Values (Software Pipelining)
 
