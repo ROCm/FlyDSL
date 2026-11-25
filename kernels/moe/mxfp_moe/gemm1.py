@@ -645,7 +645,12 @@ def _gemm1_body(
 
 
 def _bm_constants(BM, BN, KH_TILE, K_TILES_TOTAL):
-    kAStages = 2 if BM == 128 else 3
+    # Three A slots for every BM. With two, each BM=128 main-loop step refilled
+    # the slot its waves had just read, with no barrier in between, so one
+    # wave's copy could overwrite rows that another wave had not read yet.
+    # With three, the slot refilled in step t was last read in step t-1,
+    # before the barrier at the top of step t.
+    kAStages = 3
     kSubBlocks = 1 if BM < 32 else BM // 32
     kMChunks = kmchunks_for(BM)
     s_aq_bytes = kAStages * BM * KH_TILE
