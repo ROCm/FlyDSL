@@ -1,8 +1,97 @@
 {
  "schema": 1,
- "updated": "2026-11-25T06:35:01Z",
+ "updated": "2026-11-25T08:39:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45574969214,
+   "pr": null,
+   "commit": "7684cf49b9d5e16b3a3c11ddf25b41ebf0dc7d22",
+   "branch": "main",
+   "event": "push",
+   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting (#1412)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214",
+   "created_at": "2026-11-25T08:17:21Z",
+   "updated_at": "2026-11-25T08:20:13Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T08:37:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369271"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T08:37:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369314"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T08:37:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369327"
+    }
+   ]
+  },
+  {
+   "run_id": 45564684558,
+   "pr": 1515,
+   "commit": "e0ecd20142391e7bec1bf725b3633de8fc20543e",
+   "branch": "pr/fix-lds-dma-m0-licm",
+   "event": "pull_request",
+   "title": "[ROCDL] Hoist loop-invariant lane intrinsics and LDS DMA M0 reads",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45564684558",
+   "created_at": "2026-11-25T06:59:38Z",
+   "updated_at": "2026-11-25T08:37:03Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T07:24:28Z",
+     "completed_at": "2026-11-25T07:56:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45564684558/job/139046823919",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-11-25T07:24:16Z",
+     "completed_at": "2026-11-25T07:35:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45564684558/job/139046823933"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T07:25:16Z",
+     "completed_at": "2026-11-25T08:37:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45564684558/job/139046823938"
+    }
+   ]
+  },
   {
    "run_id": 45531875870,
    "pr": 1514,
@@ -427,7 +516,7 @@
   },
   {
    "run_id": 45367209730,
-   "pr": 1412,
+   "pr": null,
    "commit": "f83a33f62dfdfad1043cef8aeac7276084a08c88",
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
@@ -733,7 +822,7 @@
   },
   {
    "run_id": 45242406235,
-   "pr": 1412,
+   "pr": null,
    "commit": "37369dbb91caa36043e845e3960796e784ef6256",
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
@@ -779,7 +868,7 @@
   },
   {
    "run_id": 45219472072,
-   "pr": 1412,
+   "pr": null,
    "commit": "8c39dc5949556654716e7bed4f53a120e85311d2",
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
@@ -822,7 +911,7 @@
   },
   {
    "run_id": 45215141622,
-   "pr": 1412,
+   "pr": null,
    "commit": "724199cb6bb84435cf5ade46aef77c059de81a7b",
    "branch": "perf/jit-trace-speedup",
    "event": "pull_request",
@@ -1826,67 +1915,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45094754994/job/137438382691"
     }
    ]
-  },
-  {
-   "run_id": 45093572120,
-   "pr": 1482,
-   "commit": "8cfcdb4a3b41ca26e655f8d358ab9c6a636c7c06",
-   "branch": "ci/downstream-mono-unit-tests",
-   "event": "pull_request",
-   "title": "CI: run ATOM and sgl-amd-mono unit tests against the PR wheel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093572120",
-   "created_at": "2026-11-23T01:15:52Z",
-   "updated_at": "2026-11-23T03:22:43Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T01:55:04Z",
-     "completed_at": "2026-11-23T02:13:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093572120/job/137438940242"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T02:27:32Z",
-     "completed_at": "2026-11-23T02:48:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093572120/job/137438940279"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T02:19:28Z",
-     "completed_at": "2026-11-23T02:41:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093572120/job/137438940302",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45093216251,
-   "pr": null,
-   "commit": "86d10f361a052cf09461499627ff3099bcadde9c",
-   "branch": "main",
-   "event": "push",
-   "title": "[Version] Bump version to 0.5.3 (#1481)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45093216251",
-   "created_at": "2026-11-23T01:12:21Z",
-   "updated_at": "2026-11-23T01:13:58Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
