@@ -129,7 +129,7 @@ jobs:
 Key configuration:
 - `kernel_include_regex`: Exact name or regex from Step 2
 - `kernel_iteration_range`: `"[1, [2-4]]"` skips warmup (iteration 0), traces iterations 2-4
-- `att_target_cu: 1`: Single CU for manageable output
+- `att_target_cu: 1`: Single CU for manageable output. Only waves placed on that CU are traced; a small grid can leave it empty (see 5.3)
 - `att_buffer_size: "0x6000000"`: 96MB per SE (increase to `0xC000000` if truncated)
 
 ---
@@ -213,14 +213,26 @@ ls -la $LOCAL_TRACE_DIR/
 
 # Quick validation
 python3 -c "
-import json, sys
-with open('$LOCAL_TRACE_DIR/code.json') as f:
-    data = json.load(f)
-n = len(data.get('code', []))
-has_src = sum(1 for i in data.get('code', []) if i[3])
-print(f'Instructions: {n}, with source mapping: {has_src} ({100*has_src//max(n,1)}%)')
+import glob, json
+d = '$LOCAL_TRACE_DIR'
+waves = len(glob.glob(f'{d}/se*_sm*_sl*_wv*.json'))
+code = json.load(open(f'{d}/code.json')).get('code') or []
+has_src = sum(1 for i in code if i[3])
+print(f'Waves: {waves}, instructions: {len(code)}, with source mapping: {has_src} ({100*has_src//max(len(code),1)}%)')
+if not waves or not code:
+    raise SystemExit('no waves on the target CU: rerun with another att_target_cu')
 "
 ```
+
+ATT records only the waves that run on `att_target_cu`. If no wave of the
+dispatch lands there, rocprofv3 still exits 0 and writes the dispatch directory,
+but `code.json` holds `"code": null` and there are no `se*_sm*_sl*_wv*.json`
+files, so the failure shows up only later, when an analyzer reads the empty
+trace. Grids smaller than the CU count (a split-K reduce kernel of a few dozen
+workgroups, say) are the usual cause. Rerun with another `att_target_cu`, keep
+`att_shader_engine_mask: "0xf"`, or trace a larger launch of the same kernel.
+Observed on gfx942 (80 CUs): a reduce kernel dispatch traced on CU 0 of all
+four shader engines left exactly this empty directory with rocprofv3 exit 0.
 
 ---
 
@@ -315,6 +327,7 @@ Run /kernel-trace-analysis to analyze bottlenecks.
 | `rocprof-trace-decoder library path not found` | Install decoder: see kernel-trace-analysis skill Step 3 |
 | `INVALID_SHADER_DATA` | aqlprofile/decoder version mismatch, update both |
 | Empty ui_output_agent_* | kernel_include_regex didn't match -- re-check kernel name from Step 2 |
+| `code.json` has `"code": null`, no `se*_wv*.json` files | No wave ran on `att_target_cu` (grid smaller than the CU count) -- rerun with another CU (5.3) |
 | No source mapping in code.json | Ensure `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` is set |
 | Trace truncated (missing instructions) | Increase `att_buffer_size` to `0xC000000` (192MB) |
 | SSH timeout | Increase timeout, check host connectivity |

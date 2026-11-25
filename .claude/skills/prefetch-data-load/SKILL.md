@@ -381,6 +381,30 @@ Check where the `buffer_load`/`global_load` instructions sit relative to the
 MFMAs and to the `s_waitcnt vmcnt` that guards their use. Add
 `rocdl.sched_barrier(0)` only where the dump shows that a load moved.
 
+### Branch Variants That Start with the Same Loads
+
+A wave-uniform runtime `if` can pick between unrolled variants that begin with
+the same loads, for example a 16- and a 32-element rung of a reduction chosen
+by a live count. LLVM hoists the loads both variants share above the branch,
+together with their first uses (bf16 unpacks, masked selects), and the waitcnt
+pass then waits for those loads there. The larger variant thus issues its
+remaining loads one memory round trip late. Two obvious fixes do not work:
+
+- Issue only the extra loads under the `if` and yield a constant in the other
+  branch: InstCombine folds the conversion into the branch (the wait moves
+  inside it), and MachineSink sinks the unconditional loads below the `if` when
+  nothing before it uses them.
+- Yield the already-loaded values from both branches: the yield forces register
+  copies, and with them the waits, before the branch.
+
+Give the variants different first instructions instead: issue one variant's
+shared loads in reverse order and its other loads after them. Then check in the
+final ISA that each variant issues all of its loads before its first
+`s_waitcnt vmcnt`. Observed on gfx942 (FlyDSL 0.5.0): a split-K reduce kernel's
+16/32 rung pair waited `vmcnt(0)` on 16 hoisted loads before branching. With
+the 32 rung's loads reversed, each rung issued all its loads (16 or 32) in one
+batch before its statistics, and the results were bit-identical.
+
 ## Rules and Pitfalls
 
 ### Do
