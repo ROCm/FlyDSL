@@ -403,7 +403,20 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 _store_v4i32(out_rsrc_desc, out_elem_off_i32, out_bits)
             parity = 1 - parity
 
-        # 1-stage does not use end_sync to avoid hangs.
+        # End handshake. Without it a rank can finish while a peer is still
+        # loading this rank's input_buffer, and the rank's next call then
+        # overwrites input_buffer under the peer's loads. Block b waits only
+        # for block b of every peer, and every rank launches the same grid
+        # for a given N, so this cannot deadlock.
+        gpu.barrier()
+        _signal_end_sync(
+            lane_i32=lane_i32,
+            rank_i32=rank_i32,
+            bid_i32=bid_i32,
+            self_sg_i64=self_sg_i64,
+            sgs_i64=sgs,
+            ngpus=world_size,
+        )
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage arr (reduce-scatter + all-gather)
