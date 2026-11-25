@@ -85,6 +85,28 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py summarize /tmp/isa-bef
 python3 ${CLAUDE_SKILL_DIR}/scripts/isa_resource_table.py diff baseline.json /tmp/isa-after
 ```
 
+A dump tree may be assembled from directory symlinks, e.g. to earlier per-case
+dump directories. Links whose target lies inside the same tree are not followed,
+so nothing is read twice.
+
+### Trees that only partly overlap
+
+A kernel present on one side only makes the run exit 2, which is right for two
+runs of the same command. When the case sets differ on purpose (a large saved
+dump reused as "before" against a fresh dump of a few of its cases), pass
+`--common-only`. It compares the kernels whose directory and name match on both
+sides, lists the rest under `not compared`, and takes the exit code from the
+compared ones. It still exits 2 when nothing is common, or when a directory is
+empty on one side while the other side has kernels under it.
+
+Kernels are paired across *different* directories only with `--match-by-name`
+(for a name left over exactly once on each side). In a tree with one
+subdirectory per test case, two case directories can hold different
+specializations of one kernel name. Observed: reusing a 13-case dump against a
+fresh dump of 5 of those cases plus a new one gave 8 compared and 19 one-sided
+kernels (exit 2), and one row paired a reduce kernel dumped for a page-16 case
+with the same-named kernel dumped for a page-128 case.
+
 ## Reading the output
 
 ```
@@ -112,6 +134,8 @@ untrustworthy items is printed above it.
 | `agpr` | no | `.set` symbol `num_agpr` | The accumulator VGPR count on its own |
 | `sgpr` | yes | `.sgpr_count` metadata | SGPRs including the fixed extras (VCC, XNACK, FLAT_SCRATCH) |
 | `numbered_sgpr` | no | `.set` symbol `numbered_sgpr` | SGPRs without those extras; tells a real increase from VCC becoming live |
+| `user_sgpr` | no | `.amdhsa_user_sgpr_count` in the kernel descriptor | SGPRs set up before the first instruction (kernarg pointer, preloaded arguments, ...) |
+| `kernarg_preload` | no | `.amdhsa_user_sgpr_kernarg_preload_length` in the kernel descriptor | Kernel-argument dwords preloaded into user SGPRs; `n/a` where the target has no kernarg preload |
 | `vgpr_spill` | yes | `.vgpr_spill_count` metadata | VGPRs the allocator spilled |
 | `sgpr_spill` | yes | `.sgpr_spill_count` metadata | SGPRs the allocator spilled |
 | `scratch_bytes` | yes | `.private_segment_fixed_size` metadata | Private segment per work-item; exact on every target |
@@ -120,7 +144,7 @@ untrustworthy items is printed above it.
 | `scratch_store` / `scratch_load` | no | instruction count | `scratch_*` sites; `n/a` where spilling goes through `buffer_*` |
 | `matrix_ops` | no | instruction count | MFMA / WMMA / sparse-MFMA (`v_smfmac_*`) sites |
 
-Three things are easy to misread:
+Four things are easy to misread:
 
 - **Do not add `arch_vgpr` and `agpr` to `vgpr`.** `vgpr` is LLVM's own
   occupancy number and is the only VGPR-family trigger; the other two are shown so
@@ -135,6 +159,14 @@ Three things are easy to misread:
   `scratch_bytes`, which is exact everywhere.
 - **`?` means unparsed** — the tool could not read something it reports. Any `?`
   forces exit 2. Never treat it as unchanged.
+- **A table with no trigger moved can still hide a changed hot loop.** Turning on
+  kernarg preload (`kernarg_preload` 0 -> N, `user_sgpr` up by N) removes serial
+  `s_load`s from the prologue, but it also changes the SGPR assignment, and with
+  it the scheduler's choices. Observed on gfx942: a 14-dword preload kept a
+  decode kernel's VGPR, AGPR and spill counts equal; short calls got 1-3%
+  faster, and long calls about 1% slower because one hot-loop `s_waitcnt
+  vmcnt(4)` became `vmcnt(3)`. These columns explain the SGPR delta; time the
+  change.
 
 ### Exit codes
 
@@ -148,8 +180,9 @@ Exit `1` is a claim about the code under test; exit `2` is a claim about the
 tool's own confidence. Everything that would leave the answer partial reports `2`
 and never `1`: a crash, an empty dump directory, a dump file that does not parse
 or does not decode, a metadata entry with no kernel identity or a duplicated one,
-a negative resource count, a kernel present on only one side, and a target that
-differs — or that the tool cannot name — on either side.
+a negative resource count, a kernel present on only one side (unless
+`--common-only`), a directory in a dump tree that is empty or holds IR stages
+but no final ISA, and a target that differs — or that the tool cannot name — on either side.
 
 For scripting, `-q/--quiet` drops the table (the untrustworthy count still
 prints above the verdict), and `--json PATH`
@@ -189,7 +222,11 @@ These silently produce a *confident wrong answer* if ignored:
   variant. Diff one shape at a time when the answer must be exact.
 - **A cache hit produces no dump at all.** Hence `FLYDSL_RUNTIME_ENABLE_CACHE=0`
   on both sides. Without it a kernel can silently vanish from one side, which
-  the tool reports as `ONLY IN BEFORE` and exit 2.
+  the tool reports as `ONLY IN BEFORE` and exit 2. The variable does not turn
+  off the in-memory cache: in one process, a case whose kernels an earlier case
+  already built writes no dump, and its directory stays empty. The tool reports
+  such a directory (or one with IR stages but no final ISA) and exits 2, even
+  when it is empty on both sides; directories with other files are skipped.
 - **`lds_static_bytes` is static LDS only.** A kernel using
   `SharedAllocator(static=False)` reports `0` no matter how much LDS it takes at
   dispatch; the tool prints a `dynamic LDS in use` note for it. LDS regressions

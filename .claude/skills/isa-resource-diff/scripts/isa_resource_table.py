@@ -12,7 +12,8 @@ The tool is self-contained and only consumes ``*final_isa.s`` files produced by
 
 ``diff`` accepts either two dump directories or two JSON snapshots, and the two
 sides may be mixed.  Every metric is scoped to one kernel, even when an ISA file
-contains multiple kernels.
+contains multiple kernels.  ``diff --common-only`` restricts the verdict to kernels
+present on both sides; ``--match-by-name`` pairs kernels across differing directories.
 
 The tool is architecture-general.  Register counts come from the per-kernel
 ``.set <kernel>.num_vgpr`` / ``.num_agpr`` / ``.numbered_sgpr`` assembler symbols,
@@ -43,6 +44,7 @@ if sys.version_info < (3, 10):  # pragma: no cover - exercised via subprocess
 
 import argparse  # noqa: E402  - imports must follow the interpreter guard
 import json  # noqa: E402
+import os  # noqa: E402
 import re  # noqa: E402
 import traceback  # noqa: E402
 from bisect import bisect_left  # noqa: E402
@@ -131,6 +133,7 @@ INFO = "info"
 
 METADATA = "metadata"
 SYMBOL = "symbol"
+DESCRIPTOR = "descriptor"
 INSTRUCTION = "instruction"
 
 
@@ -153,6 +156,8 @@ METRICS = (
     Metric("agpr", INFO, SYMBOL, "num_agpr"),
     Metric("sgpr", TRIGGER, METADATA, "sgpr_count"),
     Metric("numbered_sgpr", INFO, SYMBOL, "numbered_sgpr"),
+    Metric("user_sgpr", INFO, DESCRIPTOR, "user_sgpr_count"),
+    Metric("kernarg_preload", INFO, DESCRIPTOR, "user_sgpr_kernarg_preload_length"),
     Metric("vgpr_spill", TRIGGER, METADATA, "vgpr_spill_count"),
     Metric("sgpr_spill", TRIGGER, METADATA, "sgpr_spill_count"),
     Metric("scratch_bytes", TRIGGER, METADATA, "private_segment_fixed_size"),
@@ -305,6 +310,7 @@ RE_SIZE = re.compile(
 )
 RE_SET = re.compile(r"^[ \t]*\.set[ \t]+(?P<sym>[A-Za-z_.$][\w.$]*)[ \t]*,[ \t]*(?P<val>-?\d+)[ \t]*$")
 RE_SET_ANY = re.compile(r"^[ \t]*\.set[ \t]+(?P<sym>[A-Za-z_.$][\w.$]*)[ \t]*,")
+RE_DESCRIPTOR_FIELD = re.compile(r"^\.amdhsa_(?P<key>\w+)[ \t]+(?P<val>\d+)[ \t]*$")
 # Kernel-level metadata keys sit at column 4, or on the `  - ` sequence-dash line.
 # Argument keys sit at column 6 or 8, so both branches must be literal.
 RE_MD_KEY = re.compile(r"^(?:  - |    )\.(?P<key>[A-Za-z_]\w*):[ \t]*(?P<val>.*?)[ \t]*$")
@@ -364,6 +370,8 @@ class _Scan:
     instr_lines: list = field(default_factory=list)
     instr_cats: list = field(default_factory=list)
     symbol_problems: list = field(default_factory=list)
+    # `.amdhsa_kernel <name>` block -> {directive without `.amdhsa_`: integer value}
+    descriptors: dict = field(default_factory=dict)
     target_id: str | None = None
     md_target_id: str | None = None
     saw_metadata: bool = False
@@ -403,7 +411,7 @@ def _scan_text(text: str) -> _Scan:
     """One pass over the file; no regex ever runs over the whole text."""
     scan = _Scan()
     in_metadata = False
-    in_descriptor = False
+    descriptor = None
 
     for index, line in enumerate(text.splitlines()):
         if not line:
@@ -430,12 +438,16 @@ def _scan_text(text: str) -> _Scan:
             scan.saw_metadata = True
             continue
         if stripped.startswith(DESCRIPTOR_END):
-            in_descriptor = False
+            descriptor = None
             continue
         if stripped.startswith(DESCRIPTOR_BEGIN):
-            in_descriptor = True
+            name = _unquote(stripped[len(DESCRIPTOR_BEGIN) :].strip())
+            descriptor = scan.descriptors.setdefault(name, {})
             continue
-        if in_descriptor:
+        if descriptor is not None:
+            m = RE_DESCRIPTOR_FIELD.match(stripped)
+            if m:
+                descriptor.setdefault(m.group("key"), int(m.group("val")))
             continue
         if in_metadata:
             m = RE_MD_KEY.match(line)
@@ -527,6 +539,18 @@ def _symbol_cell(symbols: dict, name: str, metric: Metric) -> Cell:
     return Cell.of(value)
 
 
+def _descriptor_cell(descriptors: dict, name: str, metric: Metric) -> Cell:
+    # Only informational metrics come from here.  A descriptor that lacks the directive
+    # describes a target without that setting (not every target has kernarg preload),
+    # which is `n/a`, not a parse failure that would block the whole comparison.
+    fields = descriptors.get(name)
+    if fields is None:
+        return Cell.na(f"no .amdhsa_kernel descriptor for {name!r}")
+    if metric.field not in fields:
+        return Cell.na(f".amdhsa_{metric.field} is not emitted for this target")
+    return Cell.of(fields[metric.field])
+
+
 def _instruction_cells(counts: dict, arch: Arch, body_error: str | None) -> tuple:
     """Returns (cells, notes, problems) for the five instruction-derived metrics."""
     if body_error is not None:
@@ -616,6 +640,8 @@ def parse_isa(path: str | Path) -> tuple:
                 metrics[metric.key] = _metadata_cell(entry, metric)
             elif metric.source == SYMBOL:
                 metrics[metric.key] = _symbol_cell(scan.symbols, name, metric)
+            elif metric.source == DESCRIPTOR:
+                metrics[metric.key] = _descriptor_cell(scan.descriptors, name, metric)
 
         counts, body_error = _body_counts(scan, name)
         instruction_cells, notes, instruction_problems = _instruction_cells(counts, arch, body_error)
@@ -684,6 +710,8 @@ class Snapshot:
     kernels: dict = field(default_factory=dict)
     warnings: tuple = ()
     problems: tuple = ()
+    # Directories under the dump root, relative to it, with no final ISA anywhere below.
+    empty_dirs: tuple = ()
 
     def __len__(self) -> int:
         return len(self.kernels)
@@ -693,7 +721,15 @@ class Snapshot:
 
     @property
     def trustworthy(self) -> bool:
-        return not self.problems and not any(record.unparsed_keys for record in self.kernels.values())
+        return (
+            not self.problems
+            and not self.empty_dirs
+            and not any(record.unparsed_keys for record in self.kernels.values())
+        )
+
+    @property
+    def all_problems(self) -> tuple:
+        return self.problems + tuple(_empty_dir_problem(directory) for directory in self.empty_dirs)
 
     def to_json(self) -> dict:
         return {
@@ -701,6 +737,7 @@ class Snapshot:
             "tool": TOOL_NAME,
             "trustworthy": self.trustworthy,
             "warnings": list(self.warnings),
+            "empty_dirs": list(self.empty_dirs),
             "kernels": {
                 key: {
                     "source": record.source,
@@ -735,6 +772,80 @@ def _pick_stage_file(paths: list) -> tuple:
     return chosen, warning
 
 
+def _walk_dump_tree(root: Path) -> tuple:
+    """``({directory: [final-ISA files]}, empty directories, warnings)`` for one dump tree.
+
+    Directory symlinks are followed: a tree assembled from links to earlier per-case
+    dump directories is an ordinary way to reuse dumps, and ``Path.rglob`` skips such
+    links without a word.  A link whose target lies inside the tree is not followed,
+    and no directory is read twice, so no kernel is counted twice.
+
+    A directory with no final ISA anywhere below it is reported rather than ignored when
+    it holds no files at all or only earlier IR stages (``NN_*``): a case whose kernels
+    all came from the in-process JIT cache, or whose compile failed, leaves one, and its
+    kernels are then missing without a trace.  Other directories (scripts, logs) are
+    not dumps and are skipped.
+    """
+    real_root = os.path.realpath(root)
+    by_directory: dict = {}
+    visited: list = []
+    with_files: set = set()
+    with_stages: set = set()
+    seen: dict = {}
+    warnings: list = []
+    for current, dirnames, filenames in os.walk(root, followlinks=True):
+        real = os.path.realpath(current)
+        if real in seen:
+            warnings.append(f"{current}: same directory as {seen[real]}; read once")
+            dirnames[:] = []
+            continue
+        seen[real] = current
+        kept = []
+        for name in sorted(dirnames):
+            path = os.path.join(current, name)
+            target = os.path.realpath(path)
+            if os.path.islink(path) and (target == real_root or target.startswith(real_root + os.sep)):
+                warnings.append(f"{path}: link into the same tree, not followed")
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        directory = Path(current)
+        visited.append(directory)
+        relative = directory.relative_to(root)
+        if filenames:
+            with_files.add(relative)
+        for name in sorted(filenames):
+            if name.endswith("final_isa.s"):
+                by_directory.setdefault(directory, []).append(directory / name)
+            elif RE_STAGE_PREFIX.match(name):
+                with_stages.add(relative)
+
+    holding = set()
+    for directory in by_directory:
+        relative = directory.relative_to(root)
+        holding.add(relative)
+        holding.update(relative.parents)
+    empty = []
+    for directory in visited:
+        relative = directory.relative_to(root)
+        # Report only the topmost directory of a subtree without final ISA.
+        if relative in holding or relative.parent not in holding:
+            continue
+        subtree = [d.relative_to(root) for d in visited]
+        subtree = [d for d in subtree if d == relative or relative in d.parents]
+        if not any(d in with_files for d in subtree) or any(d in with_stages for d in subtree):
+            empty.append(relative.as_posix())
+    return by_directory, tuple(sorted(empty)), tuple(warnings)
+
+
+def _empty_dir_problem(directory: str) -> str:
+    return (
+        f"{directory}/: no *final_isa.s under this directory, so its kernels are missing from this "
+        "side (a case served entirely from the in-process JIT cache, or a failed compile, leaves one; "
+        "dump each case in its own process)"
+    )
+
+
 def collect(root: str | Path) -> Snapshot:
     """Summarize every ``*final_isa.s`` under ``root``."""
     root = Path(root)
@@ -743,14 +854,12 @@ def collect(root: str | Path) -> Snapshot:
     if not root.is_dir():
         raise SnapshotError(f"not a directory: {root}")
 
-    by_directory: dict = {}
-    for path in sorted(root.rglob("*final_isa.s")):
-        by_directory.setdefault(path.parent, []).append(path)
+    by_directory, empty_dirs, walk_warnings = _walk_dump_tree(root)
     if not by_directory:
         raise SnapshotError(f"no *final_isa.s under {root} (is FLYDSL_DUMP_IR set?)")
 
     kernels: dict = {}
-    warnings: list = []
+    warnings: list = list(walk_warnings)
     problems: list = []
     files_read = 0
 
@@ -811,7 +920,7 @@ def collect(root: str | Path) -> Snapshot:
         "so different JIT specializations overwrite each other and cache hits emit no dump. "
         "Compare only trees from a single run with FLYDSL_RUNTIME_ENABLE_CACHE=0."
     )
-    return Snapshot(kernels=kernels, warnings=tuple(warnings), problems=tuple(problems))
+    return Snapshot(kernels=kernels, warnings=tuple(warnings), problems=tuple(problems), empty_dirs=empty_dirs)
 
 
 def load_snapshot(path: str | Path) -> Snapshot:
@@ -834,7 +943,10 @@ def load_snapshot(path: str | Path) -> Snapshot:
             raise SnapshotError(f"{path}: {kernel}.metrics must be an object")
         cells = {}
         for key in KEYS:
-            if key not in raw_metrics:
+            if key not in raw_metrics and BY_KEY[key].kind == INFO:
+                # A snapshot written before this column existed; it never held a value.
+                cells[key] = Cell.na(f"not recorded in {path.name}")
+            elif key not in raw_metrics:
                 cells[key] = Cell.unparsed(f"absent from {path.name}")
             else:
                 cells[key] = Cell.from_json(raw_metrics[key], f"{path}: {kernel}.{key}")
@@ -851,12 +963,16 @@ def load_snapshot(path: str | Path) -> Snapshot:
     # not would make `diff a.json b.json` strictly less diagnosable than the `diff dirA
     # dirB` it was written from, for the same data and the same verdict.
     problems = [f"{key}: {problem}" for key, record in kernels.items() for problem in record.problems]
-    if not problems and raw.get("trustworthy") is False:
+    empty_dirs = raw.get("empty_dirs") or []
+    if not isinstance(empty_dirs, list) or not all(isinstance(d, str) for d in empty_dirs):
+        raise SnapshotError(f"{path}: 'empty_dirs' must be a list of strings")
+    if not problems and not empty_dirs and raw.get("trustworthy") is False:
         problems.append(f"{path} was written from data the tool could not fully parse")
     return Snapshot(
         kernels=kernels,
         warnings=tuple(raw.get("warnings") or ()),
         problems=tuple(problems),
+        empty_dirs=tuple(empty_dirs),
     )
 
 
@@ -922,6 +1038,8 @@ class Comparison:
     warnings: tuple = ()
     notes: tuple = ()
     total_kernels: int = 0
+    # (key, side) of one-sided kernels that `--common-only` left out of the verdict.
+    skipped: tuple = ()
 
     @property
     def compared_kernels(self) -> int:
@@ -965,8 +1083,12 @@ class Comparison:
         return {0: "RESULT: OK", 1: "RESULT: REGRESSION", 2: "RESULT: NOT TRUSTWORTHY"}[self.exit_code]
 
 
-def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
-    """Exact keys first, then pair leftovers by bare kernel name across layout drift."""
+def _match_keys(before: Snapshot, after: Snapshot, match_by_name: bool = False) -> tuple:
+    """Exact keys first; with ``match_by_name``, pair leftovers by bare kernel name.
+
+    Pairing across directories is opt-in: in a tree with one subdirectory per test case,
+    two directories can hold different JIT specializations of one kernel name.
+    """
     common = before.kernels.keys() & after.kernels.keys()
     pairs = {key: key for key in common}
     notes: list = []
@@ -982,25 +1104,58 @@ def _match_keys(before: Snapshot, after: Snapshot) -> tuple:
             return out
 
         left_by, right_by = by_kernel(left), by_kernel(right)
+        unpaired = 0
         for kernel, left_keys in left_by.items():
             right_keys = right_by.get(kernel, [])
             if len(left_keys) == 1 and len(right_keys) == 1:
+                if not match_by_name:
+                    unpaired += 1
+                    continue
                 pairs[left_keys[0]] = right_keys[0]
                 notes.append(
                     "matched by kernel name across differing layouts:\n"
                     f"      before  {left_keys[0]}\n"
                     f"      after   {right_keys[0]}"
                 )
+        if unpaired:
+            notes.append(
+                f"{unpaired} kernel name(s) are left over once on each side, in different directories; "
+                "not paired, since two directories can hold different specializations of one kernel. "
+                "Pass --match-by-name to pair them anyway."
+            )
     return pairs, tuple(notes)
 
 
-def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
+def _holds_kernels(snapshot: Snapshot, directory: str) -> bool:
+    prefix = directory + "/"
+    return any(key.rpartition("::")[0] == directory or key.startswith(prefix) for key in snapshot.kernels)
+
+
+def compare_snapshots(
+    before: Snapshot, after: Snapshot, *, common_only: bool = False, match_by_name: bool = False
+) -> Comparison:
+    """Pair and compare two snapshots.
+
+    ``common_only`` restricts the verdict to kernels present on both sides: one-sided
+    kernels, and directories empty on one side that the other side has no kernels under,
+    are listed instead of making the comparison untrustworthy.
+    """
     problems = list(before.problems) + list(after.problems)
     if not before or not after:
         problems.append(f"one or both inputs contain no kernels (before={len(before)}, after={len(after)})")
 
-    pairs, notes = _match_keys(before, after)
+    pairs, notes = _match_keys(before, after, match_by_name)
+    notes = list(notes)
     matched_after = set(pairs.values())
+    skipped = []
+
+    for side, snapshot, other in (("before", before, after), ("after", after, before)):
+        for directory in snapshot.empty_dirs:
+            message = f"{side}: {_empty_dir_problem(directory)}"
+            if common_only and not _holds_kernels(other, directory):
+                notes.append(f"not compared (--common-only): {message}")
+            else:
+                problems.append(message)
 
     rows = []
     for key in sorted(before.kernels.keys() | after.kernels.keys()):
@@ -1008,12 +1163,18 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
             before_record = before.kernels[key]
             after_record = after.kernels[pairs[key]]
         elif key in after.kernels and key not in matched_after:
+            if common_only:
+                skipped.append((key, ONLY_IN_AFTER))
+                continue
             rows.append(DiffRow(key, None, after.kernels[key]))
             problems.append(f"{key}: {ONLY_IN_AFTER}")
             continue
         elif key in after.kernels:
             continue  # already consumed as the right-hand side of a drift match
         else:
+            if common_only:
+                skipped.append((key, ONLY_IN_BEFORE))
+                continue
             rows.append(DiffRow(key, before.kernels[key], None))
             problems.append(f"{key}: {ONLY_IN_BEFORE}")
             continue
@@ -1030,13 +1191,18 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
                     else after_record.metrics[metric_key].reason
                 )
                 blocked.append(f"unparsed metric {metric_key}: {reason}")
-            elif (before_state == NA) != (after_state == NA):
+            elif (before_state == NA) != (after_state == NA) and metric_key in TRIGGERS:
+                # An informational column that one side lacks (an older snapshot) is shown
+                # without a delta instead of blocking the triggers.
                 blocked.append(
                     f"metric {metric_key} is {before_state} before and {after_state} after; " "applicability changed"
                 )
 
         rows.append(DiffRow(key, before_record, after_record, tuple(blocked)))
         problems.extend(f"{key}: {reason}" for reason in blocked)
+
+    if common_only and before and after and not pairs:
+        problems.append("--common-only: no kernel is present on both sides")
 
     total = len(before.kernels.keys() | after.kernels.keys()) - (
         len(pairs) - len(before.kernels.keys() & after.kernels.keys())
@@ -1047,6 +1213,7 @@ def compare_snapshots(before: Snapshot, after: Snapshot) -> Comparison:
         warnings=tuple(before.warnings) + tuple(after.warnings),
         notes=tuple(notes),
         total_kernels=total,
+        skipped=tuple(skipped),
     )
 
 
@@ -1127,7 +1294,7 @@ def render_snapshot(snapshot: Snapshot, output: TextIO, error: TextIO | None = N
             print(f"  note: {names[key]}: {note}", file=output)
 
     print(f"\n{len(snapshot)} kernels", file=output)
-    _render_problems(snapshot.warnings, snapshot.problems, output, error)
+    _render_problems(snapshot.warnings, snapshot.all_problems, output, error)
 
 
 def _render_problems(warnings, problems, output: TextIO, error: TextIO) -> None:
@@ -1172,6 +1339,18 @@ def render_comparison(comparison: Comparison, output: TextIO, error: TextIO) -> 
     for note in comparison.notes:
         print(f"\nnote: {note}", file=output)
 
+    if comparison.skipped:
+        only_before = sum(1 for _, side in comparison.skipped if side == ONLY_IN_BEFORE)
+        print(
+            f"\nnot compared (--common-only): {only_before} only in before, "
+            f"{len(comparison.skipped) - only_before} only in after",
+            file=output,
+        )
+        for key, side in comparison.skipped[:20]:
+            print(f"  {side:14s}  {key}", file=output)
+        if len(comparison.skipped) > 20:
+            print(f"  ... and {len(comparison.skipped) - 20} more (--json lists all)", file=output)
+
     print(
         f"\ncompared {comparison.compared_kernels} of {comparison.total_kernels} kernels; "
         f"{comparison.unchanged_kernels} unchanged; {comparison.changed_kernels} changed; "
@@ -1195,10 +1374,14 @@ def do_diff(
     error: TextIO | None = None,
     json_path: str | Path | None = None,
     quiet: bool = False,
+    common_only: bool = False,
+    match_by_name: bool = False,
 ) -> int:
     output = output if output is not None else sys.stdout
     error = error if error is not None else sys.stderr
-    comparison = compare_snapshots(load_input(before_path), load_input(after_path))
+    comparison = compare_snapshots(
+        load_input(before_path), load_input(after_path), common_only=common_only, match_by_name=match_by_name
+    )
     if json_path is not None:
         Path(json_path).write_text(
             json.dumps(_comparison_json(comparison), indent=2, sort_keys=True) + "\n",
@@ -1224,6 +1407,7 @@ def _comparison_json(comparison: Comparison) -> dict:
         "improved_metrics": comparison.improved_metrics,
         "problems": list(comparison.problems),
         "warnings": list(comparison.warnings),
+        "skipped": [{"kernel": key, "side": side} for key, side in comparison.skipped],
         "rows": [
             {
                 "kernel": row.name,
@@ -1251,7 +1435,7 @@ def do_summarize(
     if json_path is not None:
         Path(json_path).write_text(json.dumps(snapshot.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if quiet:
-        _render_problems(snapshot.warnings, snapshot.problems, output, error)
+        _render_problems(snapshot.warnings, snapshot.all_problems, output, error)
     else:
         render_snapshot(snapshot, output, error)
 
@@ -1284,6 +1468,16 @@ def _create_parser() -> argparse.ArgumentParser:
     diff.add_argument("after", type=Path, help="after dump directory or JSON snapshot")
     diff.add_argument("--json", type=Path, metavar="PATH", help="write the comparison as JSON")
     diff.add_argument("-q", "--quiet", action="store_true", help="suppress the table")
+    diff.add_argument(
+        "--common-only",
+        action="store_true",
+        help="compare only kernels present on both sides; list the one-sided ones without failing on them",
+    )
+    diff.add_argument(
+        "--match-by-name",
+        action="store_true",
+        help="pair kernels left over on each side by name even when their directories differ",
+    )
     return parser
 
 
@@ -1291,7 +1485,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _create_parser().parse_args(argv)
     try:
         if args.command == "diff":
-            return do_diff(args.before, args.after, json_path=args.json, quiet=args.quiet)
+            return do_diff(
+                args.before,
+                args.after,
+                json_path=args.json,
+                quiet=args.quiet,
+                common_only=args.common_only,
+                match_by_name=args.match_by_name,
+            )
         return do_summarize(args.dump_dir, json_path=args.json, quiet=args.quiet)
     except SnapshotError as exc:
         print(f"error: {exc}", file=sys.stderr)
