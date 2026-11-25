@@ -281,6 +281,8 @@ When writing or reviewing `@flyc.kernel` / `@flyc.jit` code, proactively avoid t
    dispatch()
    ```
 
+6. **Before a runtime `if`, every name that any of its branches assigns must already hold an IR value, `const_expr` branches included.** The rewriter picks the `scf.if` results by syntax, before `const_expr` is evaluated: a name assigned in an `elif const_expr(...)` branch becomes a result once it is bound anywhere earlier, even inside an `if const_expr(...)` block. Where that earlier binding is `None` or was skipped, tracing fails with `Variable(s) [...] initialized as None before a dynamic if/else (scf.if)`. Bind a placeholder of the assigned type before the chain (e.g. `nxt = fx.Int32(0)` ahead of `if tile + 1 < end: ... elif const_expr(PREFETCH): nxt = load_next(tile)`, not `None` and not only under `if const_expr(PREFETCH):`), or move the `const_expr`-gated assignment out of it.
+
 ### Runtime Loops with Loop-Carried Values (Software Pipelining)
 
 Use `init=` on `range()` to create a runtime loop with explicit SSA phi nodes for loop-carried state. This is required for software pipelining (prefetch patterns) where data must flow across iterations.
@@ -443,7 +445,7 @@ See [references/environment-and-debugging.md](references/environment-and-debuggi
 
 3. **Cache stale after code changes**: The disk cache is keyed by the traced MLIR and the toolchain fingerprint, so Python edits and rebuilt C++ passes invalidate it. Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/` only when debugging a suspected stale artifact.
 
-4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). `SharedAllocator` sizes the LDS global for you; the compiler errors if a static allocation exceeds the arch limit.
+4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). `SharedAllocator` sizes the LDS global for you, but by default nothing rejects a total over the arch limit at compile time: on FlyDSL 0.5.0, a gfx942 kernel whose static `@fx.struct` storage came to 69248 bytes compiled and cached, and its launch failed with `hipErrorIllegalState` from `hipModuleLaunchKernel` (the same kernel family launched at up to 63872 bytes). Since 0.5.1, launching under `with CompilationContext.compile_hints({"check_resource_limits": True}):` turns that into a compile error. When the size depends on host parameters, also call `check_smem_capacity(nbytes, arch)` from `flydsl.runtime.device` before compiling; it raises with both byte counts.
 
 5. **Dynamic vs Constexpr**: `Constexpr[int]` values are baked into IR -- different values produce different compiled kernels. Use `Int32` for truly dynamic values.
 
