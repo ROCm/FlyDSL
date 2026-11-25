@@ -1,8 +1,97 @@
 {
  "schema": 1,
- "updated": "2026-11-25T09:16:59Z",
+ "updated": "2026-11-25T09:19:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45583726935,
+   "pr": 1522,
+   "commit": "cf5ac75815abf67aefb160707e8a0d01cf890a2f",
+   "branch": "skills/isa-resource-diff-partial-trees",
+   "event": "pull_request",
+   "title": "[Skills] isa-resource-diff: partial and symlinked dump trees, empty case dirs, kernarg-preload columns",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935",
+   "created_at": "2026-11-25T09:15:47Z",
+   "updated_at": "2026-11-25T09:16:03Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T09:17:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920786"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T09:17:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920843"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-25T09:17:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920853"
+    }
+   ]
+  },
+  {
+   "run_id": 45583686361,
+   "pr": 1521,
+   "commit": "e7d0e89559bbe9e048814a23cd8f396e339fe777",
+   "branch": "skills/batch-1516-1520",
+   "event": "pull_request",
+   "title": "[Skills] Batch: capture-kernel-trace, flydsl-kernel-authoring, debug-flydsl-kernel, prefetch-data-load, kernel-code-cleanup (#1516-#1520)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361",
+   "created_at": "2026-11-25T09:15:32Z",
+   "updated_at": "2026-11-25T09:17:17Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:13Z",
+     "completed_at": "2026-11-25T09:17:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361/job/139100512808",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:13Z",
+     "completed_at": "2026-11-25T09:17:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361/job/139100512893"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:13Z",
+     "completed_at": "2026-11-25T09:17:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361/job/139100513398"
+    }
+   ]
+  },
   {
    "run_id": 45583060248,
    "pr": 1517,
@@ -189,7 +278,7 @@
   },
   {
    "run_id": 45581711486,
-   "pr": 1517,
+   "pr": null,
    "commit": "069593b371f2e9f3ad8608509a40bda67cf5fde2",
    "branch": "skills/flydsl-kernel-authoring-none-state-lds-check",
    "event": "pull_request",
@@ -1844,80 +1933,6 @@
    "updated_at": "2026-11-23T06:52:08Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 45126354855,
-   "pr": 1430,
-   "commit": "9db9445bd5d4a2a32e066042f7b038c528717317",
-   "branch": "pr/fp8-8wave-tail-race",
-   "event": "pull_request",
-   "title": "[Bugfix] Wait for the last B0 and A0 tiles in the FP8 8-wave tail",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855",
-   "created_at": "2026-11-23T06:46:08Z",
-   "updated_at": "2026-11-23T08:09:04Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T07:20:31Z",
-     "completed_at": "2026-11-23T08:03:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327563",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T07:08:13Z",
-     "completed_at": "2026-11-23T08:09:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126354855/job/137539327591"
-    }
-   ]
-  },
-  {
-   "run_id": 45126253281,
-   "pr": 1428,
-   "commit": "fa2795ba5f4100682875e014e729461b92d1e719",
-   "branch": "pr/fp4-4wave-race",
-   "event": "pull_request",
-   "title": "[Bugfix] Wait for b_cur1 before the FP4 4-wave prologue reads it",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281",
-   "created_at": "2026-11-23T06:45:20Z",
-   "updated_at": "2026-11-23T08:06:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T07:14:07Z",
-     "completed_at": "2026-11-23T07:58:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340139",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T07:08:45Z",
-     "completed_at": "2026-11-23T07:34:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126253281/job/137539340250"
-    }
-   ]
   }
  ]
 }
