@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-25T09:25:37Z",
+ "updated": "2026-11-25T09:31:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45585486948,
+   "pr": 1521,
+   "commit": "5e2b5e692ba4f9452cae5ac094a8837c8de79d44",
+   "branch": "skills/batch-1516-1520",
+   "event": "pull_request",
+   "title": "[Skills] Batch: capture-kernel-trace, flydsl-kernel-authoring, debug-flydsl-kernel, prefetch-data-load, kernel-code-cleanup, isa-resource-diff (#1516-#1520, #1522)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45585486948",
+   "created_at": "2026-11-25T09:26:53Z",
+   "updated_at": "2026-11-25T09:29:09Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:29:04Z",
+     "completed_at": "2026-11-25T09:29:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45585486948/job/139106912106"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:29:05Z",
+     "completed_at": "2026-11-25T09:29:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45585486948/job/139106912145"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:29:05Z",
+     "completed_at": "2026-11-25T09:29:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45585486948/job/139106912203",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 45583726935,
    "pr": 1522,
@@ -55,7 +101,7 @@
    "commit": "e7d0e89559bbe9e048814a23cd8f396e339fe777",
    "branch": "skills/batch-1516-1520",
    "event": "pull_request",
-   "title": "[Skills] Batch: capture-kernel-trace, flydsl-kernel-authoring, debug-flydsl-kernel, prefetch-data-load, kernel-code-cleanup (#1516-#1520)",
+   "title": "[Skills] Batch: capture-kernel-trace, flydsl-kernel-authoring, debug-flydsl-kernel, prefetch-data-load, kernel-code-cleanup, isa-resource-diff (#1516-#1520, #1522)",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361",
@@ -1921,21 +1967,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45127020995/job/137545003486"
     }
    ]
-  },
-  {
-   "run_id": 45126744320,
-   "pr": null,
-   "commit": "967f936414ef447babfe4adcc233478ba4d277df",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Lower math ops that MathToLLVM gets wrong to OCML (#1455)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45126744320",
-   "created_at": "2026-11-23T06:49:32Z",
-   "updated_at": "2026-11-23T06:52:08Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
