@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-25T10:17:51Z",
+ "updated": "2026-11-25T10:20:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45593303218,
+   "pr": 1524,
+   "commit": "97fa1c13d37e95bd4d4440f1d6847a5d1f4df511",
+   "branch": "skills/trim-batch-1521-skills",
+   "event": "pull_request",
+   "title": "[Skills] Trim redundant content and fix stale guidance in the #1521 skills",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593303218",
+   "created_at": "2026-11-25T10:15:56Z",
+   "updated_at": "2026-11-25T10:17:48Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:17:43Z",
+     "completed_at": "2026-11-25T10:17:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593303218/job/139133631220"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:17:43Z",
+     "completed_at": "2026-11-25T10:17:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593303218/job/139133631392",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:17:44Z",
+     "completed_at": "2026-11-25T10:17:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593303218/job/139133631431"
+    }
+   ]
+  },
   {
    "run_id": 45593100163,
    "pr": 1523,
@@ -10,13 +56,44 @@
    "branch": "docs/ack-mori",
    "event": "pull_request",
    "title": "[Docs] Acknowledge MORI in the README",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593100163",
    "created_at": "2026-11-25T10:14:43Z",
-   "updated_at": "2026-11-25T10:14:56Z",
+   "updated_at": "2026-11-25T10:16:20Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:16:15Z",
+     "completed_at": "2026-11-25T10:16:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593100163/job/139132844137"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:16:15Z",
+     "completed_at": "2026-11-25T10:16:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593100163/job/139132844220"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:16:15Z",
+     "completed_at": "2026-11-25T10:16:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593100163/job/139132844303",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
   },
   {
    "run_id": 45592719183,
@@ -975,8 +1052,7 @@
      "conclusion": "success",
      "started_at": "2026-11-24T12:47:31Z",
      "completed_at": "2026-11-24T12:57:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268",
-     "log_fetch_failed": true
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268"
     }
    ]
   },
@@ -1838,52 +1914,6 @@
    "updated_at": "2026-11-23T09:33:22Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 45138300271,
-   "pr": null,
-   "commit": "28a4ebca35baecba96c0b651f17a2eba01c8c72b",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_cod\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271",
-   "created_at": "2026-11-23T08:24:01Z",
-   "updated_at": "2026-11-23T12:00:53Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T08:54:01Z",
-     "completed_at": "2026-11-23T09:33:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855382",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T09:40:04Z",
-     "completed_at": "2026-11-23T10:48:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855407"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T11:17:14Z",
-     "completed_at": "2026-11-23T12:00:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855487"
-    }
-   ]
   }
  ]
 }
