@@ -449,7 +449,7 @@ FlyDSL builds on and is inspired by several projects:
 - [Categorical Foundations for CuTe Layouts](https://arxiv.org/abs/2601.05972) — mathematical framework for layout algebra ([companion code](https://github.com/ColfaxResearch/layout-categories))
 - [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) — CuTe layout algebra concepts (BSD-3-Clause parts only; no EULA-licensed code was referenced)
 - [ROCm AIter](https://github.com/ROCm/aiter) — test infrastructure and performance comparison baselines (MIT)
-- [ROCm MORI](https://github.com/ROCm/mori) — multi-GPU communication runtime; its shmem symmetric memory and CCO (SDMA) device functions back the `kernels/comm` dispatch/combine and MegaMoE kernels
+- [ROCm MORI](https://github.com/ROCm/mori) — multi-GPU communication runtime; its SHMEM/CCO symmetric memory and device-initiated communication primitives power the `kernels/comm` dispatch/combine and MegaMoE kernels
 - [Triton](https://github.com/triton-lang/triton) — Python DSL for GPU kernel authoring
 - [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) — tile-based kernel design patterns for AMD GPUs
 - [HipKittens](https://github.com/HazyResearch/HipKittens) — minimal, opinionated C++ embedded primitives for fast AMD AI kernels (part of the ThunderKittens family)
