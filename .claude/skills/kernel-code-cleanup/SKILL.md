@@ -449,6 +449,16 @@ quirks, offset-unit gotchas, invariants, spec/ISA references.
 - Similar formulas are not necessarily interchangeable: preserve activation
   rounding and batch scheduling, signed/unsigned extrema and packed bit widths.
   Extract the common operation and keep meaningful variants explicit.
+- Host-side specialization predicates (trait or config booleans that select
+  compile-time paths) collect dead clauses once a later trait widens a guard.
+  When only such a predicate changes, prove it without compiling: evaluate the
+  old and new predicate, or the whole specialization key, over the reachable
+  launch-parameter space (exhaustively over small enum grids, plus random
+  samples) and report 0 differing keys. With the kernel body unchanged,
+  identical keys mean identical kernels, so per-shape ISA dumps add nothing.
+  Observed: a two-clause removal from a paged-attention trait table changed
+  0 fields over ~42k valid schedules and 0 specializations over ~2.1k benchmark
+  cases.
 
 ---
 
@@ -504,7 +514,8 @@ _run_compiled(compiled["launch"], out.data_ptr(), a.data_ptr(), b.data_ptr(),
    ```
    Use the existing test's actual CLI when it is a script rather than pytest.
    Check asserted comparisons and dispatch logs as well as the exit code;
-   compare numerical results, ISA and performance for the changed paths.
+   compare numerical results, ISA and performance for the changed paths. A
+   predicate-only change is proven by its specialization keys instead (§8).
 5. **Review the actual merge-base diff and all remaining candidates.** Check
    callers of shared helpers, excluded paths importing them, and the final tree
    after any upstream merge. Inspect `git diff --stat` and `git diff --check`.
