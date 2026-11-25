@@ -226,11 +226,13 @@ class StoreC:
                     self._store_bf16(out, col_valid.select(c_index, oob))
 
 
-def wait_barrier(count):
+def wait_barrier(count, lgkmcnt=None):
+    """``s_waitcnt vmcnt(count)`` (plus ``lgkmcnt(lgkmcnt)`` if given), then ``s_barrier``."""
+    waits = f"vmcnt({count})" if lgkmcnt is None else f"vmcnt({count}) lgkmcnt({lgkmcnt})"
     _llvm.inline_asm(
         res=None,
         operands_=[],
-        asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
+        asm_string=f"s_waitcnt {waits}\ns_barrier",
         constraints="",
         has_side_effects=True,
     )

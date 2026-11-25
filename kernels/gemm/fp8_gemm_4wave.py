@@ -387,7 +387,9 @@ def compile_fp8_gemm_4w(
         b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
 
         for k in range_constexpr(K_ITERS - 2):
-            wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
+            # Also wait for this wave's LDS reads (lgkmcnt): right after this barrier the first block refills
+            # a_cur0, which the previous step (or the prologue) read.
+            wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B), lgkmcnt=0)
 
             c00_frag, b1_frag = _compute_block(
                 a_cur0,
