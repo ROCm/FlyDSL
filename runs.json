@@ -1,8 +1,130 @@
 {
  "schema": 1,
- "updated": "2026-11-25T08:57:55Z",
+ "updated": "2026-11-25T09:07:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45581923207,
+   "pr": 1520,
+   "commit": "79fee92c1838c7464ee9d150c384176db4abc9d6",
+   "branch": "skills/kernel-code-cleanup-predicate-equivalence",
+   "event": "pull_request",
+   "title": "[Skills] kernel-code-cleanup: prove a predicate-only cleanup by its specialization keys",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207",
+   "created_at": "2026-11-25T09:04:23Z",
+   "updated_at": "2026-11-25T09:04:36Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 45581866075,
+   "pr": 1519,
+   "commit": "32a18b3ae7bd59e9afbfb5d77cc416561f111e2b",
+   "branch": "skills/prefetch-data-load-shared-branch-loads",
+   "event": "pull_request",
+   "title": "[Skills] prefetch-data-load: branch variants that start with the same loads",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075",
+   "created_at": "2026-11-25T09:04:01Z",
+   "updated_at": "2026-11-25T09:04:19Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 45581788323,
+   "pr": 1518,
+   "commit": "56bcfb31e6457d11d6e69a767090eddd234c9ebc",
+   "branch": "skills/debug-flydsl-kernel-test-coverage",
+   "event": "pull_request",
+   "title": "[Skills] debug-flydsl-kernel: specialization coverage, rescale test data, in-memory JIT cache",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323",
+   "created_at": "2026-11-25T09:03:30Z",
+   "updated_at": "2026-11-25T09:05:12Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:08Z",
+     "completed_at": "2026-11-25T09:05:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079170"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:07Z",
+     "completed_at": "2026-11-25T09:05:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079222"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:08Z",
+     "completed_at": "2026-11-25T09:05:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079363",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
+  {
+   "run_id": 45581711486,
+   "pr": 1517,
+   "commit": "069593b371f2e9f3ad8608509a40bda67cf5fde2",
+   "branch": "skills/flydsl-kernel-authoring-none-state-lds-check",
+   "event": "pull_request",
+   "title": "[Skills] flydsl-kernel-authoring: None-bound scf.if state, LDS overflow is not caught by default",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581711486",
+   "created_at": "2026-11-25T09:03:02Z",
+   "updated_at": "2026-11-25T09:04:48Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:04:43Z",
+     "completed_at": "2026-11-25T09:04:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581711486/job/139093891631"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:04:44Z",
+     "completed_at": "2026-11-25T09:04:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581711486/job/139093891662",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:04:44Z",
+     "completed_at": "2026-11-25T09:04:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581711486/job/139093891756"
+    }
+   ]
+  },
   {
    "run_id": 45580311997,
    "pr": 1516,
@@ -75,19 +197,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-25T08:37:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369314"
+     "completed_at": "2026-11-25T09:02:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369314",
+     "machine": "smci350-rck-g03-b05-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-25T08:49:00Z",
-     "completed_at": null,
+     "completed_at": "2026-11-25T08:59:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369327"
     }
    ]
@@ -1729,190 +1854,6 @@
      "started_at": "2026-11-23T06:40:08Z",
      "completed_at": "2026-11-23T07:06:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45123913009/job/137528954707"
-    }
-   ]
-  },
-  {
-   "run_id": 45114102127,
-   "pr": null,
-   "commit": "c80aca6a69ff89e96af9b65a401eb1bee16eb879",
-   "branch": "fix/external-codegen-link-compat",
-   "event": "pull_request",
-   "title": "[Bugfix] Link external-codegen Assembly after run_external_binary_codegen returns",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127",
-   "created_at": "2026-11-23T04:49:21Z",
-   "updated_at": "2026-11-23T05:46:25Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T05:04:21Z",
-     "completed_at": "2026-11-23T05:33:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801182",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T05:02:54Z",
-     "completed_at": "2026-11-23T05:37:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801184"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T05:11:35Z",
-     "completed_at": "2026-11-23T05:41:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45114102127/job/137496801295"
-    }
-   ]
-  },
-  {
-   "run_id": 45108011622,
-   "pr": 1486,
-   "commit": "5c61c8ec400bf0438a90f93cb5f8c0f8a4af6b24",
-   "branch": "skills/batch-1458-1464",
-   "event": "pull_request",
-   "title": "[Skills] Batch: debug-flydsl-kernel, prefetch-data-load, flydsl-kernel-authoring, kernel-trace-analysis, isa-resource-diff (#1458-#1464)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45108011622",
-   "created_at": "2026-11-23T03:47:13Z",
-   "updated_at": "2026-11-23T03:48:43Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:48:38Z",
-     "completed_at": "2026-11-23T03:48:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45108011622/job/137474025803",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:48:38Z",
-     "completed_at": "2026-11-23T03:48:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45108011622/job/137474025831"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:48:38Z",
-     "completed_at": "2026-11-23T03:48:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45108011622/job/137474025995"
-    }
-   ]
-  },
-  {
-   "run_id": 45098582288,
-   "pr": 1485,
-   "commit": "34d3e4f9a95b0e42e4d664f1ab726c699ab63958",
-   "branch": "phil/subbyte-view-byte-offset",
-   "event": "pull_request",
-   "title": "[Bugfix] Step 4 and 6-bit view offsets in bytes",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288",
-   "created_at": "2026-11-23T02:09:39Z",
-   "updated_at": "2026-11-23T03:49:06Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:00:19Z",
-     "completed_at": "2026-11-23T03:16:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288/job/137454046956"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T02:43:24Z",
-     "completed_at": "2026-11-23T03:07:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288/job/137454046981"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:15:21Z",
-     "completed_at": "2026-11-23T03:49:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45098582288/job/137454047138",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45096518307,
-   "pr": 1484,
-   "commit": "ddc44ed5eef4d650d414762f4255a5add04d47b6",
-   "branch": "feat/compiled-function-code-object",
-   "event": "pull_request",
-   "title": "[Feat] Add CompiledFunction.kernel_names()",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307",
-   "created_at": "2026-11-23T01:47:13Z",
-   "updated_at": "2026-11-23T04:12:58Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T03:44:50Z",
-     "completed_at": "2026-11-23T03:59:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307/job/137447013992"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T02:41:58Z",
-     "completed_at": "2026-11-23T03:12:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307/job/137447013997",
-     "machine": "smci350-rck-g03-b05-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-23T02:20:48Z",
-     "completed_at": "2026-11-23T03:09:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45096518307/job/137447014012"
     }
    ]
   }
