@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-25T09:07:06Z",
+ "updated": "2026-11-25T09:09:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "skills/kernel-code-cleanup-predicate-equivalence",
    "event": "pull_request",
    "title": "[Skills] kernel-code-cleanup: prove a predicate-only cleanup by its specialization keys",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207",
    "created_at": "2026-11-25T09:04:23Z",
-   "updated_at": "2026-11-25T09:04:36Z",
+   "updated_at": "2026-11-25T09:06:03Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:58Z",
+     "completed_at": "2026-11-25T09:06:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558284"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:59Z",
+     "completed_at": "2026-11-25T09:06:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558295"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:58Z",
+     "completed_at": "2026-11-25T09:06:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558355",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
   },
   {
    "run_id": 45581866075,
@@ -25,13 +56,44 @@
    "branch": "skills/prefetch-data-load-shared-branch-loads",
    "event": "pull_request",
    "title": "[Skills] prefetch-data-load: branch variants that start with the same loads",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075",
    "created_at": "2026-11-25T09:04:01Z",
-   "updated_at": "2026-11-25T09:04:19Z",
+   "updated_at": "2026-11-25T09:05:46Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:42Z",
+     "completed_at": "2026-11-25T09:05:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386336",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:41Z",
+     "completed_at": "2026-11-25T09:05:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386403"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:05:42Z",
+     "completed_at": "2026-11-25T09:05:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386509"
+    }
+   ]
   },
   {
    "run_id": 45581788323,
@@ -188,10 +250,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-25T08:38:09Z",
-     "completed_at": null,
+     "completed_at": "2026-11-25T09:07:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45574969214/job/139080369271"
     },
     {
