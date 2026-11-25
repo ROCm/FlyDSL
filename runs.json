@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-25T10:15:07Z",
+ "updated": "2026-11-25T10:17:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45593100163,
+   "pr": 1523,
+   "commit": "41ecbc68459a043228c9ff6406ecb93828e8eaf7",
+   "branch": "docs/ack-mori",
+   "event": "pull_request",
+   "title": "[Docs] Acknowledge MORI in the README",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45593100163",
+   "created_at": "2026-11-25T10:14:43Z",
+   "updated_at": "2026-11-25T10:14:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45592719183,
    "pr": 1523,
@@ -10,13 +25,44 @@
    "branch": "docs/ack-mori",
    "event": "pull_request",
    "title": "[Docs] Acknowledge MORI in the README",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592719183",
    "created_at": "2026-11-25T10:12:22Z",
-   "updated_at": "2026-11-25T10:12:39Z",
+   "updated_at": "2026-11-25T10:14:41Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:14:36Z",
+     "completed_at": "2026-11-25T10:14:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592719183/job/139131845947"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:14:36Z",
+     "completed_at": "2026-11-25T10:14:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592719183/job/139131846044"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T10:14:36Z",
+     "completed_at": "2026-11-25T10:14:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45592719183/job/139131846075",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
   },
   {
    "run_id": 45592461996,
@@ -929,7 +975,8 @@
      "conclusion": "success",
      "started_at": "2026-11-24T12:47:31Z",
      "completed_at": "2026-11-24T12:57:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1835,49 +1882,6 @@
      "started_at": "2026-11-23T11:17:14Z",
      "completed_at": "2026-11-23T12:00:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45138300271/job/137575855487"
-    }
-   ]
-  },
-  {
-   "run_id": 45135322709,
-   "pr": 1431,
-   "commit": "ad5cb098a3a1400355ae8abb5b2a3b02cc0183f4",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709",
-   "created_at": "2026-11-23T08:01:20Z",
-   "updated_at": "2026-11-23T09:50:23Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-23T08:47:47Z",
-     "completed_at": "2026-11-23T09:49:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383699"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-23T09:34:09Z",
-     "completed_at": "2026-11-23T09:50:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383730"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-23T09:19:49Z",
-     "completed_at": "2026-11-23T09:37:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45135322709/job/137580383848"
     }
    ]
   }
