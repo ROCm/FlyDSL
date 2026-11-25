@@ -228,6 +228,9 @@ def _make_binop(op, swap=False):
     return _apply
 
 
+_IR2DSL_BY_NAME = None
+
+
 class NumericMeta(type):
     width: int
     log_width: int
@@ -481,7 +484,7 @@ class Numeric(metaclass=NumericMeta):
 
     def __dsl_not__(self):
         b = self.__dsl_bool__()
-        if isinstance(b.value, bool):
+        if b.is_static():
             return Boolean(not b.value)
         zero = arith_const(0, T.bool())
         return Boolean(b.ir_value().__eq__(zero))
@@ -489,14 +492,14 @@ class Numeric(metaclass=NumericMeta):
     def __dsl_and__(self, other):
         lhs = self.__dsl_bool__()
         rhs = as_numeric(other).__dsl_bool__()
-        if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
+        if lhs.is_static() and rhs.is_static():
             return Boolean(lhs.value and rhs.value)
         return Boolean(lhs.ir_value().__and__(rhs.ir_value()))
 
     def __dsl_or__(self, other):
         lhs = self.__dsl_bool__()
         rhs = as_numeric(other).__dsl_bool__()
-        if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
+        if lhs.is_static() and rhs.is_static():
             return Boolean(lhs.value or rhs.value)
         return Boolean(lhs.ir_value().__or__(rhs.ir_value()))
 
@@ -526,45 +529,49 @@ class Numeric(metaclass=NumericMeta):
 
     @staticmethod
     def from_ir_type(ir_type):
-        ir2dsl_map = {
-            T.bool(): Boolean,
-            T.f64(): Float64,
-            T.f32(): Float32,
-            T.f16(): Float16,
-            T.bf16(): BFloat16,
-            T.i64(): Int64,
-            T.i32(): Int32,
-            T.i16(): Int16,
-            T.i8(): Int8,
-            T.i(4): Int4,
-            T.si64(): Int64,
-            T.si32(): Int32,
-            T.si16(): Int16,
-            T.si8(): Int8,
-            T.ui64(): Uint64,
-            T.ui32(): Uint32,
-            T.ui16(): Uint16,
-            T.ui8(): Uint8,
-            T.i(128): Int128,
-            T.si(128): Int128,
-            T.ui(128): Uint128,
-            T.f8E5M2(): Float8E5M2,
-            T.f8E4M3(): Float8E4M3,
-            T.f8E4M3FN(): Float8E4M3FN,
-            Float8E4M3FNUZ.ir_type: Float8E4M3FNUZ,  # not in upstream MLIR extras T
-            Float8E5M2FNUZ.ir_type: Float8E5M2FNUZ,  # not in upstream MLIR extras T
-            T.f8E4M3B11FNUZ(): Float8E4M3B11FNUZ,
-            T.f8E8M0FNU(): Float8E8M0FNU,
-            T.f6E2M3FN(): Float6E2M3FN,
-            T.f6E3M2FN(): Float6E3M2FN,
-            T.f4E2M1FN(): Float4E2M1FN,
-        }
-        # Handle IndexType specially since it maps to Index
+        # Types belong to a context and every trace has its own, so build the table once keyed by type text.
+        global _IR2DSL_BY_NAME
         if isinstance(ir_type, ir.IndexType):
             return Index
-        if ir_type not in ir2dsl_map:
+        if _IR2DSL_BY_NAME is None:
+            ir2dsl_map = {
+                T.bool(): Boolean,
+                T.f64(): Float64,
+                T.f32(): Float32,
+                T.f16(): Float16,
+                T.bf16(): BFloat16,
+                T.i64(): Int64,
+                T.i32(): Int32,
+                T.i16(): Int16,
+                T.i8(): Int8,
+                T.i(4): Int4,
+                T.si64(): Int64,
+                T.si32(): Int32,
+                T.si16(): Int16,
+                T.si8(): Int8,
+                T.ui64(): Uint64,
+                T.ui32(): Uint32,
+                T.ui16(): Uint16,
+                T.ui8(): Uint8,
+                T.i(128): Int128,
+                T.si(128): Int128,
+                T.ui(128): Uint128,
+                T.f8E5M2(): Float8E5M2,
+                T.f8E4M3(): Float8E4M3,
+                T.f8E4M3FN(): Float8E4M3FN,
+                Float8E4M3FNUZ.ir_type: Float8E4M3FNUZ,  # not in upstream MLIR extras T
+                Float8E5M2FNUZ.ir_type: Float8E5M2FNUZ,  # not in upstream MLIR extras T
+                T.f8E4M3B11FNUZ(): Float8E4M3B11FNUZ,
+                T.f8E8M0FNU(): Float8E8M0FNU,
+                T.f6E2M3FN(): Float6E2M3FN,
+                T.f6E3M2FN(): Float6E3M2FN,
+                T.f4E2M1FN(): Float4E2M1FN,
+            }
+            _IR2DSL_BY_NAME = {str(ty): dsl for ty, dsl in ir2dsl_map.items()}
+        dsl = _IR2DSL_BY_NAME.get(str(ir_type))
+        if dsl is None:
             raise ValueError(f"unsupported mlir type: {ir_type}")
-        return ir2dsl_map[ir_type]
+        return dsl
 
     def __add__(self, other):
         return _make_binop(operator.add)(self, other)
