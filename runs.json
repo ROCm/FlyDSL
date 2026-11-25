@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-25T09:19:23Z",
+ "updated": "2026-11-25T09:21:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,39 +10,42 @@
    "branch": "skills/isa-resource-diff-partial-trees",
    "event": "pull_request",
    "title": "[Skills] isa-resource-diff: partial and symlinked dump trees, empty case dirs, kernarg-preload columns",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935",
    "created_at": "2026-11-25T09:15:47Z",
-   "updated_at": "2026-11-25T09:16:03Z",
+   "updated_at": "2026-11-25T09:17:57Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-25T09:17:42Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:53Z",
+     "completed_at": "2026-11-25T09:17:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920786"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-25T09:17:42Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:53Z",
+     "completed_at": "2026-11-25T09:17:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920843"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-25T09:17:42Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920853"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-25T09:17:53Z",
+     "completed_at": "2026-11-25T09:17:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583726935/job/139100920853",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
     }
    ]
   },
