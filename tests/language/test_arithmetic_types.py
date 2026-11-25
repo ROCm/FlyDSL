@@ -420,6 +420,66 @@ class TestOperators:
 
         assert "arith.floordivsi" in source_ir(body)
 
+    @pytest.mark.parametrize(("divisor", "shift"), [(2, 1), (4, 2), (128, 7)])
+    def test_signed_scalar_floordiv_power_of_two_uses_shift(self, divisor, shift):
+        def body(a: Int32):
+            _ = a // divisor
+
+        ir_text = source_ir(body, -129)
+        assert f"arith.constant {shift} : i32" in ir_text
+        assert "arith.shrsi" in ir_text
+        assert "arith.floordivsi" not in ir_text
+
+    @pytest.mark.parametrize(("divisor", "shift"), [(2, 1), (4, 2), (128, 7)])
+    def test_signed_vector_floordiv_power_of_two_uses_shift(self, divisor, shift):
+        def body():
+            _ = vec(Int32) // divisor
+
+        ir_text = source_ir(body)
+        assert f"dense<{shift}> : vector<8xi32>" in ir_text
+        assert "arith.shrsi" in ir_text
+        assert "arith.floordivsi" not in ir_text
+
+    @pytest.mark.parametrize("divisor", [3, -8])
+    def test_signed_floordiv_other_constants_stays_floordiv(self, divisor):
+        def body(a: Int32):
+            _ = a // divisor
+
+        ir_text = source_ir(body, -129)
+        assert "arith.floordivsi" in ir_text
+        assert "arith.shrsi" not in ir_text
+
+    def test_unsigned_floordiv_power_of_two_stays_divui(self):
+        def body(a: Uint32):
+            _ = a // 8
+
+        ir_text = source_ir(body, 129)
+        assert "arith.divui" in ir_text
+        assert "arith.shrsi" not in ir_text
+
+    @pytest.mark.parametrize("divisor", [4, 1 << 100, -(1 << 127)])
+    def test_signed_floordiv_wider_than_64_bits_stays_floordiv(self, divisor):
+        """The MLIR bindings read wide signless constants back unsigned (-(1 << 127) reads as 1 << 127), so they are
+        not rewritten to a shift. Revisit once the bindings are fixed."""
+        from flydsl.expr.utils.arith import arith_const
+
+        def body():
+            _ = arith_const(5, ir.IntegerType.get_signless(128)) // divisor
+
+        ir_text = source_ir(body)
+        assert "arith.floordivsi" in ir_text
+        assert "arith.shrsi" not in ir_text
+
+    def test_signed_floordiv_mismatched_types_is_rejected(self):
+        from flydsl.compiler.diagnostics import DSLCompileError
+        from flydsl.expr.utils.arith import arith_const
+
+        def body(a: Int32):
+            _ = a.ir_value() // arith_const(4, ir.IntegerType.get_signless(64))
+
+        with pytest.raises(DSLCompileError, match="same type"):
+            source_ir(body, 129)
+
     def test_mod_int(self):
         def body():
             _ = vec(Int32) % vec(Int32)
