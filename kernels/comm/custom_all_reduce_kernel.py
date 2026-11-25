@@ -643,6 +643,11 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 dst_off_i32 = dst_pack_idx * _ELEMS_PER_PACK
                 _store_v4i32(dst_tmp_rsrc_desc, dst_off_i32, raw)
 
+        # Wave 0 signals for the whole block, so every wave's stores into the
+        # peers' tmp buffers must have completed first. tmp is in the
+        # uncached signal allocation, so completing the stores is enough.
+        rocdl.s_waitcnt(0)
+        gpu.barrier()
         # Signal all ranks that stage 1 is complete
         _signal_start_sync(
             lane_i32=lane_i32,
@@ -732,6 +737,11 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             if not bad_out_addr:
                 _store_v4i32_nt(dst_out_rsrc_desc, dst_off_i32, reduced_val)
 
+        # The stores into the peers' output buffers (ordinary device memory)
+        # can still sit in this GPU's L2. Write L2 back (system-scope release)
+        # before the end flag tells the peers to read their outputs.
+        llvm.InlineAsmOp(None, [], "buffer_wbl2 sc0 sc1", "", has_side_effects=True)
+        rocdl.s_waitcnt(0)
         gpu.barrier()
         _signal_end_sync(
             lane_i32=lane_i32,
