@@ -1602,6 +1602,12 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # Load Q to GPR (independent of boundary check)
         q_nope_packs, q_rope_packs = _load_q_to_regs(qo_start)
 
+        # KV buffer 0 is reused across work items: other waves may still be
+        # using it for the previous item's last tile (V reads, output
+        # reshape). Wait for all of them before this item's first tile is
+        # copied into it.
+        _barrier()
+
         # Async load first tile KV to LDS. Boundary branch is compile-time
         # (check_boundary must be Python bool); arch branch lives inside
         # _async_load_kv_all.
