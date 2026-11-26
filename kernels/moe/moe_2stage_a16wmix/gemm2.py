@@ -258,6 +258,8 @@ def _gemm2_body_a16w4(
     rocm_arch="",
     use_reduce=False,
     topk=1,
+    w_k=None,
+    a_stride=None,
 ):
     """a16w4/a16wi4/a16w16 stage2 body. K=inter_dim (contraction), N=model_dim (N_OUT).
 
@@ -269,6 +271,7 @@ def _gemm2_body_a16w4(
     KH_TILE_BYTES = TILE_K * elem_bytes
     LDS_STRIDE = TILE_K
     K = INTER
+    A_STRIDE = K if a_stride is None else int(a_stride)
     K_TILES_TOTAL = K // TILE_K
     m_repeat = BM // 16
     k_unroll = KH_TILE_BYTES // 64
@@ -302,14 +305,20 @@ def _gemm2_body_a16w4(
         TILE_K=TILE_K,
         w_dtype=w_dtype,
         b_cache_mod=b_cache_mod,
+        b_block_major=(TILE_K % 128 != 0),
         rocm_arch=rocm_arch,
+        k_w=w_k,
     )
 
     # ---- A path (shared with gemm1, see utils.make_a_loader) -------------------
     # A row = SORTED position m_row + row_local; the whole block (256 threads) stages one
     # BM x TILE_K tile. stage2 has a single unslotted A region and XOR-swizzles it to
     # kill LDS bank conflicts.
-    c_k_div4 = (K * elem_bytes) // 4
+    c_k_div4 = (A_STRIDE * elem_bytes) // 4
+    # The XOR swizzle assumes k_blocks16 is a power of two; odd K tiles (e.g. 160) use
+    # the linear layout instead.
+    _block_major = (TILE_K % 128) != 0
+    _a_swizzle = ((k_blocks16 & (k_blocks16 - 1)) == 0) and not _block_major
     a_loader = make_a_loader(
         lds_raw_ptr,
         num_i32=BM * LDS_STRIDE // 2,
@@ -319,13 +328,14 @@ def _gemm2_body_a16w4(
         k_blocks16=k_blocks16,
         lane_div_16=lane_div_16,
         lane_mod_16=lane_mod_16,
-        swizzle=True,
+        swizzle=_a_swizzle,
         a_ptr=arg_a,
         a_num_bytes=fx.Int64(0xFFFFFFFF),
         a_load_threads=256,
         row_base_dwords=lambda row_local: (m_row + row_local) * fx.Int32(c_k_div4),
         dma_cache_mod=b_cache_mod,
         dma_via_vgpr=_is_gfx942,
+        k_block_major=_block_major,
     )
 
     # ---- N-column addressing (W2 cols of model_dim; wave owns _n_per_wave) ------
@@ -349,6 +359,17 @@ def _gemm2_body_a16w4(
 
     _mma = functools.partial(_mma_bf16, mma_atom, _is_gfx942)
 
+    # A's rows are the stage-1 intermediate, whose K tail past the real inter dim is padding (never
+    # written, so possibly NaN in the caller's buffer). The B (weight) side is already zeroed there, but
+    # bf16 0 * NaN is NaN, so the A fragment has to be masked to a true zero. Only the fragments that
+    # straddle the tail pay for it, and they are known at compile time.
+    _tail_k = int(w_k) if (w_k is not None and 0 < int(w_k) < K) else None
+
+    def _mask_a_tail(a8, pred):
+        v4 = fx.Vector(a8).bitcast(fx.Int32)
+        z = fx.Vector.from_elements([pred.select(fx.Int32(v4[j]), fx.Int32(0)) for j in range_constexpr(4)], fx.Int32)
+        return z.bitcast(fx.BFloat16)
+
     for kt in range_constexpr(K_TILES_TOTAL):
         base_k = fx.Int32(kt * TILE_K)
         a_loader.store_tile(base_k)
@@ -358,8 +379,16 @@ def _gemm2_body_a16w4(
         for ni in range_constexpr(num_acc_n):
             for ku in range_constexpr(k_unroll):
                 bb = b_loader.upconvert(b_raw[ni], ku, b_sc[ni][ku])
+                _k0 = kt * TILE_K + (ku // 4) * 128 + (ku % 4) * 8
                 for mi in range_constexpr(m_repeat):
-                    a8 = a_loader.load(mi, ku)
+                    if const_expr(_tail_k is not None and _k0 + 96 + 8 <= _tail_k):
+                        a8 = a_loader.load(mi, ku)
+                    elif const_expr(_tail_k is not None and _k0 >= _tail_k):
+                        a8 = fx.full(8, 0.0, fx.BFloat16)
+                    elif const_expr(_tail_k is not None):
+                        a8 = _mask_a_tail(a_loader.load(mi, ku), _k0 + lane_div_16 * fx.Int32(32) < fx.Int32(_tail_k))
+                    else:
+                        a8 = a_loader.load(mi, ku)
                     _mma(accm[mi][ni], a8, bb)
         gpu.barrier()
 
@@ -432,6 +461,8 @@ def compile_gemm2_a16w4_port(
     rocm_arch,
     epilog="atomic",
     topk=1,
+    w_k=None,
+    a_stride=None,
 ):
     """a16w4/a16wi4/a16w16 (bf16 intermediate A x mxfp4/int4/bf16 W2) stage2 builder.
 
@@ -447,7 +478,15 @@ def compile_gemm2_a16w4_port(
         "fp4",
         "int4",
         "bf16",
-    ), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
+        "fp8",
+    ), f"w_dtype must be 'mxfp4', 'int4', 'bf16' or 'fp8', got {w_dtype!r}"
+    # ``w_k`` (fp8 only): the W2 rows' real length when D_INTER is the intermediate padded
+    # to the K tile; the steps past it read 0.
+    assert w_k is None or (w_dtype == "fp8" and 0 < int(w_k) <= D_INTER and int(w_k) % 32 == 0), w_k
+    # The A tail mask below maps lane groups on the K-major layout; a block-major A
+    # loader (TILE_K not a multiple of 128) has a different map, so only allow a K tail
+    # there when the full padded K is real.
+    assert w_k is None or int(w_k) == int(D_INTER) or TILE_K % 128 == 0, (w_k, TILE_K)
     if epilog not in ("atomic", "reduce"):
         raise ValueError(f"epilog must be 'atomic' or 'reduce', got {epilog!r}")
     _use_reduce = epilog == "reduce"
@@ -487,6 +526,10 @@ def compile_gemm2_a16w4_port(
         _name += "_persist"
     if _use_reduce:
         _name += f"_reduce_tk{_topk}"
+    if w_k is not None and int(w_k) != _K:
+        _name += f"_wk{int(w_k)}"
+    if a_stride is not None and int(a_stride) != _K:
+        _name += f"_as{int(a_stride)}"
 
     @fx.struct
     class SharedStorage:
@@ -561,6 +604,8 @@ def compile_gemm2_a16w4_port(
                 rocm_arch=rocm_arch,
                 use_reduce=_use_reduce,
                 topk=_topk,
+                w_k=w_k,
+                a_stride=a_stride,
             )
 
         if const_expr(persist):
