@@ -6,6 +6,7 @@ endif()
 
 add_mlir_conversion_library(MLIRFlyToROCDL
   FastMathOps.cpp
+  FloatConversions.cpp
   FlyToROCDL.cpp
   FlyEmitGPUBinary.cpp
 
@@ -18,6 +19,7 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRFlyDialect
   MLIRFlyROCDLDialect
 
+  MLIRAMDGPUUtils
   MLIRArithDialect
   MLIRControlFlowTransforms
   MLIRFuncTransforms
