@@ -17,8 +17,8 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.meta import capture_user_location, file_location
-from ..expr.numeric import Numeric
+from ..expr.meta import capture_user_location, file_location, thunk_runner
+from ..expr.numeric import Boolean, Numeric
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -620,6 +620,21 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
+def _operand_generator(expr: ast.expr) -> ast.GeneratorExp:
+    """Wrap *expr* as ``(expr for _ in (0,))``: evaluated only when the fold asks for it."""
+    return ast.GeneratorExp(
+        elt=expr,
+        generators=[
+            ast.comprehension(
+                target=ast.Name(id="__fly_once", ctx=ast.Store()),
+                iter=ast.Tuple(elts=[ast.Constant(0)], ctx=ast.Load()),
+                ifs=[],
+                is_async=0,
+            )
+        ],
+    )
+
+
 @ASTRewriter.register
 class RewriteBoolOps(Transformer):
     @staticmethod
@@ -639,6 +654,51 @@ class RewriteBoolOps(Transformer):
         return lhs or rhs
 
     @staticmethod
+    @thunk_runner
+    def dsl_bool_op_(is_or, *operands):
+        # Fold left like Python and return an operand, not a truth. Every operand arrives as a
+        # one-shot generator, so each is evaluated at most once and only if the fold reaches it.
+        # An operand whose truth is known at trace time either decides the chain, and is its
+        # value, or leaves it alone and needs no op.
+        combine = RewriteBoolOps.dsl_or_ if is_or else RewriteBoolOps.dsl_and_
+        identity = not is_or
+        result = None
+        final = len(operands) - 1
+        for index, operand in enumerate(operands):
+            value = next(operand)
+            if isinstance(value, Numeric):
+                static = value.is_static()
+            elif isinstance(value, ir.Value):
+                static = False
+            elif isinstance(value, (bool, int, float)):
+                static = True
+            else:
+                warnings.warn(
+                    f"`and` / `or` folds a {type(value).__name__} operand by its Python truth, "
+                    "which a kernel cannot lower if the chain reaches the device",
+                    stacklevel=2,
+                )
+                static = True
+            if static:
+                if result is None:
+                    # Nothing to fold it into: the chain is decided, or this is its value.
+                    if bool(value) is not identity or index == final:
+                        return value
+                elif bool(value) is not identity:
+                    # The chain is decided whatever came before, so it needs no op.
+                    return Boolean(value) if isinstance(value, (bool, int, float, Numeric)) else value
+                elif index == final:
+                    # The chain is what came before, as a predicate.
+                    return (
+                        result.__dsl_bool__()
+                        if isinstance(result, Numeric) and not isinstance(result, Boolean)
+                        else result
+                    )
+                continue
+            result = value if result is None else combine(result, value)
+        return result
+
+    @staticmethod
     def dsl_not_(x):
         if hasattr(x, "__dsl_not__"):
             return x.__dsl_not__()
@@ -649,6 +709,7 @@ class RewriteBoolOps(Transformer):
         return {
             "dsl_and_": cls.dsl_and_,
             "dsl_or_": cls.dsl_or_,
+            "dsl_bool_op_": cls.dsl_bool_op_,
             "dsl_not_": cls.dsl_not_,
         }
 
@@ -657,8 +718,7 @@ class RewriteBoolOps(Transformer):
         if len(node.ops) == 1:
             return node
         # Chained comparison `a < b < c` -> `(a < b) and (b < c)`, then reuse the
-        # `and` lowering. Middle operands are referenced by two comparisons, matching
-        # the existing repeated-evaluation convention in visit_BoolOp.
+        # `and` lowering. Middle operands are evaluated by both comparisons.
         operands = [node.left] + node.comparators
         comparisons = []
         for i, op in enumerate(node.ops):
@@ -675,36 +735,18 @@ class RewriteBoolOps(Transformer):
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
 
-        _BOOL_OP_MAP = {ast.And: "dsl_and_", ast.Or: "dsl_or_"}
-        handler = _BOOL_OP_MAP.get(type(node.op))
-        if handler is None:
+        if not isinstance(node.op, (ast.And, ast.Or)):
             return node
 
-        def _should_skip(operand):
-            bail_val = ast.Constant(value=(type(node.op) is ast.Or))
-            return ast.BoolOp(
-                op=ast.And(),
-                values=[
-                    ast.Call(
-                        func=ast.Name(id="isinstance", ctx=ast.Load()),
-                        args=[operand, ast.Name(id="bool", ctx=ast.Load())],
-                        keywords=[],
-                    ),
-                    ast.Compare(left=operand, ops=[ast.Eq()], comparators=[bail_val]),
-                ],
-            )
-
-        result = node.values[0]
-        for rhs in node.values[1:]:
-            result = ast.IfExp(
-                test=_should_skip(result),
-                body=result,
-                orelse=ast.Call(
-                    func=ast.Name(handler, ctx=ast.Load()),
-                    args=[result, rhs],
-                    keywords=[],
-                ),
-            )
+        # One call per chain, every operand a one-shot generator: keeps short-circuiting,
+        # evaluates each operand once, and stays linear in the operand count. A generator is
+        # what makes the rewrite transparent to a walrus, which binds in the enclosing function
+        # rather than in the generator (PEP 572), unlike the lambda a thunk would otherwise need.
+        result = ast.Call(
+            func=ast.Name("dsl_bool_op_", ctx=ast.Load()),
+            args=[ast.Constant(isinstance(node.op, ast.Or))] + [_operand_generator(rhs) for rhs in node.values],
+            keywords=[],
+        )
 
         return ast.copy_location(ast.fix_missing_locations(result), node)
 
@@ -795,13 +837,20 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _call_branch(fn, result_names, state_values):
-        sig = inspect.signature(fn)
-        params = list(sig.parameters.values())
-        pos_params = [
-            p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
-        if has_varargs or len(pos_params) >= len(state_values) + 1:
+        # Read the arity off the code object: inspect.signature costs more than most branches it
+        # dispatches. A bound method counts `self` in co_argcount but does not take it in the
+        # call, and a partial has no code object at all, so both fall back to signature.
+        code = getattr(fn, "__code__", None)
+        if code is None:
+            params = list(inspect.signature(fn).parameters.values())
+            varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            argcount = sum(
+                p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) for p in params
+            )
+        else:
+            varargs = bool(code.co_flags & inspect.CO_VARARGS)
+            argcount = code.co_argcount - inspect.ismethod(fn)
+        if varargs or argcount >= len(state_values) + 1:
             return fn(result_names, *state_values)
         return fn(*state_values)
 

@@ -26,6 +26,16 @@ Also clear Python-level caches if using `@functools.lru_cache`:
 compile_my_kernel.cache_clear()
 ```
 
+`FLYDSL_RUNTIME_ENABLE_CACHE=0` turns off the disk cache only. Within one
+process, a `@flyc.jit` function keeps every artifact it compiled in memory,
+keyed by the lowered IR, and reuses it without compiling again. A later case
+that lowers to a kernel an earlier case already built therefore writes no
+`FLYDSL_DUMP_IR` dump at all, and its dump directory stays empty. Run each
+case in its own process when you need a dump of every specialization.
+Observed on gfx942: a 37-case compile-only dump from one process left one case
+directory empty; dumped with only one other case in its process, the same case
+wrote all of its kernels.
+
 ## Step 1: Classify the Error
 
 | Symptom | Likely Cause | Go to |
@@ -125,6 +135,22 @@ Run both Gluon and FlyDSL on the same input and compare element-wise:
 torch.testing.assert_close(flydsl_output, gluon_output, atol=5e-3, rtol=5e-3)
 ```
 
+### 4.5 Check that the test reaches the specialized path
+
+A test can compile a specialization and still never run the code it adds. With
+many partitions every CTA gets one KV tile, so a multi-tile loop body, its
+masked/unmasked tile split and the next-tile page prefetch run in at most one
+CTA, and a bug there passes. Before trusting such a test:
+
+1. Count tiles per CTA from the host-side partition plan (or with a per-CTA counter written to a debug buffer).
+2. Lower `max_context_partition_num` until most CTAs run several tiles.
+3. Plant a bug in the specialized branch (scale its scores, hand the next tile the wrong page ids), confirm the test fails, then revert it.
+
+Observed on a paged-attention decode test: planned at up to 64 partitions per
+sequence, 736 CTAs shared 737 KV tiles (one CTA ran two, and none ran the
+unmasked loop), and bugs planted in the unmasked loop and in the next-tile page
+handoff passed; at 4 partitions (212 CTAs, 180 of them multi-tile) both failed.
+
 ## 5. Debugging Small Errors (1-5%)
 
 ### 5.1 FP8 probability requantization
@@ -138,6 +164,21 @@ If the reference uses per-row Q quantization but FlyDSL uses per-tensor, expect 
 ### 5.3 Scale factor mismatch
 
 Verify `_scale = softmax_scale * q_scale * k_scale` matches the reference. Common bug: applying v_scale twice (once in prob scaling, once after PV).
+
+### 5.4 Random inputs hide a missing online-softmax rescale
+
+With Q and K drawn from U(-0.5, 0.5) and head dim 128, the scaled scores have a
+standard deviation of about 0.08 (variance 128/144 before the 1/sqrt(128)
+scale). The running max then barely moves from tile to tile, the rescale factor
+`exp(m_old - m_new)` stays close to 1, and an output accumulator that is never
+rescaled, or rescaled at the wrong point, still passes `atol=5e-3`. To test the
+rescale, make the row max jump after the first tile: give each sequence one key,
+placed after the first tile, whose logit leads the rest by a wide margin (cover
+leads from about 12 up to 1e5 and beyond), and confirm that a planted
+"no rescale" bug fails. Observed: a decode kernel variant whose PV accumulation
+dropped `o * corr` passed 8 of 8 random-data cases at batch 64 and context 4096;
+with one leading key at `length // 3`, every case that ran the variant failed
+(max abs error 13-29).
 
 ## 6. Compilation Errors
 
@@ -279,3 +320,5 @@ sudo amd-smi reset -G -g <gpu_index>
 - [ ] Division by zero guarded (`select(sum > 0, sum, 1.0)`)
 - [ ] K/V address calculation matches tensor layout (4D vs 5D trans_v)
 - [ ] MFMA operand order: `mfma(LHS, RHS, acc)` — LHS→M, RHS→N
+- [ ] The test runs the specialized path (several tiles per CTA), and a bug planted there fails it
+- [ ] Online-softmax tests include a row max that jumps after the first tile
