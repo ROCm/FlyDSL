@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T16:50:27Z",
+ "updated": "2026-11-26T16:56:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Wait for the last K tile's B0/A0 copies in the conv3d fp8 dr\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481",
    "created_at": "2026-11-26T14:47:21Z",
-   "updated_at": "2026-11-26T15:11:27Z",
+   "updated_at": "2026-11-26T16:48:47Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -38,9 +38,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T15:11:27Z",
+     "started_at": "2026-11-26T16:48:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651344"
     }
@@ -186,11 +186,11 @@
    "branch": "pr/fix-fnuz-value-caster",
    "event": "pull_request",
    "title": "[Bugfix] Register ArithValue casters for the FNUZ fp8 types",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077",
    "created_at": "2026-11-26T10:13:10Z",
-   "updated_at": "2026-11-26T14:56:37Z",
+   "updated_at": "2026-11-26T16:54:03Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -205,11 +205,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T14:56:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338425"
+     "completed_at": "2026-11-26T16:54:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338425",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
