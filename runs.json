@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T03:27:13Z",
+ "updated": "2026-11-26T04:05:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "yz/flydsl-fp8-b32-moe",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add the fp8 32x32-block-scale MoE layer and tile the a16wmix stages by regime",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45743494295",
    "created_at": "2026-11-26T02:35:59Z",
-   "updated_at": "2026-11-26T02:51:37Z",
+   "updated_at": "2026-11-26T04:03:29Z",
    "actor": "Arist12",
    "jobs": [
     {
@@ -32,10 +32,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T02:51:32Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T04:03:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45743494295/job/139659212119"
     }
    ]
