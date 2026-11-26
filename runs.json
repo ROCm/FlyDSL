@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-26T09:35:31Z",
+ "updated": "2026-11-26T10:18:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45799687086,
+   "pr": null,
+   "commit": "82d9e03d038ea35f8e1e874ae2e4f07c4f1455f3",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL][Perf] Lower signed // by a constant power of two to an arithmet\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086",
+   "created_at": "2026-11-26T10:15:51Z",
+   "updated_at": "2026-11-26T10:16:28Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 45799254077,
+   "pr": 1534,
+   "commit": "764619a73f426444717bab79e31ff61a0975c817",
+   "branch": "pr/fix-fnuz-value-caster",
+   "event": "pull_request",
+   "title": "[Bugfix] Register ArithValue casters for the FNUZ fp8 types",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077",
+   "created_at": "2026-11-26T10:13:10Z",
+   "updated_at": "2026-11-26T10:16:05Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 45792929081,
    "pr": null,
@@ -10,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat] Introduce experimental register_allocation on ROCDL (#1401)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45792929081",
    "created_at": "2026-11-26T09:32:34Z",
-   "updated_at": "2026-11-26T09:33:13Z",
+   "updated_at": "2026-11-26T10:16:15Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-26T10:04:35Z",
+     "completed_at": "2026-11-26T10:16:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45792929081/job/139833045562"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-26T10:04:24Z",
+     "completed_at": "2026-11-26T10:15:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45792929081/job/139833045634"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-26T10:04:24Z",
+     "completed_at": "2026-11-26T10:15:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45792929081/job/139833045781"
+    }
+   ]
   },
   {
    "run_id": 45786014780,
@@ -44,19 +102,19 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:21:08Z",
+     "started_at": "2026-11-26T10:15:35Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780/job/139810218611"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:21:08Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T09:45:04Z",
+     "completed_at": "2026-11-26T09:58:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780/job/139810218714"
     }
    ]
@@ -1679,11 +1737,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T09:14:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801626878"
+     "completed_at": "2026-11-26T09:40:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801626878",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1713,10 +1774,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T09:29:42Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T09:59:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634038"
     },
     {
@@ -1756,9 +1817,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:11:48Z",
+     "started_at": "2026-11-26T10:00:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444/job/139805365867"
     }
@@ -1815,9 +1876,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:13:39Z",
+     "started_at": "2026-11-26T09:52:30Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311108"
     },
@@ -2277,74 +2338,6 @@
      "started_at": "2026-11-24T03:17:37Z",
      "completed_at": "2026-11-24T03:51:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45315072262/job/138185132956"
-    }
-   ]
-  },
-  {
-   "run_id": 45311979030,
-   "pr": 1496,
-   "commit": "a5f726d883af6c60d844a3d7c12cee1b59246352",
-   "branch": "users/merrittttt/gemm-a16w16-swizzle-bk32",
-   "event": "pull_request",
-   "title": "[Bugfix] Size the gemm_a16w16 gfx950 LDS swizzle to block_k",
-   "status": "queued",
-   "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030",
-   "created_at": "2026-11-24T02:23:12Z",
-   "updated_at": "2026-11-26T09:12:48Z",
-   "actor": "merrittttt",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:12:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030/job/139805879899"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:12:48Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030/job/139805880195"
-    }
-   ]
-  },
-  {
-   "run_id": 45310213083,
-   "pr": 1495,
-   "commit": "932e4cfa3695d0ad7ddbeba622a6927f741615e0",
-   "branch": "users/merrittttt/fused-rope-pair-lane",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the NeoX pair lane in fused_rope_cache for head_dim=96",
-   "status": "queued",
-   "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083",
-   "created_at": "2026-11-24T02:08:45Z",
-   "updated_at": "2026-11-26T09:24:59Z",
-   "actor": "merrittttt",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:24:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083/job/139812239922"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:24:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083/job/139812239956"
     }
    ]
   }
