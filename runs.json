@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T16:25:37Z",
+ "updated": "2026-11-26T16:28:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -1685,11 +1685,11 @@
    "branch": "fix/f50-fp8-gemm-4wave-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-buffer refill LDS race in fp8_gemm_4wave",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870",
    "created_at": "2026-11-25T02:17:26Z",
-   "updated_at": "2026-11-26T09:26:54Z",
+   "updated_at": "2026-11-26T16:24:02Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1793,11 +1793,11 @@
    "branch": "fix/f38-conv3d-fp8-drain-read-before-wait",
    "event": "pull_request",
    "title": "[Bugfix] Fix the pipeline-drain LDS race in conv3d_implicit_fp8",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351",
    "created_at": "2026-11-25T02:13:51Z",
-   "updated_at": "2026-11-26T15:05:16Z",
+   "updated_at": "2026-11-26T16:23:43Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -2101,10 +2101,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T15:47:33Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T16:27:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311233"
     }
    ]
