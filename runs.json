@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T15:56:21Z",
+ "updated": "2026-11-26T16:25:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -1722,11 +1722,11 @@
    "branch": "fix/f40-mxfp-moe-gemm1-bm128-a-ring",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-tile LDS race in mxfp_moe stage-1 GEMM at BM=128",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801",
    "created_at": "2026-11-25T02:16:19Z",
-   "updated_at": "2026-11-26T09:08:51Z",
+   "updated_at": "2026-11-26T16:23:19Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1741,11 +1741,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T14:37:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835876"
+     "completed_at": "2026-11-26T16:19:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835876",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1756,11 +1759,11 @@
    "branch": "fix/f39-moe-gemm1-tile-m16-lds-overflow",
    "event": "pull_request",
    "title": "[Bugfix] Fix A-tile LDS overlap in MoE stage-1 GEMM at tile_m=16/48",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614",
    "created_at": "2026-11-25T02:15:08Z",
-   "updated_at": "2026-11-26T09:08:55Z",
+   "updated_at": "2026-11-26T16:22:48Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1775,9 +1778,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:08:54Z",
+     "started_at": "2026-11-26T16:22:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614/job/139803864940"
     }
@@ -1812,10 +1815,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T15:05:15Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T16:23:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589298"
     }
    ]
