@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T09:25:43Z",
+ "updated": "2026-11-26T09:35:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45792929081,
+   "pr": null,
+   "commit": "7e28ebc0efbd37f2b62d4fdfc343ed914c9f4e37",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat] Introduce experimental register_allocation on ROCDL (#1401)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45792929081",
+   "created_at": "2026-11-26T09:32:34Z",
+   "updated_at": "2026-11-26T09:33:13Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 45786014780,
    "pr": 1533,
@@ -53,38 +68,38 @@
    "branch": "main",
    "event": "push",
    "title": "[AOT] Return the export metadata from export_to_c and name raw-bits s\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431",
    "created_at": "2026-11-26T08:44:05Z",
-   "updated_at": "2026-11-26T09:13:28Z",
+   "updated_at": "2026-11-26T09:32:58Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-26T09:13:28Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T09:32:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210386"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-26T09:13:28Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T09:32:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210513"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T09:13:41Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T09:24:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210515"
     }
    ]
@@ -1420,13 +1435,32 @@
    "branch": "fix/f50-fp8-gemm-4wave-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-buffer refill LDS race in fp8_gemm_4wave",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870",
    "created_at": "2026-11-25T02:17:26Z",
-   "updated_at": "2026-11-26T09:05:04Z",
+   "updated_at": "2026-11-26T09:26:54Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:26:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/139813244003"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:26:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/139813244069"
+    }
+   ]
   },
   {
    "run_id": 45531742801,
@@ -1601,11 +1635,11 @@
    "branch": "fix/f31-pa-swa-decode-qk-max-overwrites-q-scale",
    "event": "pull_request",
    "title": "[Bugfix] Fix the query-scale LDS race in pa_decode_sw_kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031",
    "created_at": "2026-11-25T02:08:15Z",
-   "updated_at": "2026-11-26T08:55:18Z",
+   "updated_at": "2026-11-26T09:28:40Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1620,9 +1654,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T08:55:18Z",
+     "started_at": "2026-11-26T09:28:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031/job/139797088600"
     }
@@ -1679,9 +1713,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:04:30Z",
+     "started_at": "2026-11-26T09:29:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634038"
     },
@@ -2158,11 +2192,11 @@
    "branch": "users/merrittttt/gemm-a16w16-hti-lds-races",
    "event": "pull_request",
    "title": "[Bugfix] Fix cross-wave-group LDS races in the gemm_a16w16 gfx950 HTI epilogue",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454",
    "created_at": "2026-11-24T03:34:57Z",
-   "updated_at": "2026-11-26T08:41:37Z",
+   "updated_at": "2026-11-26T09:25:02Z",
    "actor": "merrittttt",
    "jobs": [
     {
@@ -2287,11 +2321,11 @@
    "branch": "users/merrittttt/fused-rope-pair-lane",
    "event": "pull_request",
    "title": "[Bugfix] Fix the NeoX pair lane in fused_rope_cache for head_dim=96",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083",
    "created_at": "2026-11-24T02:08:45Z",
-   "updated_at": "2026-11-26T08:41:36Z",
+   "updated_at": "2026-11-26T09:24:59Z",
    "actor": "merrittttt",
    "jobs": [
     {
@@ -2311,43 +2345,6 @@
      "started_at": "2026-11-26T09:24:59Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083/job/139812239956"
-    }
-   ]
-  },
-  {
-   "run_id": 45290819082,
-   "pr": 1494,
-   "commit": "3936aa5471dd2b4547b7b15039d2f27f27463afe",
-   "branch": "pr/allreduce-rank-agree",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix custom all-reduce outputs that differ between ranks",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082",
-   "created_at": "2026-11-23T23:40:20Z",
-   "updated_at": "2026-11-24T01:04:49Z",
-   "actor": "Arist12",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T00:07:23Z",
-     "completed_at": "2026-11-24T00:37:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082/job/138111194220"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T00:07:14Z",
-     "completed_at": "2026-11-24T00:36:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45290819082/job/138111194324",
-     "machine": "smci350-rck-g03-b05-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
