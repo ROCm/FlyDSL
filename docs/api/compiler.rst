@@ -36,6 +36,27 @@ The primary API for defining and compiling kernels:
   On first call it triggers JIT compilation; subsequent calls with the same type
   signature use a cached compiled artifact.
 
+Launch block size
+-----------------
+
+A ``block`` of Python ints compiles the kernel for exactly that many
+work-items. A block computed at run time leaves the size open, and the kernel
+is then compiled for at most 256 work-items. HIP refuses a larger launch with
+``hipErrorLaunchFailure``. The ``max_flat_work_group_size`` compile hint, an
+int from 1 to 1024, sets that maximum:
+
+.. code-block:: python
+
+   compiled = flyc.compile[{"max_flat_work_group_size": 1024}](launch, tA, tB, n)
+
+The hint applies to the launcher's kernels whose block size is open; a kernel
+with a static block, ``known_block_size`` or its own
+``rocdl.flat_work_group_size`` keeps its size. A larger maximum costs
+registers: on gfx942 and gfx950 a maximum of 512 leaves each wave at most 256
+VGPRs and AGPRs together, and 1024 leaves 128, whatever ``waves_per_eu`` asks
+for, so ask for no more than the largest block you launch. A value below 256
+lowers the limit and frees no registers.
+
 Compilation flow
 -----------------
 

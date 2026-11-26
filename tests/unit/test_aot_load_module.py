@@ -137,6 +137,11 @@ def add_one_twice(X: fx.Pointer, first_block: fx.Int32, second_block: fx.Int32):
     _add_one_kernel(X).launch(grid=(1, 1, 1), block=(second_block, 1, 1))
 
 
+@flyc.jit
+def add_one(X: fx.Pointer, block: fx.Int32):
+    _add_one_kernel(X).launch(grid=(1, 1, 1), block=(block, 1, 1))
+
+
 def _ptr(value=0):
     return flyc.from_c_void_p(fx.Float32, value)
 
@@ -300,6 +305,29 @@ class TestLoadModule:
         fn(x.data_ptr(), 8, 8)
         torch.cuda.synchronize()
         torch.testing.assert_close(x, torch.full_like(x, 2.0))
+
+    @pytest.mark.parametrize("hint", [None, 512])
+    def test_runtime_block_of_512(self, tmp_path, monkeypatch, hint):
+        # flyc.compile[hints] stores its hints on the launcher; restore them after the test.
+        monkeypatch.setattr(add_one, "compile_hints", {})
+        compile_ = flyc.compile if hint is None else flyc.compile[{"max_flat_work_group_size": hint}]
+        compile_(add_one, _ptr(), 8, compile_only=True).export_to_c(tmp_path, "add_one")
+        fn = flyc.load_module(tmp_path / "add_one.o")
+        x = torch.zeros(1024, device="cuda")
+
+        if hint is None:
+            # The object keeps the default limit of 256, so HIP refuses 512 threads.
+            with pytest.raises(RuntimeError, match="failed with status [1-9]"):
+                fn(x.data_ptr(), 512)
+            torch.cuda.synchronize()
+            assert int(torch.count_nonzero(x)) == 0
+        else:
+            fn(x.data_ptr(), 512)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(x, torch.cat([torch.ones(512), torch.zeros(512)]).cuda())
+            # The hint is the object's limit: a larger block is still refused.
+            with pytest.raises(RuntimeError, match="failed with status [1-9]"):
+                fn(x.data_ptr(), 1024)
 
     def test_many_loads_stay_usable(self, tmp_path):
         # A load holds no per-process resource, so more loads than there are pthread keys still work.

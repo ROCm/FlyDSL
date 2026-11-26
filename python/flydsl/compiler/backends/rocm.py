@@ -2,12 +2,15 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import hashlib
+import operator
 import os
 import sys
 import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Sequence, Tuple
+
+import numpy as np
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
@@ -400,14 +403,19 @@ class RocmBackend(BaseBackend):
         return f"{self.target}:{toolkit}:{_device_bitcode_fingerprint(toolkit)}"
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
-        """Materialize a scalar waves-per-EU override on kernel entries.
+        """Materialize the waves-per-EU and max flat work-group size hints on kernel entries.
+
+        ``max_flat_work_group_size`` only applies to kernels whose block size is
+        unknown at compile time: a kernel with ``known_block_size`` (a static
+        launch block) or its own work-group size attribute keeps that size.
 
         On targets with a unified VGPR/AGPR file, kernel entries whose minimum
         waves-per-EU is >= 2 also get ``amdgpu-agpr-alloc=0`` unless they set it:
         without it LLVM reserves half of the vector registers for AGPRs, which
         halves the VGPRs available at that occupancy and spills. The minimum is
         the explicit ``rocdl.waves_per_eu`` or the one a workgroup of more than
-        256 threads forces, whichever is larger.
+        256 threads forces, whichever is larger; a maximum set here by
+        ``max_flat_work_group_size`` counts like any other.
         """
         if compile_hints.get("maxnreg") is not None:
             raise ValueError(
@@ -422,8 +430,10 @@ class RocmBackend(BaseBackend):
 
         waves_per_eu = compile_hints.get("waves_per_eu")
         wpe_str = None if waves_per_eu is None else _normalize_waves_per_eu(waves_per_eu)
+        max_flat = compile_hints.get("max_flat_work_group_size")
+        flat_str = None if max_flat is None else f"1,{_normalize_max_flat_work_group_size(max_flat)}"
         unified_agprs = self.target.arch.startswith(("gfx90a", "gfx94", "gfx95"))
-        if wpe_str is None and not unified_agprs:
+        if wpe_str is None and flat_str is None and not unified_agprs:
             return
 
         with module.context:
@@ -432,6 +442,9 @@ class RocmBackend(BaseBackend):
             for func_op in _iter_gpu_kernel_funcs(module):
                 if wpe_str is not None:
                     func_op.attributes["rocdl.waves_per_eu"] = _ir.StringAttr.get(wpe_str)
+                if flat_str is not None and not any(name in func_op.attributes for name in _WORK_GROUP_SIZE_ATTRS):
+                    func_op.attributes["rocdl.flat_work_group_size"] = _ir.StringAttr.get(flat_str)
+                # Last: the AGPR decision reads the attributes the two hints set above.
                 if unified_agprs and max(_min_waves_per_eu(func_op), _workgroup_min_waves_per_eu(func_op)) >= 2:
                     _add_passthrough_default(func_op, "amdgpu-agpr-alloc", "0")
 
@@ -535,6 +548,28 @@ def _normalize_waves_per_eu(waves_per_eu) -> "str | None":
         return None if vals == [0] else ",".join(str(v) for v in vals)
 
     raise TypeError(f"waves_per_eu must be an int, tuple(int, int), or str, got {type(waves_per_eu).__name__}")
+
+
+#: Kernel attributes that already fix the work-group size; max_flat_work_group_size leaves them alone.
+_WORK_GROUP_SIZE_ATTRS = (
+    "known_block_size",
+    "rocdl.flat_work_group_size",
+    "rocdl.max_flat_work_group_size",
+    "rocdl.reqd_work_group_size",
+)
+
+
+def _normalize_max_flat_work_group_size(value) -> int:
+    """Validate ``max_flat_work_group_size``: the most work-items a launch of the kernel may use."""
+    try:
+        size = None if isinstance(value, (bool, np.bool_)) else operator.index(value)
+    except TypeError:
+        size = None
+    if size is None:
+        raise TypeError(f"max_flat_work_group_size must be an int, got {value!r}")
+    if not 1 <= size <= 1024:
+        raise ValueError(f"max_flat_work_group_size must be in [1, 1024], got {size}")
+    return size
 
 
 def _iter_gpu_kernel_funcs(module):

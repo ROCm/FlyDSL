@@ -349,7 +349,9 @@ class KernelLauncher:
             block: Block dimensions (x, y, z). Can be int, integer Numeric,
                 ir.Value, tuple, or list. Static integer dimensions
                 automatically specialize the emitted kernel's
-                ``known_block_size``.
+                ``known_block_size``. A runtime block compiles for at most
+                256 work-items unless the ``max_flat_work_group_size``
+                compile hint sets another limit.
             smem: Dynamic shared memory size in bytes. ``None`` (default)
                 auto-infers from ``SharedAllocator.allocated_bytes`` when one
                 was used inside the kernel body. Explicit values are allowed

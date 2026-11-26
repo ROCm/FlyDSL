@@ -10,6 +10,7 @@ Validates:
   - compile_hints propagation through JitFunction → MlirCompiler → pipeline
 """
 
+import ctypes
 import gc
 import math
 import weakref
@@ -25,6 +26,7 @@ if torch is None or not torch.cuda.is_available():
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.runtime.device_runtime.rocm import _hip_library_names
 
 # ──────────────────────────────────────────────────────────────
 # Minimal kernel for compile-hint tests
@@ -270,3 +272,56 @@ class TestCacheDisabledRegression:
         assert math.isfinite(avg_us)
         assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
+
+
+# ──────────────────────────────────────────────────────────────
+# Tests: max_flat_work_group_size at launch
+# ──────────────────────────────────────────────────────────────
+
+
+@flyc.kernel
+def _iota_kernel(out: fx.Tensor):
+    t = fx.thread_idx.x
+    out[t] = fx.Float32(t) + 1.0
+
+
+@flyc.jit
+def _runtime_block_launch(out: fx.Tensor, threads: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _iota_kernel(out).launch(grid=(1, 1, 1), block=(threads, 1, 1), stream=stream)
+
+
+def _take_hip_error():
+    """Read and clear HIP's last error, so a refused launch cannot fail a later torch call."""
+    for name in _hip_library_names():
+        try:
+            return ctypes.CDLL(name).hipGetLastError()
+        except OSError:
+            continue
+    pytest.fail("no HIP library to read the last error from")
+
+
+class TestMaxFlatWorkGroupSize:
+    """A runtime block compiles for at most 256 work-items unless max_flat_work_group_size raises it."""
+
+    @pytest.mark.parametrize("hint", [None, 512])
+    def test_runtime_block_of_512(self, monkeypatch, hint):
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+        # flyc.compile[hints] stores its hints on the launcher; restore them after the test.
+        monkeypatch.setattr(_runtime_block_launch, "compile_hints", {})
+        _reset_jit_caches(_runtime_block_launch)
+        launch = _runtime_block_launch
+        if hint is not None:
+            launch = flyc.compile[{"max_flat_work_group_size": hint}](_runtime_block_launch)
+        out = torch.zeros(512, device="cuda")
+
+        launch(out, 512)
+        hip_error = _take_hip_error()
+        torch.cuda.synchronize()
+
+        if hint is None:
+            # HIP refuses the launch and nothing runs. A JIT launch does not raise, so read HIP's error.
+            assert hip_error != 0
+            assert int(torch.count_nonzero(out)) == 0
+        else:
+            assert hip_error == 0
+            torch.testing.assert_close(out.cpu(), torch.arange(1, 513, dtype=torch.float32))
