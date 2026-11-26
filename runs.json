@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T10:21:05Z",
+ "updated": "2026-11-26T10:51:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086",
    "created_at": "2026-11-26T10:15:51Z",
-   "updated_at": "2026-11-26T10:17:36Z",
+   "updated_at": "2026-11-26T10:48:41Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:48:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086/job/139856961824"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:48:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086/job/139856962749"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:48:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086/job/139856963509"
+    }
+   ]
   },
   {
    "run_id": 45799254077,
@@ -25,13 +53,41 @@
    "branch": "pr/fix-fnuz-value-caster",
    "event": "pull_request",
    "title": "[Bugfix] Register ArithValue casters for the FNUZ fp8 types",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077",
    "created_at": "2026-11-26T10:13:10Z",
-   "updated_at": "2026-11-26T10:16:05Z",
+   "updated_at": "2026-11-26T10:43:44Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:43:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338402"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:43:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338425"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T10:44:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338479"
+    }
+   ]
   },
   {
    "run_id": 45792929081,
@@ -1537,9 +1593,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:08:51Z",
+     "started_at": "2026-11-26T10:45:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835825"
     },
@@ -1693,11 +1749,11 @@
    "branch": "fix/f31-pa-swa-decode-qk-max-overwrites-q-scale",
    "event": "pull_request",
    "title": "[Bugfix] Fix the query-scale LDS race in pa_decode_sw_kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031",
    "created_at": "2026-11-25T02:08:15Z",
-   "updated_at": "2026-11-26T09:28:40Z",
+   "updated_at": "2026-11-26T10:48:58Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1712,10 +1768,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T09:28:29Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T10:48:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031/job/139797088600"
     }
    ]
@@ -1808,19 +1864,19 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:11:48Z",
+     "started_at": "2026-11-26T10:26:56Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444/job/139805365689"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-26T10:00:14Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T10:45:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444/job/139805365867"
     }
    ]
@@ -1851,9 +1907,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T08:57:09Z",
+     "started_at": "2026-11-26T10:26:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530158732/job/139797986821"
     }
