@@ -9,7 +9,7 @@
 
 #include <cstdio>
 
-bool flydsl_has_inprocess_lld(void) {
+bool mlirFlyROCDLHasInProcessLLD(void) {
 #ifdef FLYDSL_HAS_LLD_LIBRARY
   return true;
 #else
@@ -17,8 +17,8 @@ bool flydsl_has_inprocess_lld(void) {
 #endif
 }
 
-bool flydsl_link_hsaco(const char *objectPath, const char *hsacoPath, char *error,
-                       size_t errorSize) {
+bool mlirFlyROCDLLinkHsacoInProcess(const char *objectPath, const char *hsacoPath, char *error,
+                                    size_t errorSize) {
 #ifdef FLYDSL_HAS_LLD_LIBRARY
   std::optional<std::string> diag = mlir::fly::linkHsacoInProcess(objectPath, hsacoPath);
   if (!diag)
