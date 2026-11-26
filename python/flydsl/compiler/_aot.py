@@ -729,6 +729,7 @@ _C_RESERVED = frozenset(
 )
 
 _HEADER_ARGS_ARRAY = "flydsl_args_"
+_HEADER_ENCODINGS = {"float16_bits": "IEEE binary16 bits", "bfloat16_bits": "bfloat16 bits"}
 
 
 def _is_implementation_reserved(name: str, *, file_scope: bool) -> bool:
@@ -781,7 +782,7 @@ def _render_header(metadata: _ExportMetadata) -> str:
     sym = metadata.symbol
     macro = sym.upper()
     guard = f"FLYDSL_AOT_{macro}_H"
-    types, params, arg_exprs, call_args = [], [], [], []
+    types, params, arg_exprs, call_args, encoded = [], [], [], [], []
     used = {_HEADER_ARGS_ARRAY, "flydsl_status_"}
     used_types = set()
     link_command = " ".join(metadata.linker_flags)
@@ -834,6 +835,16 @@ def _render_header(metadata: _ExportMetadata) -> str:
         params.append(f"{ctype}{'' if ctype.endswith('*') else ' '}{name}")
         arg_exprs.append(f"(void *)&{name}")
         call_args.append(name)
+        if slot.encoding is not None:
+            encoded.append(f"{name}: {_HEADER_ENCODINGS.get(slot.encoding, slot.encoding)}")
+
+    raw_bits_note = []
+    if encoded:
+        raw_bits_note = [
+            f"/* 16-bit float parameters are raw bit patterns ({'; '.join(encoded)}). Pass the value's",
+            "   bits, not a converted integer: (uint16_t)1 is a subnormal, not 1.0. Where the compiler has",
+            "   _Float16 or __bf16, copy the bits of such a value: memcpy(&bits, &value, sizeof bits). */",
+        ]
 
     return "\n".join(
         [
@@ -870,6 +881,7 @@ def _render_header(metadata: _ExportMetadata) -> str:
             f"int32_t {metadata.module_unload_symbol}(void);",
             f"extern const char {metadata.metadata_symbol}[];",
             "",
+            *raw_bits_note,
             "/* Typed call for callers using the explicit lifecycle API above. */",
             f"static inline int32_t {sym}_call({', '.join(params) or 'void'}) {{",
             f"  void *{_HEADER_ARGS_ARRAY}[{max(len(arg_exprs), 1)}] = {{{', '.join(arg_exprs) or '0'}}};",
@@ -922,8 +934,11 @@ class _AOTCompiledFunction:
         file_path: Union[str, "os.PathLike[str]"],
         file_name: str,
         function_prefix: str = "",
-    ) -> None:
-        """Write ``<file_name>.o`` (``.obj`` on Windows) and ``<file_name>.h`` into ``file_path``."""
+    ) -> Dict[str, Any]:
+        """Write ``<file_name>.o`` (``.obj`` on Windows) and ``<file_name>.h`` into ``file_path``.
+
+        Returns a fresh copy of the metadata embedded as ``<symbol>__metadata``.
+        """
         import flydsl
 
         object_path, function_name, header_path = _resolve_export_paths(file_path, file_name, function_prefix)
@@ -999,3 +1014,4 @@ class _AOTCompiledFunction:
         with _output_directory_lock(object_path.parent):
             _write_atomically(object_path, data)
             _write_atomically(header_path, header)
+        return json.loads(metadata)

@@ -1437,7 +1437,7 @@ class CompiledFunction:
         """GPU code objects of this specialization, keyed by ``gpu.binary`` symbol name."""
         return self._keepalive.binaries()
 
-    def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> None:
+    def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> Dict[str, Any]:
         """Export this specialization as a standalone ``.o`` and C header.
 
         The object embeds its backend adapter and only needs the backend's
@@ -1446,8 +1446,13 @@ class CompiledFunction:
         Host export requires 64-bit little-endian Linux ELF tools, or Windows
         x64, where it writes a COFF ``.obj`` and needs no external tools.
         Export IR and ABI validation are prepared lazily on the first export.
+
+        Returns the export metadata as a dict: the JSON object that the object
+        file also embeds as ``<symbol>__metadata``, with its
+        ``schema_version``, the exported symbol names, the link flags and, in
+        ``abi``, one entry per slot of the packed ``void **args`` array.
         """
-        self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
+        return self._get_aot_compiled()._export_to_c(file_path, file_name, function_prefix)
 
     def _get_aot_compiled(self):
         """Parse and validate export IR once, only when an export is requested."""

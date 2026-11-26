@@ -197,6 +197,18 @@ initialization/load/unload functions, and embedded ABI metadata. When
 ``function_prefix`` is omitted, ``file_name`` is also used as the exported C
 symbol.
 
+``export_to_c`` returns that metadata as a dict, the same JSON object the
+object embeds as ``<symbol>__metadata``. ``schema_version`` identifies its
+layout. It names the exported symbols and the link flags, and ``abi`` lists
+the slots of the packed ``void **args`` array in order, each with its
+``kind``, ``ctype``, ``size`` and ``alignment``, so a build system needs
+neither to read the object nor to parse the header.
+
+``Float16`` and ``BFloat16`` scalar parameters are passed as their raw 16-bit
+patterns in ``uint16_t``, not as converted integers. The header names those
+parameters, and their ``abi`` slots carry the ``encoding`` ``float16_bits`` or
+``bfloat16_bits``.
+
 The lowered IR is parsed and its export ABI validated on the first
 ``export_to_c`` call. Each ``CompiledFunction`` keeps its own argument metadata
 for that export without retaining the example tensors passed to ``compile``.
