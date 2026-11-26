@@ -32,7 +32,7 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm.mxfp4_preshuffle import launch_gemm, prefetch_depth  # noqa: E402
+from kernels.gemm.mxfp4_preshuffle import launch_gemm, launch_gemm_fused, prefetch_depth  # noqa: E402
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
@@ -864,6 +864,90 @@ _A8W8_VARIANTS = [
 def test_mfma_a8w8_preshuffle_variants(shape, kwargs):
     """A8W8 non-default launch paths (bf16 out, no XCD swizzle)."""
     test_mfma_a8w8_preshuffle("bf16", *shape, 0, **kwargs)
+
+
+def _a8w8_row_operands(M, N, K):
+    """fp8 A, preshuffled fp8 B and row-layout e8m0 scales, plus the fp32 reference."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    a_q, sa = gemm_common_utils.per_1x32_f8_quant(torch.randn(M, K, device=device))
+    w_q, sb = gemm_common_utils.per_1x32_f8_quant(torch.randn(N, K, device=device))
+    a_deq = a_q.float() * gemm_common_utils.e8m0_to_f32(sa.repeat_interleave(32, dim=1))
+    b_deq = w_q.float() * gemm_common_utils.e8m0_to_f32(sb.repeat_interleave(32, dim=1))
+    b = gemm_common_utils.shuffle_weight_w4(w_q, 16, False, False)
+    return a_q, b, sa.contiguous(), sb.contiguous(), torch.mm(a_deq, b_deq.T)
+
+
+# launch_gemm_fused paths: (M, N, K, tile_m, tile_n, tile_k, k_batch, launch kwargs).
+_A8W8_FUSED_VARIANTS = [
+    ("sk4", (32, 1024, 4096, 32, 128, 256, 4), {}),
+    ("sk2-raggedM", (100, 512, 2048, 64, 64, 128, 2), {}),  # the last tile reduces fewer rows
+    ("sk8-pf3", (64, 2048, 8192, 32, 128, 256, 8), dict(prefetch=3)),
+    ("sk2-10tiles", (32, 640, 2048, 32, 64, 256, 2), {}),
+    # l2_reduce: a tile's splits 8 pids apart on one XCD.
+    ("sk8-pf3-l2", (64, 2048, 8192, 32, 128, 256, 8), dict(prefetch=3, l2_reduce=True)),
+    ("sk2-10tiles-l2", (32, 640, 2048, 32, 64, 256, 2), dict(l2_reduce=True)),  # a partial last group of 8
+]
+
+
+@pytest.mark.parametrize("shape,kwargs", [pytest.param(sh, kw, id=name) for name, sh, kw in _A8W8_FUSED_VARIANTS])
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
+    """fused_split_k: the last block of each output tile reduces the fp32 partials in-kernel."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP8 MX GEMM requires gfx950, got {get_rocm_arch()}")
+    M, N, K, tile_m, tile_n, tile_k, k_batch = shape
+    a, b, sa, sb, c_ref = _a8w8_row_operands(M, N, K)
+    ws = torch.empty((k_batch, M, N), dtype=torch.float32, device="cuda")
+    out = torch.zeros((M, N), dtype=torch.bfloat16, device="cuda")
+    n_tiles = -(-M // tile_m) * (N // tile_n)
+    sem = torch.zeros(n_tiles, dtype=torch.int32, device="cuda")
+    args = (
+        _ptr(ws),
+        _ptr(a.view(torch.uint8)),
+        _ptr(b.view(torch.uint8)),
+        _ptr(sa),
+        _ptr(sb),
+        _ptr(out),
+        _ptr(sem),
+        M,
+        N,
+        torch.cuda.current_stream(),
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        "fp8",
+        "bf16",
+        "fp8",
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        k_batch,
+        "none",
+        "row",
+        "row",
+        kwargs.get("prefetch", 1),
+        kwargs.get("l2_reduce", False),
+    )
+    exe = flyc.compile(launch_gemm_fused, *args)  # compiles and launches once
+    torch.cuda.synchronize()
+    assert verify_output(out.float(), c_ref, rtol=0.1, atol=0.1)
+    assert not sem.any(), "the reducing block must re-zero its tile counter"
+    # A second launch runs on the counters the first one left.
+    out.zero_()
+    exe(*args)
+    torch.cuda.synchronize()
+    assert verify_output(out.float(), c_ref, rtol=0.1, atol=0.1)
+    assert not sem.any()
 
 
 if __name__ == "__main__":
