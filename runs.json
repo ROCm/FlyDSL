@@ -1,8 +1,42 @@
 {
  "schema": 1,
- "updated": "2026-11-26T02:30:41Z",
+ "updated": "2026-11-26T03:09:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45743494295,
+   "pr": 1532,
+   "commit": "6205b9df9c7ba86d09679032531658b4dcc6b8cb",
+   "branch": "yz/flydsl-fp8-b32-moe",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add the fp8 32x32-block-scale MoE layer and tile the a16wmix stages by regime",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45743494295",
+   "created_at": "2026-11-26T02:35:59Z",
+   "updated_at": "2026-11-26T02:51:37Z",
+   "actor": "Arist12",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T02:51:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45743494295/job/139659212118"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T02:51:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45743494295/job/139659212119"
+    }
+   ]
+  },
   {
    "run_id": 45726666677,
    "pr": 1531,
@@ -56,11 +90,11 @@
    "branch": "phil/fc3-fc5-aot-export",
    "event": "pull_request",
    "title": "[AOT] Return the export metadata from export_to_c and name raw-bits scalars in the header",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726659257",
    "created_at": "2026-11-26T00:09:13Z",
-   "updated_at": "2026-11-26T01:36:10Z",
+   "updated_at": "2026-11-26T03:06:28Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -75,10 +109,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T01:36:10Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T02:34:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726659257/job/139610757935"
     },
     {
@@ -2026,21 +2060,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45181651587/job/137729278638"
     }
    ]
-  },
-  {
-   "run_id": 45180315742,
-   "pr": 1487,
-   "commit": "d2e917f65e2da9453a4c2962bca26038f0dae7c2",
-   "branch": "fix/device-printf-line-buffered-stdout",
-   "event": "pull_request",
-   "title": "[Bugfix] Line-buffer the C stdout stream so device printf shows in Jupyter and piped logs",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45180315742",
-   "created_at": "2026-11-23T13:04:35Z",
-   "updated_at": "2026-11-23T13:04:35Z",
-   "actor": "Nikunj-Mehndiratta",
-   "jobs": []
   }
  ]
 }
