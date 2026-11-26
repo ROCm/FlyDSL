@@ -150,6 +150,41 @@ LogicalResult normalizeOneBoundaryCheck(AtomSetValueOp op, IRRewriter &rewriter)
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// gfx1250 WMMA C modifier under a multi-K fly.gemm
+//===----------------------------------------------------------------------===//
+
+/// fly.gemm passes a tile's partial sum in D as C on its later K steps, and a gfx1250 WMMA C
+/// modifier applies to each instruction's C, so with one a tile may have only one K step. Checked
+/// here, before fly-layout-lowering expands the GEMM, because only this dialect knows the modifier.
+LogicalResult checkGemmModC(GemmOp op) {
+  Type atomTy = op.getMmaAtom().getType();
+  if (auto tiledMmaTy = dyn_cast<TiledMmaType>(atomTy))
+    atomTy = tiledMmaTy.getMmaAtom();
+  auto mmaAtomTy = dyn_cast<MmaAtomType>(atomTy);
+  if (!mmaAtomTy)
+    return success();
+  int32_t modC = 0;
+  if (auto wmma = dyn_cast<MmaOpGFX1250_WMMAType>(mmaAtomTy.getMmaOp()))
+    modC = wmma.getModC();
+  else if (auto wmmaScale = dyn_cast<MmaOpGFX1250_WMMAScaleType>(mmaAtomTy.getMmaOp()))
+    modC = wmmaScale.getModC();
+  if (modC == 0 || op.getA().empty())
+    return success();
+  auto aLayout = cast<LayoutAttr>(cast<fly::MemRefType>(op.getA().front().getType()).getLayout());
+  if (aLayout.getRef().rank() != 3)
+    return success();
+  auto kSteps = core::product(core::IntTuple<core::Trait>(aLayout.getRef().shape().at(2)));
+  if (!kSteps.isStatic() || kSteps.staticValue() <= 1)
+    return success();
+  return op.emitOpError() << "a gfx1250 WMMA C modifier (mod_c = " << modC
+                          << ") applies to every WMMA, and this GEMM has " << kSteps.staticValue()
+                          << " K steps per (m, n) tile, so from the second step on it would modify "
+                             "the running sum instead of C; to modify C only, apply the modifier "
+                             "to C before the GEMM and use mod_c = 0, or pass an atom_callback "
+                             "that returns an atom without mod_c for a tile's later K steps";
+}
+
 class FlyROCDLExpandOpsPass
     : public mlir::fly_rocdl::impl::FlyROCDLExpandOpsPassBase<FlyROCDLExpandOpsPass> {
 public:
@@ -184,6 +219,12 @@ public:
     for (AtomSetValueOp op : boundaryCheckSetters)
       if (failed(normalizeOneBoundaryCheck(op, rewriter)))
         return signalPassFailure();
+
+    WalkResult gemms = getOperation()->walk([](GemmOp op) {
+      return failed(checkGemmModC(op)) ? WalkResult::interrupt() : WalkResult::advance();
+    });
+    if (gemms.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
