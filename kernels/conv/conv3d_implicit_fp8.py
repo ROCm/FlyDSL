@@ -577,7 +577,12 @@ def compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt
 
         a1_frag = a_s2r.load(a_cur1)
         conv_a_g2s(a_next1, 1, K_ITERS - 1)
-        fx.rocdl.s_barrier()
+        # The b_next0 read below and the a_cur0 read in the last step read the
+        # last K tile's B0 and A0 halves, and the next vmcnt wait comes only
+        # after both reads. Wait for those copies here (the tile's B1 and A1
+        # copies may stay in flight), so every wave's copy has landed in LDS
+        # before any wave reads it.
+        wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
 
         c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
 
