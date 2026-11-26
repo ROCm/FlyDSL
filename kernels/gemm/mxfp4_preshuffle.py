@@ -63,6 +63,63 @@ def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves, pair):
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
+# K-tiles one row-layout scale panel row holds (see ``row_scale_panel``).
+ROW_SCALE_CHUNK = 4
+# gfx950 LDS: bounds the prefetch pipeline's A ring and scale panels.
+LDS_LIMIT_BYTES = 160 * 1024
+
+
+def row_scale_panel(rows, tile_k, num_threads):
+    """(rows per slice, DMA passes per slice, bytes) of one row-layout LDS scale panel.
+
+    A panel row holds ROW_SCALE_CHUNK K-tiles of one scale row; slice j of the next
+    chunk is DMA'd a dword per lane in iteration j, and a slice's spare lanes run on
+    past it, so the panel is padded to cover the last slice's tail.
+    """
+    crow = ROW_SCALE_CHUNK * tile_k // 32
+    rs = -(-rows // ROW_SCALE_CHUNK)
+    passes = -(-(rs * crow // 4) // num_threads)
+    size = max(rows * crow, (ROW_SCALE_CHUNK - 1) * rs * crow + passes * num_threads * 4)
+    return rs, passes, (size + 15) // 16 * 16
+
+
+# prefetch_depth's per-tile caps, tuned on gfx950 (ROCm/aiter#7309).
+_PF_MAX_DEPTH = 8
+_PF_MID_TILE_M = 48  # tiles of this many rows or more cap at _PF_MID_MAX_DEPTH
+_PF_MID_MAX_DEPTH = 3
+# A 192-row tile's ring is twice a 96-row one's: P = 2 beat 3 by 4-6% on
+# 160-192 x 25600 x 6144 (192x128x128).
+_PF_BIG_TILE_M = 192
+_PF_BIG_MAX_DEPTH = 2
+
+
+def prefetch_depth(tile_m, tile_n, tile_k, N, K, k_batch=1, num_cus=256):
+    """Deepest legal ``prefetch`` for an a8w8 row-scale launch, or 0 when none is.
+
+    A depth must fit the vmcnt counter ((P - 1) * loads <= 63) and the LDS (an A ring
+    of P + 1 tiles plus the scale panels), and leave enough LDS for the workgroups
+    each CU gets (the N tiles x splits over ``num_cus``) to run together. The per-tile
+    caps follow aiter's gfx950 tuning.
+    """
+    k_tiles = K // tile_k // max(k_batch, 1)
+    num_threads = min(4, tile_n // 16) * 64
+    _, pass_a, panel_a = row_scale_panel(tile_m, tile_k, num_threads)
+    _, pass_b, panel_b = row_scale_panel(tile_n, tile_k, num_threads)
+    b_loads = (tile_n // (num_threads // 64) // 16) * (tile_k // 128) * 2  # lo, hi
+    a_loads = tile_m * tile_k // (num_threads * 16)
+    loads = pass_a + pass_b + b_loads + a_loads  # the kernel's PF_LOADS
+    want = min(_PF_MAX_DEPTH, -(-(N // tile_n * max(k_batch, 1)) // num_cus))
+    max_depth = _PF_MID_MAX_DEPTH if tile_m >= _PF_MID_TILE_M else _PF_MAX_DEPTH
+    if tile_m >= _PF_BIG_TILE_M:
+        max_depth = _PF_BIG_MAX_DEPTH
+    best = 0
+    for p in range(2, min(max_depth, k_tiles) + 1):
+        lds = tile_m * tile_k * (p + 1) + (2 + -(-(p - 1) // ROW_SCALE_CHUNK)) * (panel_a + panel_b)
+        if (p - 1) * loads <= 63 and lds <= LDS_LIMIT_BYTES and LDS_LIMIT_BYTES // lds >= want:
+            best = p
+    return best
+
+
 @flyc.jit
 def launch_gemm(
     arg_c: fx.Pointer,
@@ -92,6 +149,9 @@ def launch_gemm(
     xcd_swizzle: Constexpr[int] = 0,
     k_batch: Constexpr[int] = 1,
     blockscale: Constexpr[str] = "none",
+    a_scale_layout: Constexpr[str] = "mfma_tile",
+    b_scale_layout: Constexpr[str] = "mfma_tile",
+    prefetch: Constexpr[int] = 1,
 ):
     """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
     per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
@@ -99,12 +159,26 @@ def launch_gemm(
     batch>1 = strided-batched over grid.z. The a_/sca_/c_ row/batch strides make A/scale_a/C
     addressing caller-controlled; each <0 keeps the contiguous [B,M,*] bmn default, all set =
     the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
+
+    ``*_scale_layout``: "mfma_tile" takes that operand's e8m0 scale pre-shuffled
+    (shuffle_scale_w4), read from global; "row" the unshuffled row-major
+    ``[rows, K // 32]`` tensor as the quantizer emits it, staged through LDS by the
+    kernel (1x32 scales, a8w8, batch 1).
+
+    ``prefetch`` P > 1 (both scales "row") runs the prefetch pipeline: B and the
+    scales are loaded P - 1 K-tiles ahead of their MFMAs, B into P register sets,
+    A into a ring of P + 1 LDS tiles by async DMA; the last P tiles are peeled.
     """
     BM, BN, BK = tile_m, tile_n, tile_k
     assert blockscale in ("none", "ab"), f"blockscale must be 'none' or 'ab', got {blockscale!r}"
     assert BK in (128, 256), f"tile_k must be 128 or 256 (tiles_per_chunk = 256 // tile_k), got {BK}"
     assert BM % 32 == 0, f"tile_m must be a multiple of 32 (the A e8m0 scale is 32-row granular), got {BM}"
     assert BN % 16 == 0, f"tile_n must be a multiple of 16, got {BN}"
+    for _layout in (a_scale_layout, b_scale_layout):
+        assert _layout in ("mfma_tile", "row"), f"scale layout {_layout}"
+    _row_a = a_scale_layout == "row"
+    _row_b = b_scale_layout == "row"
+    _row_any = _row_a or _row_b
     if const_expr(out_dtype == "bf16"):
         out_elem = BFloat16
     else:
@@ -160,6 +234,40 @@ def launch_gemm(
     )
     n_pairs = max(1, num_acc_n // 2)
     m_pairs = max(1, m_chunks // 2)
+    if const_expr(_row_any):
+        # Row-major scales: a scale row's bytes for one K-tile are BK//32 apart from the
+        # next row's, so per-tile loads touch a cache line per row. Instead an LDS panel
+        # row holds SC_C K-tiles (CROW_B contiguous bytes), filled by dword LDS-DMA:
+        # slice j (rows [j*rs, (j+1)*rs)) of chunk c+1 rides iteration j of chunk c,
+        # double-buffered by chunk parity. A slice's spare lanes run on into the
+        # following rows (the data those will hold) or the panel tail. Only a "row"
+        # operand gets a panel (A first, then B).
+        assert batch == 1, "row scale layout: batch 1"
+        assert a_dtype == "fp8" and b_dtype == "fp8", "row scale layout: a8w8"
+        assert blockscale == "none", "row scale layout: 1x32 scales"
+        SC_ROW_B = BK // 32  # bytes per scale row per K-tile
+        SC_WPR = SC_ROW_B // 4  # one dword per 128-K MFMA step
+        SC_C = ROW_SCALE_CHUNK  # K-tiles per chunk
+        CROW_B = SC_C * SC_ROW_B
+        SC_RS_A, SC_PASS_A, SC_PANEL_A = row_scale_panel(BM, BK, num_threads) if _row_a else (0, 0, 0)
+        SC_RS_B, SC_PASS_B, SC_PANEL_B = row_scale_panel(BN, BK, num_threads) if _row_b else (0, 0, 0)
+        SC_LDS_B = SC_PANEL_A + SC_PANEL_B
+
+    PF = int(prefetch)
+    _pf = PF > 1
+    if const_expr(_pf):
+        assert _row_a and _row_b, "prefetch: row-layout 1x32 A and B scales"
+        # Chunk c's slices are issued while chunk c - SC_D is read; its last one retires
+        # P - 1 iterations later, before chunk c's first tile, when
+        # SC_D * SC_C >= SC_C + P - 1.
+        SC_D = 1 + -(-(PF - 1) // SC_C)
+        SC_NB = SC_D + 1
+        # Loads in flight at an iteration's end: P - 1 iterations' scale slices, B (lo,
+        # hi per 128-K step and N subtile) and A DMA. vmcnt counts to 63.
+        PF_LOADS = SC_PASS_A + SC_PASS_B + num_acc_n * k_halves * 2 + n_coop
+        assert (PF - 1) * PF_LOADS <= 63, f"prefetch {PF}: vmcnt {(PF - 1) * PF_LOADS}"
+        PF_LDS_B = A_LDS_B * (PF + 1) + SC_LDS_B * SC_NB
+        assert PF_LDS_B <= LDS_LIMIT_BYTES, f"prefetch {PF}: LDS {PF_LDS_B}B > {LDS_LIMIT_BYTES}B"
 
     # Scheduler counts per loop iter: MFMAs, A LDS reads/thread (fp6/fp8 2 per (mi,kh)), gmem loads.
     sched_mfma_total = k_halves * m_chunks * num_acc_n
@@ -169,11 +277,39 @@ def launch_gemm(
         a_ds_per = 2
     sched_num_ds_load = m_chunks * k_halves * a_ds_per
     sched_num_gmem = n_coop + num_acc_n * k_halves * B_BLK_PER_MMA + m_pairs + n_pairs
+    if const_expr(_row_any):
+        # A row operand's scale rows come from LDS (one read per 16-row tile); its DMA
+        # replaces that operand's per-pair global scale loads.
+        sched_num_sc_ds = (m_chunks if _row_a else 0) + (num_acc_n if _row_b else 0)
+        # Also counted in the A-read group: the slack keeps every A ds_read ahead of the
+        # MFMAs (an exact count measured up to 1.4x slower on some tiles).
+        sched_num_ds_load += sched_num_sc_ds
+        sched_num_gmem += (SC_PASS_A - m_pairs if _row_a else 0) + (SC_PASS_B - n_pairs if _row_b else 0)
 
-    @fx.struct
-    class SharedA:
-        a0: fx.Array[Int8, A_LDS_B, 16]
-        a1: fx.Array[Int8, A_LDS_B, 16]
+    if const_expr(_pf):
+
+        @fx.struct
+        class SharedA:
+            # One array each: the A ring of P + 1 tiles A_LDS_B apart, the SC_NB scale
+            # panels SC_LDS_B apart.
+            a0: fx.Array[Int8, A_LDS_B * (PF + 1), 16]
+            s0: fx.Array[Int8, SC_LDS_B * SC_NB, 16]
+
+    elif const_expr(_row_any):
+
+        @fx.struct
+        class SharedA:
+            a0: fx.Array[Int8, A_LDS_B, 16]
+            a1: fx.Array[Int8, A_LDS_B, 16]
+            s0: fx.Array[Int8, SC_LDS_B, 16]
+            s1: fx.Array[Int8, SC_LDS_B, 16]
+
+    else:
+
+        @fx.struct
+        class SharedA:
+            a0: fx.Array[Int8, A_LDS_B, 16]
+            a1: fx.Array[Int8, A_LDS_B, 16]
 
     @flyc.kernel
     def kernel_gemm(
@@ -255,10 +391,17 @@ def launch_gemm(
         lds = fx.SharedAllocator().allocate(SharedA).peek()
         # A-LDS modeled as i32 (16B = 4 i32): fx.copy is dtype-agnostic, only the MMA cares.
         sA0_i32 = fx.recast_iter(Int32, lds.a0.ptr)
-        lds_db = fx.Int32(fx.ptrtoint(lds.a1.ptr)) - fx.Int32(fx.ptrtoint(lds.a0.ptr))  # ping/pong byte stride
+        if const_expr(_pf):
+            lds_db = fx.Int32(A_LDS_B)  # ring slot byte stride
+        else:
+            lds_db = fx.Int32(fx.ptrtoint(lds.a1.ptr)) - fx.Int32(fx.ptrtoint(lds.a0.ptr))  # ping/pong byte stride
         lds_db_i32 = lds_db // 4
         lds_copy = fx.make_copy_atom(fx.UniversalCopy128b(), Int32)
-        dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        # The prefetch pipeline's LDS DMAs are async: they retire by asyncmark group, so
+        # an LDS read is not held behind every copy in flight.
+        dma_atom = fx.make_copy_atom(
+            fx.rocdl.cdna4.BufferLoadAsyncLDS128b() if _pf else fx.rocdl.BufferCopyLDS128b(), 128
+        )
         _i8s = fx.PointerType.get(Int8.ir_type, fx.AddressSpace.Shared, 512)
         sA0_i8 = fx.recast_iter(_i8s, lds.a0.ptr)
 
@@ -364,6 +507,99 @@ def launch_gemm(
 
         n_acc = m_chunks * num_acc_n
 
+        if const_expr(_row_any):
+            _i8g4 = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=4)
+            sc_row_g = K // 32  # bytes per global scale row
+
+            def _sc_src(addr, nrec):
+                buf = fx.rocdl.make_buffer_tensor(
+                    fx.Tensor(fx.make_view(fx.inttoptr(_i8g4, addr), fx.make_layout(1 << 30, 1))),
+                    max_size=False,
+                    num_records_bytes=nrec,
+                )
+                return fx.logical_divide(buf, fx.make_layout(1, 1))
+
+            # Bounded to the tensors: rows past M read 0 (and are never stored).
+            # (source, first row, rows per slice, passes, panel byte)
+            sc_panels = []
+            if const_expr(_row_a):
+                sa_row = _sc_src(arg_scale_a, fx.Int64(i32_m) * fx.Int64(sc_row_g))
+                sc_panels.append((sa_row, bx_m, SC_RS_A, SC_PASS_A, 0))
+            if const_expr(_row_b):
+                sb_row = _sc_src(arg_scale_b, fx.Int64(N * sc_row_g))
+                sc_panels.append((sb_row, by_n, SC_RS_B, SC_PASS_B, SC_PANEL_A))
+            sc_dma = fx.make_copy_atom(
+                fx.rocdl.cdna4.BufferLoadAsyncLDS32b() if _pf else fx.rocdl.BufferCopyLDS32b(), 32
+            )
+            sc_row_copy = fx.make_copy_atom({1: fx.UniversalCopy32b, 2: fx.UniversalCopy64b}[SC_WPR](), Int32)
+            sS0_i8 = fx.recast_iter(_i8s, lds.s0.ptr)
+            sS0_i32 = fx.recast_iter(Int32, lds.s0.ptr)
+            if const_expr(_pf):
+                sc_db = fx.Int32(SC_LDS_B)  # panel buffer byte stride
+            else:
+                sc_db = fx.Int32(fx.ptrtoint(lds.s1.ptr)) - fx.Int32(fx.ptrtoint(lds.s0.ptr))
+            sc_db_dw = sc_db // 4
+            b_wave_n = wave * (BN // num_waves)
+            # v_perm pool = {hi:lo}; selector byte b+4 picks hi.byte(b), b picks lo.byte(b),
+            # 0x0C gives 0. Lane l reads 32-K group b = l // 16.
+            sc_sel = 0x0C0C0000 + lane_div_16 * 256 + lane_div_16 + 4
+
+            # CROW_B // 4 (dwords per panel row) is tile_k // 32: a power of two.
+            _SC_DW_SHIFT = (CROW_B // 4).bit_length() - 1
+            assert 1 << _SC_DW_SHIFT == CROW_B // 4
+
+            def dma_scale_slice(kt_c, j, buf):
+                """Slice j of the chunk starting at K-tile kt_c into buffer buf."""
+                for src, row0, rs, passes, off in sc_panels:
+                    for i in range_constexpr(passes):
+                        # Lane l of a wave lands at the wave-uniform base + l * 4.
+                        q = i * num_threads + tid
+                        if const_expr(_pf):
+                            # Non-negative operands and power-of-two divisors: shifts and
+                            # masks, not signed division fix-ups.
+                            row = j * rs + (q >> _SC_DW_SHIFT)
+                            col_dw = q & (CROW_B // 4 - 1)
+                        else:
+                            row = j * rs + q // (CROW_B // 4)
+                            col_dw = q % (CROW_B // 4)
+                        gbyte = (row0 + row) * sc_row_g + kt_c * SC_ROW_B + col_dw * 4
+                        lds_off = rocdl.readfirstlane(
+                            T.i32, buf * sc_db + off + j * (rs * CROW_B) + i * num_threads * 4 + wave * 256
+                        )
+                        dst = fx.make_view(fx.add_offset(sS0_i8, lds_off), fx.make_layout(1, 1))
+                        fx.copy(sc_dma, fx.slice(src, (None, gbyte)), dst)
+
+            def _sc_row(buf, j, lrow, crow, base):
+                # Panel row lrow + crow, K-tile j of the chunk: SC_WPR dwords, one per kh.
+                # lrow is the per-lane part; the compile-time crow and base stay out of it
+                # so they fold into the ds_read immediate offset.
+                t = fx.make_rmem_tensor(SC_WPR, Int32)
+                off = buf * sc_db_dw + lrow * (CROW_B // 4) + j * SC_WPR + (crow * CROW_B + base) // 4
+                fx.copy(sc_row_copy, fx.make_view(fx.add_offset(sS0_i32, off), fx.make_layout(SC_WPR, 1)), t)
+                return Vec(fx.memref_load_vec(t))
+
+            def _sc_pack(r0, r1):
+                # The shuffled-layout word: byte kh*2 + i = row (r + 16*i)'s scale for MFMA
+                # step kh, so the opsel atoms and one VGPR per row pair are kept.
+                w = fx.Int32(rocdl.perm_b32(r0[0], r1[0], sc_sel))
+                if const_expr(k_halves > 1):
+                    w = w | (fx.Int32(rocdl.perm_b32(r0[1], r1[1], sc_sel)) << 16)
+                return w
+
+            def _sc_pairs(buf, j, lrow, n_tiles, base):
+                words = []
+                for p_ in range_constexpr(max(1, n_tiles // 2)):
+                    r0 = _sc_row(buf, j, lrow, p_ * 32, base)
+                    r1 = _sc_row(buf, j, lrow, p_ * 32 + 16, base) if 2 * p_ + 1 < n_tiles else r0
+                    words.append(_sc_pack(r0, r1))
+                return words
+
+            def load_sc_row(buf, j):
+                # (sa, sb) of the row operands from LDS; None for a mfma_tile one.
+                sa = _sc_pairs(buf, j, lane_mod_16, m_chunks, 0) if _row_a else None
+                sb = _sc_pairs(buf, j, b_wave_n + lane_mod_16, num_acc_n, SC_PANEL_A) if _row_b else None
+                return sa, sb
+
         def load_b(kt):
             # buffer_load_dwordx4 into i32[4] frags; fp8 B packs two K0 blocks (lo/hi, 64 K
             # apart, f8f6f4 ABI) into i32[8] — same shuffle as read_a's fp6/fp8 A path.
@@ -382,60 +618,67 @@ def launch_gemm(
                         ops.append(t)
             return ops
 
-        def load_sc(chunk_kt):
+        def load_sc(chunk_kt, want_a=True, want_b=True):
             # (sa, sb) e8m0 words per m-/n-pair for one 256-K chunk (uniform base -> SGPR soffset).
             # blockscale uses smaller per-chunk strides (compact buffer) + broadcast lanes.
+            # A row-layout operand comes from load_sc_row instead (want_* False -> None).
             koff_a = chunk_kt * _sc_k0_a
             koff_b = chunk_kt * _sc_k0_b
-            sa = [
-                Vec(
-                    fly.copy_atom_call_ssa(
-                        [T.vec(1, T.i32)],
-                        bs_copy,
-                        sa_flat[
-                            None,
-                            rocdl.readfirstlane(T.i32, a_sc_base[mp] + koff_a) + sc_lane_a,
-                        ],
-                    )
-                )[0]
-                for mp in range_constexpr(m_pairs)
-            ]
-
-            _bs_b_dedup = _bs_b and (BN // num_waves) <= 128 and (128 % (BN // num_waves) == 0)
-            if const_expr(_bs_b_dedup):
-                _sb0 = Vec(
-                    fly.copy_atom_call_ssa(
-                        [T.vec(1, T.i32)],
-                        bs_copy,
-                        sb_flat[
-                            None,
-                            rocdl.readfirstlane(T.i32, b_sc_base[0] + koff_b) + sc_lane_b,
-                        ],
-                    )
-                )[0]
-                sb = [_sb0 for _ in range_constexpr(n_pairs)]
-            else:
-                sb = [
+            sa = None
+            if const_expr(want_a):
+                sa = [
                     Vec(
+                        fly.copy_atom_call_ssa(
+                            [T.vec(1, T.i32)],
+                            bs_copy,
+                            sa_flat[
+                                None,
+                                rocdl.readfirstlane(T.i32, a_sc_base[mp] + koff_a) + sc_lane_a,
+                            ],
+                        )
+                    )[0]
+                    for mp in range_constexpr(m_pairs)
+                ]
+            sb = None
+            if const_expr(want_b):
+                _bs_b_dedup = _bs_b and (BN // num_waves) <= 128 and (128 % (BN // num_waves) == 0)
+                if const_expr(_bs_b_dedup):
+                    _sb0 = Vec(
                         fly.copy_atom_call_ssa(
                             [T.vec(1, T.i32)],
                             bs_copy,
                             sb_flat[
                                 None,
-                                rocdl.readfirstlane(T.i32, b_sc_base[np] + koff_b) + sc_lane_b,
+                                rocdl.readfirstlane(T.i32, b_sc_base[0] + koff_b) + sc_lane_b,
                             ],
                         )
                     )[0]
-                    for np in range_constexpr(n_pairs)
-                ]
+                    sb = [_sb0 for _ in range_constexpr(n_pairs)]
+                else:
+                    sb = [
+                        Vec(
+                            fly.copy_atom_call_ssa(
+                                [T.vec(1, T.i32)],
+                                bs_copy,
+                                sb_flat[
+                                    None,
+                                    rocdl.readfirstlane(T.i32, b_sc_base[np] + koff_b) + sc_lane_b,
+                                ],
+                            )
+                        )[0]
+                        for np in range_constexpr(n_pairs)
+                    ]
             return sa, sb
 
         def compute(accs, av, bv, sa_v, sb_v, scale_shift=None):
             # tile_k=128: shift the active 128-K half of the shared 256-K word into the opsel's low bytes.
+            # A row operand's packed word holds only this K-tile: nothing to shift.
             if const_expr(scale_shift is not None):
-                sa_v = [v.shrui(scale_shift) for v in sa_v]
-                sb_v = [v.shrui(scale_shift) for v in sb_v]
-            if const_expr(BN < 128):
+                if const_expr(not _row_a):
+                    sa_v = [v.shrui(scale_shift) for v in sa_v]
+                if const_expr(not _row_b):
+                    sb_v = [v.shrui(scale_shift) for v in sb_v]
+            if const_expr(BN < 128 and not _row_b):
                 _bnsh = ((by_n + wave * (BN // num_waves)) % 32) // 16 * 8
                 sb_v = [v.shrui(_bnsh) for v in sb_v]
             # kh OUTERMOST: consecutive MFMAs hit distinct accumulators (dense issue). Each
@@ -464,6 +707,10 @@ def launch_gemm(
 
         def hot_loop_scheduler():
             # Interleave the MFMAs with the tile's vmem + A-LDS loads: preload all hints, then issue MFMAs 1-by-1.
+            if const_expr(_row_any):
+                # Scale LDS reads ahead of every DMA: an LDS read after an in-flight
+                # buffer_load...lds may alias it, so the backend would wait vmcnt.
+                rocdl.sched_dsrd(sched_num_sc_ds)
             rocdl.sched_vmem(sched_num_gmem)
             rocdl.sched_dsrd(sched_num_ds_load)
             for _ in range_constexpr(sched_mfma_total):
@@ -472,30 +719,127 @@ def launch_gemm(
 
         accs_init = [fx.full(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
 
-        dma_a_to_lds(kt0, fx.Int32(0))
-        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-        gpu.barrier()
-        for iv, state in range(0, k_tiles_local, 1, init=accs_init):
-            accs = list(state)
-            ivi = fx.Int32(iv)
-            cur = ivi % 2
-            nxt = (ivi + 1) % 2
-            kt = kt0 + ivi  # absolute K-tile for A/B/scale addressing
-            nkt = ivi + 1
-            # clamp last-iter prefetch to the local last tile, then rebase to absolute
-            pf_kt = kt0 + (nkt - nkt // k_tiles_local)
-            chunk_kt = kt if tiles_per_chunk == 1 else kt // tiles_per_chunk
-            scale_shift = None if tiles_per_chunk == 1 else (kt % tiles_per_chunk) * 16
-            av = read_a(cur)
-            bv = load_b(kt)
-            sa_v, sb_v = load_sc(chunk_kt)
-            dma_a_to_lds(pf_kt, nxt)  # A DMA after B/scale loads -> overlaps the MFMAs
-            accs = compute(accs, av, bv, sa_v, sb_v, scale_shift)
-            hot_loop_scheduler()
-            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
+        def pf_main_loop():
+            """The prefetch pipeline (see ``prefetch``): returns the accumulators."""
+            k_loc = k_tiles_local
+            steady = max(0, k_loc - PF)  # iterations that fetch tile + PF
+            acc_t = [fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(n_acc)]
+            for t in acc_t:
+                t.store(fx.full(4, 0.0, Float32))
+            # B register set s holds the tiles kt0 + s (mod PF); static indices keep each
+            # set in its registers across the unrolled loop.
+            b_regs = [
+                [fx.make_rmem_tensor(B_NDW, Int32) for _ in range_constexpr(num_acc_n * k_halves)]
+                for _ in range_constexpr(PF)
+            ]
+
+            def prefetch_b(kt_abs, s):
+                for d, o in zip(b_regs[s], load_b(kt_abs)):
+                    d.store(o.load())
+
+            # asyncmark group k holds tile k's LDS copies, here and in the loop (steady
+            # iteration i fetches tile i + PF). A prologue chunk c joins the group of tile
+            # min(c * SC_C, n_pro - 1): it lands before its first tile is read. Only tile
+            # 0's group is waited for here.
+            n_pro = min(PF, k_loc)
+            for t in range_constexpr(n_pro):
+                dma_a_to_lds(kt0 + t, fx.Int32(t))
+                prefetch_b(kt0 + t, t)
+                for c in range_constexpr(SC_D):
+                    if const_expr(c * SC_C < k_loc and min(c * SC_C, n_pro - 1) == t):
+                        for j in range_constexpr(SC_C):
+                            dma_scale_slice(kt0 + c * SC_C, fx.Int32(j), fx.Int32(c))
+                rocdl.asyncmark()
+            rocdl.wait_asyncmark(n_pro - 1)
             gpu.barrier()
-            results = yield accs
-        accs = results
+
+            def step(ivi, ph, fetch, pending):
+                """Local K tile ivi, B set ph (static). fetch issues tile ivi + PF; pending
+                is how many iterations' LDS copies (asyncmark groups) may stay in flight at
+                its end."""
+                kt = kt0 + ivi
+                c_idx = ivi // SC_C
+                c_j = ivi % SC_C
+                # Every LDS read of this tile before this iteration's DMAs: an LDS read
+                # issued behind an in-flight LDS DMA waits for it.
+                sa_v, sb_v = load_sc_row(c_idx % SC_NB, c_j)
+                av = read_a(ivi % (PF + 1))
+                rocdl.sched_barrier(0)
+                if const_expr(fetch):
+                    dma_scale_slice(kt0 + (c_idx + SC_D) * SC_C, c_j, (c_idx + SC_D) % SC_NB)
+                    dma_a_to_lds(kt + PF, (ivi + PF) % (PF + 1))
+                    rocdl.asyncmark()
+                    rocdl.sched_barrier(0)
+                # The MFMAs read B set ph in place (a copy would wait for its loads); the
+                # set is refilled with tile + PF once they have.
+                accs = compute([t.load().ir_value() for t in acc_t], av, b_regs[ph], sa_v, sb_v)
+                for t, v in zip(acc_t, accs):
+                    t.store(Vec(v))
+                if const_expr(fetch):
+                    prefetch_b(kt + PF, ph)
+                # Tile ivi + 1's copies have landed (B registers are waited for at their
+                # MFMAs by the backend), and this tile's LDS reads are done before the
+                # barrier lets a copy overwrite its slot.
+                rocdl.wait_asyncmark(pending)
+                rocdl.s_waitcnt(lgkmcnt=0)
+                gpu.barrier()
+
+            for g in range(steady // PF):
+                for ph in range_constexpr(PF):
+                    step(fx.Int32(g) * PF + ph, ph, True, PF - 1)
+            for t in range_constexpr(steady - steady % PF, steady):
+                step(fx.Int32(t), t % PF, True, PF - 1)
+            # The last PF tiles, peeled: no fetch. Groups are tiles: tile t + 1's has
+            # landed, the later ones may stay in flight.
+            for t in range_constexpr(steady, k_loc):
+                step(fx.Int32(t), t % PF, False, max(0, k_loc - t - 2))
+            return [t.load().ir_value() for t in acc_t]
+
+        if const_expr(_pf):
+            accs = pf_main_loop()
+        else:
+            dma_a_to_lds(kt0, fx.Int32(0))
+            if const_expr(_row_any):
+                for j in range_constexpr(SC_C):
+                    dma_scale_slice(kt0, fx.Int32(j), fx.Int32(0))
+            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+            gpu.barrier()
+            for iv, state in range(0, k_tiles_local, 1, init=accs_init):
+                accs = list(state)
+                ivi = fx.Int32(iv)
+                cur = ivi % 2
+                nxt = (ivi + 1) % 2
+                kt = kt0 + ivi  # absolute K-tile for A/B/scale addressing
+                nkt = ivi + 1
+                # clamp last-iter prefetch to the local last tile, then rebase to absolute
+                pf_kt = kt0 + (nkt - nkt // k_tiles_local)
+                chunk_kt = kt if tiles_per_chunk == 1 else kt // tiles_per_chunk
+                scale_shift = None if tiles_per_chunk == 1 else (kt % tiles_per_chunk) * 16
+                if const_expr(_row_any):
+                    # Next chunk's slice first (its scattered rows are the slowest load the
+                    # end-of-iteration drain waits for), then this tile's scale reads ahead
+                    # of A's: LDS returns in order.
+                    c_idx = ivi // SC_C
+                    c_j = ivi % SC_C
+                    dma_scale_slice(kt0 + (c_idx + 1) * SC_C, c_j, (c_idx + 1) % 2)
+                    sa_r, sb_r = load_sc_row(c_idx % 2, c_j)
+                av = read_a(cur)
+                bv = load_b(kt)
+                if const_expr(_row_a and _row_b):
+                    sa_v, sb_v = sa_r, sb_r
+                else:
+                    sa_v, sb_v = load_sc(chunk_kt, not _row_a, not _row_b)
+                    if const_expr(_row_a):
+                        sa_v = sa_r
+                    if const_expr(_row_b):
+                        sb_v = sb_r
+                dma_a_to_lds(pf_kt, nxt)  # A DMA after B/scale loads -> overlaps the MFMAs
+                accs = compute(accs, av, bv, sa_v, sb_v, scale_shift)
+                hot_loop_scheduler()
+                rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
+                gpu.barrier()
+                results = yield accs
+            accs = results
 
         # Epilogue via fx.copy: a lane owns 4 rows per (mi,ni) accm (row m*16+(l//16)*4+ii, col
         # base+l%16), c_stride apart.

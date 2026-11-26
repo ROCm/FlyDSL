@@ -32,7 +32,7 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm.mxfp4_preshuffle import launch_gemm  # noqa: E402
+from kernels.gemm.mxfp4_preshuffle import launch_gemm, prefetch_depth  # noqa: E402
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
@@ -59,6 +59,9 @@ def _mxfp4_launcher(
     xcd_swizzle=0,
     k_batch=1,
     blockscale="none",
+    a_scale_layout="mfma_tile",
+    b_scale_layout="mfma_tile",
+    prefetch=1,
 ):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. This closure fixes every Constexpr, so it reuses one compiled handle:
@@ -95,6 +98,9 @@ def _mxfp4_launcher(
             xcd_swizzle,
             k_batch,
             blockscale,
+            a_scale_layout,
+            b_scale_layout,
+            prefetch,
         )
         if compiled is None:
             compiled = flyc.compile(launch_gemm, *args)  # Compiles and launches once.
@@ -722,8 +728,13 @@ def test_mfma_a8w8_preshuffle(
     bench_iters: int = 0,
     bench_warmup: int = 0,
     waves_per_eu: int = 0,
+    a_scale_layout: str = "mfma_tile",
+    b_scale_layout: str = "mfma_tile",
+    prefetch: int = 1,
 ):
-    """A8W8: MXFP8 (E4M3) A × MXFP8 (E4M3) B preshuffle GEMM — gfx950 only."""
+    """A8W8: MXFP8 (E4M3) A × MXFP8 (E4M3) B preshuffle GEMM — gfx950 only.
+
+    A "row" scale layout passes that operand's unshuffled [rows, K // 32] e8m0 scale."""
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP8 MX GEMM requires gfx950, got {get_rocm_arch()}")
 
@@ -734,7 +745,19 @@ def test_mfma_a8w8_preshuffle(
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
     launch_fn = _mxfp4_launcher(
-        N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", xcd_swizzle=xcd_swizzle
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        out_dtype,
+        "fp8",
+        _wpe,
+        b_dtype="fp8",
+        xcd_swizzle=xcd_swizzle,
+        a_scale_layout=a_scale_layout,
+        b_scale_layout=b_scale_layout,
+        prefetch=prefetch,
     )
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
@@ -752,12 +775,18 @@ def test_mfma_a8w8_preshuffle(
     # A: MXFP8 E4M3, 1 byte/code, row-major (not preshuffled). B: MXFP8, preshuffled 16x16.
     a_q, scale_a_orig = gemm_common_utils.per_1x32_f8_quant(a_fp32_padded)
     a_codes = a_q[:M]
-    scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+    if a_scale_layout == "row":
+        scale_a = scale_a_orig[:M].contiguous()
+    else:
+        scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
 
     w_q, scale_b_orig = gemm_common_utils.per_1x32_f8_quant(b_fp32_padded)
     w_q = w_q[:N]
     b_shuffled = gemm_common_utils.shuffle_weight_w4(w_q, 16, False, False)
-    scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(scale_b_orig, 1, False)
+    if b_scale_layout == "row":
+        scale_b_shuffled = scale_b_orig[:N].contiguous()
+    else:
+        scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(scale_b_orig, 1, False)
 
     # Reference: dequant(A) @ dequant(B).T in fp32 (torch decodes fp8 natively).
     a_deq = a_codes.float() * gemm_common_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
@@ -807,6 +836,34 @@ def test_mfma_a8w8_preshuffle(
         tflops = (2 * M * N * K) / (us / 1e6) / 1e12
         tbps = bytes_moved / 1e12 / (us / 1e6)
         print(f"[flyc] A8W8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+_ROW = dict(a_scale_layout="row", b_scale_layout="row")
+# Non-default a8w8 paths, one row per path: (M, N, K, tile_m, tile_n, tile_k, launch kwargs).
+_A8W8_VARIANTS = [
+    # Row-major [rows, K // 32] scales staged through LDS.
+    ("row", (32, 1024, 2048, 32, 128, 256), _ROW),
+    ("row-raggedM-tk128", (100, 1024, 2048, 64, 128, 128), _ROW),  # 128-K tiles share a scale word
+    ("rowA-k5tiles", (256, 2048, 1280, 64, 256, 256), dict(a_scale_layout="row")),  # not a multiple of the chunk
+    ("rowB-tk128", (100, 1024, 2048, 64, 128, 128), dict(b_scale_layout="row")),
+    # Prefetch pipeline: B and the row scales loaded prefetch - 1 K tiles ahead.
+    ("pf2", (32, 1024, 2048, 32, 128, 256), dict(_ROW, prefetch=2)),
+    ("pf3-raggedM", (100, 1024, 2048, 64, 128, 128), dict(_ROW, prefetch=3)),
+    ("pf3-k5tiles", (256, 2048, 1280, 64, 128, 256), dict(_ROW, prefetch=3)),  # steady loop, remainder, peel
+    ("pf4-k2tiles", (64, 512, 512, 32, 64, 256), dict(_ROW, prefetch=4)),  # fewer K tiles than the depth
+    # The depth prefetch_depth picks (per tile height, capped by vmcnt and LDS) builds and runs.
+    ("pfauto-tm32", (32, 7168, 2048, 32, 128, 256), dict(_ROW, prefetch=prefetch_depth(32, 128, 256, 7168, 2048))),
+    ("pfauto-tm64", (128, 5120, 5120, 64, 256, 256), dict(_ROW, prefetch=prefetch_depth(64, 256, 256, 5120, 5120))),
+    ("pfauto-tm192", (192, 2048, 4096, 192, 128, 128), dict(_ROW, prefetch=prefetch_depth(192, 128, 128, 2048, 4096))),
+]
+
+
+@pytest.mark.parametrize("shape,kwargs", [pytest.param(sh, kw, id=name) for name, sh, kw in _A8W8_VARIANTS])
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a8w8_preshuffle_variants(shape, kwargs):
+    """A8W8 non-default launch paths (bf16 out, no XCD swizzle)."""
+    test_mfma_a8w8_preshuffle("bf16", *shape, 0, **kwargs)
 
 
 if __name__ == "__main__":
