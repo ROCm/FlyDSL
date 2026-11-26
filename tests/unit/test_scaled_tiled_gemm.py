@@ -504,5 +504,5 @@ def test_mxfp8_callback_kernel_compiles(monkeypatch, default_device, preshuffled
         c = torch.empty(256 * 256, dtype=torch.bfloat16, device="cpu")
         sa = torch.empty(256 * 8, dtype=torch.uint8, device="cpu")
         sb = torch.empty_like(sa, device="cpu")
-        flyc.compile(launch, a, b, c, sa, sb, 256, 256, fx.Stream(None))
+        flyc.compile(launch, a, b, c, sa, sb, 256, 256, 256, fx.Stream(None))
         assert launch._last_compiled is not None
