@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T01:55:17Z",
+ "updated": "2026-11-26T02:30:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -102,11 +102,11 @@
    "branch": "phil/fc23-fc26-run-tests-scratch",
    "event": "pull_request",
    "title": "[Tests] Give run_tests.sh a private scratch directory",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726651270",
    "created_at": "2026-11-26T00:09:09Z",
-   "updated_at": "2026-11-26T01:40:12Z",
+   "updated_at": "2026-11-26T02:28:08Z",
    "actor": "Phil-amd",
    "jobs": [
     {
