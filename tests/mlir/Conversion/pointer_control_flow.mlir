@@ -9,7 +9,7 @@
 // CHECK-LABEL: func.func @select_global
 // CHECK-SAME: !llvm.ptr<1>
 // CHECK: arith.select {{.*}} : !llvm.ptr<1>
-// CHECK: llvm.load {{.*}} {alignment = 16 : i64} : !llvm.ptr<1> -> f32
+// CHECK: llvm.load {{.*}} <alignment = 16> : !llvm.ptr<1> -> f32
 // CF-LABEL: func.func @select_global
 func.func @select_global(%c: i1, %a: !fly.ptr<f32, global, align<16>>, %b: !fly.ptr<f32, global, align<16>>) -> f32 {
   %p = arith.select %c, %a, %b : !fly.ptr<f32, global, align<16>>
@@ -19,7 +19,7 @@ func.func @select_global(%c: i1, %a: !fly.ptr<f32, global, align<16>>, %b: !fly.
 
 // CHECK-LABEL: func.func @select_shared
 // CHECK: arith.select {{.*}} : !llvm.ptr<3>
-// CHECK: llvm.load {{.*}} {alignment = 8 : i64} : !llvm.ptr<3> -> f64
+// CHECK: llvm.load {{.*}} <alignment = 8> : !llvm.ptr<3> -> f64
 // CF-LABEL: func.func @select_shared
 func.func @select_shared(%c: i1, %a: !fly.ptr<f64, shared, align<8>>, %b: !fly.ptr<f64, shared, align<8>>) -> f64 {
   %p = arith.select %c, %a, %b : !fly.ptr<f64, shared, align<8>>

@@ -19,6 +19,10 @@ def Fly_Dialect : Dialect {
   
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+
+  // The pinned LLVM defaults this to 1, which rejects assembly formats that
+  // leave inherent attributes unbound. Keep the historical format.
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 class Fly_Type<string typeName, string typeMnemonic, list<Trait> traits = []>
@@ -38,7 +42,11 @@ class Fly_I32EnumAttr<string enumName, string summary, list<I32EnumAttrCase> cas
 }
 
 class Fly_EnumAttr<Fly_I32EnumAttr enumInfo, string attrMnemonic, list<Trait> traits = []>
-    : EnumAttr<Fly_Dialect, enumInfo, attrMnemonic, traits>;
+    : EnumAttr<Fly_Dialect, enumInfo, attrMnemonic, traits> {
+  // The pinned LLVM wraps an enum attribute's value in '<...>'. Print and parse
+  // the bare keyword instead, which is the syntax the IR and tests use.
+  let assemblyFormat = "$value";
+}
 
 class Fly_Op<string mnemonic, list<Trait> traits = []> 
     : Op<Fly_Dialect, mnemonic, traits> {
