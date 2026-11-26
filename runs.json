@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T14:48:01Z",
+ "updated": "2026-11-26T14:50:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45842517481,
+   "pr": null,
+   "commit": "ae1e23e8e9d8853c48c86a7353df1b60bf4d7f3f",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Wait for the last K tile's B0/A0 copies in the conv3d fp8 dr\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481",
+   "created_at": "2026-11-26T14:47:21Z",
+   "updated_at": "2026-11-26T14:47:31Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45842201649,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Fix custom all-reduce outputs that differ between ranks (#1494)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842201649",
    "created_at": "2026-11-26T14:45:28Z",
-   "updated_at": "2026-11-26T14:45:59Z",
+   "updated_at": "2026-11-26T14:47:23Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2241,52 +2256,6 @@
      "started_at": "2026-11-24T11:52:25Z",
      "completed_at": "2026-11-24T12:13:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45384731158/job/138423767781"
-    }
-   ]
-  },
-  {
-   "run_id": 45377633888,
-   "pr": 1412,
-   "commit": "b9537dce2a9eda2f5eff0667db919bd885724089",
-   "branch": "perf/jit-trace-speedup",
-   "event": "pull_request",
-   "title": "[JIT] Speed up tracing and fix exponential and/or rewriting",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45377633888",
-   "created_at": "2026-11-24T10:44:29Z",
-   "updated_at": "2026-11-24T13:45:26Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T12:18:56Z",
-     "completed_at": "2026-11-24T13:45:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45377633888/job/138438450235"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T12:27:23Z",
-     "completed_at": "2026-11-24T12:36:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45377633888/job/138438450253"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T12:18:37Z",
-     "completed_at": "2026-11-24T12:51:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45377633888/job/138438450338",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
