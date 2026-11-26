@@ -28,15 +28,23 @@ if torch is None or not torch.cuda.is_available():
 
 import flydsl.compiler as flyc  # noqa: E402
 import kernels.norm.softmax_autotune as softmax_autotune_module  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.norm.softmax_autotune import (  # noqa: E402
     _RTOL,
     _softmax_hot_cache,
     _softmax_tuner,
+    _split_hot_cache,
     candidate_configs,
     softmax_autotuned,
     uses_fast_path,
 )
 from kernels.norm.softmax_kernel import TUNING_SCHEMA, softmax_direct  # noqa: E402
+from kernels.norm.softmax_split import (  # noqa: E402
+    ALL_ROWS_SPLIT_N,
+    DECODE_MAX_ROWS,
+    WIDE_ROW_MIN_N,
+    use_split_softmax,
+)
 
 DTYPES = [(torch.float32, "f32"), (torch.float16, "f16"), (torch.bfloat16, "bf16")]
 
@@ -168,6 +176,39 @@ def test_wrapper_matches_the_torch_reference(dtype, dtype_str):
     softmax_autotuned(x, out)
     torch.cuda.synchronize()
     _assert_close(out, _reference(x), dtype_str)
+
+
+@pytest.mark.parametrize("dtype,dtype_str", DTYPES)
+def test_wide_rows_take_the_split_kernel_without_searching(monkeypatch, dtype, dtype_str):
+    """Shapes use_split_softmax picks never reach the tuner, and a repeat call reuses
+    the compiled split launcher with a fresh workspace."""
+    if not str(get_rocm_arch()).startswith("gfx95"):
+        pytest.skip("softmax_autotuned takes the split kernel on gfx95* only")
+    monkeypatch.setattr(_softmax_tuner, "resolve_config", lambda *a, **k: pytest.fail("wide rows reached the tuner"))
+    _split_hot_cache.clear()
+    for seed in (1, 2):
+        x, out = _inputs(3, 129283, dtype, seed=seed)
+        softmax_autotuned(x, out)
+        torch.cuda.synchronize()
+        _assert_close(out, _reference(x), dtype_str)
+    assert use_split_softmax(3, 129283, dtype_str) and len(_split_hot_cache) == 1
+    _split_hot_cache.clear()
+
+
+def test_split_routing_follows_the_measured_thresholds(monkeypatch):
+    """Past WIDE_ROW_MIN_N only decode-sized calls go split; from ALL_ROWS_SPLIT_N on
+    every row count does. A call outside both stays on the register-buffered kernel."""
+    for dtype_str, all_rows_n in ALL_ROWS_SPLIT_N.items():
+        assert not use_split_softmax(1, WIDE_ROW_MIN_N, dtype_str)
+        assert use_split_softmax(DECODE_MAX_ROWS, WIDE_ROW_MIN_N + 1, dtype_str)
+        assert not use_split_softmax(DECODE_MAX_ROWS + 1, all_rows_n - 1, dtype_str)
+        assert use_split_softmax(8192, all_rows_n, dtype_str)
+
+    monkeypatch.setattr(softmax_autotune_module, "_softmax_split", lambda *a, **k: pytest.fail("took the split kernel"))
+    x, out = _inputs(DECODE_MAX_ROWS + 1, WIDE_ROW_MIN_N + 1, torch.bfloat16)
+    softmax_autotuned(x, out)
+    torch.cuda.synchronize()
+    _assert_close(out, _reference(x), "bf16")
 
 
 def test_zero_rows_is_a_no_launch(monkeypatch):
