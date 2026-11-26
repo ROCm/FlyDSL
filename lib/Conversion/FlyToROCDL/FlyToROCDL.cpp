@@ -30,6 +30,7 @@
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
@@ -854,6 +855,19 @@ public:
     Value src = loweredValue(adaptor.getSrc());
     Value dst = loweredValue(adaptor.getDst());
     Value pred = loweredValue(adaptor.getPred());
+    // A row list given as an int tuple reaches the emitter the same way an int tuple
+    // atom field does: a struct of its leaves. An all-static tuple carries no lowered
+    // value at all -- its indices live in its type -- so `loweredValue` alone would
+    // hand the emitter nothing.
+    Value index = loweredValue(adaptor.getIndex());
+    if (Value rowList = op.getIndex()) {
+      if (auto tupleTy = dyn_cast<IntTupleType>(rowList.getType())) {
+        auto tuple = tupleFieldValue(rewriter, op.getLoc(), tupleTy, adaptor.getIndex());
+        if (failed(tuple))
+          return op.emitOpError("expected a row list of integer leaves");
+        index = *tuple;
+      }
+    }
 
     Type srcTy = op.getSrc().getType();
     Type dstTy = op.getDst().getType();
@@ -873,6 +887,17 @@ public:
       predMemTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
       if (!predMemTy)
         return rewriter.notifyMatchFailure(op, "pred is not a MemRef type");
+    }
+
+    if (index) {
+      if (pred)
+        return rewriter.notifyMatchFailure(op, "an indexed copy cannot also be predicated");
+      if (failed(fly_rocdl::emitTdmIndexedCall(rewriter, loc, copyAtomType, srcTy, dstTy,
+                                               op.getIndex().getType(), copyAtomVal, src, dst,
+                                               index)))
+        return failure();
+      rewriter.eraseOp(op);
+      return success();
     }
 
     if (pred) {

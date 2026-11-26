@@ -41,6 +41,13 @@ constexpr int32_t kMaxIterateCount = 256;
 // with a 2D descriptor.
 constexpr int32_t kMaxIterateRank = 2;
 
+/// Indexed (row-addressed) descriptors replace the two outer descriptor groups with a
+/// list of row indices, so one issue carries only as many rows as those groups hold:
+/// sixteen 16-bit indices or eight 32-bit ones. The descriptor is limited to 2D because
+/// the groups the index list occupies are the ones that would carry dims 2..4.
+constexpr int32_t kIndexedRank = 2;
+inline int32_t maxIndexedRows(int32_t indexBits) { return indexBits == 16 ? 16 : 8; }
+
 /// `tensor2tdm` read the other way round: per global mode, the descriptor axis index
 /// its flag lands on, flattened into mode order; `-1` for a mode with no bound to give.
 ///
@@ -57,6 +64,13 @@ namespace mlir::fly_rocdl {
 /// Materialize a tiled TDM builder using the same construction as type inference.
 LogicalResult expandTdmAtom(MakeTiledTdmLoadAtomOp op, IRRewriter &rewriter);
 LogicalResult expandTdmAtom(MakeTiledTdmStoreAtomOp op, IRRewriter &rewriter);
+
+/// Emit one CDNA5 TDM call whose outer dim is addressed by the row list in `index`.
+/// Kept off `CopyOpTypeInterface` because the index operand is specific to this target:
+/// every other atom would carry a parameter it can never use.
+LogicalResult emitTdmIndexedCall(OpBuilder &builder, Location loc, Type copyAtomTy, Type srcTy,
+                                 Type dstTy, Type indexTy, Value atomVal, Value src, Value dst,
+                                 Value index);
 
 FailureOr<fly::LayoutType> tdmPartitionLayout(Type atomType, Type stensorType, Type gtensorType,
                                               int32_t numWarps,
