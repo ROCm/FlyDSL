@@ -33,6 +33,31 @@ gpu.module @kernels {
 
 // -----
 
+// Inner loops go first, so the M0 read placed before an inner loop moves on out of the outer
+// one. The induction variable of such a loop is the same in every lane, and so is a loop bounded
+// by it.
+
+// CHECK-LABEL: gpu.func @nested_loops
+// CHECK: %[[M0:.*]] = rocdl.readfirstlane %arg1
+// CHECK-NEXT: scf.for %[[I:[a-z0-9_]+]] =
+// CHECK-NEXT: scf.for %{{.*}} = %{{.*}} to %[[I]] step
+// CHECK-NEXT: rocdl.raw.ptr.buffer.load.lds %{{.*}}, %[[M0]],
+gpu.module @kernels {
+  gpu.func @nested_loops(%rsrc: !llvm.ptr<8>, %lds: !llvm.ptr<3>, %voffset: i32, %n: i32) kernel {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c4 = arith.constant 4 : i32
+    scf.for %i = %c0 to %n step %c1 : i32 {
+      scf.for %j = %c0 to %i step %c1 : i32 {
+        rocdl.raw.ptr.buffer.load.lds %rsrc, %lds, %c4, %voffset, %c0, %c0, 0
+      }
+    }
+    gpu.return
+  }
+}
+
+// -----
+
 // Lanes run different numbers of iterations, so a lane active in the loop may be inactive
 // before it. readlane and writelane, as ROCDL op or intrinsic call, name their lane, so they
 // still move, unless that lane differs between lanes and is read from the first active one.

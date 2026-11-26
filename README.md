@@ -301,7 +301,8 @@ Python Function (@flyc.kernel / @flyc.jit)
    │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
    │    fly-promote-regmem-to-vectorssa →                     │
    │    convert-fly-to-rocdl → canonicalize →                 │
-   │    gpu.module(convert-scf-to-cf, cse,                    │
+   │    gpu.module(rocdl-invariant-code-motion,               │
+   │       convert-scf-to-cf, cse,                            │
    │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
    ├──────────────────────────────────────────────────────────┤
    │ B. binary_prep_fragments  (→ LLVM)                       │
