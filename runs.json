@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T00:42:43Z",
+ "updated": "2026-11-26T01:03:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "phil/fc2-max-flat-work-group-size",
    "event": "pull_request",
    "title": "[Feat] Add a max_flat_work_group_size compile hint",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726666677",
    "created_at": "2026-11-26T00:09:17Z",
-   "updated_at": "2026-11-26T00:40:35Z",
+   "updated_at": "2026-11-26T00:54:57Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -29,18 +29,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T00:40:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T00:44:35Z",
+     "completed_at": "2026-11-26T00:54:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726666677/job/139610733655"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T00:40:35Z",
+     "started_at": "2026-11-26T00:41:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726666677/job/139610733727"
     }
@@ -115,18 +115,18 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T00:40:40Z",
+     "started_at": "2026-11-26T00:52:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726651270/job/139610769161"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T00:40:40Z",
+     "started_at": "2026-11-26T01:00:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726651270/job/139610769205"
     }
@@ -139,11 +139,11 @@
    "branch": "phil/fc1-dynamic-extent-i64",
    "event": "pull_request",
    "title": "[Bugfix] Stop products of dynamic shape extents from wrapping at 2^31",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726643078",
    "created_at": "2026-11-26T00:09:05Z",
-   "updated_at": "2026-11-26T00:35:00Z",
+   "updated_at": "2026-11-26T01:00:07Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -158,20 +158,23 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T00:24:57Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T01:00:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726643078/job/139604279480"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T00:24:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726643078/job/139604279707"
+     "completed_at": "2026-11-26T00:52:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726643078/job/139604279707",
+     "machine": "smci350-rck-g03-b05-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
