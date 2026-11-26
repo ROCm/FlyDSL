@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T09:03:20Z",
+ "updated": "2026-11-26T09:25:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780",
    "created_at": "2026-11-26T08:46:32Z",
-   "updated_at": "2026-11-26T08:47:57Z",
+   "updated_at": "2026-11-26T09:21:08Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:21:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780/job/139810218607"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:21:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780/job/139810218611"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:21:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45786014780/job/139810218714"
+    }
+   ]
   },
   {
    "run_id": 45785661431,
@@ -25,13 +53,41 @@
    "branch": "main",
    "event": "push",
    "title": "[AOT] Return the export metadata from export_to_c and name raw-bits s\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431",
    "created_at": "2026-11-26T08:44:05Z",
-   "updated_at": "2026-11-26T08:58:36Z",
+   "updated_at": "2026-11-26T09:13:28Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:13:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210386"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:13:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210513"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:13:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45785661431/job/139806210515"
+    }
+   ]
   },
   {
    "run_id": 45784329058,
@@ -1364,11 +1420,11 @@
    "branch": "fix/f50-fp8-gemm-4wave-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-buffer refill LDS race in fp8_gemm_4wave",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870",
    "created_at": "2026-11-25T02:17:26Z",
-   "updated_at": "2026-11-26T08:41:41Z",
+   "updated_at": "2026-11-26T09:05:04Z",
    "actor": "thechenli",
    "jobs": []
   },
@@ -1379,13 +1435,32 @@
    "branch": "fix/f40-mxfp-moe-gemm1-bm128-a-ring",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-tile LDS race in mxfp_moe stage-1 GEMM at BM=128",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801",
    "created_at": "2026-11-25T02:16:19Z",
-   "updated_at": "2026-11-26T08:56:31Z",
+   "updated_at": "2026-11-26T09:08:51Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:08:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835825"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:08:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835876"
+    }
+   ]
   },
   {
    "run_id": 45531594614,
@@ -1394,13 +1469,32 @@
    "branch": "fix/f39-moe-gemm1-tile-m16-lds-overflow",
    "event": "pull_request",
    "title": "[Bugfix] Fix A-tile LDS overlap in MoE stage-1 GEMM at tile_m=16/48",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614",
    "created_at": "2026-11-25T02:15:08Z",
-   "updated_at": "2026-11-26T08:57:24Z",
+   "updated_at": "2026-11-26T09:08:55Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:08:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614/job/139803864872"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:08:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614/job/139803864940"
+    }
+   ]
   },
   {
    "run_id": 45531437351,
@@ -1409,13 +1503,32 @@
    "branch": "fix/f38-conv3d-fp8-drain-read-before-wait",
    "event": "pull_request",
    "title": "[Bugfix] Fix the pipeline-drain LDS race in conv3d_implicit_fp8",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351",
    "created_at": "2026-11-25T02:13:51Z",
-   "updated_at": "2026-11-26T08:52:29Z",
+   "updated_at": "2026-11-26T09:16:04Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:16:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589017"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:16:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589298"
+    }
+   ]
   },
   {
    "run_id": 45531296496,
@@ -1439,13 +1552,32 @@
    "branch": "fix/f35b-allreduce-2stage-uneven-allgather",
    "event": "pull_request",
    "title": "[Bugfix] Fix the 2-stage custom all-reduce all-gather for uneven sizes",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523",
    "created_at": "2026-11-25T02:11:41Z",
-   "updated_at": "2026-11-26T08:42:13Z",
+   "updated_at": "2026-11-26T09:04:29Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:04:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625844"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:04:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625888"
+    }
+   ]
   },
   {
    "run_id": 45530972624,
@@ -1503,13 +1635,32 @@
    "branch": "fix/f30-pa-tile-decode-v-page-ids-race",
    "event": "pull_request",
    "title": "[Bugfix] Fix the V page-id LDS race in pa_decode_tile_kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405",
    "created_at": "2026-11-25T02:06:48Z",
-   "updated_at": "2026-11-26T08:41:51Z",
+   "updated_at": "2026-11-26T09:04:29Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:14:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801626878"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:04:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801627005"
+    }
+   ]
   },
   {
    "run_id": 45530467192,
@@ -1518,13 +1669,32 @@
    "branch": "fix/f29-pa-ps-decode-q-staging-overwrites-p",
    "event": "pull_request",
    "title": "[Bugfix] Fix the P/query LDS race in pa_decode_metadata_kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192",
    "created_at": "2026-11-25T02:05:40Z",
-   "updated_at": "2026-11-26T08:41:44Z",
+   "updated_at": "2026-11-26T09:04:30Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:04:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634038"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:04:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634437"
+    }
+   ]
   },
   {
    "run_id": 45530317444,
@@ -1533,13 +1703,32 @@
    "branch": "fix/f14-f49-mla-decode-kv-buffer0-reuse-race",
    "event": "pull_request",
    "title": "[Bugfix] Fix the KV buffer reuse race in mla_fwd_decode_m16x8_fp8_fp8",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444",
    "created_at": "2026-11-25T02:04:28Z",
-   "updated_at": "2026-11-26T08:41:42Z",
+   "updated_at": "2026-11-26T09:11:48Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:11:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444/job/139805365689"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:11:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530317444/job/139805365867"
+    }
+   ]
   },
   {
    "run_id": 45530158732,
@@ -1582,13 +1771,32 @@
    "branch": "fix/f10-gemm-a16w16-hti-b-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix a main-loop LDS race in the gemm_a16w16 gfx950 HTI kernel",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109",
    "created_at": "2026-11-25T02:01:37Z",
-   "updated_at": "2026-11-26T08:41:39Z",
+   "updated_at": "2026-11-26T09:13:39Z",
    "actor": "thechenli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:13:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311108"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:13:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311233"
+    }
+   ]
   },
   {
    "run_id": 45455838769,
@@ -1956,7 +2164,26 @@
    "created_at": "2026-11-24T03:34:57Z",
    "updated_at": "2026-11-26T08:41:37Z",
    "actor": "merrittttt",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:25:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269169"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:25:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269185"
+    }
+   ]
   },
   {
    "run_id": 45317002749,
@@ -2026,13 +2253,32 @@
    "branch": "users/merrittttt/gemm-a16w16-swizzle-bk32",
    "event": "pull_request",
    "title": "[Bugfix] Size the gemm_a16w16 gfx950 LDS swizzle to block_k",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030",
    "created_at": "2026-11-24T02:23:12Z",
-   "updated_at": "2026-11-26T08:41:24Z",
+   "updated_at": "2026-11-26T09:12:48Z",
    "actor": "merrittttt",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:12:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030/job/139805879899"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:12:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45311979030/job/139805880195"
+    }
+   ]
   },
   {
    "run_id": 45310213083,
@@ -2047,7 +2293,26 @@
    "created_at": "2026-11-24T02:08:45Z",
    "updated_at": "2026-11-26T08:41:36Z",
    "actor": "merrittttt",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:24:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083/job/139812239922"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T09:24:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45310213083/job/139812239956"
+    }
+   ]
   },
   {
    "run_id": 45290819082,
