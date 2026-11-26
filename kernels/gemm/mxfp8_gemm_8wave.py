@@ -25,6 +25,16 @@ from kernels.gemm.fp8_gemm_utils import (
 # closes for this shape, see ``compile_mxfp8_gemm_8w``.
 BLOCK_K = 128
 LDS_LIMIT_BYTES = 160 * 1024
+# CUs on a gfx950 part (MI350X and MI355X both have 256; this kernel is gfx950-only).
+# The tile dispatch saturates at this many workgroups.
+N_CU = 256
+# Measured per-CU throughput of each candidate tile once the machine is
+# saturated, in TFLOP/s x 10 (integers keep the dispatch in one comparison
+# chain).  A workgroup moves ``(BLOCK_M + BLOCK_N) / (BLOCK_M * BLOCK_N)`` bytes
+# per MAC, i.e. half as much for a 256x256 tile as for a 128x128 one and a
+# quarter as much as for a 64x64 one -- which is where the ~2x / ~5x ratios come
+# from, and why the big tile only pays off once its grid alone covers the part.
+TILE_RATE = {(256, 256): 106, (128, 128): 51, (64, 64): 21}
 
 
 class ScalePreshuffledS2R:
@@ -503,17 +513,26 @@ def compile_mxfp8_gemm_8w(
         store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
         store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
 
-    @flyc.jit
-    def launch_gemm(
-        A: fx.Tensor,
-        B_T: fx.Tensor,
-        C: fx.Tensor,
-        A_scale: fx.Tensor,
-        B_scale: fx.Tensor,
-        c_m: fx.Int32,
-        c_n: fx.Int32,
-        stream: fx.Stream,
-    ):
+    # A 256x256 workgroup is already MFMA-bound, so a problem that only fills a
+    # few dozen of the 256 CUs cannot go faster on this tile -- it needs more
+    # workgroups, which means a narrower tile.  ``mxfp8_gemm_narrow`` provides
+    # those; the dispatch in ``launch_gemm`` below scores the three against each
+    # other for the call's M and N.  Imported here because that module imports
+    # ``MxMfma`` from this one.
+    from kernels.gemm.mxfp8_gemm_narrow import compile_mxfp8_gemm_tile
+
+    # Only the preshuffled-scale path has the narrow-tile ring variant.
+    small_launch = None
+    tiny_launch = None
+    if scale_preshuffled:
+        _, small_launch = compile_mxfp8_gemm_tile(
+            K=K, BLOCK_M=128, BLOCK_N=128, b_preshuffled=b_preshuffled, xcd_swizzle=xcd_swizzle
+        )
+        _, tiny_launch = compile_mxfp8_gemm_tile(
+            K=K, BLOCK_M=64, BLOCK_N=64, b_preshuffled=b_preshuffled, xcd_swizzle=xcd_swizzle
+        )
+
+    def _launch_big(A, B_T, C, A_scale, B_scale, c_m, c_n, stream):
         grid_x = ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N)
         kernel_gemm(
             A,
@@ -525,5 +544,60 @@ def compile_mxfp8_gemm_8w(
             c_n,
             value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
         ).launch(grid=(grid_x, 1, 1), block=(512, 1, 1), stream=stream)
+
+    def _launch_small(A, B_T, C, A_scale, B_scale, c_m, c_n, stream):
+        small_launch(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+    def _launch_tiny(A, B_T, C, A_scale, B_scale, c_m, c_n, stream):
+        tiny_launch(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+    if small_launch is None:
+
+        @flyc.jit
+        def launch_gemm(
+            A: fx.Tensor,
+            B_T: fx.Tensor,
+            C: fx.Tensor,
+            A_scale: fx.Tensor,
+            B_scale: fx.Tensor,
+            c_m: fx.Int32,
+            c_n: fx.Int32,
+            stream: fx.Stream,
+        ):
+            _launch_big(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+
+        return launch_gemm
+
+    @flyc.jit
+    def launch_gemm(
+        A: fx.Tensor,
+        B_T: fx.Tensor,
+        C: fx.Tensor,
+        A_scale: fx.Tensor,
+        B_scale: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
+        stream: fx.Stream,
+    ):
+        # Rates are the measured per-CU throughput of each tile once the machine
+        # is saturated (TFLOP/s x 10, so the comparison stays in integers).  The
+        # 256x256 tile is ~2x the 128x128 tile and ~5x the 64x64 one, but it
+        # needs four (resp. sixteen) times the workgroups to fill the machine.
+        big = TILE_RATE[(BLOCK_M, BLOCK_N)] * fx.min(ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N), N_CU)
+        mid = TILE_RATE[(128, 128)] * fx.min(ceildiv(c_m, 128) * ceildiv(c_n, 128), N_CU)
+        tiny = TILE_RATE[(64, 64)] * fx.min(ceildiv(c_m, 64) * ceildiv(c_n, 64), N_CU)
+        # The branch order matters: a nested ``if`` chain instantiates the
+        # innermost kernel twice, and a module carrying the extra copy makes the
+        # 256x256 kernel ~8% slower on the large shapes.  This flat chain keeps
+        # one instantiation per tile.
+        if big >= mid:
+            if big >= tiny:
+                _launch_big(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+            else:
+                _launch_tiny(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+        elif mid >= tiny:
+            _launch_small(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
+        else:
+            _launch_tiny(A, B_T, C, A_scale, B_scale, c_m, c_n, stream)
 
     return launch_gemm
