@@ -13,28 +13,24 @@ allowed-tools: Read Edit Bash Grep Glob Agent
 
 # Debug FlyDSL Kernel
 
-## Step 0: Clear All Caches (ALWAYS DO THIS FIRST)
+## Step 0: Make Sure the Code You Edited Is the Code That Runs
 
-FlyDSL aggressively caches compiled kernels. Stale cache is the #1 cause of "my fix didn't work":
+Check that `python -c "import flydsl; print(flydsl.__file__)"` points at the
+checkout you edited, not an installed wheel, and that rebuilt C++ was installed
+where it is imported.
 
-```bash
-rm -rf ~/.flydsl /tmp/flydsl*
-```
-
-Also clear Python-level caches if using `@functools.lru_cache`:
-```python
-compile_my_kernel.cache_clear()
-```
+FlyDSL retraces on every call, and its caches are keyed by the traced IR (the
+disk key adds the toolchain fingerprint), so Python edits recompile on their
+own. Clear `~/.flydsl/cache` or set `FLYDSL_RUNTIME_ENABLE_CACHE=0` only for a
+suspected stale artifact. Host-side memos do go stale within a process; clear
+them (`compile_my_kernel.cache_clear()` for an `@functools.lru_cache` helper).
 
 `FLYDSL_RUNTIME_ENABLE_CACHE=0` turns off the disk cache only. Within one
-process, a `@flyc.jit` function keeps every artifact it compiled in memory,
-keyed by the lowered IR, and reuses it without compiling again. A later case
-that lowers to a kernel an earlier case already built therefore writes no
-`FLYDSL_DUMP_IR` dump at all, and its dump directory stays empty. Run each
-case in its own process when you need a dump of every specialization.
-Observed on gfx942: a 37-case compile-only dump from one process left one case
-directory empty; dumped with only one other case in its process, the same case
-wrote all of its kernels.
+process, a `@flyc.jit` function reuses every artifact it compiled, keyed by the
+traced IR, so a later case that traces to an already-built kernel writes no
+`FLYDSL_DUMP_IR` dump and its dump directory stays empty. Run each case in its
+own process when you need a dump of every specialization (observed on gfx942:
+one empty case directory in a 37-case single-process dump).
 
 ## Step 1: Classify the Error
 
@@ -146,10 +142,9 @@ CTA, and a bug there passes. Before trusting such a test:
 2. Lower `max_context_partition_num` until most CTAs run several tiles.
 3. Plant a bug in the specialized branch (scale its scores, hand the next tile the wrong page ids), confirm the test fails, then revert it.
 
-Observed on a paged-attention decode test: planned at up to 64 partitions per
-sequence, 736 CTAs shared 737 KV tiles (one CTA ran two, and none ran the
-unmasked loop), and bugs planted in the unmasked loop and in the next-tile page
-handoff passed; at 4 partitions (212 CTAs, 180 of them multi-tile) both failed.
+Observed on a paged-attention decode test: at up to 64 partitions per
+sequence, 736 CTAs shared 737 KV tiles and two planted bugs passed; at 4
+partitions (180 of 212 CTAs multi-tile) both failed.
 
 ## 5. Debugging Small Errors (1-5%)
 
@@ -175,10 +170,9 @@ rescaled, or rescaled at the wrong point, still passes `atol=5e-3`. To test the
 rescale, make the row max jump after the first tile: give each sequence one key,
 placed after the first tile, whose logit leads the rest by a wide margin (cover
 leads from about 12 up to 1e5 and beyond), and confirm that a planted
-"no rescale" bug fails. Observed: a decode kernel variant whose PV accumulation
-dropped `o * corr` passed 8 of 8 random-data cases at batch 64 and context 4096;
-with one leading key at `length // 3`, every case that ran the variant failed
-(max abs error 13-29).
+"no rescale" bug fails. Observed: a decode variant that dropped `o * corr`
+passed 8 of 8 random-data cases and failed every case with one leading key at
+`length // 3` (max abs error 13-29).
 
 ## 6. Compilation Errors
 
@@ -195,57 +189,27 @@ for i in range_constexpr(4): result[i] = ...
 
 ### 6.2 Runtime vs compile-time conditionals
 
-Current FlyDSL supports runtime comparisons in Python `if`; the AST rewriter lowers dynamic conditions to `scf.IfOp`. Prefer readable DSL operators for runtime SSA values:
-```python
-tid = gpu.thread_id("x")
-lane = tid % fx.Int64(64)
-c_zero = fx.Int64(0)
-c_limit = fx.Int64(8)
-
-# Runtime condition, lowered to scf.IfOp
-if lane == c_zero:
-    fx.printf("lane zero")
-
-# Runtime predicate for select
-val = (lane < c_limit).select(good_val, zero_val)
-
-```
-
-Avoid spelling simple integer comparisons as `arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)` unless you are manually constructing low-level MLIR. If you pass a condition directly to `scf.IfOp`, unwrap the DSL boolean:
-```python
-cond = arith.unwrap(partition_idx >= visible_tile_count)
-if_op = scf.IfOp(cond, has_else=False)
-```
-
-Use `const_expr(...)` only for compile-time decisions:
-```python
-if const_expr(trans_v):
-    ...
-```
-
-Do not use `const_expr(lane == 0)`: even with `known_block_size`, `gpu.thread_id("x")`, `lane`, and `warp_id` are runtime SSA values. The compiler knows their range, not the current executing lane.
+A Python `if` on a DSL value is a runtime `scf.if`; use `const_expr(...)` only
+for trace-time values. `const_expr(lane == 0)` is wrong even with
+`known_block_size`: `gpu.thread_id("x")`, `lane` and `warp_id` are runtime SSA
+values. Every name a runtime `if` assigns and that is used after it must be
+bound to an IR value before it: otherwise that use raises `NameError`, or tracing fails with
+`Variable(s) [...] initialized as None before a dynamic if/else (scf.if)`. See
+**flydsl-kernel-authoring** §3 ("Control Flow", "Frontend Semantic
+Restrictions").
 
 ### 6.3 Loop-carried state packing
 
-Prefer the concrete FlyDSL types (`fx.Int32`, `fx.Float32`, `fx.Vector`) for
-loop-carried state rather than wrapping raw values in `ArithValue` directly.
-(`fx.Vector` subclasses `ArithValue`; the guidance is about the constructor you
-reach for, not the base class.) Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
-```python
-def _unwrap(v):
-    return v.ir_value() if hasattr(v, 'ir_value') else v
-
-init_state = [_unwrap(v) for v in [val1, val2, vec_val]]
-```
-
+`range(..., init=[...])` and its `yield` take a **flat** list; DSL values
+(`fx.Int32`, `fx.Float32`, `fx.Vector`) are converted to `ir.Value` for you, but
+nested lists are not, so flatten nested state with small pack/unpack helpers.
 Supported state types: `f32` (scalar), vector values, `i32`, `i64`, `index`.
 
 ### 6.4 buffer_load type mismatch
 
-Applies to kernels still on the raw buffer intrinsics, which live in
-`kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880). The
-`offset` is in units of `dtype`, so FP8 data addressed in bytes must be divided
-by the element size:
+Applies to kernels still on the raw intrinsics in `kernels/common/buffer_ops.py`.
+The `offset` is in units of `dtype`, so FP8 data addressed in bytes must be
+divided by the element size:
 ```python
 import flydsl.expr as fx
 from kernels.common import buffer_ops
@@ -254,9 +218,8 @@ k_addr_bytes = ...  # address in FP8 elements (= bytes for FP8)
 k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=fx.T.i32)
 ```
 
-This class of offset bug is the reason `fx.rocdl.make_buffer_tensor` + a layout
-view is preferred for new code — the descriptor and offsets are derived for you.
-See the **kernel-code-cleanup** skill to migrate.
+`fx.rocdl.make_buffer_tensor` + a layout view derives the offsets for you; see
+the **kernel-code-cleanup** skill to migrate.
 
 ### 6.5 Vector stores require vector values
 
@@ -296,7 +259,7 @@ sudo amd-smi reset -G -g <gpu_index>
 ## 8. Diagnostic Workflow
 
 ```
-1. Clear caches (rm -rf ~/.flydsl)
+1. Confirm the edited checkout is what runs (Step 0)
 2. Run with all-1s input → passes? Layout is OK, data issue
 3. Run with single partition (one_shot) → passes? Multi-partition/reduce bug
 4. Add host-side prints (tensor shapes, strides, NaN checks)
@@ -308,12 +271,10 @@ sudo amd-smi reset -G -g <gpu_index>
 
 ## 9. Common Pitfalls Checklist
 
-- [ ] Cleared `~/.flydsl` cache after code change
 - [ ] `range_constexpr()` for all compile-time loops (not `range()`)
-- [ ] No Python `if` on runtime GPU values
+- [ ] No `const_expr(...)` around runtime GPU values; names a runtime `if` assigns and later code uses are bound before it
 - [ ] `buffer_load` offset units match dtype (bytes/4 for i32)
 - [ ] Vector stores use `Vector` values (not scalars)
-- [ ] `range(..., init=...)` state uses internal types, unwrapped only at hard boundaries
 - [ ] Output written to correct partition slot (`part_z`, not absolute index)
 - [ ] `exp_sums`/`max_logits` strides match actual tensor layout
 - [ ] Softmax guards against `-inf - (-inf) = NaN`

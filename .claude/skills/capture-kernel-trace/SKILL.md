@@ -26,72 +26,38 @@ If no test script is provided, ask the user.
 ## Connection Info
 
 **Ask the user for their remote access configuration** (or reuse what they gave
-earlier in the session):
-- SSH host and user
-- Docker container name (if applicable)
-- FlyDSL install path on remote (default: project root)
+earlier in the session): SSH host and user, Docker container name (if any), and
+the FlyDSL path on the remote (default: project root).
 
-For a purely local GPU, skip the SSH/Docker wrappers throughout this skill.
+Commands below are written for a local GPU. On a remote container, run each one
+through this wrapper, without its `PYTHONPATH`, `ROCR_VISIBLE_DEVICES` and
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO` prefixes (the wrapper sets them; drop
+`docker exec` when the checkout is on the host):
 
-SSH command pattern (adjust per environment):
 ```bash
 ssh $USER@$HOST \
   "docker exec -e PYTHONPATH=<flydsl_root>/python:<flydsl_root>/tests \
-   -e FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 \
-   $CONTAINER bash -c '<CMD>'"
-```
-
-For local execution (no SSH/Docker):
-```bash
-FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=./ <CMD>
+   -e FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 -e ROCR_VISIBLE_DEVICES=<gpu> \
+   $CONTAINER bash -c 'cd /tmp && <CMD>'"
 ```
 
 ---
 
-## Workflow
+## Step 1: Deploy Test Script (remote only)
 
-```
-Step 1: Deploy test script to remote container (if remote)
-Step 2: Discover kernel names (if pattern not provided)
-Step 3: Configure input.yaml with kernel_include_regex
-Step 4: Run rocprofv3 -i input.yaml to collect ATT trace
-Step 5: Find and download latest ui_output_agent_* to local
-```
-
----
-
-## Step 1: Deploy Test Script
-
-If running on a remote container, copy the test script:
+Skip this if the script is already on the remote (e.g. in the FlyDSL tests dir):
 
 ```bash
-# Copy local file to container via SSH + docker cp
 scp $TEST_SCRIPT $USER@$HOST:/tmp/
 ssh $USER@$HOST "docker cp /tmp/$TEST_SCRIPT $CONTAINER:/tmp/"
 ```
-
-If the test script is already on the remote (e.g., in the FlyDSL tests dir), skip this step.
 
 ---
 
 ## Step 2: Kernel Discovery (if no pattern provided)
 
-Run rocprofv3 in stats mode to list kernel names:
-
 ```bash
-# Remote
-ssh $USER@$HOST \
-  "docker exec -e PYTHONPATH=<flydsl_root>/python:<flydsl_root>/tests \
-   $CONTAINER bash -c \
-   'cd /tmp && rocprofv3 --stats --kernel-trace -f csv -o /tmp/discover -- python $TEST_SCRIPT 2>&1'"
-
-# Local
 rocprofv3 --stats --kernel-trace -f csv -o /tmp/discover -- python $TEST_SCRIPT 2>&1
-```
-
-Parse output to find kernel names:
-
-```bash
 cat /tmp/discover_kernel_stats.csv
 ```
 
@@ -107,7 +73,7 @@ or graph replay.
 
 ## Step 3: Configure input.yaml
 
-Create the input.yaml with the target `kernel_include_regex`:
+Write `/tmp/input_trace.yaml` with the target `kernel_include_regex`:
 
 ```yaml
 jobs:
@@ -129,7 +95,7 @@ jobs:
 Key configuration:
 - `kernel_include_regex`: Exact name or regex from Step 2
 - `kernel_iteration_range`: `"[1, [2-4]]"` skips warmup (iteration 0), traces iterations 2-4
-- `att_target_cu: 1`: Single CU for manageable output. Only waves placed on that CU are traced; a small grid can leave it empty (see 5.3)
+- `att_target_cu: 1`: Single CU for manageable output. Only waves placed on that CU are traced (see 5.3)
 - `att_buffer_size: "0x6000000"`: 96MB per SE (increase to `0xC000000` if truncated)
 
 ---
@@ -147,23 +113,14 @@ Before running, check two things:
   including GPUs that other jobs are timing on.
 
 ```bash
-# Remote
-ssh $USER@$HOST \
-  "docker exec -e PYTHONPATH=<flydsl_root>/python:<flydsl_root>/tests \
-   -e FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 -e ROCR_VISIBLE_DEVICES=<gpu> \
-   $CONTAINER bash -c \
-   'cd /tmp && rm -rf /tmp/kernel_trace_output && rocprofv3 -i /tmp/input_trace.yaml -- python $TEST_SCRIPT 2>&1'"
-
-# Local
+rm -rf /tmp/kernel_trace_output
 ROCR_VISIBLE_DEVICES=<gpu> FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1 PYTHONPATH=./ \
   rocprofv3 -i /tmp/input_trace.yaml -- python $TEST_SCRIPT 2>&1
 ```
 
-**IMPORTANT**: Set `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` to get source-to-assembly mapping
-in the trace output. This enables DWARF debug info in the compiled HSACO, so `code.json`
-will contain source file:line annotations for each ISA instruction.
-
-Timeout: allow 3-5 minutes for JIT compilation + trace collection.
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` compiles DWARF debug info into the HSACO, so
+`code.json` maps each ISA instruction to its source file:line. Allow 3-5
+minutes for JIT compilation + trace collection.
 
 ---
 
@@ -172,12 +129,6 @@ Timeout: allow 3-5 minutes for JIT compilation + trace collection.
 ### 5.1 Find the latest ui_output_agent_* directory
 
 ```bash
-# Remote
-ssh $USER@$HOST \
-  "docker exec $CONTAINER bash -c \
-   'ls -td /tmp/kernel_trace_output/ui_output_agent_* 2>/dev/null | head -5'"
-
-# Local
 ls -td /tmp/kernel_trace_output/ui_output_agent_* 2>/dev/null | head -5
 ```
 
@@ -186,20 +137,12 @@ The output directories are named `ui_output_agent_<PID>_dispatch_<N>`. Pick the 
 ### 5.2 Download to local (remote only)
 
 ```bash
-# Create local destination
 LOCAL_TRACE_DIR=./trace_data/$(date +%Y%m%d_%H%M%S)_$KERNEL_SHORT_NAME
 mkdir -p $LOCAL_TRACE_DIR
-
-# Copy from container to host, then to local
 UI_OUTPUT_DIR=<latest ui_output_agent_* path>
 
 ssh $USER@$HOST "docker cp $CONTAINER:$UI_OUTPUT_DIR /tmp/ui_trace_download"
 scp -r $USER@$HOST:/tmp/ui_trace_download/* $LOCAL_TRACE_DIR/
-```
-
-Also download supporting files:
-
-```bash
 # Kernel trace CSV (timing, VGPR info)
 ssh $USER@$HOST "docker cp $CONTAINER:/tmp/kernel_trace_output/out_kernel_trace.csv /tmp/"
 scp $USER@$HOST:/tmp/out_kernel_trace.csv $LOCAL_TRACE_DIR/
@@ -224,15 +167,13 @@ if not waves or not code:
 "
 ```
 
-ATT records only the waves that run on `att_target_cu`. If no wave of the
-dispatch lands there, rocprofv3 still exits 0 and writes the dispatch directory,
-but `code.json` holds `"code": null` and there are no `se*_sm*_sl*_wv*.json`
-files, so the failure shows up only later, when an analyzer reads the empty
-trace. Grids smaller than the CU count (a split-K reduce kernel of a few dozen
-workgroups, say) are the usual cause. Rerun with another `att_target_cu`, keep
-`att_shader_engine_mask: "0xf"`, or trace a larger launch of the same kernel.
-Observed on gfx942 (80 CUs): a reduce kernel dispatch traced on CU 0 of all
-four shader engines left exactly this empty directory with rocprofv3 exit 0.
+If no wave of the dispatch runs on `att_target_cu`, rocprofv3 still exits 0 and
+writes the dispatch directory, but with `"code": null` and no wave files, and
+the failure surfaces only later in an analyzer. Grids smaller than the CU count
+(a split-K reduce of a few dozen workgroups, say) are the usual cause; this was
+observed on gfx942 (80 CUs) with a reduce kernel traced on CU 0. Rerun with
+another `att_target_cu`, keep `att_shader_engine_mask: "0xf"`, or trace a
+larger launch of the same kernel.
 
 ---
 
@@ -265,20 +206,16 @@ jobs:
     output_format: [csv]
 ```
 
-Run each (cache disabled is NOT needed — PMC doesn't use source mapping, so
-leave `FLYDSL_RUNTIME_ENABLE_CACHE=1` for speed):
+Run each job separately, pinned as in Step 4:
 
 ```bash
-HIP_VISIBLE_DEVICES=<gpu> FLYDSL_RUNTIME_ENABLE_CACHE=1 PYTHONPATH=./ \
-  rocprofv3 -i /tmp/pmc_l2.yaml -- python <test_script> --perf
-HIP_VISIBLE_DEVICES=<gpu> FLYDSL_RUNTIME_ENABLE_CACHE=1 PYTHONPATH=./ \
-  rocprofv3 -i /tmp/pmc_ea.yaml -- python <test_script> --perf
+ROCR_VISIBLE_DEVICES=<gpu> PYTHONPATH=./ rocprofv3 -i /tmp/pmc_l2.yaml -- python <test_script> --perf
+ROCR_VISIBLE_DEVICES=<gpu> PYTHONPATH=./ rocprofv3 -i /tmp/pmc_ea.yaml -- python <test_script> --perf
 ```
 
 **CRITICAL — keep each job to a single hardware pass (≤ ~4 TCC counters).**
-Packing many counters into one job forces multi-pass collection, which on
-gfx942 has been observed to trigger a **GPU Hang (HW Exception)**. Split into
-multiple single-pass jobs (as above) instead of one big counter list.
+Multi-pass collection has been observed to trigger a **GPU Hang (HW
+Exception)** on gfx942; split counters into single-pass jobs as above.
 
 Discover available counters with:
 ```bash
