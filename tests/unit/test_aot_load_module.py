@@ -287,6 +287,8 @@ class TestLoadModule:
         torch.testing.assert_close(y, torch.full_like(y, 2.0))
         with pytest.raises(RuntimeError, match="cannot be exported again"):
             second.export_to_c(tmp_path, "again")
+        with pytest.raises(NotImplementedError, match="flyc.load_module"):
+            second.kernel_names()
 
     def test_failed_launch_ends_the_call(self, tmp_path):
         fn = flyc.load_module(_export(tmp_path, "add_one_twice", add_one_twice, _ptr(), 8, 8))

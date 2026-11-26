@@ -478,6 +478,21 @@ class CompiledArtifact:
             ir.Module.parse(self._ir_text).operation.walk(visit)
         return binaries
 
+    def kernel_names(self) -> List[str]:
+        """Symbols of the GPU kernels this artifact launches, without repeats, in the order they are first launched."""
+        from .jit_function import _create_mlir_context
+
+        kernels = []
+
+        def visit(op):
+            if op.name == "gpu.launch_func":
+                kernels.append(ir.SymbolRefAttr(op.opview.kernel).value[-1])
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        return list(dict.fromkeys(kernels))
+
     def max_blocks_per_cu(self) -> int:
         from .jit_function import _create_mlir_context
 

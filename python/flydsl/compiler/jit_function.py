@@ -1437,6 +1437,10 @@ class CompiledFunction:
         """GPU code objects of this specialization, keyed by ``gpu.binary`` symbol name."""
         return self._keepalive.binaries()
 
+    def kernel_names(self) -> List[str]:
+        """Symbols of the GPU kernels this function launches, without repeats, in the order they are first launched."""
+        return self._keepalive.kernel_names()
+
     def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> None:
         """Export this specialization as a standalone ``.o`` and C header.
 

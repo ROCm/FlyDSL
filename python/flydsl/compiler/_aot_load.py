@@ -125,6 +125,9 @@ class _LoadedModule:
     def binaries(self):
         raise NotImplementedError("binaries() is not available for a function from flyc.load_module")
 
+    def kernel_names(self):
+        raise NotImplementedError("kernel_names() is not available for a function from flyc.load_module")
+
 
 def load_module(path: Union[str, "os.PathLike[str]"]) -> CompiledFunction:
     """Load an object written by :meth:`CompiledFunction.export_to_c` into this process.
