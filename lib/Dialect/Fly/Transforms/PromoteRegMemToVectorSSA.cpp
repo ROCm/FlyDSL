@@ -6,6 +6,7 @@
 #include "mlir/Analysis/DataFlow/SparseAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -25,6 +26,7 @@
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <utility>
@@ -322,6 +324,13 @@ int64_t getAllocBits(Operation *root) {
          getElemBits(makePtrOp.getType());
 }
 
+/// Storage of bytes, such as RegisterAllocator's. When placed, it is read
+/// through the registers that cover each access, so that its sub-register
+/// fields can be accessed individually.
+bool isByteStorage(MakePtrOp root) {
+  return cast<PointerType>(root.getType()).getElemTy().isInteger(8);
+}
+
 class FlyPromoteRegMemToVectorSSAPass
     : public mlir::fly::impl::FlyPromoteRegMemToVectorSSAPassBase<FlyPromoteRegMemToVectorSSAPass> {
 public:
@@ -342,6 +351,11 @@ public:
   }
 
 private:
+  struct Placement {
+    RegisterClassAttr registerClass;
+    IntegerAttr startIdx;
+  };
+  DenseMap<MakePtrOp, Placement> placements;
   DenseMap<MakePtrOp, RegAllocaInfo> regAllocaInfos;
   SmallVector<MakePtrOp> allocaOrder;
   const DataFlowSolver *solver = nullptr;
@@ -351,6 +365,7 @@ private:
 
     regAllocaInfos.clear();
     allocaOrder.clear();
+    placements.clear();
 
     funcOp.walk([&](MakePtrOp makePtrOp) {
       if (!isAllocaCandidate(makePtrOp))
@@ -366,7 +381,10 @@ private:
       allocaOrder.push_back(makePtrOp);
     });
 
-    if (allocaOrder.empty())
+    SmallVector<RegisterPlaceOp> declarations;
+    funcOp.walk([&](RegisterPlaceOp op) { declarations.push_back(op); });
+
+    if (allocaOrder.empty() && declarations.empty())
       return success();
 
     DataFlowSolver functionSolver;
@@ -376,6 +394,13 @@ private:
     if (failed(functionSolver.initializeAndRun(funcOp)))
       return failure();
     solver = &functionSolver;
+
+    // A placement covers a whole allocation, which therefore has to be
+    // promoted. The declarations are consumed here.
+    if (failed(collectPlacements(declarations)))
+      return failure();
+    for (RegisterPlaceOp op : declarations)
+      op.erase();
 
     // Register memory is lexically scoped: it is accessed only inside the
     // region that allocates it.
@@ -428,6 +453,11 @@ private:
       }
     });
 
+    for (MakePtrOp root : allocaOrder) {
+      if (placements.count(root) && !regAllocaInfos.count(root))
+        return root.emitOpError("explicit register storage must be accessed only by loads and "
+                                "stores at static offsets");
+    }
     llvm::erase_if(allocaOrder, [&](MakePtrOp r) { return !regAllocaInfos.count(r); });
 
     if (allocaOrder.empty())
@@ -532,6 +562,54 @@ private:
 
   bool isPromoted(Value value) const { return getPromotedSlot(value).has_value(); }
 
+  /// Records the placement of the allocation of each declaration: its base, in
+  /// the block that creates it. The declarations of one allocation agree.
+  LogicalResult collectPlacements(ArrayRef<RegisterPlaceOp> declarations) {
+    bool invalidPlacement = false;
+    for (RegisterPlaceOp op : declarations) {
+      const RegAddress *address = getAddress(op.getStorage());
+      auto resolved = address ? address->getResolved() : std::nullopt;
+      if (!resolved || resolved->second != 0) {
+        op.emitOpError("requires the base of a static register allocation with positive allocSize");
+        invalidPlacement = true;
+        continue;
+      }
+      if (op->getBlock() != resolved->first->getBlock()) {
+        op.emitOpError("must be declared in the same block as its allocation");
+        invalidPlacement = true;
+        continue;
+      }
+      auto [it, inserted] = placements.try_emplace(
+          resolved->first, Placement{op.getRegisterClassAttr(), op.getStartIdxAttr()});
+      if (!inserted && (it->second.registerClass != op.getRegisterClassAttr() ||
+                        it->second.startIdx != op.getStartIdxAttr())) {
+        op.emitOpError("conflicting declarations for the same register allocation");
+        invalidPlacement = true;
+      }
+    }
+    if (invalidPlacement)
+      return failure();
+
+    for (MakePtrOp root : allocaOrder) {
+      auto it = placements.find(root);
+      if (it == placements.end())
+        continue;
+      // register_value carries the bit offset of a slice as an i32.
+      int64_t allocBits = getAllocBits(root);
+      if (allocBits > std::numeric_limits<int32_t>::max())
+        return root.emitOpError("explicit register storage must be smaller than 2^31 bits");
+      unsigned bits = it->second.registerClass.getBits();
+      if (isByteStorage(root) && (bits % 8 || allocBits % bits))
+        return root.emitOpError("explicit byte storage must be padded to whole ")
+               << bits << "-bit registers";
+    }
+    return success();
+  }
+
+  bool isPlacedByteStorage(MakePtrOp root) const {
+    return placements.count(root) && isByteStorage(root);
+  }
+
   /// The lanes of its promoted allocation that an access of `valueType`
   /// through `ptr` covers.
   std::optional<RegAccessInfo> getRegAccessInfo(Value ptr, Type valueType) {
@@ -633,6 +711,61 @@ private:
     return vector::ExtractOp::create(builder, loc, vec, ArrayRef<int64_t>{0});
   }
 
+  /// `value`, the lanes `access` covers, hinted to the registers of its placed
+  /// allocation that hold them.
+  Value bindRegister(OpBuilder &builder, Location loc, Value value, RegAccessInfo access) {
+    auto it = placements.find(access.makePtrOp);
+    if (it == placements.end())
+      return value;
+    // Placed storage was checked to stay below 2^31 bits.
+    int32_t bitOffset = access.offset * int32_t(getAllocaInfo(access.makePtrOp)->laneBits);
+    return RegisterValueOp::create(builder, loc, value.getType(), value, it->second.registerClass,
+                                   it->second.startIdx, builder.getI32IntegerAttr(bitOffset));
+  }
+
+  // Merge explicitly by lane, including partially overlapping slices. This
+  // avoids relying on extract_strided_slice folding through an insert chain
+  // when a later store updates only the tail of an earlier slice.
+  VectorValue insertLaneSlice(OpBuilder &builder, Location loc, Value slice, VectorValue storage,
+                              int64_t offset) {
+    int64_t size = storage.getType().getNumElements();
+    int64_t width = cast<VectorType>(slice.getType()).getNumElements();
+    SmallVector<int64_t> mask;
+    for (int64_t i = 0; i < size; ++i)
+      mask.push_back(i >= offset && i < offset + width ? size + i - offset : i);
+    return vector::ShuffleOp::create(builder, loc, storage, slice, mask);
+  }
+
+  // Read the covering registers of placed byte storage before extracting a
+  // sub-register field. Keep the slice separate: a load does not update the
+  // remaining storage lanes.
+  Value readCoveringRegisters(OpBuilder &builder, Location loc, VectorValue value,
+                              RegAccessInfo access) {
+    const RegAllocaInfo *info = getAllocaInfo(access.makePtrOp);
+    // Placed byte storage was checked to be padded to whole class members,
+    // whose width is a multiple of the lane width, which divides 8.
+    int64_t registerBits = placements.find(access.makePtrOp)->second.registerClass.getBits();
+    int64_t unit = registerBits / info->laneBits;
+    int64_t begin = access.offset / unit * unit;
+    int64_t end = (int64_t(access.offset) + access.width + unit - 1) / unit * unit;
+    Value slice =
+        vector::ExtractStridedSliceOp::create(builder, loc, value, ArrayRef<int64_t>{begin},
+                                              ArrayRef<int64_t>{end - begin}, ArrayRef<int64_t>{1});
+    Type lanesTy = slice.getType();
+    slice = vector::BitCastOp::create(
+        builder, loc, VectorType::get({(end - begin) / unit}, builder.getIntegerType(registerBits)),
+        slice);
+    int64_t relativeOffset = access.offset - begin;
+    access.offset = begin;
+    slice = bindRegister(builder, loc, slice, access);
+    slice = vector::BitCastOp::create(builder, loc, lanesTy, slice);
+    if (!relativeOffset && access.width == end - begin)
+      return slice;
+    return vector::ExtractStridedSliceOp::create(
+        builder, loc, slice, ArrayRef<int64_t>{relativeOffset}, ArrayRef<int64_t>{access.width},
+        ArrayRef<int64_t>{1});
+  }
+
   LogicalResult rewritePtrStore(PtrStoreOp storeOp, OpBuilder &builder, IRMapping &mapping,
                                 RegMem2VectorSSAMap &state) {
     auto access = getRegAccessInfo(storeOp.getPtr(), storeOp.getValue().getType());
@@ -649,8 +782,22 @@ private:
 
     const RegAllocaInfo *info = getAllocaInfo(access->makePtrOp);
     assert(info && "missing alloca info for register ptr.store");
+    if (isPlacedByteStorage(access->makePtrOp)) {
+      if (!isa<VectorType>(storedValue.getType()))
+        storedValue = vector::FromElementsOp::create(
+            builder, loc, VectorType::get({1}, storedValue.getType()), storedValue);
+      storedValue = bitcastToLanes(builder, loc, storedValue, info->vectorSSATy.getElementType(),
+                                   access->width);
+      // Bind the packed representation when it is read. Binding every partial
+      // write would constrain historical full-register values whose unchanged
+      // lanes LLVM may reuse after a later write to the same register.
+      state[access->makePtrOp] =
+          insertLaneSlice(builder, loc, storedValue, currentVec, access->offset);
+      return success();
+    }
     storedValue = bitcastToLanes(builder, loc, storedValue, info->vectorSSATy.getElementType(),
                                  access->width);
+    storedValue = bindRegister(builder, loc, storedValue, *access);
 
     if (isa<IntegerType, FloatType>(storedValue.getType())) {
       assert(access->width == 1 && "expected scalar type with width 1");
@@ -682,6 +829,12 @@ private:
     Type resultType = loadOp.getResult().getType();
     Value extracted;
 
+    if (isPlacedByteStorage(access->makePtrOp)) {
+      extracted = readCoveringRegisters(builder, loc, currentVec, *access);
+      mapping.map(loadOp, bitcastFromLanes(builder, loc, extracted, resultType));
+      return success();
+    }
+
     if (!isa<VectorType>(resultType) && access->width == 1) {
       extracted = vector::ExtractOp::create(builder, loc, currentVec, access->offset);
     } else {
@@ -690,6 +843,7 @@ private:
           ArrayRef<int64_t>{access->width}, ArrayRef<int64_t>{1});
     }
     extracted = bitcastFromLanes(builder, loc, extracted, resultType);
+    extracted = bindRegister(builder, loc, extracted, *access);
     mapping.map(loadOp, extracted);
     return success();
   }
@@ -989,8 +1143,15 @@ private:
           mapping.map(
               makePtrOp.getResult(),
               ub::PoisonOp::create(builder, makePtrOp.getLoc(), makePtrOp.getType()).getResult());
-          state[makePtrOp] = cast<VectorValue>(
-              ub::PoisonOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
+          // A packed field is bitcast to its covering registers for register
+          // placement. LLVM tracks poison per integer value but undef per bit,
+          // so undef keeps the written bits without materializing padding.
+          if (isPlacedByteStorage(makePtrOp))
+            state[makePtrOp] = cast<VectorValue>(
+                LLVM::UndefOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
+          else
+            state[makePtrOp] = cast<VectorValue>(
+                ub::PoisonOp::create(builder, makePtrOp.getLoc(), info->vectorSSATy).getResult());
         } else {
           builder.clone(op, mapping);
         }

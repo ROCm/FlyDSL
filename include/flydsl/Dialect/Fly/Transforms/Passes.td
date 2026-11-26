@@ -108,7 +108,8 @@ def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
     "gpu::GPUDialect",
     "scf::SCFDialect",
     "vector::VectorDialect",
-    "ub::UBDialect"
+    "ub::UBDialect",
+    "LLVM::LLVMDialect"
   ];
 }
 
