@@ -10,6 +10,7 @@ This test file provides:
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 # Use the installed FlyDSL wheel. The repository root is only needed to import
@@ -894,6 +895,74 @@ def test_allreduce_4gpu_accuracy(shape, dtype_str, mode):
     if phys_ng < 4:
         pytest.skip(f"Requires >= 4 physical GPUs, found {phys_ng}.")
     _run_subprocess_test(world_size=4, shape=shape, dtype_str=dtype_str, mode=mode)
+
+
+# bf16 inputs of ranks 0-3 whose fp32 sum rounds to different bf16 values depending on the order the ranks are added.
+_ORDER_SENSITIVE_BF16 = [1.53125, 1.796875, -1.424923539161682e-07, -1.1796875]
+
+
+def _ranks_agree_worker(rank: int, world_size: int, port: int):
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.manual_seed(rank)
+
+    x = torch.full((2560,), _ORDER_SENSITIVE_BF16[rank], dtype=torch.bfloat16, device=device)
+    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
+    offsets = [0 for _ in range(world_size)]
+    meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
+    fa = init_custom_ar(meta, x, handles, offsets, rank=rank, full_nvlink=True)
+
+    def assert_ranks_agree(out, what):
+        gathered = [torch.empty_like(out) for _ in range(world_size)]
+        dist.all_gather(gathered, out)
+        ref = gathered[0].view(torch.int16)
+        differ = [r for r, t in enumerate(gathered) if not torch.equal(t.view(torch.int16), ref)]
+        assert not differ, f"[rank={rank}] {what}: ranks {differ} hold other bytes than rank 0"
+
+    assert_ranks_agree(fa.custom_all_reduce(x), "1-stage, eager")
+
+    # 2-stage, single- and double-buffered loop: a rank's partition of 373 x 2560 (130 x 2560) leaves 16 (32) packs for
+    # a block's last pass, so that pass has work only in the first of the rank's two waves. 16 calls of each in one
+    # graph, each on its own input, so a call that reads a peer's partial sums before they are written gets the
+    # previous call's.
+    xs = [torch.empty(m * 2560, dtype=torch.bfloat16, device=device) for m in (373, 130) for _ in range(16)]
+    outs = [torch.empty_like(t) for t in xs]
+    for i in (0, 16):
+        fa.custom_all_reduce(xs[i], out=outs[i])
+    x_graph, out_graph = x.clone(), torch.empty_like(x)
+    graph = torch.cuda.CUDAGraph()
+    with fa.capture():
+        with torch.cuda.graph(graph):
+            fa.custom_all_reduce(x_graph, out=out_graph)
+            for inp, out in zip(xs, outs):
+                fa.custom_all_reduce(inp, out=out)
+    for replay in range(20):
+        for t in xs:
+            t.normal_()
+        graph.replay()
+        assert_ranks_agree(out_graph, f"1-stage, graph, replay {replay}")
+        for i, out in enumerate(outs):
+            assert_ranks_agree(out, f"2-stage, graph, replay {replay}, call {i}")
+    dist.destroy_process_group()
+
+
+@pytest.mark.multi_gpu
+def test_allreduce_4gpu_ranks_agree(monkeypatch):
+    """Every rank gets the same bytes back, from the 1-stage and the 2-stage kernel."""
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 4:
+        pytest.skip(f"Requires >= 4 physical GPUs, found {phys_ng}.")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    context = mp.spawn(_ranks_agree_worker, args=(4, _free_port()), nprocs=4, join=False)
+    deadline = time.monotonic() + 600
+    while not context.join(timeout=10):
+        if time.monotonic() > deadline:
+            for p in context.processes:
+                p.kill()
+            pytest.fail("4-GPU rank-agreement test timed out after 600 s")
 
 
 if __name__ == "__main__":
