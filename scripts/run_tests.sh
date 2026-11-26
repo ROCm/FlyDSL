@@ -13,6 +13,10 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Scratch files of this run, never a fixed shared path; removed on exit.
+RUN_TMP=$(mktemp -d -t flydsl-run-tests.XXXXXX)
+trap 'rm -rf "${RUN_TMP}"' EXIT
+
 # Broad test runs must be deterministic; dedicated autotune tests opt in per test.
 export FLYDSL_AUTOTUNE=0
 
@@ -92,7 +96,8 @@ for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/
         echo "  SKIP  ${name}  (requires: ${allowed_arches}; arch: ${_gpu_arch})"
         continue
     fi
-    output=$(python3 "${example}" 2>&1) || {
+    # Trace files (examples/07) go to the run's scratch directory, not the checkout.
+    output=$(FLYDSL_KTRACE_DUMP_DIR="${FLYDSL_KTRACE_DUMP_DIR:-${RUN_TMP}}" python3 "${example}" 2>&1) || {
         echo "  FAIL  ${name}"; echo "$output" | tail -10 | sed 's/^/        /'; exit 1
     }
     if echo "$output" | grep -qE "Result correct: False|All passed: False"; then
@@ -150,10 +155,10 @@ for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | s
             -e "s|@FLY_OPT@|${FLY_OPT}|g" \
             -e "s|@FILECHECK@|${FILECHECK}|g" \
             -e "s|@SRC@|${f}|g")
-        if ! eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
+        if ! eval "$cmd" > "${RUN_TMP}/filecheck_out.log" 2>&1; then
             echo "  FAIL  ${f#${REPO_ROOT}/tests/mlir/}"
             echo "        RUN: ${run_line}"
-            tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
+            tail -5 "${RUN_TMP}/filecheck_out.log" | sed 's/^/        /'
             exit 1
         fi
     done
