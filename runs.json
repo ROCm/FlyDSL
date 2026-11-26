@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T12:31:12Z",
+ "updated": "2026-11-26T13:08:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -1601,9 +1601,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:26:54Z",
+     "started_at": "2026-11-26T12:49:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/139813244069"
     }
@@ -1758,9 +1758,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:04:29Z",
+     "started_at": "2026-11-26T12:45:37Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625888"
     }
@@ -1878,11 +1878,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T12:05:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634437"
+     "completed_at": "2026-11-26T12:32:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634437",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -2367,11 +2370,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T12:14:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269169"
+     "completed_at": "2026-11-26T12:49:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269169",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
