@@ -3857,6 +3857,34 @@ def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
     _assert_lse_matches(lse, _reference_lse(q, k, causal, Hkv), atol)
 
 
+@pytest.mark.parametrize(
+    "Sq,Skv,D",
+    [
+        (64, 65, 64),  # seq_len a multiple of 64, seq_len_kv not
+        (128, 100, 128),
+        (64, 192, 64),  # both multiples of 64: the unmasked build
+        (100, 64, 64),
+    ],
+)
+def test_dense_cross_attn_kv_tail(Sq, Skv, D):
+    """Non-causal dense cross attention masks the KV tail tile.
+
+    The generic dense path picks a build without the KV padding mask when the
+    lengths fill whole 64-wide tiles; it used to check seq_len only, so the padded
+    keys of a partial KV tile entered the softmax.
+    """
+    dtype = torch.bfloat16
+    B, H = 1, 4
+    torch.manual_seed(Sq + Skv + D)
+    q = _rand_lse(B, Sq, H, D, dtype=dtype)
+    k = _rand_lse(B, Skv, H, D, dtype=dtype)
+    v = _rand_lse(B, Skv, H, D, dtype=dtype)
+    out, lse = flydsl_flash_attn_func(q, k, v, causal=False, return_lse=True)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out.float(), pytorch_ref_attention(q, k, v, causal=False), rtol=2.0e-2, atol=2.0e-2)
+    _assert_lse_matches(lse, _reference_lse(q, k, False, H), _ATOL_BF16)
+
+
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("D,num_kv_splits", [(64, 2), (128, 3)])
