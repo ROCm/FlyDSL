@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T14:38:16Z",
+ "updated": "2026-11-26T14:40:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45840653556,
+   "pr": null,
+   "commit": "6ef2e1d302cf0c43c6a139d067779c9171313e0d",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Size the moe_gemm_2stage stage-1 A-tile LDS buffers for whol\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45840653556",
+   "created_at": "2026-11-26T14:36:05Z",
+   "updated_at": "2026-11-26T14:38:00Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45840467021,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Use the stage-1 thread mapping for the uneven 2-stage all-ga\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45840467021",
    "created_at": "2026-11-26T14:35:00Z",
-   "updated_at": "2026-11-26T14:35:41Z",
+   "updated_at": "2026-11-26T14:36:22Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1607,10 +1622,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-11-26T13:59:20Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T14:38:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/139813244003"
     },
     {
@@ -1653,9 +1668,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:08:51Z",
+     "started_at": "2026-11-26T14:37:55Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835876"
     }
@@ -1678,9 +1693,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:08:54Z",
+     "started_at": "2026-11-26T14:38:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614/job/139803864872"
     },
@@ -2334,40 +2349,6 @@
      "started_at": "2026-11-24T07:43:28Z",
      "completed_at": "2026-11-24T08:09:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45346915636/job/138294258832"
-    }
-   ]
-  },
-  {
-   "run_id": 45334916675,
-   "pr": 1499,
-   "commit": "1e7f96a1600c4662feda1b5f10be9c6f97bc2b11",
-   "branch": "jli/llvm-update-coexec-scheduler",
-   "event": "pull_request",
-   "title": "llvm update to coexec scheduler  branch",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45334916675",
-   "created_at": "2026-11-24T05:40:06Z",
-   "updated_at": "2026-11-24T07:05:27Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T06:24:26Z",
-     "completed_at": "2026-11-24T06:49:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45334916675/job/138260273000"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-24T06:21:02Z",
-     "completed_at": "2026-11-24T06:37:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45334916675/job/138260273059"
     }
    ]
   }
