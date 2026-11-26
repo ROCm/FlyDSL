@@ -73,7 +73,15 @@ def _build_moe_gemm1_fp8_gateup(
     )
 
     in_t = elem_t
-    a_lds_size = BM * TILE_K
+    _val_per_thr = 16 // elem_bytes  # elements per 128b buffer_load (fp8=16)
+    _thrs_k = TILE_K // _val_per_thr
+    _thrs_m = 256 // _thrs_k
+    # The A-tile copy writes _thrs_m rows per pass (32 at tile_k=128), so each
+    # LDS buffer must hold a whole number of passes. Sized BM * TILE_K, a copy
+    # into a_ping at tile_m=16 (or 48, 80, ...) also overwrote a_pong while
+    # other waves were still reading it.
+    a_lds_rows = (BM + _thrs_m - 1) // _thrs_m * _thrs_m
+    a_lds_size = a_lds_rows * TILE_K
 
     @fx.struct
     class GemmBuffers:
@@ -85,10 +93,7 @@ def _build_moe_gemm1_fp8_gateup(
         sorted_lds: fx.Array[fx.Int32, 256, 16]
         gemm: GemmBuffers
 
-    _val_per_thr = 16 // elem_bytes  # elements per 128b buffer_load (fp8=16)
     _swz_params = (3, 4, 3)  # A-LDS swizzle, 8-bit fp8 (matches preshuffle_gemm)
-    _thrs_k = TILE_K // _val_per_thr
-    _thrs_m = 256 // _thrs_k
     _m_per_wave = _thrs_m // 4
 
     def _gemm_1x4(blk_n, arg_p_input, arg_p_weight, lds, M, expert_id):
