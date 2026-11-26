@@ -29,6 +29,8 @@ subtrees:
         title: DSL protocols
   - caption: Extension
     entries:
+      - file: extension/hadamard
+        title: Fast Walsh-Hadamard transform
       - file: extension/rand
         title: Random number generation
   - caption: Guides
