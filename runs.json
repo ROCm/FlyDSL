@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T14:56:56Z",
+ "updated": "2026-11-26T15:24:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Wait for the last K tile's B0/A0 copies in the conv3d fp8 dr\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481",
    "created_at": "2026-11-26T14:47:21Z",
-   "updated_at": "2026-11-26T14:53:44Z",
+   "updated_at": "2026-11-26T15:11:27Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T15:11:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651314"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T15:20:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651343"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-26T15:11:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651344"
+    }
+   ]
   },
   {
    "run_id": 45842201649,
@@ -158,11 +186,11 @@
    "branch": "pr/fix-fnuz-value-caster",
    "event": "pull_request",
    "title": "[Bugfix] Register ArithValue casters for the FNUZ fp8 types",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077",
    "created_at": "2026-11-26T10:13:10Z",
-   "updated_at": "2026-11-26T10:43:44Z",
+   "updated_at": "2026-11-26T14:56:37Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -177,9 +205,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T10:43:44Z",
+     "started_at": "2026-11-26T14:56:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338425"
     },
@@ -1738,10 +1766,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T14:38:22Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T15:04:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531594614/job/139803864872"
     },
     {
@@ -1762,11 +1790,11 @@
    "branch": "fix/f38-conv3d-fp8-drain-read-before-wait",
    "event": "pull_request",
    "title": "[Bugfix] Fix the pipeline-drain LDS race in conv3d_implicit_fp8",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351",
    "created_at": "2026-11-25T02:13:51Z",
-   "updated_at": "2026-11-26T09:16:04Z",
+   "updated_at": "2026-11-26T15:05:16Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -1784,9 +1812,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:16:04Z",
+     "started_at": "2026-11-26T15:05:15Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589298"
     }
