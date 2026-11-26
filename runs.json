@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T14:01:59Z",
+ "updated": "2026-11-26T14:38:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45840467021,
+   "pr": null,
+   "commit": "061a211168d8bbd37afbccf7f5d059394e5103f6",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Use the stage-1 thread mapping for the uneven 2-stage all-ga\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45840467021",
+   "created_at": "2026-11-26T14:35:00Z",
+   "updated_at": "2026-11-26T14:35:41Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45811409911,
    "pr": 1535,
@@ -40,29 +55,29 @@
    "branch": "main",
    "event": "push",
    "title": "[DSL][Perf] Lower signed // by a constant power of two to an arithmet\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086",
    "created_at": "2026-11-26T10:15:51Z",
-   "updated_at": "2026-11-26T10:48:41Z",
+   "updated_at": "2026-11-26T14:35:24Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-26T10:48:40Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T14:35:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086/job/139856961824"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T10:48:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-11-26T14:08:19Z",
+     "completed_at": "2026-11-26T14:35:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799687086/job/139856962749"
     },
     {
@@ -93,9 +108,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T10:43:44Z",
+     "started_at": "2026-11-26T14:32:08Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338402"
     },
@@ -2353,43 +2368,6 @@
      "started_at": "2026-11-24T06:21:02Z",
      "completed_at": "2026-11-24T06:37:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45334916675/job/138260273059"
-    }
-   ]
-  },
-  {
-   "run_id": 45320509454,
-   "pr": 1498,
-   "commit": "14b2d4e462647c83488d6a5f6fb17451e797c135",
-   "branch": "users/merrittttt/gemm-a16w16-hti-lds-races",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix cross-wave-group LDS races in the gemm_a16w16 gfx950 HTI epilogue",
-   "status": "queued",
-   "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454",
-   "created_at": "2026-11-24T03:34:57Z",
-   "updated_at": "2026-11-26T09:25:02Z",
-   "actor": "merrittttt",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T12:14:58Z",
-     "completed_at": "2026-11-26T12:49:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269169",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-26T09:25:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269185"
     }
    ]
   }
