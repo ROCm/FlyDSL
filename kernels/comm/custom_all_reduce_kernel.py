@@ -554,22 +554,24 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 dst_off_i32 = dst_pack * _ELEMS_PER_PACK
                 _store_v4i32(out_rsrc, dst_off_i32, raw)
         else:
-            tmp_rsrcs = [_make_rsrc(tmp_ptrs_arr[i]) for i in range(world_size)]
-            thread_linear_idx = bid_i32 * threads + lane_i32
-            thread_linear_stride = fx.grid_dim.x * threads
-
-            for cur in range(thread_linear_idx, largest_part_p, thread_linear_stride):
-                for p in range_constexpr(world_size):
-                    if const_expr(p == world_size - 1):
-                        ok = True
-                    else:
-                        ok = _u(cur) < part_p
-                    if ok:
-                        src_off_i32 = cur * _ELEMS_PER_PACK
-                        raw = _load_v4i32(tmp_rsrcs[p], src_off_i32)
-                        dst_pack_idx = (p * part_p) + cur
-                        dst_off_i32 = dst_pack_idx * _ELEMS_PER_PACK
-                        _store_v4i32(out_rsrc, dst_off_i32, raw)
+            # Same thread mapping as stage 1 and the vector path above: block b
+            # reads only the tmp entries that block b of each rank wrote, which
+            # is all that the per-block end sync orders. Warp w copies the
+            # partition of rank (rank + w) % world_size (tmp_ptrs_arr[w]) into
+            # that rank's slot of the output.
+            tmp_ptrs_vec = _pack_i64_vec(tmp_ptrs_arr)
+            thread_pack_start_s2 = bid_i32 * threads_per_rank_i32 + lane_id
+            pack_stride_s2 = fx.grid_dim.x * threads_per_rank_i32
+            tmp_src_rsrc_desc = _make_rsrc(_extract_i64(tmp_ptrs_vec, warp_id))
+            src_rank = (rank_i32 + warp_id) & (world_size - 1)
+            is_last_src = src_rank == (world_size - 1)
+            end_s2 = is_last_src.select(fx.Int32(largest_part_p), fx.Int32(part_p))
+            for cur in range(thread_pack_start_s2, end_s2, pack_stride_s2):
+                src_off_i32 = cur * _ELEMS_PER_PACK
+                raw = _load_v4i32(tmp_src_rsrc_desc, src_off_i32)
+                dst_pack = src_rank * part_p + cur
+                dst_off_i32 = dst_pack * _ELEMS_PER_PACK
+                _store_v4i32(out_rsrc, dst_off_i32, raw)
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage write-mode (large tensors, writes reduced result
