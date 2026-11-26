@@ -147,9 +147,9 @@ def build_fused_rope_cache_module(
             fx.copy(atom or copy_atom, r, fx.slice(div_tensor, (None, idx)))
 
         # Helper: get the rotary-pair element via ds_bpermute (LDS cross-lane shuffle).
-        # For NeoX RoPE, the pair of thread tid is tid XOR vecs_per_half.
+        # For NeoX RoPE, the pair of thread tid is (tid + vecs_per_half) % vecs_per_head.
         # ds_bpermute: thread tid reads the VGPR value held by thread (pair_byte_addr/4).
-        # pair_byte_addr = (tid XOR vecs_per_half) * 4.
+        # pair_byte_addr = pair_lane * 4.
         # Handles VEC_WIDTH=1 (vector<1xbf16/f16>, 16-bit) and VEC_WIDTH=2 (vector<2xbf16/f16>, 32-bit).
         def ds_bpermute_pair(vec_val, pair_byte_addr):
             """Return the copy of vec_val held by the rotary-pair thread, via ds_bpermute."""
@@ -188,9 +188,11 @@ def build_fused_rope_cache_module(
             is_first_half = tid < vecs_per_half
             cos_vec_idx = tid % vecs_per_half if reuse_freqs_front_part else tid
 
-            # Pair lane for ds_bpermute: tid XOR vecs_per_half (symmetric, works for both halves).
+            # Pair lane for ds_bpermute: tid ± vecs_per_half, i.e. (tid + vecs_per_half) % vecs_per_head
+            # (symmetric, works for both halves; tid XOR vecs_per_half only matches it when
+            # vecs_per_half is a power of two, not for D=96).
             # pair_byte_addr = pair_lane * 4 (ds_bpermute address unit is bytes, VGPR = 4 bytes).
-            pair_lane = tid ^ vecs_per_half
+            pair_lane = (tid + vecs_per_half) % vecs_per_head
             pair_byte_addr = pair_lane * 4
 
             # --- Shared cos/sin (loaded once, used by both Q and K) ---
