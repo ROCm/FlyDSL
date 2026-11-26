@@ -12,6 +12,8 @@ Highlights:
   2. **Predicated OOB masking**: the (M, N) shape need not be a multiple of the block tile,
      so border blocks have threads whose float4 lies past the tensor. A per-atom boolean
      predicate (``coord < (M, N)``) gates each copy, so a load/store never touches OOB memory.
+     The predicate checks a float4's first column only, so N must be a multiple of 4: then
+     every float4 is either wholly inside a row or wholly past it.
 """
 
 import torch
@@ -88,6 +90,8 @@ def vector_add(
 
 
 M, N = 100, 1000
+if N % 4 != 0:
+    raise ValueError(f"N must be a multiple of 4 (one float4 per thread along N), got N={N}")
 
 A = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
 B = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
