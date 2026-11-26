@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T11:59:26Z",
+ "updated": "2026-11-26T12:19:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -1694,11 +1694,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T11:28:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589017"
+     "completed_at": "2026-11-26T12:08:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589017",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1875,9 +1878,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:04:30Z",
+     "started_at": "2026-11-26T12:05:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192/job/139801634437"
     }
@@ -1927,21 +1930,24 @@
    "branch": "fix/f13-fp8-flash-attn-stagger-kv-copy-race",
    "event": "pull_request",
    "title": "[Bugfix] Fix the stagger K/V LDS race in flash_attn_fp8_gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530158732",
    "created_at": "2026-11-25T02:03:08Z",
-   "updated_at": "2026-11-26T11:38:56Z",
+   "updated_at": "2026-11-26T12:17:29Z",
    "actor": "thechenli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T11:38:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530158732/job/139797986713"
+     "completed_at": "2026-11-26T12:17:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530158732/job/139797986713",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2361,9 +2367,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:25:02Z",
+     "started_at": "2026-11-26T12:14:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45320509454/job/139812269169"
     },
