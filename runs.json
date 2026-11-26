@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T17:34:08Z",
+ "updated": "2026-11-26T17:53:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Wait for the last K tile's B0/A0 copies in the conv3d fp8 dr\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481",
    "created_at": "2026-11-26T14:47:21Z",
-   "updated_at": "2026-11-26T16:48:47Z",
+   "updated_at": "2026-11-26T17:51:28Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T16:48:46Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T17:36:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651344"
     }
    ]
