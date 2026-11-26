@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-26T15:24:59Z",
+ "updated": "2026-11-26T15:56:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T15:20:04Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T15:30:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45842517481/job/140001651343"
     },
     {
@@ -196,10 +196,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-26T14:32:08Z",
-     "completed_at": null,
+     "completed_at": "2026-11-26T15:47:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077/job/139854338402"
     },
     {
@@ -1965,11 +1965,11 @@
    "branch": "fix/f29-pa-ps-decode-q-staging-overwrites-p",
    "event": "pull_request",
    "title": "[Bugfix] Fix the P/query LDS race in pa_decode_metadata_kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192",
    "created_at": "2026-11-25T02:05:40Z",
-   "updated_at": "2026-11-26T14:41:08Z",
+   "updated_at": "2026-11-26T15:53:32Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -2076,11 +2076,11 @@
    "branch": "fix/f10-gemm-a16w16-hti-b-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix a main-loop LDS race in the gemm_a16w16 gfx950 HTI kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109",
    "created_at": "2026-11-25T02:01:37Z",
-   "updated_at": "2026-11-26T09:13:39Z",
+   "updated_at": "2026-11-26T15:50:30Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -2098,9 +2098,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-26T09:13:39Z",
+     "started_at": "2026-11-26T15:47:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311233"
     }
