@@ -203,6 +203,33 @@ def _coerce_other(self, other):
     return other
 
 
+def _integer_constant_or_splat(value):
+    """Return the integer in a scalar constant or a splat vector constant, else None.
+
+    Non-splat vectors, float constants, run-time values and integers wider than 64 bits all return None.
+    """
+    owner = value.owner
+    if getattr(owner, "name", None) == "vector.broadcast":
+        owner = owner.operands[0].owner  # A scalar broadcast to a vector.
+    if getattr(owner, "name", None) != "arith.constant":  # Block arguments have no name.
+        return None
+    attr = owner.attributes["value"]
+    if isinstance(attr, ir.DenseIntElementsAttr) and attr.is_splat:
+        attr = attr.get_splat_value()  # Every lane holds this value.
+    if not isinstance(attr, ir.IntegerAttr):
+        return None
+    # NOTE: For signless types wider than 64 bits, the MLIR Python bindings return the unsigned bit pattern from
+    # IntegerAttr.value (e.g. -4 : i128 reads back as 2**128 - 4), unlike narrower types, which read back signed.
+    # A negative divisor could then look like a power of two, so skip these until the bindings are fixed.
+    if isinstance(attr.type, ir.IntegerType) and attr.type.width > 64:
+        return None
+    return attr.value
+
+
+def _is_power_of_two_above_one(n):
+    return n is not None and n > 1 and n & (n - 1) == 0
+
+
 _ARITH_OPS = {
     "add": (arith.addf, arith.addi),
     "sub": (arith.subf, arith.subi),
@@ -243,6 +270,15 @@ def _binary_op(self, other, op):
         if isinstance(et, ir.IndexType):
             return arith.divui(self, other)
         if self.signed is not False:
+            divisor = _integer_constant_or_splat(other)  # Trying to cast `other` to an integer constant.
+            # If other is a power of two > 1, use a shift instead of a division.
+            # Operands of different types still reach floordivsi, which rejects them.
+            if other.type == self.type and _is_power_of_two_above_one(divisor):
+                # For signed x, an arithmetic right shift is floor(x / 2**k), which is
+                # what `//` means (it rounds toward -inf, as `shrsi` does).
+                # divisor is 2**k, so bit_length() is k + 1 and subtracting 1 gives k.
+                shift_amount = divisor.bit_length() - 1
+                return arith.shrsi(self, arith_const(shift_amount, self.type))
             return arith.floordivsi(self, other)
         return arith.divui(self, other)
 

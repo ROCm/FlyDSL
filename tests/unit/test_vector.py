@@ -271,6 +271,19 @@ class TestOperators:
         ir_text = _build_module(build, [_vec_i32, _vec_i32])
         assert "arith.floordivsi" in ir_text
 
+    @pytest.mark.parametrize(("divisor", "shift"), [(2, 1), (4, 2), (128, 7)])
+    @pytest.mark.parametrize("typed_divisor", [False, True])
+    def test_signed_floordiv_power_of_two_uses_shift(self, divisor, shift, typed_divisor):
+        def build(a):
+            ta = Vector(a, 8, Int32)
+            rhs = Int32(divisor) if typed_divisor else divisor
+            _ = ta // rhs
+
+        ir_text = _build_module(build, [_vec_i32])
+        assert f"dense<{shift}> : vector<8xi32>" in ir_text
+        assert "arith.shrsi" in ir_text
+        assert "arith.floordivsi" not in ir_text
+
     def test_mod_int(self):
         def build(a, b):
             ta = Vector(a, 8, Int32)
