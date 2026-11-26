@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T14:40:48Z",
+ "updated": "2026-11-26T14:43:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45841147299,
+   "pr": null,
+   "commit": "dfff88140649dee4386b66d9df12e14342c2062e",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Use three A slots for the BM=128 mxfp_moe stage-1 GEMM (#1513)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45841147299",
+   "created_at": "2026-11-26T14:39:02Z",
+   "updated_at": "2026-11-26T14:40:42Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45840653556,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Size the moe_gemm_2stage stage-1 A-tile LDS buffers for whol\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45840653556",
    "created_at": "2026-11-26T14:36:05Z",
-   "updated_at": "2026-11-26T14:38:00Z",
+   "updated_at": "2026-11-26T14:39:19Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1892,11 +1907,11 @@
    "branch": "fix/f29-pa-ps-decode-q-staging-overwrites-p",
    "event": "pull_request",
    "title": "[Bugfix] Fix the P/query LDS race in pa_decode_metadata_kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530467192",
    "created_at": "2026-11-25T02:05:40Z",
-   "updated_at": "2026-11-26T09:04:30Z",
+   "updated_at": "2026-11-26T14:41:08Z",
    "actor": "thechenli",
    "jobs": [
     {
@@ -2303,52 +2318,6 @@
      "machine": "gbt350-odcdh1-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45346915636,
-   "pr": null,
-   "commit": "47d04a1282dd2db774f04cbd43a5036f52b2d0d7",
-   "branch": "main",
-   "event": "push",
-   "title": "[Test] Bench gfx1250 FP8/FP4 GEMM per launch batch; add trig/uniform \u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45346915636",
-   "created_at": "2026-11-24T07:17:58Z",
-   "updated_at": "2026-11-24T08:22:01Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T07:43:36Z",
-     "completed_at": "2026-11-24T08:18:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45346915636/job/138294258774",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T07:43:27Z",
-     "completed_at": "2026-11-24T08:10:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45346915636/job/138294258818"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T07:43:28Z",
-     "completed_at": "2026-11-24T08:09:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45346915636/job/138294258832"
     }
    ]
   }
