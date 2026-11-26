@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-26T18:27:47Z",
+ "updated": "2026-11-26T21:24:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45895586079,
+   "pr": 1495,
+   "commit": "5224d6580ae38a64ab0980bced447927d0e8d261",
+   "branch": "users/merrittttt/fused-rope-pair-lane",
+   "event": "pull_request",
+   "title": "[Bugfix] Fix the NeoX pair lane in fused_rope_cache for head_dim=96",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45895586079",
+   "created_at": "2026-11-26T21:04:47Z",
+   "updated_at": "2026-11-26T21:04:47Z",
+   "actor": "merrittttt",
+   "jobs": []
+  },
   {
    "run_id": 45842517481,
    "pr": null,
@@ -2250,49 +2265,6 @@
      "started_at": "2026-11-24T12:47:31Z",
      "completed_at": "2026-11-24T12:57:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268"
-    }
-   ]
-  },
-  {
-   "run_id": 45384731158,
-   "pr": 1431,
-   "commit": "f66d90ab0ceb1817f0b334154335e8867e6e02cd",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45384731158",
-   "created_at": "2026-11-24T11:30:05Z",
-   "updated_at": "2026-11-24T12:13:16Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-24T11:51:39Z",
-     "completed_at": "2026-11-24T12:13:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45384731158/job/138423767667"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-24T12:09:21Z",
-     "completed_at": "2026-11-24T12:12:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45384731158/job/138423767771"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-11-24T11:52:25Z",
-     "completed_at": "2026-11-24T12:13:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45384731158/job/138423767781"
     }
    ]
   }
