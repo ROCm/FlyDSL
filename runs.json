@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-27T09:18:47Z",
+ "updated": "2026-11-27T09:21:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45972459077,
+   "pr": 1537,
+   "commit": "b676e50d328791242c8f56820f791ed0f8e1f645",
+   "branch": "perf/coop-warp-merge-sort-int-keys",
+   "event": "pull_request",
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972459077",
+   "created_at": "2026-11-27T09:17:22Z",
+   "updated_at": "2026-11-27T09:18:58Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 45972203017,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Lower float conversions for the chip in convert-rocdl-math-op\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017",
    "created_at": "2026-11-27T09:15:31Z",
-   "updated_at": "2026-11-27T09:15:51Z",
+   "updated_at": "2026-11-27T09:16:54Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45963875330",
    "created_at": "2026-11-27T08:12:20Z",
-   "updated_at": "2026-11-27T08:13:55Z",
+   "updated_at": "2026-11-27T09:17:39Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -2272,43 +2287,6 @@
    "updated_at": "2026-11-25T02:12:39Z",
    "actor": "thechenli",
    "jobs": []
-  },
-  {
-   "run_id": 45531179523,
-   "pr": 1509,
-   "commit": "0807d5814b4a5aaad08de67a571dcd40649d65cd",
-   "branch": "fix/f35b-allreduce-2stage-uneven-allgather",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the 2-stage custom all-reduce all-gather for uneven sizes",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523",
-   "created_at": "2026-11-25T02:11:41Z",
-   "updated_at": "2026-11-26T14:55:01Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T10:56:30Z",
-     "completed_at": "2026-11-26T11:37:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625844",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T12:45:37Z",
-     "completed_at": "2026-11-26T14:00:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625888"
-    }
-   ]
   }
  ]
 }
