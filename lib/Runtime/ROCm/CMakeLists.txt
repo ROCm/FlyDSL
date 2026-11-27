@@ -3,6 +3,13 @@
 #
 # FlyJitRuntime — thin ROCm runtime with GPU module caching.
 
+# hip-config.cmake reads HIP_PLATFORM from the cache or the environment, and
+# some HIP builds ship it without the hipconfig lookup that would detect the
+# platform otherwise. This runtime is AMD-only.
+if(NOT DEFINED HIP_PLATFORM AND NOT DEFINED ENV{HIP_PLATFORM})
+  set(HIP_PLATFORM amd)
+endif()
+
 # Prefer an explicitly selected ROCm, then the SDK in the active environment.
 # NO_DEFAULT_PATH excludes default search locations; a cached hip_DIR still wins.
 if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
