@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-27T07:40:38Z",
+ "updated": "2026-11-27T07:44:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388",
    "created_at": "2026-11-27T07:37:58Z",
-   "updated_at": "2026-11-27T07:38:36Z",
+   "updated_at": "2026-11-27T07:40:13Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -277,9 +277,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-27T07:38:42Z",
+     "started_at": "2026-11-27T07:39:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45895586079/job/140374922970"
     },
@@ -419,11 +419,11 @@
    "branch": "pr/refactor-registration",
    "event": "pull_request",
    "title": "[Refactor] Align FlyDSL registration and bindings with upstream MLIR",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474",
    "created_at": "2026-11-26T11:21:48Z",
-   "updated_at": "2026-11-27T07:19:46Z",
+   "updated_at": "2026-11-27T07:39:04Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -2007,20 +2007,20 @@
    "branch": "fix/f50-fp8-gemm-4wave-refill-war",
    "event": "pull_request",
    "title": "[Bugfix] Fix the A-buffer refill LDS race in fp8_gemm_4wave",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870",
    "created_at": "2026-11-25T02:17:26Z",
-   "updated_at": "2026-11-27T07:11:41Z",
+   "updated_at": "2026-11-27T07:41:44Z",
    "actor": "thechenli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T07:11:41Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T07:41:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/140364485266"
     },
     {
@@ -2222,11 +2222,11 @@
    "branch": "fix/f31-pa-swa-decode-qk-max-overwrites-q-scale",
    "event": "pull_request",
    "title": "[Bugfix] Fix the query-scale LDS race in pa_decode_sw_kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031",
    "created_at": "2026-11-25T02:08:15Z",
-   "updated_at": "2026-11-27T07:11:37Z",
+   "updated_at": "2026-11-27T07:38:51Z",
    "actor": "thechenli",
    "jobs": [
     {
