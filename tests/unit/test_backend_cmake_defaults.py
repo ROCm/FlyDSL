@@ -18,8 +18,6 @@ def test_cmake_default_backend_stays_rocdl():
     text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
 
     assert 'set(FLYDSL_BACKENDS "rocdl"' in text
-    assert "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)" in text
-    assert "set(_FLYDSL_BACKENDS_ALLOWED rocdl)" in text
 
 
 def test_rocm_runtime_is_only_added_for_rocdl_backend():
@@ -39,7 +37,7 @@ def test_backend_descriptors_are_loaded_from_selected_backend_list():
 
 
 def test_future_backend_descriptor_is_opt_in(tmp_path):
-    """A future backend should be legal only when explicitly selected."""
+    """A descriptor alone makes a backend selectable, and only selection includes it."""
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.skip("cmake not available")
@@ -48,16 +46,7 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
     backend_dir = cmake_dir / "backends"
     backend_dir.mkdir(parents=True)
 
-    text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
-    text = text.replace(
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)",
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl dummy)",
-    )
-    text = text.replace(
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl)",
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl dummy)",
-    )
-    (cmake_dir / "FlyDSLBackends.cmake").write_text(text)
+    shutil.copy(_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake", cmake_dir / "FlyDSLBackends.cmake")
 
     (backend_dir / "rocdl.cmake").write_text('set(GUARDRAIL_SELECTED_ROCDL ON CACHE BOOL "" FORCE)\n')
     (backend_dir / "dummy.cmake").write_text('set(GUARDRAIL_SELECTED_DUMMY ON CACHE BOOL "" FORCE)\n')
@@ -101,3 +90,11 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
     assert "FLYDSL_BACKENDS:STRING=dummy" in dummy_cache
     assert "GUARDRAIL_SELECTED_DUMMY:BOOL=ON" in dummy_cache
     assert "GUARDRAIL_SELECTED_ROCDL" not in dummy_cache
+
+    missing = subprocess.run(
+        [cmake, "-S", str(tmp_path), "-B", str(tmp_path / "build-missing"), "-DFLYDSL_BACKENDS=missing"],
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode != 0
+    assert "Unknown FLYDSL_BACKENDS entry: 'missing'" in missing.stderr

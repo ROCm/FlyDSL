@@ -4,8 +4,8 @@
 # ROCDL backend descriptor.
 # Self-registers into global properties consumed by downstream CMakeLists.txt.
 #
-# Adding a new backend: copy this file, change the property values, and add the
-# new name to _FLYDSL_BACKENDS_ALLOWED in cmake/FlyDSLBackends.cmake.
+# Adding a new backend: copy this file to cmake/backends/<name>.cmake and change
+# the property values; -DFLYDSL_BACKENDS can then select <name>.
 
 # TableGen / header subdirectories under include/flydsl/
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_DIALECT_SUBDIRS "FlyROCDL")

@@ -8,11 +8,16 @@
 #   cmake -DFLYDSL_BACKENDS="rocdl" ..
 #
 # Each backend descriptor (cmake/backends/<name>.cmake) self-registers into
-# global properties that downstream CMakeLists.txt files iterate over.
+# global properties that downstream CMakeLists.txt files iterate over. A backend
+# can be selected as soon as its descriptor exists.
+
+file(GLOB _FLYDSL_BACKENDS_AVAILABLE RELATIVE "${CMAKE_CURRENT_LIST_DIR}/backends"
+     "${CMAKE_CURRENT_LIST_DIR}/backends/*.cmake")
+list(TRANSFORM _FLYDSL_BACKENDS_AVAILABLE REPLACE "\\.cmake$" "")
 
 set(FLYDSL_BACKENDS "rocdl"
     CACHE STRING "Enabled FlyDSL backend stacks (semicolon-separated)")
-set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)
+set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS ${_FLYDSL_BACKENDS_AVAILABLE})
 
 # ---- Validate ----
 list(LENGTH FLYDSL_BACKENDS _n_backends)
@@ -23,12 +28,11 @@ if(_n_backends GREATER 5)
   message(FATAL_ERROR "FLYDSL_FOR_EACH_BACKEND supports at most 5 backends.")
 endif()
 
-set(_FLYDSL_BACKENDS_ALLOWED rocdl)
 foreach(_b ${FLYDSL_BACKENDS})
-  if(NOT _b IN_LIST _FLYDSL_BACKENDS_ALLOWED)
+  if(NOT _b IN_LIST _FLYDSL_BACKENDS_AVAILABLE)
     message(FATAL_ERROR
       "Unknown FLYDSL_BACKENDS entry: '${_b}'. "
-      "Allowed values: ${_FLYDSL_BACKENDS_ALLOWED}")
+      "Backends with a descriptor in cmake/backends/: ${_FLYDSL_BACKENDS_AVAILABLE}")
   endif()
 endforeach()
 
