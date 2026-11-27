@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-11-27T08:15:59Z",
+ "updated": "2026-11-27T09:18:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45972203017,
+   "pr": null,
+   "commit": "478e1abe6bdc7a7d0ddbe23c6d2e99cc9429c59c",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Lower float conversions for the chip in convert-rocdl-math-op\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017",
+   "created_at": "2026-11-27T09:15:31Z",
+   "updated_at": "2026-11-27T09:15:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 45972146256,
+   "pr": null,
+   "commit": "825534066c3f21e1c6ec7c5475da43e5ead31f8d",
+   "branch": "main",
+   "event": "push",
+   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions (#1431)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972146256",
+   "created_at": "2026-11-27T09:15:10Z",
+   "updated_at": "2026-11-27T09:15:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 45963875330,
    "pr": 1537,
@@ -10,11 +40,11 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45963875330",
    "created_at": "2026-11-27T08:12:20Z",
-   "updated_at": "2026-11-27T08:13:20Z",
+   "updated_at": "2026-11-27T08:13:55Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -25,39 +55,42 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Wait for K/V copies before the fp8 flash-attn third phase ba\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388",
    "created_at": "2026-11-27T07:37:58Z",
-   "updated_at": "2026-11-27T07:58:52Z",
+   "updated_at": "2026-11-27T09:15:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-27T07:58:51Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T08:28:53Z",
+     "completed_at": "2026-11-27T09:00:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412795"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T08:06:37Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T09:15:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412850"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T08:07:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412922"
+     "completed_at": "2026-11-27T08:36:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412922",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -493,22 +526,13 @@
    "branch": "pr/refactor-registration",
    "event": "pull_request",
    "title": "[Refactor] Align FlyDSL registration and bindings with upstream MLIR",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474",
    "created_at": "2026-11-26T11:21:48Z",
-   "updated_at": "2026-11-27T08:06:18Z",
+   "updated_at": "2026-11-27T09:12:39Z",
    "actor": "sjfeng1999",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-27T07:39:03Z",
-     "completed_at": "2026-11-27T08:06:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903774"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
@@ -516,7 +540,16 @@
      "conclusion": "success",
      "started_at": "2026-11-27T07:38:48Z",
      "completed_at": "2026-11-27T07:49:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903778"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140413514590"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T07:39:03Z",
+     "completed_at": "2026-11-27T08:06:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140413514663"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -525,7 +558,7 @@
      "conclusion": "success",
      "started_at": "2026-11-27T07:20:08Z",
      "completed_at": "2026-11-27T07:46:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903826",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140413514750",
      "machine": "smci350-rck-g03-b20-03",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
@@ -2274,58 +2307,6 @@
      "started_at": "2026-11-26T12:45:37Z",
      "completed_at": "2026-11-26T14:00:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531179523/job/139801625888"
-    }
-   ]
-  },
-  {
-   "run_id": 45530972624,
-   "pr": 1508,
-   "commit": "4f157ce738c24ea0dcb7bea3d90a7af20dcb33e4",
-   "branch": "fix/f33-allreduce-1stage-no-end-sync",
-   "event": "pull_request",
-   "title": "[Bugfix] Add an end handshake to the 1-stage custom all-reduce kernel",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530972624",
-   "created_at": "2026-11-25T02:09:57Z",
-   "updated_at": "2026-11-25T02:09:57Z",
-   "actor": "thechenli",
-   "jobs": []
-  },
-  {
-   "run_id": 45530776031,
-   "pr": 1507,
-   "commit": "008618c427cfe9c9444ba6485a05ab01d4c8e70c",
-   "branch": "fix/f31-pa-swa-decode-qk-max-overwrites-q-scale",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the query-scale LDS race in pa_decode_sw_kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031",
-   "created_at": "2026-11-25T02:08:15Z",
-   "updated_at": "2026-11-27T07:38:51Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-27T07:10:35Z",
-     "completed_at": "2026-11-27T07:38:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031/job/140364449293",
-     "machine": "smci350-rck-g03-b05-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T09:28:29Z",
-     "completed_at": "2026-11-26T10:48:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031/job/140364450796"
     }
    ]
   }
