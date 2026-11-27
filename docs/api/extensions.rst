@@ -62,6 +62,9 @@ Warp functions
      - Convenience result-layout variants for batched reduction.
    * - ``warp_bitonic_sort`` / ``warp_merge_sort``
      - Sort key or key/value inputs across a logical warp.
+   * - ``warp_sort``
+     - Sort a blocked tile with one of the two sorts above, chosen per call
+       and target; ``stable=True`` keeps the order of equal keys.
 
 ``op`` can be a built-in ``fx.ReductionOp`` or an associative callable. Some
 algorithms can reorder operands only when the operation is declared

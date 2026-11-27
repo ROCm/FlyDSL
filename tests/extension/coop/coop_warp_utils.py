@@ -21,6 +21,7 @@ from coop_test_utils import (
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.backends import current_target
+from flydsl.expr.primitive import inttoptr, ptrtoint
 
 # Shared kernels and host references for primitive matrices and compilation.
 
@@ -132,6 +133,99 @@ def check_compile_family(monkeypatch, arch, case):
 
     tensor = torch.empty(block * count, dtype=torch.int32, device="cpu")
     launch(tensor, tensor)
+
+
+# name: (items per lane, torch dtype, payload dtype, valid prefix, comparator) and the sort that must run, as
+# (stable=False, stable=True): on gfx9 through fx.coop, and everywhere else (other targets, fx.coop.universal).
+#
+# One item per lane takes the network unless equal keys must keep an order that can show: a payload, a
+# comparator and float keys can show it. Several items per lane are blocked, where the network returns them
+# striped. On gfx9 an item that is not one 32-bit word has no DPP network, and the rank path of the gfx9 merge
+# sorts it faster than the portable network; a pointer has neither, so the portable choice stands.
+SORT_CHOICES = {
+    "integer keys alone": ((1, "int32", None, False, False), ("network", "network"), ("network", "network")),
+    "valid prefix": ((1, "int32", None, True, False), ("network", "network"), ("network", "network")),
+    "payload": ((1, "int32", fx.Int32, False, False), ("network", "merge"), ("network", "merge")),
+    "comparator": ((1, "int32", None, False, True), ("network", "merge"), ("network", "merge")),
+    "float keys": ((1, "float32", None, False, False), ("network", "merge"), ("network", "merge")),
+    "two keys per lane": ((2, "int32", None, False, False), ("merge", "merge"), ("merge", "merge")),
+    "64-bit keys": ((1, "int64", None, False, False), ("merge", "merge"), ("network", "network")),
+    "16-bit keys": ((1, "int16", None, False, False), ("merge", "merge"), ("network", "network")),
+    "64-bit payload": ((1, "int32", fx.Int64, False, False), ("merge", "merge"), ("network", "merge")),
+    "pointer payload": ((1, "int32", "pointer", False, False), ("network", "merge"), ("network", "merge")),
+    "pointer keys": ((1, "pointer", None, False, True), ("network", "merge"), ("network", "merge")),
+}
+
+
+def check_sort_choice(monkeypatch, arch, case, universal, tmp_path):
+    """A kernel around ``warp_sort`` is, instruction for instruction, the kernel around the sort it must choose.
+
+    ``warp_sort`` adds no instruction of its own, and a wrong choice still sorts correctly, so the result
+    tests cannot see it.
+    """
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", arch)
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    assert current_target().arch == arch
+    (count, dtype, payload_dtype, valid_prefix, comparator), gfx9, other = SORT_CHOICES[case]
+    pairs = payload_dtype is not None
+    ns = fx.coop.universal if universal else fx.coop
+    expected = gfx9 if arch.startswith("gfx9") and not universal else other
+    block = fx.num_warp_threads()
+    n = count * (2 if pairs else 1)
+    options = {"valid_items": block * count - 3} if valid_prefix else {}
+    if comparator:
+        options["compare_op"] = lambda a, b: a > b
+
+    if dtype == "pointer":  # ordered by address
+        dtype, options["compare_op"] = "int32", lambda a, b: ptrtoint(a) > ptrtoint(b)
+        pointer_keys = True
+    else:
+        pointer_keys = False
+
+    def instructions(sort, name, **more):
+        def apply(a, out):
+            def pointer(value):
+                return inttoptr(a.iter.type, ptrtoint(a.iter).to(fx.Uint64) + value.to(fx.Uint64))
+
+            def cast(value, target):
+                return pointer(value) if target == "pointer" else value.to(target)
+
+            base = fx.thread_idx.x * n
+            values = [a[base + i] for i in range(n)]
+            keys = [pointer(value) for value in values[:count]] if pointer_keys else values[:count]
+            payload = [cast(value, payload_dtype) for value in values[count:]] if pairs else None
+            result = sort(keys, payload, **options, **more)
+            result = [*result[0], *result[1]] if pairs else list(result)
+            for i in range(n):
+                item = result[i]
+                out[base + i] = (ptrtoint(item) if isinstance(item, fx.Pointer) else item).to(a.dtype)
+
+        @flyc.kernel(known_block_size=[block, 1, 1])
+        def kernel(a: fx.Tensor, out: fx.Tensor):
+            apply(a, out)
+
+        @flyc.jit
+        def launch(a: fx.Tensor, out: fx.Tensor):
+            kernel(a, out).launch(grid=(1, 1, 1), block=(block, 1, 1))
+
+        monkeypatch.setenv("FLYDSL_DUMP_DIR", str(tmp_path / name))
+        tensor = torch.empty(block * n, dtype=getattr(torch, dtype), device="cpu")
+        launch(tensor, torch.empty_like(tensor))
+        (isa,) = (tmp_path / name).glob("*/*_final_isa.s")
+        lines = [line.strip() for line in isa.read_text().split("s_endpgm")[0].splitlines()]
+        return [line for line in lines if line and not line.startswith((";", ".")) and not line.endswith(":")]
+
+    reference = {
+        "network": instructions(ns.warp_bitonic_sort, "network"),
+        "merge": instructions(ns.warp_merge_sort, "merge"),
+    }
+    assert reference["network"] != reference["merge"]
+    for stable, chosen in zip((False, True), expected):
+        assert (
+            instructions(ns.warp_sort, f"stable-{stable}", stable=stable) == reference[chosen]
+        ), f"stable={stable}: expected the {chosen} sort"
 
 
 # Shared load/store checks and kernels for movement policy compilation.
