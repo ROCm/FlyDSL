@@ -5,7 +5,8 @@
 // Adapted from Triton (python/src/main.cc).
 //
 // Usage:
-//   // FLYDSL_BACKEND_COUNT and FLYDSL_BACKEND_0..N-1 are defined by CMake.
+//   // FLYDSL_BACKEND_COUNT and FLYDSL_BACKEND_0..N-1 are defined by CMake for
+//   // the targets that add FLYDSL_BACKEND_DEFINITIONS (lib/RegisterAll).
 //   #define MY_ACTION(name) void do_##name();
 //   FLYDSL_FOR_EACH_BACKEND(MY_ACTION)
 //   // expands to: void do_rocdl();
@@ -14,7 +15,7 @@
 #define FLYDSL_BACKEND_BACKEND_H
 
 #ifndef FLYDSL_BACKEND_COUNT
-#error "FLYDSL_BACKEND_COUNT must be defined by cmake/FlyDSLBackends.cmake."
+#error "FLYDSL_BACKEND_COUNT is undefined: add FLYDSL_BACKEND_DEFINITIONS to this target."
 #endif
 
 #define FLYDSL_BACKEND_DETAIL_CONCAT(x, y) FLYDSL_BACKEND_DETAIL_CONCAT_IMPL(x, y)

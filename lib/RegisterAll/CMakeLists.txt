@@ -15,3 +15,4 @@ add_mlir_library(MLIRFlyRegisterAll
   MLIRFlyKtraceDialect
   ${_backend_libs}
 )
+target_compile_definitions(obj.MLIRFlyRegisterAll PRIVATE ${FLYDSL_BACKEND_DEFINITIONS})

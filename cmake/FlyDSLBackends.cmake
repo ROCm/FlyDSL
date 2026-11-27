@@ -54,10 +54,11 @@ foreach(_backend ${FLYDSL_BACKENDS})
 endforeach()
 
 # ---- Assemble backend preprocessor defines ----
-# C++ code uses FLYDSL_FOR_EACH_BACKEND(MACRO) to iterate over these.
-add_compile_definitions(FLYDSL_BACKEND_COUNT=${_n_backends})
+# lib/RegisterAll iterates over these with FLYDSL_FOR_EACH_BACKEND(MACRO); only
+# that library is compiled with them, so changing the backends rebuilds only it.
+set(FLYDSL_BACKEND_DEFINITIONS FLYDSL_BACKEND_COUNT=${_n_backends})
 set(_backend_index 0)
 foreach(_backend ${FLYDSL_BACKENDS})
-  add_compile_definitions(FLYDSL_BACKEND_${_backend_index}=${_backend})
+  list(APPEND FLYDSL_BACKEND_DEFINITIONS FLYDSL_BACKEND_${_backend_index}=${_backend})
   math(EXPR _backend_index "${_backend_index} + 1")
 endforeach()
