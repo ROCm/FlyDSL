@@ -204,18 +204,27 @@ NANOBIND_VERSION="${NANOBIND_VERSION:-2.12.0}"
 
 # Check for ninja
 GENERATOR="Unix Makefiles"
+GENERATOR_ARGS=()
 if command -v ninja &> /dev/null; then
     GENERATOR="Ninja"
     echo "Using Ninja generator."
 else
     echo "Ninja not found. Using Unix Makefiles (this might be slower)."
+    # LLVM links every shared library with -Wl,-z,defs, and MLIR undoes it for
+    # its nanobind libraries, whose CPython symbols resolve at import time, with
+    # target_link_options(LINKER:-z,undefs). The Makefiles generator emits target
+    # link options before CMAKE_SHARED_LINKER_FLAGS, so -z defs wins there and the
+    # link fails on the CPython symbols. Per-config linker flags come after both.
+    # This drops -z defs for every shared library of the build, which only stops
+    # reporting unresolved symbols: a library that links comes out the same.
+    GENERATOR_ARGS=(-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=-Wl,-z,undefs)
 fi
 
 # Build the selected LLVM projects and targets in Release mode.
 # Refresh nanobind after installation, retaining the interpreter resolved before cd.
 PYTHON_EXECUTABLE="${FLY_PYTHON_EXECUTABLE}" source "${SCRIPT_DIR}/python_interpreter.sh"
 
-cmake -G "$GENERATOR" \
+cmake -G "$GENERATOR" "${GENERATOR_ARGS[@]}" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
     -DLLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS}" \
