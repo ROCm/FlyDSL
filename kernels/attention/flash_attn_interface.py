@@ -1571,6 +1571,9 @@ def flydsl_flash_attn_func(
             out = torch.empty(_out_shape, dtype=out_dtype, device=q.device)
         elif tuple(out.shape) != _out_shape:
             raise ValueError(f"flydsl_flash_attn_func: out must be {_out_shape}, got {tuple(out.shape)}")
+        elif not out.is_contiguous():
+            # out.contiguous() below would copy it, and the kernel would write the copy.
+            raise ValueError(f"flydsl_flash_attn_func: out must be contiguous, got strides {tuple(out.stride())}")
         elif dtype_str == "fp8" and out.dtype != torch.bfloat16:
             raise ValueError(f"flydsl_flash_attn_func: fp8 output must be bf16, got {out.dtype}")
         elif dtype_str != "fp8" and out.dtype != q.dtype:
