@@ -177,7 +177,8 @@ public:
     populateFastMathOpPatterns(context, patterns, ROCDLFastMathOpMappings{});
     patterns.add<Log1pLowering>(context);
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))) ||
-        failed(lowerToOCML(getOperation())))
+        failed(lowerToOCML(getOperation())) ||
+        failed(fly_rocdl::lowerFloatConversions(getOperation())))
       signalPassFailure();
   }
 };

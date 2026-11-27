@@ -16,6 +16,16 @@ namespace mlir {
 #define GEN_PASS_DECL_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 
+namespace gpu {
+class GPUModuleOp;
+} // namespace gpu
+
+namespace fly_rocdl {
+/// Lowers the float conversions of `module` that convert-gpu-to-rocdl would get wrong or slow,
+/// picking instructions for the chip of its #rocdl.target; part of convert-rocdl-math-ops.
+LogicalResult lowerFloatConversions(gpu::GPUModuleOp module);
+} // namespace fly_rocdl
+
 #ifdef FLYDSL_HAS_LLD_LIBRARY
 namespace fly {
 /// Link a relocatable AMDGPU object into an HSA code object with the in-process
