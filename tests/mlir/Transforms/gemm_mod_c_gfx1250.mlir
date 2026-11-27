@@ -2,14 +2,15 @@
 // Copyright (c) 2026 FlyDSL Project Contributors
 // RUN: %fly-opt %s --split-input-file --fly-rocdl-expand-ops --verify-diagnostics
 
-// A gfx1250 WMMA C modifier applies to every WMMA, and fly.gemm passes a tile's partial sum as C
-// after its first K step, so fly.gemm rejects a C modifier with more than one K step per (m, n) tile.
+// A gfx1250 WMMA C modifier applies to every WMMA (MmaOpTypeInterface::modifiesC), and fly.gemm passes
+// a tile's partial sum as C after its first K step, so fly.gemm rejects it with more than one K step
+// per (m, n) tile.
 
 func.func @wmma_two_k_steps(
     %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1>>,
     %acc: !fly.memref<f32, register, (8,1,1):(1,0,0)>, %a: !fly.memref<bf16, register, (16,1,2):(1,0,16)>,
     %b: !fly.memref<bf16, register, (16,1,2):(1,0,16)>) {
-  // expected-error@+1 {{a gfx1250 WMMA C modifier (mod_c = 1) applies to every WMMA, and this GEMM has 2 K steps per (m, n) tile}}
+  // expected-error@+1 {{MMA atom applies a C modifier (mod_c) on every call; this GEMM has 2 K steps per (m, n) tile}}
   fly.gemm(%atom, %acc, %a, %b, %acc) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1>>, !fly.memref<f32, register, (8,1,1):(1,0,0)>, !fly.memref<bf16, register, (16,1,2):(1,0,16)>, !fly.memref<bf16, register, (16,1,2):(1,0,16)>, !fly.memref<f32, register, (8,1,1):(1,0,0)>) -> ()
   return
 }
@@ -20,7 +21,7 @@ func.func @tiled_wmma_scale_two_k_steps(
     %mma: !fly.tiled_mma<!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 3, reuseA = false, reuseB = false, blockSize = 32>>, <(1,1,1):(0,0,0)>>,
     %acc: !fly.memref<f32, register, (8,2,1):(1,8,0)>, %a: !fly.memref<f8E4M3FN, register, (64,2,2):(1,64,128)>,
     %b: !fly.memref<f8E4M3FN, register, (64,1,2):(1,0,64)>) {
-  // expected-error@+1 {{a gfx1250 WMMA C modifier (mod_c = 3) applies to every WMMA, and this GEMM has 2 K steps per (m, n) tile}}
+  // expected-error@+1 {{MMA atom applies a C modifier (mod_c) on every call; this GEMM has 2 K steps per (m, n) tile}}
   fly.gemm(%mma, %acc, %a, %b, %acc) : (!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 3, reuseA = false, reuseB = false, blockSize = 32>>, <(1,1,1):(0,0,0)>>, !fly.memref<f32, register, (8,2,1):(1,8,0)>, !fly.memref<f8E4M3FN, register, (64,2,2):(1,64,128)>, !fly.memref<f8E4M3FN, register, (64,1,2):(1,0,64)>, !fly.memref<f32, register, (8,2,1):(1,8,0)>) -> ()
   return
 }

@@ -88,6 +88,7 @@ Type MmaOpGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
+bool MmaOpGFX1250_WMMAType::modifiesC() const { return getModC() != 0; }
 
 Attribute MmaOpGFX1250_WMMAType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
 

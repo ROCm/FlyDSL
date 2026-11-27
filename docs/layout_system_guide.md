@@ -411,6 +411,7 @@ fx.gemm(mma_atom, d, a, b, c)
 | `mma_atom.thr_layout` | `MmaAtom` | Thread layout |
 | `mma_atom.shape_mnk` | `MmaAtom` | M×N×K tile dimensions |
 | `mma_atom.layout_A_tv/layout_B_tv/layout_C_tv` | `MmaAtom` | Thread-value layouts per operand |
+| `mma_atom.modifies_c` | `MmaAtom` | Whether every call modifies its C input (a C modifier such as gfx1250 WMMA `mod_c`) |
 | `tiled_copy.layout_src_tv_tiled` | `TiledCopy` | Full tiled source layout |
 | `tiled_copy.layout_dst_tv_tiled` | `TiledCopy` | Full tiled destination layout |
 | `tiled_mma.tile_size_mnk` | `TiledMma` | Tiled MMA dimensions |

@@ -426,6 +426,7 @@ def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
     ::mlir::Attribute getThrValLayoutA() const;
     ::mlir::Attribute getThrValLayoutB() const;
     ::mlir::Attribute getThrValLayoutC() const;
+    bool modifiesC() const;
     core::MMAAtom<core::Trait> getRef() const;
     ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                        Type dMemTy, TypeRange aMemTy, TypeRange bMemTy, Type cMemTy, Value atomVal, Value d,

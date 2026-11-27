@@ -9,8 +9,9 @@ include "mlir/Pass/PassBase.td"
 def FlyROCDLExpandOpsPass : Pass<"fly-rocdl-expand-ops"> {
   let summary = "Expand fly_rocdl target specific ops into the ops";
   let description = [{
-    Also rejects a fly.gemm whose gfx1250 WMMA C modifier would apply to a partial sum, i.e. one with
-    more than one K step per (m, n) tile, before fly-layout-lowering expands it.
+    Also rejects a fly.gemm whose MMA atom modifies C on every call (MmaOpTypeInterface::modifiesC,
+    e.g. a gfx1250 WMMA C modifier) when it has more than one K step per (m, n) tile, before
+    fly-layout-lowering expands it.
   }];
   let dependentDialects = [
     "arith::ArithDialect",

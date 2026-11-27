@@ -151,25 +151,18 @@ LogicalResult normalizeOneBoundaryCheck(AtomSetValueOp op, IRRewriter &rewriter)
 }
 
 //===----------------------------------------------------------------------===//
-// gfx1250 WMMA C modifier under a multi-K fly.gemm
+// An MMA atom that modifies C under a multi-K fly.gemm
 //===----------------------------------------------------------------------===//
 
-/// fly.gemm passes a tile's partial sum in D as C on its later K steps, and a gfx1250 WMMA C
-/// modifier applies to each instruction's C, so with one a tile may have only one K step. Checked
-/// here, before fly-layout-lowering expands the GEMM, because only this dialect knows the modifier.
+/// fly.gemm passes a tile's partial sum in D as C on its later K steps, and an atom that modifies
+/// C (MmaOpTypeInterface::modifiesC, e.g. a gfx1250 WMMA C modifier) does so on every call, so
+/// with one a tile may have only one K step. Checked before fly-layout-lowering expands the GEMM.
 LogicalResult checkGemmModC(GemmOp op) {
   Type atomTy = op.getMmaAtom().getType();
   if (auto tiledMmaTy = dyn_cast<TiledMmaType>(atomTy))
     atomTy = tiledMmaTy.getMmaAtom();
   auto mmaAtomTy = dyn_cast<MmaAtomType>(atomTy);
-  if (!mmaAtomTy)
-    return success();
-  int32_t modC = 0;
-  if (auto wmma = dyn_cast<MmaOpGFX1250_WMMAType>(mmaAtomTy.getMmaOp()))
-    modC = wmma.getModC();
-  else if (auto wmmaScale = dyn_cast<MmaOpGFX1250_WMMAScaleType>(mmaAtomTy.getMmaOp()))
-    modC = wmmaScale.getModC();
-  if (modC == 0 || op.getA().empty())
+  if (!mmaAtomTy || !mmaAtomTy.modifiesC() || op.getA().empty())
     return success();
   auto aLayout = cast<LayoutAttr>(cast<fly::MemRefType>(op.getA().front().getType()).getLayout());
   if (aLayout.getRef().rank() != 3)
@@ -177,8 +170,8 @@ LogicalResult checkGemmModC(GemmOp op) {
   auto kSteps = core::product(core::IntTuple<core::Trait>(aLayout.getRef().shape().at(2)));
   if (!kSteps.isStatic() || kSteps.staticValue() <= 1)
     return success();
-  return op.emitOpError() << "a gfx1250 WMMA C modifier (mod_c = " << modC
-                          << ") applies to every WMMA, and this GEMM has " << kSteps.staticValue()
+  return op.emitOpError() << "MMA atom applies a C modifier (mod_c) on every call; this GEMM has "
+                          << kSteps.staticValue()
                           << " K steps per (m, n) tile, so from the second step on it would modify "
                              "the running sum instead of C; to modify C only, apply the modifier "
                              "to C before the GEMM and use mod_c = 0, or pass an atom_callback "

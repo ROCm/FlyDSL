@@ -3,7 +3,6 @@
 
 import builtins
 import inspect
-import re
 from enum import IntEnum
 from fractions import Fraction
 from functools import wraps
@@ -1172,9 +1171,9 @@ def gemm(
     each atom call. It receives the original MMA atom (including updated state) and static integer
     tile coordinates, and must return the MmaAtom for that call.
 
-    A C modifier (a gfx1250 WMMA's ``mod_c``) applies to every atom call, so an atom with one is
-    rejected on a tile's later K steps, whose C is the partial sum in D. To modify the original C
-    only, apply the modifier to C before the GEMM, or return an atom without it from
+    An atom whose C modifier applies to every call (``atom.modifies_c``, such as a gfx1250 WMMA
+    with ``mod_c``) is rejected on a tile's later K steps, whose C is the partial sum in D. To modify
+    the original C only, apply the modifier to C before the GEMM, or return an atom without it from
     ``atom_callback`` for a tile's later K steps.
     """
     from .typing import MmaAtom, TiledMma
@@ -1214,14 +1213,12 @@ def gemm(
         tmp_atom = atom_callback(atom, mnk)
         if not isinstance(tmp_atom, MmaAtom):
             raise TypeError("atom_callback must return an MmaAtom")
-        # Only the target dialect knows the modifier; the MMA op prints it as `modC = N`.
-        mod_c = re.search(r"\bmodC = (-?\d+)", str(tmp_atom.type.mma_op)) if accumulating else None
-        if mod_c and int(mod_c.group(1)):
+        if accumulating and tmp_atom.modifies_c:
             raise ValueError(
-                f"atom_callback returned an atom with a C modifier (mod_c = {mod_c.group(1)}) for a later K "
-                f"step of tile {mnk[:2]}, where C is the partial sum in D: the modifier applies to every WMMA, "
-                "so it would modify the running sum instead of C; return an atom without mod_c for this step, "
-                "or apply the modifier to C before the GEMM and use mod_c = 0"
+                f"atom_callback returned an atom with a C modifier (mod_c) for a later K step of tile {mnk[:2]}, "
+                "where C is the partial sum in D: the modifier applies to every call, so it would modify the "
+                "running sum instead of C; return an atom without mod_c for this step, or apply the modifier to "
+                "C before the GEMM and use mod_c = 0"
             )
         fly.mma_atom_call(tmp_atom, d_tile, a_tiles, b_tiles, c_tile)
 

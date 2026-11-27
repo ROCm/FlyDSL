@@ -135,6 +135,7 @@ Type MmaOpGFX1250_WMMAScaleType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeD() const { return getElemTyAcc(); }
+bool MmaOpGFX1250_WMMAScaleType::modifiesC() const { return getModC() != 0; }
 
 // gfx1250 block-scaled WMMA A/B layout.
 // The scaled instruction has its own register layouts, separate from plain WMMA:

@@ -55,6 +55,7 @@ Type MmaOpUniversalFMAType::getValTypeA() const { return getElemTy(); }
 Type MmaOpUniversalFMAType::getValTypeB() const { return getElemTy(); }
 Type MmaOpUniversalFMAType::getValTypeC() const { return getElemTy(); }
 Type MmaOpUniversalFMAType::getValTypeD() const { return getElemTy(); }
+bool MmaOpUniversalFMAType::modifiesC() const { return false; }
 
 Attribute MmaOpUniversalFMAType::getThrValLayoutA() const {
   return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
