@@ -548,6 +548,132 @@ TEST(LayoutParity, LogicalDivide) {
             "((16,8),?4,?4):((1,?64{div=16}),16,?512{div=128})");
 }
 
+// A divide of dynamic extents whose product reaches 2^31 maps every coordinate to its own offset.
+TEST(LayoutParity, LogicalDivideOfWideDynamicShape) {
+  // (4, 2^29):(16, 1) by 1:1: coordinate (0, l) is element (l % 4, l / 4).
+  auto layout = make_layout(make_tuple(dyn(4), dyn(int64_t{1} << 29)), make_tuple(16_c, 1_c));
+  auto divided = logical_divide(layout, make_layout(1_ct, 1_ct));
+  EXPECT_EQ(toString(divided), "(1,(?4,?536870912)):(1,(16,1))");
+  for (auto l : {0, 1, 5, 63})
+    EXPECT_EQ(toString(crd2idx(make_tuple(0_c, dyn(l)), divided)),
+              "?" + std::to_string(l % 4 * 16 + l / 4));
+
+  // A contiguous (M, N) tensor with a dynamic row stride, divided by t:1 with (M / t) * N = 2^31.
+  // Element i, lane i % t of tile i / t, is at (i % M) * N + i / M.
+  for (auto [t, n] : {std::pair<int64_t, int64_t>{1, 32768}, {2, 65536}}) {
+    auto m = int64_t{65536};
+    auto tensor = make_layout(make_tuple(dyn(m), dyn(n)),
+                              make_tuple(Tup::fromLeaf(RT::getDyn(n, LogWidth::I64)), 1_c));
+    auto tiled = logical_divide(tensor, make_layout(Tup::getSInt(t), 1_ct));
+    for (auto i : {int64_t{0}, m - 1, m, 3 * m + 7, m * n - 1}) {
+      auto offset = crd2idx(make_tuple(dyn(i % t), dyn(i / t)), tiled);
+      ASSERT_TRUE(offset.isLeaf() && !offset.isError()) << toString(offset);
+      EXPECT_EQ(offset.getLeaf().value, i % m * n + i / m) << "t=" << t << " i=" << i;
+    }
+  }
+
+  // An i64 extent and static strides, (2^29, 32):(32, 1) by 4:1. The offset of the last lane of
+  // tile 2^31 - 1, element 2^33 - 1, is i64: 32 * (2^29 - 1) + 15.
+  auto wide =
+      make_layout(make_tuple(Tup::fromLeaf(RT::getDyn(int64_t{1} << 29, LogWidth::I64)), 32_c),
+                  make_tuple(32_c, 1_c));
+  EXPECT_EQ(toString(crd2idx(make_tuple(dyn(3), dyn(INT32_MAX)),
+                             logical_divide(wide, make_layout(4_ct, 1_ct)))),
+            "?17179869167i64");
+}
+
+// The rest of a divide holds the tile counts of the modes.  Where two or more of them are dynamic
+// the divide takes them as they are; composition with the complement would multiply them and split
+// the product again by a minimum and a quotient per mode, which gives the same layout.
+TEST(LayoutParity, LogicalDivideCountsTiles) {
+  auto wide = [](int64_t value) { return Tup::fromLeaf(RT::getDyn(value, LogWidth::I64)); };
+  auto values = [](IntTupleRef<Runtime> tuple) {
+    auto result = std::vector<int64_t>();
+    for (auto leaf : tuple.leaves())
+      result.push_back(leaf.value);
+    return result;
+  };
+  auto sameAsComposition = [&](const Lay &layout, const Lay &tiler) {
+    auto divided = logical_divide(layout, tiler);
+    auto composed =
+        composition(layout, make_layout(tiler, complement(tiler, coalesce(layout).shape())));
+    ASSERT_EQ(divided.isError(), composed.isError())
+        << toString(layout) << " by " << toString(tiler);
+    ASSERT_TRUE(congruent(divided.shape(), composed.shape()))
+        << toString(divided) << " vs " << toString(composed);
+    EXPECT_EQ(values(divided.shape()), values(composed.shape())) << toString(layout);
+    EXPECT_EQ(values(divided.stride()), values(composed.stride())) << toString(layout);
+  };
+  auto unit = make_layout(1_ct, 1_ct);
+  auto by4 = make_layout(4_ct, 1_ct);
+  auto by64 = make_layout(64_ct, 1_ct);
+  auto million = int64_t{1} << 20;
+  auto layouts = {
+      // Dynamic extents only, tiles that divide them and tiles that do not.
+      make_layout(make_tuple(dyn(6), dyn(10)), make_tuple(1_c, dyn(6))),
+      make_layout(make_tuple(dyn(100), dyn(7), dyn(3)), make_tuple(dyn(21), dyn(3), 1_c)),
+      make_layout(make_tuple(dyn(65536), dyn(65536), dyn(4)),
+                  make_tuple(1_c, wide(65536), wide(int64_t{1} << 32))),
+      // Static extents after the dynamic ones, before them, between them.
+      make_layout(make_tuple(dyn(128), dyn(4), 8_c, 16_c), make_tuple(dyn(512), 128_c, 16_c, 1_c)),
+      make_layout(make_tuple(dyn(million), dyn(million), 32_c, 128_c),
+                  make_tuple(dyn(7), 4096_c, 128_c, 1_c)),
+      make_layout(make_tuple(8_c, dyn(5), dyn(6)), make_tuple(1_c, 8_c, dyn(40))),
+      make_layout(make_tuple(2_c, 4_c, dyn(5), dyn(7)), make_tuple(1_c, 4_c, 16_c, dyn(80))),
+      make_layout(make_tuple(8_c, dyn(million), dyn(million)),
+                  make_tuple(1_c, 8_c, wide(8 * million))),
+      make_layout(make_tuple(dyn(4), 9_c, dyn(5)), make_tuple(1_c, dyn(4), dyn(36))),
+      // An extent of 1 at the end, an i64 extent, and strides of 0, where coalesce merges a
+      // dynamic extent into a static one and the divide falls back to the composition.
+      make_layout(make_tuple(dyn(5), dyn(6), 1_c), make_tuple(1_c, dyn(5), dyn(30))),
+      make_layout(make_tuple(wide(6), dyn(10)), make_tuple(1_c, wide(6))),
+      make_layout(make_tuple(dyn(3), dyn(5), 4_c), make_tuple(1_c, 0_c, 0_c)),
+  };
+  // Tilers: a unit, sizes that divide and do not, a stride, a size known at run time, and two
+  // modes, which leave a gap before the tile counts, a dynamic one if the first mode is dynamic.
+  auto tilers = {
+      unit,
+      by4,
+      by64,
+      make_layout(4_ct, 2_ct),
+      make_layout(dyn(4), 1_ct),
+      make_layout(make_tuple(2_c, 2_c), make_tuple(1_c, 8_c)),
+      make_layout(make_tuple(dyn(2), 2_c), make_tuple(1_c, 8_c)),
+  };
+  for (const auto &layout : layouts)
+    for (const auto &tiler : tilers)
+      sameAsComposition(layout, tiler);
+
+  // No extent of such a divide is i64, and none depends on the product: 2^34 elements here.
+  auto divided = logical_divide(layouts.begin()[2], unit);
+  EXPECT_EQ(toString(divided),
+            "(1,(?65536,?65536,?4)):(?4294967296i64,(1,?65536i64,?4294967296i64))");
+  for (auto i : {int64_t{0}, int64_t{65537}, (int64_t{1} << 31) - 1})
+    EXPECT_EQ(toString(crd2idx(make_tuple(0_c, dyn(i)), divided)), "?" + std::to_string(i) + "i64");
+  EXPECT_EQ(toString(logical_divide(layouts.begin()[4], unit).shape()),
+            "(1,((?1048576,?1048576,?1,?1),(?1,?1,?32,?128)))");
+  EXPECT_EQ(toString(logical_divide(layouts.begin()[7], by4).shape()),
+            "(4,(2,(?1048576,?1048576)))");
+  EXPECT_EQ(toString(logical_divide(layouts.begin()[0], make_layout(dyn(4), 1_ct)).shape()),
+            "((?4,?1),(?2,?10))");
+  // An extent that is not a tile count goes through the minimum and the quotient.
+  EXPECT_EQ(toString(composition(layouts.begin()[0], make_layout(wide(47), 1_ct))),
+            "(?6,?7i64):(1,?6)");
+  // So do counts that the composition does not meet as they were taken: here the two dynamic
+  // modes are claimed to be counted at stride 1, but the stride 16 arrives at them as 2, and with
+  // the stride 1 the static mode before them takes its share of the rest first.
+  auto counted = detail::TileCounts{0, 1, 2, 1};
+  for (const auto &[first, rest] : {std::pair{8_c, make_layout(wide(30), 16_ct)},
+                                    std::pair{4_c, make_layout(wide(60), 1_ct)}}) {
+    auto lhs = make_layout(make_tuple(first, dyn(5), dyn(6)), make_tuple(1_c, 8_c, dyn(40)));
+    auto composed =
+        detail::composition_impl(lhs.shape(), lhs.stride(), rest.shape(), rest.stride());
+    EXPECT_EQ(toString(detail::composition_impl(lhs.shape(), lhs.stride(), rest.shape(),
+                                                rest.stride(), counted)),
+              toString(composed));
+  }
+}
+
 TEST(LayoutParity, LogicalProduct) {
   EXPECT_EQ(toString(logical_product(make_layout(make_tuple(2_c, 2_c), make_tuple(4_c, 1_c)),
                                      make_layout(6_ct, 1_ct))),

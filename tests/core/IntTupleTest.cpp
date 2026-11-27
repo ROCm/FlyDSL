@@ -24,12 +24,14 @@ TEST(IntTupleParity, RankAndDepth) {
 }
 
 // A reduction is static only when every leaf it reads is, except that a static zero factor absorbs
-// dynamic ones.  Divisibilities multiply under product and meet (gcd) under sum.
+// dynamic ones.  Divisibilities multiply under product and meet (gcd) under sum.  A product of
+// dynamic leaves is i64.
 TEST(IntTupleParity, ProductSumAndSize) {
   EXPECT_EQ(toString(product(make_tuple(2_c, make_tuple(3_c, 4_c)))), "24");
   EXPECT_EQ(toString(product(make_tuple(2_c, make_tuple(3_d, 4_c)))), "?24{div=8}");
-  EXPECT_EQ(toString(product(make_tuple(2_d, 3_d))), "?6");
-  EXPECT_EQ(toString(product(make_tuple(dyn(8, 4), make_tuple(dyn(6, 2), 3_c)))), "?144{div=24}");
+  EXPECT_EQ(toString(product(make_tuple(2_d, 3_d))), "?6i64");
+  EXPECT_EQ(toString(product(make_tuple(dyn(8, 4), make_tuple(dyn(6, 2), 3_c)))),
+            "?144i64{div=24}");
   EXPECT_EQ(toString(product(make_tuple(7_d, 0_c))), "0");
   EXPECT_EQ(toString(product(make_tuple(1_c, 5_d))), "?5");
   EXPECT_EQ(toString(product(make_tuple<Runtime>())), "1");
@@ -283,6 +285,129 @@ TEST(IntTupleParity, Idx2Crd) {
   EXPECT_EQ(toString(idx2crd(13_ct, make_tuple(make_tuple(2_c, 2_c), 3_c))), "((1,0),3)");
   EXPECT_EQ(toString(idx2crd(dyn(24, 8), make_tuple(16_c, 4_c))), "(?8{div=8},?1)");
   EXPECT_EQ(toString(idx2crd(dyn(40, 8), make_tuple(16_c, dyn(4, 2)))), "(?8{div=8},?2)");
+}
+
+// Dynamic extents whose product leaves i32.  The product is exact, and a coordinate splits through
+// a mode of such extents one leaf at a time, without dividing by the mode size.
+TEST(IntTupleParity, WideDynamicExtents) {
+  auto big = dyn(int64_t{1} << 29);
+  EXPECT_EQ(toString(product(make_tuple(dyn(4), big))), "?2147483648i64");
+  // The product is exact wherever a static extent stands: every dynamic extent is cast before it
+  // is multiplied, so none makes an i32 product with the static one, which would wrap here.
+  for (const auto &shape :
+       {make_tuple(dyn(1 << 18), 8192_c, dyn(2)), make_tuple(8192_c, dyn(1 << 18), dyn(2)),
+        make_tuple(dyn(1 << 18), dyn(2), 8192_c),
+        make_tuple(make_tuple(dyn(1 << 18), 8192_c), dyn(2))})
+    EXPECT_EQ(toString(product(shape)), "?4294967296i64{div=8192}") << toString(shape);
+  EXPECT_EQ(toString(product(make_tuple(dyn(4), 8192_c))), "?32768{div=8192}");
+  EXPECT_EQ(toString(coalesce(make_tuple(dyn(65536), dyn(32768)))), "?2147483648i64");
+  EXPECT_EQ(toString(coalesce(make_tuple(dyn(4), 2_c, 3_c, big))), "(?4,6,?536870912)");
+  // ((4, 2^30 + 1), 2):((1, 4), 1): index 63 is (3, 15) in the first mode.
+  auto shape = make_tuple(make_tuple(dyn(4), dyn((int64_t{1} << 30) + 1)), 2_c);
+  EXPECT_EQ(toString(idx2crd(dyn(63), shape)), "((?3,?15),?0)");
+  EXPECT_EQ(toString(crd2idx(dyn(63), shape, make_tuple(make_tuple(1_c, 4_c), 1_c))), "?63");
+  EXPECT_EQ(toString(crd2idx(dyn(63), make_tuple(make_tuple(dyn(4), dyn(8)), 2_c),
+                             make_tuple(make_tuple(1_c, 4_c), 32_c))),
+            "?63");
+  // An i64 extent makes the size of its mode i64 by itself. The index is divided by that size,
+  // at i64: 37 is (1, 9 % L) then 9 / L, and the coordinates are i64 from that mode on.
+  auto wide = [](int64_t value) { return Tup::fromLeaf(RT::getDyn(value, LogWidth::I64)); };
+  EXPECT_EQ(toString(idx2crd(dyn(37), make_tuple(make_tuple(dyn(4), wide(3)), dyn(5)))),
+            "((?1i64,?0i64),?3i64)");
+  EXPECT_EQ(
+      toString(idx2crd(dyn(37), make_tuple(make_tuple(dyn(4), wide(int64_t{1} << 33)), dyn(5)))),
+      "((?1i64,?9i64),?0i64)");
+  EXPECT_EQ(toString(idx2crd(dyn(37), make_tuple(dyn(4), make_tuple(dyn(2), wide(3)), dyn(5)))),
+            "(?1,(?1i64,?1i64),?1i64)");
+  EXPECT_EQ(
+      toString(crd2idx(dyn(37), make_tuple(wide(int64_t{1} << 33), dyn(5)), make_tuple(1_c, 7_c))),
+      "?37i64");
+  // So an offset with static strides is exact beyond 2^31: 1 + 4 * 1 + 64 * 143165572.
+  auto modes = make_tuple(make_tuple(wide(3), dyn(5)), 4_c);
+  auto strides = make_tuple(make_tuple(1_c, 4_c), 64_c);
+  EXPECT_EQ(toString(crd2idx(dyn((int64_t{1} << 31) - 64), modes, strides)), "?9162596613i64");
+  EXPECT_EQ(toString(crd2idx(dyn(INT32_MAX), make_tuple(wide(3), make_tuple(dyn(5), 4_c)),
+                             make_tuple(1_c, make_tuple(4_c, 64_c)))),
+            "?9162596873i64");
+  // Static extents whose product leaves i32 before the first dynamic one widen the index as well:
+  // 65537 is (1, 4096) in the first mode, and 4096 * 2^20 is 2^32.
+  EXPECT_EQ(toString(crd2idx(dyn(65537),
+                             make_tuple(make_tuple(16_c, 536870912_c, dyn(5), dyn(16)), dyn(16)),
+                             make_tuple(make_tuple(0_c, 1048576_c, 4096_c, 64_c), 1_c))),
+            "?4294967296i64");
+  // So does a single static extent beyond i32, for the extents before it in its mode: 5 is (2, 1).
+  EXPECT_EQ(toString(crd2idx(dyn(5), make_tuple(make_tuple(dyn(3), 8589934592_c), 4_c),
+                             make_tuple(make_tuple(1073741824_c, 1_c), 1_c))),
+            "?2147483649i64");
+  // Also between two dynamic extents: 5 is (2, 1, 0).
+  EXPECT_EQ(toString(crd2idx(dyn(5), make_tuple(make_tuple(dyn(3), 8589934592_c, dyn(5)), 4_c),
+                             make_tuple(make_tuple(1073741824_c, 1_c, 1_c), 1_c))),
+            "?2147483649i64");
+  // An i64 index is split like an i32 one, so no size is formed for it either: that of the nested
+  // (65536, 65536), with one dynamic extent, is an i32 product.
+  EXPECT_EQ(toString(idx2crd(wide(37),
+                             make_tuple(make_tuple(make_tuple(dyn(65536), 65536_c), dyn(3)), 4_c))),
+            "(((?37i64,?0i64),?0i64),?0i64)");
+  // The largest i32 index, by an extent just inside and just outside i32.
+  EXPECT_EQ(toString(idx2crd(dyn(INT32_MAX), make_tuple(wide(INT32_MAX), dyn(5)))),
+            "(?0i64,?1i64)");
+  EXPECT_EQ(toString(idx2crd(dyn(INT32_MAX), make_tuple(wide(int64_t{1} << 31), dyn(5)))),
+            "(?2147483647i64,?0i64)");
+  // A static index beyond i32 divides at i64.
+  EXPECT_EQ(toString(idx2crd(Tup::getSInt(int64_t{1} << 40),
+                             make_tuple(make_tuple(wide(int64_t{1} << 33), dyn(5)), dyn(7)))),
+            "((?0i64,?3i64),?25i64)");
+}
+
+// The coordinates of an index have the types that dividing it by the size of each mode gives
+// them, and the offset has the type of its coordinates and strides.
+TEST(IntTupleParity, CoordinateTypesOfAnIndex) {
+  auto wide = [](int64_t value) { return Tup::fromLeaf(RT::getDyn(value, LogWidth::I64)); };
+  // A static index is divided by the size of the mode, so its coordinates are run-time values of
+  // the type of that size. Through a mode with an i64 extent behind a static one they are i64,
+  // the one of the static extent too, and 5 times a run-time i32 stride of 2^30 is exact.
+  auto shape = make_tuple(make_tuple(16_c, wide(3)), 4_c);
+  auto stride = make_tuple(make_tuple(dyn(1 << 30), 1_c), 1_c);
+  EXPECT_EQ(toString(idx2crd(5_ct, shape)), "((?5i64,?0i64),?0i64)");
+  EXPECT_EQ(toString(crd2idx(5_ct, shape, stride)), "?5368709120i64");
+  EXPECT_EQ(toString(crd2idx(idx2crd(5_ct, shape), shape, stride)), "?5368709120i64");
+  // The same where the static extents in front multiply beyond i32: 400486012 * 8.
+  EXPECT_EQ(toString(crd2idx(400486012_ct, make_tuple(make_tuple(536870912_c, 8_c, dyn(4)), dyn(8)),
+                             make_tuple(make_tuple(dyn(8), 1_c, 1_c), 1_c))),
+            "?3203888096i64");
+  // And where the first extent is a static one beyond i32: 2147483560 * 12.
+  EXPECT_EQ(
+      toString(crd2idx(2147483560_ct, make_tuple(make_tuple(2147483648_c, dyn(4), 4_c), dyn(7)),
+                       make_tuple(make_tuple(dyn(12), dyn(40), 64_c), 4_c))),
+      "?25769802720i64");
+  // Two dynamic extents make the size of a mode i64 as well, and a static index is divided by
+  // it: 37 is (5, 2, 0) in (16, 3, 5), at i64. A run-time index is split at its own type. The
+  // coordinates of 0 are static.
+  auto mixed = make_tuple(make_tuple(16_c, dyn(3), dyn(5)), 4_c);
+  EXPECT_EQ(toString(idx2crd(37_ct, mixed)), "((?5i64,?2i64,?0i64),?0i64)");
+  EXPECT_EQ(toString(idx2crd(dyn(37), mixed)), "((?5,?2,?0),?0)");
+  EXPECT_EQ(toString(crd2idx(37_ct, mixed, make_tuple(make_tuple(dyn(1 << 20), 4_c, 1_c), 64_c))),
+            "?5242888i64");
+  EXPECT_EQ(toString(idx2crd(0_ct, mixed)), "((0,0,0),0)");
+  EXPECT_EQ(toString(idx2crd(0_ct, shape)), "((0,0),0)");
+
+  // A leaf that ends its tuple with an extent of 1 keeps a run-time coordinate, so its i64 stride
+  // makes the offset i64: 11 is (3, (2, 0, 0), 0), and 3 * 2^29 + 2 * 2^29 passes 2^31.
+  auto unit = make_tuple(4_c, make_tuple(dyn(3), dyn(5), 1_c), 2_c);
+  auto unitStride = make_tuple(dyn(1 << 29), make_tuple(dyn(1 << 29), 1_c, wide(7)), 1_c);
+  EXPECT_EQ(toString(idx2crd(dyn(11), unit)), "(?3,(?2,?0,?0),?0)");
+  EXPECT_EQ(toString(crd2idx(dyn(11), unit, unitStride)), "?2684354560i64");
+  EXPECT_EQ(toString(crd2idx(idx2crd(dyn(11), unit), unit, unitStride)), "?2684354560i64");
+  // So does the last leaf of a nested tuple, also of one that is all ones and ends its mode. A
+  // tuple of ones in the middle of a mode is the static 0 that the remainder by its size is.
+  auto nested = [](const Tup &middle, const Tup &last) {
+    return make_tuple(make_tuple(dyn(3), middle, last), 4_c);
+  };
+  EXPECT_EQ(toString(idx2crd(dyn(37), nested(make_tuple(dyn(5), 1_c), 2_ct))),
+            "((?1,(?2,?0),?0),?1)");
+  EXPECT_EQ(toString(idx2crd(dyn(37), nested(dyn(5), make_tuple(1_c, 1_c)))),
+            "((?1,?2,(0,?0)),?2)");
+  EXPECT_EQ(toString(idx2crd(dyn(37), nested(make_tuple(1_c, 1_c), dyn(5)))), "((?1,(0,0),?2),?2)");
 }
 
 TEST(IntTupleParity, Crd2Idx) {

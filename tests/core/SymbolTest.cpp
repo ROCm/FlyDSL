@@ -349,7 +349,7 @@ TEST(SymbolCategory, CompactLayoutSizeAndCrd2Idx) {
   EXPECT_TRUE(layout.stride().at(0).getLeaf().isSInt(1));
   EXPECT_EQ(layout.stride().at(1).getLeaf(), N);
   EXPECT_EQ(exprStr(layout.stride().at(2).getLeaf()), "N*M");
-  EXPECT_EQ(exprStr(size(layout).getLeaf()), "N*M*4");
+  EXPECT_EQ(exprStr(size(layout).getLeaf()), "i64(N)*i64(M)*4i64");
 
   auto idx = crd2idx(make_tuple(leaf(iIdx), leaf(jIdx), leaf(2)), layout);
   ASSERT_TRUE(idx.isLeaf());

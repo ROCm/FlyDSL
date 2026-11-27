@@ -124,6 +124,64 @@ def test_layout_functions_take_python_values(frontend_only_jit):
         assert f"fly.{op}" in source, op
 
 
+def test_size_of_dynamic_extents_is_int64(frontend_only_jit):
+    """The size of two or more dynamic extents is Int64 wherever a static one stands; with one it stays Int32."""
+
+    @flyc.jit
+    def build(m: fx.Int32, n: fx.Int32):
+        sizes = {"?{i64}": [(m, n)], "?{i64 div=8192}": [(m, 8192, n), (8192, m, n), (m, n, 8192)]}
+        for leaf, shapes in sizes.items():
+            for shape in shapes:
+                for size in (fx.size(fx.make_int_tuple(shape)), fx.int_tuple_product(shape)):
+                    assert str(size.type) == f"!fly.int_tuple<{leaf}>"
+                    assert isinstance(fx.get_scalar(size), fx.Int64)
+        size = fx.size(fx.make_int_tuple((m, 8192)))
+        assert str(size.type) == "!fly.int_tuple<?{div=8192}>"
+        assert isinstance(fx.get_scalar(size), fx.Int32)
+        # The extents of a divided layout are tile counts, not sizes, and stay Int32.
+        divided = fx.logical_divide(fx.make_layout((m, n), (16, 1)), fx.make_layout(1, 1))
+        assert str(divided.type) == "!fly.layout<(1,(?,?)):(1,(16,1))>"
+
+    build(3, 5)
+
+
+def test_offset_through_an_int64_extent_is_int64(frontend_only_jit):
+    """An Int32 index through a mode with an Int64 extent gives an Int64 offset, also with static strides."""
+
+    @flyc.jit
+    def build(a: fx.Int64, b: fx.Int32, i: fx.Int32):
+        offset = fx.crd2idx(i, fx.make_layout(((a, b), 4), ((1, 4), 64)))
+        assert str(offset.type) == "!fly.int_tuple<?{i64}>"
+        assert isinstance(fx.get_scalar(offset), fx.Int64)
+        divided = fx.logical_divide(fx.make_layout((a, 32), (32, 1)), fx.make_layout(4, 1))
+        assert str(fx.crd2idx((i, i), divided).type) == "!fly.int_tuple<?{i64}>"
+
+    build(3, 5, 7)
+
+
+def test_index_coordinates_keep_the_type_of_their_mode(frontend_only_jit):
+    """The offset of a static index and of a mode that ends in an extent of 1 has the type of its coordinates."""
+
+    @flyc.jit
+    def build(a: fx.Int64, s: fx.Int32, m: fx.Int32, n: fx.Int32, i: fx.Int32):
+        # A static index through an Int64 extent behind a static one: run-time Int64 coordinates,
+        # so the product with the Int32 stride s is Int64.
+        offset = fx.crd2idx(5, fx.make_layout(((16, a), 4), ((s, 1), 1)))
+        assert str(offset.type) == "!fly.int_tuple<?{i64}>"
+        assert isinstance(fx.get_scalar(offset), fx.Int64)
+        # Two dynamic extents make the size of a mode Int64 as well: a static index is divided by it
+        # and its offset is Int64, the offset of a run-time index, split by each extent, Int32.
+        mixed = fx.make_layout(((16, m, n), 4), ((s, 4, 1), 64))
+        assert str(fx.crd2idx(5, mixed).type) == "!fly.int_tuple<?{i64}>"
+        assert str(fx.crd2idx(i, mixed).type) == "!fly.int_tuple<?>"
+        # The extent of 1 that ends the mode (m, n, 1) has a run-time coordinate: its Int64 stride
+        # makes the offset Int64.
+        unit = fx.make_layout((4, (m, n, 1), 2), (s, (s, 1, a), 1))
+        assert str(fx.crd2idx(i, unit).type) == "!fly.int_tuple<?{i64}>"
+
+    build(3, 7, 3, 5, 11)
+
+
 # ==============================================================================
 # Basis
 # ==============================================================================
