@@ -854,11 +854,13 @@ _A8W8_VARIANTS = [
     ("rowB-tk128", (100, 1024, 2048, 64, 128, 128), dict(b_scale_layout="row")),
     ("row-tm16-m1", (1, 1024, 2048, 16, 64, 256), _ROW),  # a 16-row tile (M <= 16), one accumulator
     ("rowA-tm16-m9", (9, 1024, 2048, 16, 128, 256), dict(a_scale_layout="row")),
+    ("row-tk512", (64, 1024, 4096, 64, 128, 512), _ROW),  # two scale words per row pair
     # Prefetch pipeline: B and the row scales loaded prefetch - 1 K tiles ahead.
     ("pf2", (32, 1024, 2048, 32, 128, 256), dict(_ROW, prefetch=2)),
     ("pf3-raggedM", (100, 1024, 2048, 64, 128, 128), dict(_ROW, prefetch=3)),
     ("pf3-k5tiles", (256, 2048, 1280, 64, 128, 256), dict(_ROW, prefetch=3)),  # steady loop, remainder, peel
     ("pf4-k2tiles", (64, 512, 512, 32, 64, 256), dict(_ROW, prefetch=4)),  # fewer K tiles than the depth
+    ("pf3-tk512", (32, 1024, 4096, 32, 64, 512), dict(_ROW, prefetch=3)),
     # b_nt: a single M tile streams B non-temporal.
     ("pf2-bnt", (32, 1024, 2048, 32, 128, 256), dict(_ROW, prefetch=2, b_nt=True)),
     ("pf3-bnt-tm16", (16, 1024, 2048, 16, 64, 256), dict(_ROW, prefetch=3, b_nt=True)),

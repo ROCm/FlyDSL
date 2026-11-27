@@ -204,7 +204,11 @@ def _launch_gemm_impl(
     """
     BM, BN, BK = tile_m, tile_n, tile_k
     assert blockscale in ("none", "ab"), f"blockscale must be 'none' or 'ab', got {blockscale!r}"
-    assert BK in (128, 256), f"tile_k must be 128 or 256 (tiles_per_chunk = 256 // tile_k), got {BK}"
+    # tile_k=512 only reads row-layout scales, which pack a word per 256 K of the K-tile; a
+    # mfma_tile scale word covers 256 K, at most one K-tile.
+    assert BK in (128, 256) or (
+        BK == 512 and a_scale_layout == "row" and b_scale_layout == "row"
+    ), f"tile_k must be 128 or 256 (512 with row-layout scales on both operands), got {BK}"
     # A pre-shuffled per-1x32 A scale packs 16-row chunks in pairs. a8w8 may run one
     # 16-row chunk: its row-layout scales pack a lone chunk's word with itself, and a
     # 1x128 blockscale A broadcasts. A 16-row tile is for M <= 16 (one M tile): a
@@ -281,8 +285,10 @@ def _launch_gemm_impl(
     assert K_TILES % k_batch == 0, "K_TILES must be divisible by k_batch"
     k_tiles_local = K_TILES // k_batch
     k_halves = BK // 128  # 16x16x128 MFMA k-steps per K-tile
+    # Packed scale words per row/col pair: a word holds two 128-K MFMA steps.
+    SC_NW = max(1, k_halves // 2)
     # e8m0 scales are 256-K granular, B 128-K: tiles_per_chunk K-tiles share a word (hi/lo 16b = 128-K half).
-    tiles_per_chunk = 256 // BK  # 1 for tile_k=256, 2 for tile_k=128
+    tiles_per_chunk = max(1, 256 // BK)  # 1 for tile_k>=256, 2 for tile_k=128
     m_chunks = BM // 16
     num_waves = min(4, BN // 16)
     num_threads = num_waves * 64
@@ -609,7 +615,9 @@ def _launch_gemm_impl(
             sc_dma = fx.make_copy_atom(
                 fx.rocdl.cdna4.BufferLoadAsyncLDS32b() if _pf else fx.rocdl.BufferCopyLDS32b(), 32
             )
-            sc_row_copy = fx.make_copy_atom({1: fx.UniversalCopy32b, 2: fx.UniversalCopy64b}[SC_WPR](), Int32)
+            sc_row_copy = fx.make_copy_atom(
+                {1: fx.UniversalCopy32b, 2: fx.UniversalCopy64b, 4: fx.UniversalCopy128b}[SC_WPR](), Int32
+            )
             sS0_i8 = fx.recast_iter(_i8s, lds.s0.ptr)
             sS0_i32 = fx.recast_iter(Int32, lds.s0.ptr)
             if const_expr(_pf):
@@ -656,20 +664,24 @@ def _launch_gemm_impl(
                 fx.copy(sc_row_copy, fx.make_view(fx.add_offset(sS0_i32, off), fx.make_layout(SC_WPR, 1)), t)
                 return Vec(fx.memref_load_vec(t))
 
-            def _sc_pack(r0, r1):
-                # The shuffled-layout word: byte kh*2 + i = row (r + 16*i)'s scale for MFMA
-                # step kh, so the opsel atoms and one VGPR per row pair are kept.
-                w = fx.Int32(rocdl.perm_b32(r0[0], r1[0], sc_sel))
+            def _sc_pack(r0, r1, w_):
+                # The shuffled-layout word: byte (kh%2)*2 + i = row (r + 16*i)'s scale for
+                # MFMA step kh = 2*w_ + kh%2, so the opsel atoms and one VGPR per row pair
+                # (per 256 K) are kept.
+                kh0 = 2 * w_
+                w = fx.Int32(rocdl.perm_b32(r0[kh0], r1[kh0], sc_sel))
                 if const_expr(k_halves > 1):
-                    w = w | (fx.Int32(rocdl.perm_b32(r0[1], r1[1], sc_sel)) << 16)
+                    w = w | (fx.Int32(rocdl.perm_b32(r0[kh0 + 1], r1[kh0 + 1], sc_sel)) << 16)
                 return w
 
             def _sc_pairs(buf, j, lrow, n_tiles, base):
+                # SC_NW words per pair, pair-major (compute's sa_v[mp * SC_NW + w]).
                 words = []
                 for p_ in range_constexpr(max(1, n_tiles // 2)):
                     r0 = _sc_row(buf, j, lrow, p_ * 32, base)
                     r1 = _sc_row(buf, j, lrow, p_ * 32 + 16, base) if 2 * p_ + 1 < n_tiles else r0
-                    words.append(_sc_pack(r0, r1))
+                    for w_ in range_constexpr(SC_NW):
+                        words.append(_sc_pack(r0, r1, w_))
                 return words
 
             def load_sc_row(buf, j):
@@ -764,20 +776,22 @@ def _launch_gemm_impl(
             c_frags = [fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(n_acc)]
             for idx in range_constexpr(n_acc):
                 c_frags[idx].store(Vec(accs[idx]))
+            # tile_k=512: steps kh >= 2 read the pair's next word (SC_NW per pair).
             for kh in range_constexpr(k_halves):
+                kw, ks = kh // 2, kh % 2
                 for ni in range_constexpr(num_acc_n):
                     np_i, in_b = ni // 2, ni % 2
                     for mi in range_constexpr(m_chunks):
                         mp_i, im = mi // 2, mi % 2
                         cf = c_frags[mi * num_acc_n + ni]
                         fx.gemm(
-                            scale_atoms[(kh * 2 + im, kh * 2 + in_b)],
+                            scale_atoms[(ks * 2 + im, ks * 2 + in_b)],
                             cf,
                             av[mi * k_halves + kh],
                             bv[ni * k_halves + kh],
                             cf,
-                            scale_a=sa_v[mp_i],
-                            scale_b=sb_v[np_i],
+                            scale_a=sa_v[mp_i * SC_NW + kw],
+                            scale_b=sb_v[np_i * SC_NW + kw],
                         )
             for idx in range_constexpr(n_acc):
                 accs[idx] = c_frags[idx].load().ir_value()
