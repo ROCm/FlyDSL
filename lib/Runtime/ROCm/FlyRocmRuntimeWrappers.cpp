@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <cassert>
+#include <cstdio>
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -23,6 +24,18 @@
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 
 thread_local static int32_t defaultDevice = 0;
+
+#ifndef _WIN32
+namespace {
+// The HIP runtime writes device printf (gpu.printf) output to the C stdout stream. That stream is
+// fully buffered when stdout is a pipe or a file (Jupyter, redirected logs), so the output would
+// stay in the buffer until the process exits. With line buffering each line is written out as soon
+// as the runtime prints it. The MSVC CRT has no line-buffered mode.
+struct LineBufferedStdout {
+  LineBufferedStdout() { setvbuf(stdout, nullptr, _IOLBF, 0); }
+} lineBufferedStdout;
+} // namespace
+#endif
 
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
