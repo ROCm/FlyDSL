@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-27T08:11:21Z",
+ "updated": "2026-11-27T08:15:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45963875330,
+   "pr": 1537,
+   "commit": "b852939deb19ba595196af37e2777c7c051b808c",
+   "branch": "perf/coop-warp-merge-sort-int-keys",
+   "event": "pull_request",
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45963875330",
+   "created_at": "2026-11-27T08:12:20Z",
+   "updated_at": "2026-11-27T08:13:20Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 45959798388,
    "pr": null,
@@ -52,39 +67,39 @@
    "commit": "471da11c4a2bf3583598dfe6c8a5c72a824e310d",
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
-   "title": "[Coop][Perf] Sort integer keys alone with the bitonic network in warp_merge_sort",
-   "status": "queued",
-   "conclusion": null,
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618",
    "created_at": "2026-11-27T07:35:23Z",
-   "updated_at": "2026-11-27T07:48:19Z",
+   "updated_at": "2026-11-27T08:13:06Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T07:48:19Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T08:12:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500305"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T07:48:40Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T08:13:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500311"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T07:59:12Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T08:12:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500428"
     }
    ]
@@ -184,7 +199,7 @@
    "commit": "226f768df015aec1148bc5cec16ed1f64f9762bd",
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
-   "title": "[Coop][Perf] Sort integer keys alone with the bitonic network in warp_merge_sort",
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374",
@@ -2311,43 +2326,6 @@
      "started_at": "2026-11-26T09:28:29Z",
      "completed_at": "2026-11-26T10:48:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530776031/job/140364450796"
-    }
-   ]
-  },
-  {
-   "run_id": 45530603405,
-   "pr": 1506,
-   "commit": "a0f6d76b8b2164739aa753d7976092e70cdb48e2",
-   "branch": "fix/f30-pa-tile-decode-v-page-ids-race",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the V page-id LDS race in pa_decode_tile_kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405",
-   "created_at": "2026-11-25T02:06:48Z",
-   "updated_at": "2026-11-26T13:42:35Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T09:14:47Z",
-     "completed_at": "2026-11-26T09:40:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801626878",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T10:55:19Z",
-     "completed_at": "2026-11-26T11:24:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530603405/job/139801627005"
     }
    ]
   }
