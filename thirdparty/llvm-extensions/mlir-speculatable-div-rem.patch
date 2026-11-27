@@ -1,0 +1,357 @@
+diff --git a/mlir/include/mlir/Dialect/Arith/IR/ArithOps.td b/mlir/include/mlir/Dialect/Arith/IR/ArithOps.td
+index 4e7b85c534209c..f6fb5e092729f3 100644
+--- a/mlir/include/mlir/Dialect/Arith/IR/ArithOps.td
++++ b/mlir/include/mlir/Dialect/Arith/IR/ArithOps.td
+@@ -746,7 +746,8 @@ def Arith_CeilDivSIOp : Arith_IntBinaryOp<"ceildivsi",
+ // FloorDivSIOp
+ //===----------------------------------------------------------------------===//
+ 
+-def Arith_FloorDivSIOp : Arith_TotalIntBinaryOp<"floordivsi"> {
++def Arith_FloorDivSIOp
++    : Arith_IntBinaryOp<"floordivsi", [ConditionallySpeculatable]> {
+   let summary = "signed floor integer division operation";
+   let description = [{
+     Signed integer division. Rounds towards negative infinity, i.e. `5 / -2 = -3`.
+@@ -764,6 +765,10 @@ def Arith_FloorDivSIOp : Arith_TotalIntBinaryOp<"floordivsi"> {
+ 
+     ```
+   }];
++  let extraClassDeclaration = [{
++    /// Interface method for ConditionallySpeculatable.
++    Speculation::Speculatability getSpeculatability();
++  }];
+   let hasFolder = 1;
+ }
+ 
+diff --git a/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td b/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td
+index 9ff3b2d75e3f67..8f9b5b728a70bc 100644
+--- a/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td
++++ b/mlir/include/mlir/Dialect/LLVMIR/LLVMOps.td
+@@ -161,8 +161,12 @@ def LLVM_UDivOp : LLVM_IntArithmeticOpWithExactFlag<"udiv", "UDiv",
+     [DeclareOpInterfaceMethods<ConditionallySpeculatable>]>;
+ def LLVM_SDivOp : LLVM_IntArithmeticOpWithExactFlag<"sdiv", "SDiv",
+     [DeclareOpInterfaceMethods<ConditionallySpeculatable>]>;
+-def LLVM_URemOp : LLVM_IntArithmeticOp<"urem", "URem", [Pure]>;
+-def LLVM_SRemOp : LLVM_IntArithmeticOp<"srem", "SRem", [Pure]>;
++def LLVM_URemOp : LLVM_IntArithmeticOp<
++    "urem", "URem",
++    [DeclareOpInterfaceMethods<ConditionallySpeculatable>]>;
++def LLVM_SRemOp : LLVM_IntArithmeticOp<
++    "srem", "SRem",
++    [DeclareOpInterfaceMethods<ConditionallySpeculatable>]>;
+ def LLVM_AndOp : LLVM_IntArithmeticOp<"and", "And", [Pure]>;
+ def LLVM_OrOp : LLVM_IntArithmeticOpWithDisjointFlag<"or", "Or", [Pure]> {
+   let hasFolder = 1;
+diff --git a/mlir/lib/Dialect/Arith/IR/ArithOps.cpp b/mlir/lib/Dialect/Arith/IR/ArithOps.cpp
+index 19e9caca6567a6..d73d4d2edcd1ed 100644
+--- a/mlir/lib/Dialect/Arith/IR/ArithOps.cpp
++++ b/mlir/lib/Dialect/Arith/IR/ArithOps.cpp
+@@ -1087,6 +1087,17 @@ OpFoldResult arith::FloorDivSIOp::fold(FoldAdaptor adaptor) {
+   return overflowOrDiv ? Attribute() : result;
+ }
+ 
++Speculation::Speculatability FloorDivSIOp::getSpeculatability() {
++  // Division by zero is UB.
++  // Signed division overflow (INT_MIN / -1) is also UB.
++  Value divisor = getRhs();
++  if (matchPattern(divisor, m_IntRangeWithoutZeroS()) &&
++      matchPattern(divisor, m_IntRangeWithoutNegOneS()))
++    return Speculation::Speculatable;
++
++  return Speculation::NotSpeculatable;
++}
++
+ //===----------------------------------------------------------------------===//
+ // RemUIOp
+ //===----------------------------------------------------------------------===//
+diff --git a/mlir/lib/Dialect/LLVMIR/IR/LLVMDialect.cpp b/mlir/lib/Dialect/LLVMIR/IR/LLVMDialect.cpp
+index 1c8d2e229b7d5c..ce020fd50a1aeb 100644
+--- a/mlir/lib/Dialect/LLVMIR/IR/LLVMDialect.cpp
++++ b/mlir/lib/Dialect/LLVMIR/IR/LLVMDialect.cpp
+@@ -4674,6 +4674,34 @@ Speculation::Speculatability SDivOp::getSpeculatability() {
+   return Speculation::NotSpeculatable;
+ }
+ 
++//===----------------------------------------------------------------------===//
++// URemOp
++//===----------------------------------------------------------------------===//
++
++Speculation::Speculatability URemOp::getSpeculatability() {
++  // urem(x, 0) => UB
++  Value divisor = getRhs();
++  if (matchPattern(divisor, m_IntRangeWithoutZeroU()))
++    return Speculation::Speculatable;
++
++  return Speculation::NotSpeculatable;
++}
++
++//===----------------------------------------------------------------------===//
++// SRemOp
++//===----------------------------------------------------------------------===//
++
++Speculation::Speculatability SRemOp::getSpeculatability() {
++  // srem(x, 0) => UB
++  // srem(INT_MIN, -1) => UB
++  Value divisor = getRhs();
++  if (matchPattern(divisor, m_IntRangeWithoutZeroS()) &&
++      matchPattern(divisor, m_IntRangeWithoutNegOneS()))
++    return Speculation::Speculatable;
++
++  return Speculation::NotSpeculatable;
++}
++
+ //===----------------------------------------------------------------------===//
+ // LLVMDialect initialization, type parsing, and registration.
+ //===----------------------------------------------------------------------===//
+diff --git a/mlir/test/Dialect/Arith/floordivsi-speculatability.mlir b/mlir/test/Dialect/Arith/floordivsi-speculatability.mlir
+new file mode 100644
+index 00000000000000..820fdcd83a9646
+--- /dev/null
++++ b/mlir/test/Dialect/Arith/floordivsi-speculatability.mlir
+@@ -0,0 +1,109 @@
++// RUN: mlir-opt %s -loop-invariant-code-motion -split-input-file | FileCheck %s
++
++// ===========================================================================
++// Unproven divisor => must NOT hoist.
++// ===========================================================================
++// CHECK-LABEL: func.func @no_hoist_unproven
++// CHECK: scf.for
++// CHECK:   arith.floordivsi
++// CHECK:   scf.yield
++func.func @no_hoist_unproven(%a: i32, %b: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = arith.floordivsi %a, %b : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// ===========================================================================
++// Constant 7 (non-zero, not -1) => hoist is legal.
++// Do not use CHECK-NEXT here: LICM also hoists the init constant, so the
++// floordivsi is not guaranteed to be immediately followed by scf.for.
++// ===========================================================================
++// CHECK-LABEL: func.func @hoist_constant_safe
++// CHECK: %[[Q:.*]] = arith.floordivsi
++// CHECK: scf.for
++// CHECK: scf.yield %[[Q]]
++func.func @hoist_constant_safe(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 7 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = arith.floordivsi %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// ===========================================================================
++// Constant 0 => must NOT hoist.
++// ===========================================================================
++// CHECK-LABEL: func.func @no_hoist_zero
++// CHECK: scf.for
++// CHECK:   arith.floordivsi
++// CHECK:   scf.yield
++func.func @no_hoist_zero(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 0 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = arith.floordivsi %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// ===========================================================================
++// Constant -1 => must NOT hoist (INT_MIN / -1 overflow).
++// ===========================================================================
++// CHECK-LABEL: func.func @no_hoist_neg_one
++// CHECK: scf.for
++// CHECK:   arith.floordivsi
++// CHECK:   scf.yield
++func.func @no_hoist_neg_one(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant -1 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = arith.floordivsi %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// ===========================================================================
++// Divisor = addi 5, 3. The m_IntRangeWithoutZeroS / WithoutNegOneS matchers
++// only inspect the divisor's defining op, not a dataflow analysis. Without
++// a running DataFlowSolver, addi's range is unknown, so LICM must not hoist.
++// ===========================================================================
++// CHECK-LABEL: func.func @no_hoist_addi_divisor
++// CHECK: scf.for
++// CHECK:   arith.floordivsi
++// CHECK:   scf.yield
++func.func @no_hoist_addi_divisor(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %c5 = arith.constant 5 : i32
++  %c3 = arith.constant 3 : i32
++  %d  = arith.addi %c5, %c3 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = arith.floordivsi %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
+diff --git a/mlir/test/Dialect/LLVMIR/urem-srem-speculatability.mlir b/mlir/test/Dialect/LLVMIR/urem-srem-speculatability.mlir
+new file mode 100644
+index 00000000000000..27edad57a442d8
+--- /dev/null
++++ b/mlir/test/Dialect/LLVMIR/urem-srem-speculatability.mlir
+@@ -0,0 +1,131 @@
++// RUN: mlir-opt %s -loop-invariant-code-motion -split-input-file \
++// RUN:   | FileCheck %s
++
++// Unproven divisor => must NOT hoist.
++// CHECK-LABEL: func.func @urem_no_hoist
++// CHECK: scf.for
++// CHECK:   llvm.urem
++// CHECK:   scf.yield
++func.func @urem_no_hoist(%a: i32, %b: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.urem %a, %b : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Constant 7 => hoist is legal.
++// CHECK-LABEL: func.func @urem_hoist_constant
++// CHECK: %[[Q:.*]] = llvm.urem
++// CHECK: scf.for
++// CHECK: scf.yield %[[Q]]
++func.func @urem_hoist_constant(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 7 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.urem %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Constant 0 => must NOT hoist.
++// CHECK-LABEL: func.func @urem_no_hoist_zero
++// CHECK: scf.for
++// CHECK:   llvm.urem
++// CHECK:   scf.yield
++func.func @urem_no_hoist_zero(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 0 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.urem %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Unproven divisor => must NOT hoist.
++// CHECK-LABEL: func.func @srem_no_hoist
++// CHECK: scf.for
++// CHECK:   llvm.srem
++// CHECK:   scf.yield
++func.func @srem_no_hoist(%a: i32, %b: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.srem %a, %b : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Constant 7 => hoist is legal.
++// CHECK-LABEL: func.func @srem_hoist_constant
++// CHECK: %[[Q:.*]] = llvm.srem
++// CHECK: scf.for
++// CHECK: scf.yield %[[Q]]
++func.func @srem_hoist_constant(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 7 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.srem %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Constant 0 => must NOT hoist.
++// CHECK-LABEL: func.func @srem_no_hoist_zero
++// CHECK: scf.for
++// CHECK:   llvm.srem
++// CHECK:   scf.yield
++func.func @srem_no_hoist_zero(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant 0 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.srem %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}
++
++// -----
++
++// Constant -1 => must NOT hoist (INT_MIN / -1 overflow).
++// CHECK-LABEL: func.func @srem_no_hoist_neg_one
++// CHECK: scf.for
++// CHECK:   llvm.srem
++// CHECK:   scf.yield
++func.func @srem_no_hoist_neg_one(%a: i32, %n: index) -> i32 {
++  %c0 = arith.constant 0 : index
++  %c1 = arith.constant 1 : index
++  %d = arith.constant -1 : i32
++  %init = arith.constant 0 : i32
++  %r = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %init) -> (i32) {
++    %q = llvm.srem %a, %d : i32
++    scf.yield %q : i32
++  }
++  return %r : i32
++}

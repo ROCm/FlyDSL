@@ -12,6 +12,7 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   TargetInfo.cpp
   Transforms/ExpandOps.cpp
   Transforms/ClusterAttr.cpp
+  Transforms/InvariantCodeMotion.cpp
   GFX1250/MmaAtom.cpp
   GFX1250/MmaAtomScale.cpp
   GFX1250/CopyAtom.cpp
@@ -23,6 +24,7 @@ add_mlir_dialect_library(MLIRFlyROCDLDialect
   FlyROCDLTransformPassIncGen
 
   LINK_COMPONENTS
+  Core
   MC
   TargetParser
 

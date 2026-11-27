@@ -349,7 +349,7 @@ class RocmBackend(BaseBackend):
             *ktrace_fragments,
             "convert-fly-to-rocdl",
             "canonicalize",
-            f"gpu.module(convert-scf-to-cf,cse,"
+            f"gpu.module(rocdl-invariant-code-motion,convert-scf-to-cf,cse,"
             f"convert-rocdl-math-ops,"
             f"convert-gpu-to-rocdl{{chipset={chipset} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
