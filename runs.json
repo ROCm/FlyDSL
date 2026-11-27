@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-27T00:43:55Z",
+ "updated": "2026-11-27T01:33:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45922142982,
+   "pr": 1527,
+   "commit": "cde418bdc3b8b88fd9262109897dde0f9aa38a61",
+   "branch": "phil/gemm-accumulating-variant",
+   "event": "pull_request",
+   "title": "[Bugfix] Reject a gfx1250 WMMA C modifier in a multi-K fx.gemm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45922142982",
+   "created_at": "2026-11-27T01:21:50Z",
+   "updated_at": "2026-11-27T01:23:47Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 45916168374,
    "pr": 1537,
@@ -10,38 +25,41 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop][Perf] Sort integer keys alone with the bitonic network in warp_merge_sort",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374",
    "created_at": "2026-11-27T00:20:42Z",
-   "updated_at": "2026-11-27T00:34:52Z",
+   "updated_at": "2026-11-27T01:30:39Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T00:35:34Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374/job/140240285481"
+     "completed_at": "2026-11-27T01:08:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374/job/140240285481",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-27T00:34:51Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T00:44:54Z",
+     "completed_at": "2026-11-27T00:54:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374/job/140240285497"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T00:35:14Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T00:58:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374/job/140240285549"
     }
    ]
@@ -902,7 +920,7 @@
    "commit": "27ba8477bf4fe62d6f8e97194808f3cf6ea124cf",
    "branch": "phil/gemm-accumulating-variant",
    "event": "pull_request",
-   "title": "[Bugfix] Apply a gfx1250 WMMA C modifier only on a GEMM's first K step",
+   "title": "[Bugfix] Reject a gfx1250 WMMA C modifier in a multi-K fx.gemm",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45716965650",
@@ -2225,43 +2243,6 @@
      "started_at": "2026-11-26T10:26:28Z",
      "completed_at": "2026-11-26T11:27:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45530158732/job/139797986821"
-    }
-   ]
-  },
-  {
-   "run_id": 45529978109,
-   "pr": 1502,
-   "commit": "56d3dafc485fc05cc73f25bf29b7d11401cec117",
-   "branch": "fix/f10-gemm-a16w16-hti-b-refill-war",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix a main-loop LDS race in the gemm_a16w16 gfx950 HTI kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109",
-   "created_at": "2026-11-25T02:01:37Z",
-   "updated_at": "2026-11-26T17:27:05Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T09:52:30Z",
-     "completed_at": "2026-11-26T10:20:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311108",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T15:47:33Z",
-     "completed_at": "2026-11-26T16:27:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311233"
     }
    ]
   }
