@@ -21,10 +21,11 @@ def test_cmake_default_backend_stays_rocdl():
 
 
 def test_rocm_runtime_is_only_added_for_rocdl_backend():
-    text = (_REPO_ROOT / "lib" / "Runtime" / "CMakeLists.txt").read_text()
+    runtime = (_REPO_ROOT / "lib" / "Runtime" / "CMakeLists.txt").read_text()
+    rocdl = (_REPO_ROOT / "cmake" / "backends" / "rocdl.cmake").read_text()
 
-    assert 'if("rocdl" IN_LIST FLYDSL_BACKENDS)' in text
-    assert "add_subdirectory(ROCm)" in text
+    assert "get_property(_dirs GLOBAL PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS)" in runtime
+    assert 'set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS "ROCm")' in rocdl
 
 
 def test_backend_descriptors_are_loaded_from_selected_backend_list():

@@ -15,18 +15,6 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
 )
 
-if(FLYDSL_HAS_ROCDL)
-  declare_mlir_dialect_python_bindings(
-    ADD_TO_PARENT FlyPythonSources
-    ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
-    TD_FILE dialects/FlyROCDL.td
-    SOURCES
-      dialects/fly_rocdl.py
-    DIALECT_NAME fly_rocdl
-    GEN_ENUM_BINDINGS
-  )
-endif()
-
 declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT FlyPythonSources
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
@@ -58,20 +46,15 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
     MLIRCPILLVMOption
 )
 
-if(FLYDSL_HAS_ROCDL)
-  declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
-    MODULE_NAME _mlirDialectsFlyROCDL
-    ADD_TO_PARENT FlyPythonSources
-    ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
-    PYTHON_BINDINGS_LIBRARY nanobind
-    SOURCES
-      FlyROCDLExtension.cpp
-    PRIVATE_LINK_LIBS
-      LLVMSupport
-    EMBED_CAPI_LINK_LIBS
-      MLIRCPIFlyROCDL
-  )
-endif()
+# Each enabled backend's python/mlir_flydsl/backends/<name>.cmake declares its
+# dialect bindings and extension module, and appends to these lists:
+set(_fly_backend_upstream_sources "")  # upstream MLIR Python sources it needs
+set(_fly_backend_stubgen_modules "")   # its extension modules, for stubgen
+set(_fly_backend_dialect_libs "")      # dialect libraries its extension calls (Windows)
+set(_fly_backend_copy_commands "")     # extra CopyFlyPythonSources commands
+foreach(_backend IN LISTS FLYDSL_BACKENDS)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/backends/${_backend}.cmake")
+endforeach()
 
 # NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
 # Doing so statically embeds a copy of MLIRPass (and its pass registry) into
@@ -99,7 +82,6 @@ declare_mlir_python_extension(FlyPythonSources.SiteInitialize
 )
 
 
-get_property(_backend_upstream_dialect_sources GLOBAL PROPERTY FLYDSL_BACKEND_UPSTREAM_DIALECT_SOURCES)
 set(MLIRFlyDSLSources
   FlyPythonSources
   MLIRPythonSources.Core
@@ -115,7 +97,7 @@ set(MLIRFlyDSLSources
   MLIRPythonSources.Dialects.vector
   MLIRPythonSources.Dialects.llvm
   MLIRPythonSources.ExecutionEngine
-  ${_backend_upstream_dialect_sources}
+  ${_fly_backend_upstream_sources}
 )
 
 add_mlir_python_common_capi_library(FlyPythonCAPI
@@ -136,10 +118,7 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 # archives on the link line, so the archive copies are never pulled in.
 # ---------------------------------------------------------------------------
 if(WIN32)
-  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect FlyCore)
-  if(FLYDSL_HAS_ROCDL)
-    list(APPEND _fly_dialect_libs MLIRFlyROCDLDialect)
-  endif()
+  set(_fly_dialect_libs MLIRFlyDialect MLIRFlyKtraceDialect FlyCore ${_fly_backend_dialect_libs})
   foreach(_lib IN LISTS _fly_dialect_libs)
     # add_mlir_library makes obj.<lib> for every generator except Visual Studio's.
     if(NOT TARGET obj.${_lib})
@@ -231,11 +210,10 @@ if(DEFINED nanobind_DIR AND NOT "${nanobind_DIR}" STREQUAL "")
 endif()
 list(JOIN _STUBGEN_PYTHONPATH ":" _STUBGEN_PYTHONPATH_VALUE)
 
-get_property(_backend_stubgen_modules GLOBAL PROPERTY FLYDSL_BACKEND_STUBGEN_MODULES)
 set(_flydsl_stubgen_modules
   flydsl._mlir._mlir_libs._mlir
   flydsl._mlir._mlir_libs._mlirDialectsFly
-  ${_backend_stubgen_modules}
+  ${_fly_backend_stubgen_modules}
 )
 list(APPEND _flydsl_stubgen_modules
   flydsl._mlir._mlir_libs._mlirDialectsGPU
@@ -294,19 +272,6 @@ add_custom_target(FlyPythonStubs ALL
   DEPENDS "${_STUB_MARKER_FILE}"
 )
 
-if(FLYDSL_HAS_ROCDL)
-  set(_FLY_COPY_ROCDL_TABLEGEN
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_ops_gen.py"
-      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_ops_gen.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_enum_gen.py"
-      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_enum_gen.py"
-  )
-else()
-  set(_FLY_COPY_ROCDL_TABLEGEN "")
-endif()
-
 # The JIT asks for the C runner utils by an unversioned name. Windows keeps the
 # DLL names and has no rpath to patch: Python preloads mlir_c_runner_utils.dll,
 # and that load finds mlir_float16_utils.dll in the same folder
@@ -361,7 +326,7 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ktrace_ops_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_ktrace_ops_gen.py"
-  ${_FLY_COPY_ROCDL_TABLEGEN}
+  ${_fly_backend_copy_commands}
   ${_FLY_COPY_DEVICE_BITCODE}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
@@ -377,21 +342,21 @@ add_custom_target(CopyFlyPythonSources ALL
 add_dependencies(CopyFlyPythonSources FlyPythonModules)
 
 ################################################################################
-# FlyJitRuntime output + dependency (built in lib/Runtime/)
+# Backend runtime outputs + dependencies (built in lib/Runtime/<backend>/)
 ################################################################################
-if(TARGET FlyJitRuntime)
-  set_target_properties(FlyJitRuntime PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
-  # On Windows the DLL is a RUNTIME output, not a LIBRARY one.
-  set_property(TARGET FlyJitRuntime PROPERTY RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
-  add_dependencies(FlyPythonCAPI FlyJitRuntime)
-endif()
-
-if(TARGET FlyRocmAotRuntime)
-  set_target_properties(FlyRocmAotRuntime PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
-  add_dependencies(FlyPythonCAPI FlyRocmAotRuntime)
-endif()
+get_property(_fly_runtime_targets GLOBAL PROPERTY FLYDSL_BACKEND_RUNTIME_TARGETS)
+foreach(_target IN LISTS _fly_runtime_targets)
+  get_target_property(_type ${_target} TYPE)
+  if(_type STREQUAL "STATIC_LIBRARY")
+    set_property(TARGET ${_target} PROPERTY ARCHIVE_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  else()
+    # On Windows a DLL is a RUNTIME output, not a LIBRARY one.
+    set_target_properties(${_target} PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  endif()
+  add_dependencies(FlyPythonCAPI ${_target})
+endforeach()
 
 # Windows: the AOT runtime's bitcode (lib/Runtime/ROCm) becomes LLVM-dialect IR,
 # which compiler/_aot.py merges into each exported module. The same MLIR reads
@@ -413,6 +378,7 @@ if(WIN32 AND TARGET FlyRocmAotRuntimeBitcode)
   )
   add_custom_target(FlyRocmAotRuntimeIR ALL DEPENDS "${_fly_aot_runtime_ir}")
   add_dependencies(FlyPythonCAPI FlyRocmAotRuntimeIR)
+  list(APPEND _fly_runtime_targets FlyRocmAotRuntimeIR)
 endif()
 
 ################################################################################
@@ -420,7 +386,8 @@ endif()
 ################################################################################
 # Runs on every build, after everything that writes native files into
 # _mlir_libs (the patchelf'd runtime copies in CopyFlyPythonSources included),
-# so the table always describes the libraries next to it. Any new target that
+# so the table always describes the libraries next to it. Backend runtimes
+# register theirs in FLYDSL_BACKEND_RUNTIME_TARGETS; any other new target that
 # writes into _mlir_libs must be added as a dependency here.
 add_custom_target(FlyNativeDigest ALL
   COMMAND ${CMAKE_COMMAND} -DLIBS_DIR=${_MLIR_LIBS_DIR}
@@ -428,9 +395,5 @@ add_custom_target(FlyNativeDigest ALL
   COMMENT "Fingerprinting native libraries in ${_MLIR_LIBS_DIR}"
   VERBATIM
 )
-add_dependencies(FlyNativeDigest CopyFlyPythonSources FlyPythonModules FlyPythonCAPI)
-foreach(_runtime_target IN ITEMS FlyJitRuntime FlyRocmAotRuntime FlyRocmAotRuntimeIR)
-  if(TARGET ${_runtime_target})
-    add_dependencies(FlyNativeDigest ${_runtime_target})
-  endif()
-endforeach()
+add_dependencies(FlyNativeDigest CopyFlyPythonSources FlyPythonModules FlyPythonCAPI
+  ${_fly_runtime_targets})

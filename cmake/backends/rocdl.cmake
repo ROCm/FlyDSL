@@ -5,7 +5,9 @@
 # Self-registers into global properties consumed by downstream CMakeLists.txt.
 #
 # Adding a new backend: copy this file to cmake/backends/<name>.cmake and change
-# the property values; -DFLYDSL_BACKENDS can then select <name>.
+# the property values, and copy python/mlir_flydsl/backends/rocdl.cmake (its
+# Python bindings) to python/mlir_flydsl/backends/<name>.cmake;
+# -DFLYDSL_BACKENDS can then select <name>.
 
 # TableGen / header subdirectories under include/flydsl/
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_DIALECT_SUBDIRS "FlyROCDL")
@@ -25,14 +27,5 @@ set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_SOURCES "ROCDL.c
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_LIBS
   MLIRFlyROCDLDialect MLIRFlyToROCDL MLIRFlyKtraceToROCDL)
 
-# Upstream MLIR dialect sources needed by this backend's Python bindings
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_UPSTREAM_DIALECT_SOURCES
-  "MLIRPythonSources.Dialects.rocdl")
-
-# Stubgen modules for this backend
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_STUBGEN_MODULES
-  "flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL")
-
-# Convenience boolean for Python CMakeLists gating of ROCDL-specific bindings
-# (dialect bindings, nanobind extension, tablegen copy are still ROCDL-specific)
-set(FLYDSL_HAS_ROCDL ON)
+# JIT and AOT runtime subdirectory under lib/Runtime/
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS "ROCm")

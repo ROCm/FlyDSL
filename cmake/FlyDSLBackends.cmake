@@ -44,9 +44,9 @@ set_property(GLOBAL PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "")
 set_property(GLOBAL PROPERTY FLYDSL_BACKEND_CAPI_SUBDIRS "")
 set_property(GLOBAL PROPERTY FLYDSL_BACKEND_REGISTRATION_SOURCES "")
 set_property(GLOBAL PROPERTY FLYDSL_BACKEND_REGISTRATION_LIBS "")
-# Python-side properties
-set_property(GLOBAL PROPERTY FLYDSL_BACKEND_UPSTREAM_DIALECT_SOURCES "")
-set_property(GLOBAL PROPERTY FLYDSL_BACKEND_STUBGEN_MODULES "")
+set_property(GLOBAL PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS "")
+# Filled by the runtime subdirectories: targets whose output belongs in _mlir_libs
+set_property(GLOBAL PROPERTY FLYDSL_BACKEND_RUNTIME_TARGETS "")
 
 # ---- Include per-backend descriptors ----
 foreach(_backend ${FLYDSL_BACKENDS})
