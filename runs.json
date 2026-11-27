@@ -1,8 +1,112 @@
 {
  "schema": 1,
- "updated": "2026-11-26T21:24:53Z",
+ "updated": "2026-11-27T00:36:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45916168374,
+   "pr": 1537,
+   "commit": "226f768df015aec1148bc5cec16ed1f64f9762bd",
+   "branch": "perf/coop-warp-merge-sort-int-keys",
+   "event": "pull_request",
+   "title": "[Coop][Perf] Sort integer keys alone with the bitonic network in warp_merge_sort",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45916168374",
+   "created_at": "2026-11-27T00:20:42Z",
+   "updated_at": "2026-11-27T00:22:28Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 45910708079,
+   "pr": 1528,
+   "commit": "4c8e891fc60a8b90b705e4fba0a8dc106ef089f1",
+   "branch": "phil/fc1-dynamic-extent-i64",
+   "event": "pull_request",
+   "title": "[Bugfix] Stop products of dynamic shape extents from wrapping at 2^31 in sizes and divides",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910708079",
+   "created_at": "2026-11-26T23:23:58Z",
+   "updated_at": "2026-11-27T00:34:09Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T23:45:17Z",
+     "completed_at": "2026-11-27T00:34:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910708079/job/140224222607",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T23:43:48Z",
+     "completed_at": "2026-11-27T00:07:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910708079/job/140224222632"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T23:48:13Z",
+     "completed_at": "2026-11-26T23:56:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910708079/job/140224222660"
+    }
+   ]
+  },
+  {
+   "run_id": 45910028292,
+   "pr": 1531,
+   "commit": "ff2cdaf9f8408d9966521ace9f0e9361d7a67c82",
+   "branch": "phil/fc2-max-flat-work-group-size",
+   "event": "pull_request",
+   "title": "[Feat] Add a max_flat_work_group_size compile hint",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910028292",
+   "created_at": "2026-11-26T23:17:14Z",
+   "updated_at": "2026-11-26T23:38:40Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T23:29:44Z",
+     "completed_at": "2026-11-26T23:52:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910028292/job/140219805557"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-26T23:31:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910028292/job/140219805568"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-26T23:38:40Z",
+     "completed_at": "2026-11-26T23:47:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45910028292/job/140219805651"
+    }
+   ]
+  },
   {
    "run_id": 45895586079,
    "pr": 1495,
@@ -721,7 +825,7 @@
    "commit": "b01248fb7b82c475593cc999d024a980f8c8bcfb",
    "branch": "phil/fc1-dynamic-extent-i64",
    "event": "pull_request",
-   "title": "[Bugfix] Stop products of dynamic shape extents from wrapping at 2^31",
+   "title": "[Bugfix] Stop products of dynamic shape extents from wrapping at 2^31 in sizes and divides",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45726643078",
@@ -2127,144 +2231,6 @@
      "started_at": "2026-11-26T15:47:33Z",
      "completed_at": "2026-11-26T16:27:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45529978109/job/139806311233"
-    }
-   ]
-  },
-  {
-   "run_id": 45455838769,
-   "pr": 1501,
-   "commit": "1c0de3ea0cd4f17431e06b6af8db3633069a1c12",
-   "branch": "reble/pa-decode-mfma-interleave",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] PA decode: interleave independent MFMA chains",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45455838769",
-   "created_at": "2026-11-24T18:06:13Z",
-   "updated_at": "2026-11-24T19:09:02Z",
-   "actor": "reble",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T18:27:42Z",
-     "completed_at": "2026-11-24T19:01:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45455838769/job/138678640509"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T18:27:30Z",
-     "completed_at": "2026-11-24T18:36:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45455838769/job/138678640517"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T18:32:02Z",
-     "completed_at": "2026-11-24T19:09:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45455838769/job/138678640644",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45415491312,
-   "pr": 1431,
-   "commit": "ecc1e4cd1453dd080ac6904fc3828404c9d46294",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45415491312",
-   "created_at": "2026-11-24T14:33:52Z",
-   "updated_at": "2026-11-24T16:54:27Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T15:15:06Z",
-     "completed_at": "2026-11-24T15:59:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45415491312/job/138547793785",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T15:14:54Z",
-     "completed_at": "2026-11-24T16:54:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45415491312/job/138547793816"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T15:26:28Z",
-     "completed_at": "2026-11-24T15:34:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45415491312/job/138547793841"
-    }
-   ]
-  },
-  {
-   "run_id": 45391329460,
-   "pr": 1431,
-   "commit": "8c953cd01d60afebf524a0cb0dbdc362efed1e8e",
-   "branch": "jli/llvm-upgrade-e2ce52c885",
-   "event": "pull_request",
-   "title": "[LLVM] Bump LLVM pin to e2ce52c885 and rebase llvm-extensions",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460",
-   "created_at": "2026-11-24T12:12:48Z",
-   "updated_at": "2026-11-25T01:45:57Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T01:08:51Z",
-     "completed_at": "2026-11-25T01:45:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900582609"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T12:30:08Z",
-     "completed_at": "2026-11-24T13:02:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900584159",
-     "machine": "gbt350-odcdh1-b10-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-24T12:47:31Z",
-     "completed_at": "2026-11-24T12:57:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45391329460/job/138900585268"
     }
    ]
   }
