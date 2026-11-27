@@ -64,6 +64,9 @@ def launch_gemm_a8w8(
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
+    # A tile below one WMMA would issue no WMMA at all and store zeros.
+    if tile_k % WMMA_K or tile_m % (m_warp * WMMA_M) or tile_n % (n_warp * WMMA_N):
+        raise ValueError(f"tile ({tile_m},{tile_n},{tile_k}) / warps ({m_warp},{n_warp}) not WMMA-aligned")
     WAVE = fx.num_warp_threads()
     K_WS = tile_k // WMMA_K
     # Pair updates as q = -A0*B0-C; C = A1*B1-q. The exact sum is unchanged,
