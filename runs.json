@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-11-27T21:24:43Z",
+ "updated": "2026-11-27T23:20:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 46073686868,
+   "pr": 1537,
+   "commit": "50248d1f7f0bf0a5a2f86b14dff39117216cd589",
+   "branch": "perf/coop-warp-merge-sort-int-keys",
+   "event": "pull_request",
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/46073686868",
+   "created_at": "2026-11-27T21:58:26Z",
+   "updated_at": "2026-11-27T23:17:48Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T22:19:05Z",
+     "completed_at": "2026-11-27T22:59:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46073686868/job/140763206469",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T22:30:10Z",
+     "completed_at": "2026-11-27T22:39:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46073686868/job/140763206473"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T22:19:52Z",
+     "completed_at": "2026-11-27T23:17:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46073686868/job/140763206503"
+    }
+   ]
+  },
   {
    "run_id": 45986057911,
    "pr": 1538,
@@ -2323,43 +2369,6 @@
      "completed_at": "2026-11-26T13:23:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531875870/job/140364487580",
      "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45531742801,
-   "pr": 1513,
-   "commit": "82166f2d05a36138c57140421236db0f76eef1ae",
-   "branch": "fix/f40-mxfp-moe-gemm1-bm128-a-ring",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the A-tile LDS race in mxfp_moe stage-1 GEMM at BM=128",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801",
-   "created_at": "2026-11-25T02:16:19Z",
-   "updated_at": "2026-11-26T16:47:31Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T10:45:13Z",
-     "completed_at": "2026-11-26T11:41:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835825"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T14:37:55Z",
-     "completed_at": "2026-11-26T16:19:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531742801/job/139803835876",
-     "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
     }
