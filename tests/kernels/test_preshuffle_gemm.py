@@ -64,6 +64,7 @@ def _mxfp4_launcher(
     prefetch=1,
     single_row=False,
     b_nt=False,
+    b_scale_32x32=False,
 ):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. This closure fixes every Constexpr, so it reuses one compiled handle:
@@ -105,6 +106,7 @@ def _mxfp4_launcher(
             prefetch,
             single_row,
             b_nt,
+            b_scale_32x32,
         )
         if compiled is None:
             compiled = flyc.compile(launch_gemm, *args)  # Compiles and launches once.
@@ -1360,77 +1362,117 @@ def _blk_jitter(shape, device):
     return torch.exp2(torch.randint(-2, 3, shape, device=device, dtype=torch.float32))
 
 
+# Coarse E8M0 scale paths: (M, N, K, tile_m, tile_n, tile_k), A block, B block, scale layout, launch kwargs.
+# "mfma_tile" takes the coarse scales in the kernel's compact blockscale order (1x32 ones
+# shuffle_scale_w4'd); "row" takes them as the quantizer emits them (a 1x128 A column-major).
+_A8W8_COARSE_CASES = [
+    ("ab", (64, 8192, 8192, 64, 128, 128), "1x128", "128x128", "mfma_tile", {}),
+    ("a", (64, 8192, 8192, 64, 128, 128), "1x128", "1x32", "mfma_tile", {}),
+    ("b", (64, 8192, 8192, 64, 128, 128), "1x32", "128x128", "mfma_tile", {}),
+    ("ab-tm16", (13, 1024, 2048, 16, 128, 256), "1x128", "128x128", "mfma_tile", {}),  # M <= 16
+    ("ab-tm16-m1-single", (1, 1024, 2048, 16, 64, 256), "1x128", "128x128", "mfma_tile", dict(single_row=True)),
+    ("row-a", (100, 1024, 2048, 64, 256, 256), "1x128", "1x32", "row", {}),
+    ("row-b32", (32, 512, 2048, 32, 128, 128), "1x32", "32x32", "row", {}),
+    ("row-b128", (100, 1024, 2048, 64, 256, 256), "1x32", "128x128", "row", {}),
+    ("row-ab-tm16-tk512", (9, 1024, 4096, 16, 128, 512), "1x128", "128x128", "row", {}),
+    # The 32x32 B rides the 1x32 panels, so the prefetch pipeline takes it too.
+    ("row-b32-pf3", (100, 1024, 2048, 64, 256, 256), "1x32", "32x32", "row", dict(prefetch=3)),
+    ("row-b32-tm16-tk512-pf3", (9, 1024, 4096, 16, 128, 512), "1x32", "32x32", "row", dict(prefetch=3)),
+]
+
+
 @pytest.mark.parametrize("out_dtype", ["bf16"])
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, single_row",
-    [
-        (64, 8192, 8192, 64, 128, 128, False),
-        (13, 1024, 2048, 16, 128, 256, False),  # a 16-row tile (M <= 16)
-        (1, 1024, 2048, 16, 64, 256, True),  # M = 1: only row 0 stored
-    ],
+    "shape,a_block,b_block,scale_layout,kwargs",
+    [pytest.param(sh, ab, bb, lay, kw, id=name) for name, sh, ab, bb, lay, kw in _A8W8_COARSE_CASES],
 )
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 def test_mfma_a8w8_preshuffle_blockscale(
     out_dtype,
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    single_row,
+    shape,
+    a_block,
+    b_block,
+    scale_layout,
+    kwargs,
     *,
     bench_iters: int = 0,
     bench_warmup: int = 0,
     waves_per_eu: int = 0,
 ):
-    """A8W8 blockscale GEMM driven from randn fp32 operands (test_mfma_a8_flyc_preshuffle
-    init style). Only the quant grid differs from the MX path: one E8M0 scale per 1x128 of
-    A and per 128x128 of B, instead of per 1x32 of each."""
+    """A8W8 with coarse E8M0 scales driven from randn fp32 operands: A per 1x128 and/or B per
+    128x128 (blockscale "a" / "b" / "ab") or 32x32, the other operand per 1x32."""
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP8 MX GEMM requires gfx950, got {get_rocm_arch()}")
+    M, N, K, tile_m, tile_n, tile_k = shape
     # blockscale is a8w8-only and needs N%128==0 (aiter host enforces the same).
     assert N % SCALE_BLOCK_128 == 0 and K % SCALE_BLOCK_128 == 0
+    blockscale = {(True, True): "ab", (True, False): "a", (False, True): "b", (False, False): "none"}[
+        (a_block == "1x128", b_block == "128x128")
+    ]
 
     print("=" * 80)
-    print(f"MFMA A8W8 blockscale GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print(f"MFMA A8W8 {a_block} A / {b_block} B {scale_layout} scale GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
     launch_fn = _mxfp4_launcher(
-        N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", blockscale="ab", single_row=single_row
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        out_dtype,
+        "fp8",
+        _wpe,
+        b_dtype="fp8",
+        blockscale=blockscale,
+        a_scale_layout=scale_layout,
+        b_scale_layout=scale_layout,
+        b_scale_32x32=b_block == "32x32",
+        **kwargs,
     )
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
     torch.manual_seed(0)
     scale_k = K // SCALE_BLOCK_128
-    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
-    # Per-block magnitude jitter. Plain randn makes every block max nearly identical, so all
-    # blocks quantize to the same E8M0 and a mis-indexed scale reads a value that happens to
-    # be right. Real tensors vary per block - that is why blockscale quant exists.
-    a_fp32 = (a_fp32.view(M, scale_k, SCALE_BLOCK_128) * _blk_jitter((M, scale_k, 1), device)).view(M, K)
-    b_fp32 = (
-        b_fp32.view(N // SCALE_BLOCK_128, SCALE_BLOCK_128, scale_k, SCALE_BLOCK_128)
-        * _blk_jitter((N // SCALE_BLOCK_128, 1, scale_k, 1), device)
-    ).view(N, K)
 
-    a_q, scale_a = gemm_common_utils.per_block_f8_quant(a_fp32, 1, SCALE_BLOCK_128)
-    b_q, scale_b = gemm_common_utils.per_block_f8_quant(b_fp32, SCALE_BLOCK_128, SCALE_BLOCK_128)
+    def _quant(x, block):
+        """fp8 codes, the scale in the kernel's layout and the dequant of x on a (bm x bk)
+        grid. Per-block magnitude jitter: plain randn makes every block max nearly
+        identical, so a mis-indexed scale would read a value that happens to be right."""
+        bm, bk = {"1x32": (1, 32), "1x128": (1, 128), "32x32": (32, 32), "128x128": (128, 128)}[block]
+        rows = x.shape[0]
+        # A shuffle_scale_w4'd 1x32 scale needs rows padded to 32.
+        pad = 32 if (scale_layout, block) == ("mfma_tile", "1x32") else bm
+        padded = torch.zeros((rows + pad - 1) // pad * pad, K, device=device)
+        padded[:rows] = x
+        jitter = _blk_jitter((padded.shape[0] // bm, K // bk), device)
+        padded = padded * jitter.repeat_interleave(bm, 0).repeat_interleave(bk, 1)
+        q, sc = gemm_common_utils.per_block_f8_quant(padded, bm, bk)
+        sc_f = gemm_common_utils.e8m0_to_f32(sc).repeat_interleave(bm, 0).repeat_interleave(bk, 1)
+        return q[:rows], sc, q[:rows].float() * sc_f[:rows]
 
-    # Reference: dequant each operand at its own block granularity, then plain fp32 mm.
-    a_deq = a_q.float().view(M, scale_k, SCALE_BLOCK_128) * gemm_common_utils.e8m0_to_f32(scale_a).unsqueeze(-1)
-    b_sc_rows = gemm_common_utils.e8m0_to_f32(scale_b).repeat_interleave(SCALE_BLOCK_128, dim=0)
-    b_deq = b_q.float().view(N, scale_k, SCALE_BLOCK_128) * b_sc_rows.unsqueeze(-1)
-    c_ref = torch.mm(a_deq.view(M, K), b_deq.view(N, K).T)
+    a_q, sa, a_deq = _quant(torch.randn(M, K, device=device), a_block)
+    b_q, sb, b_deq = _quant(torch.randn(N, K, device=device), b_block)
+    c_ref = torch.mm(a_deq, b_deq.T)
 
-    # gfx950 packing: B preshuffled 16x16, scales into the kernel's compact blockscale order.
+    # gfx950 packing: B preshuffled 16x16.
     b_shuffled = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
-    scale_a_shuffled = gemm_common_utils.shuffle_scale_blockscale_a(scale_a, K)
-    scale_b_shuffled = gemm_common_utils.shuffle_scale_blockscale_b(scale_b, N, K)
+    if scale_layout == "row":
+        scale_a_shuffled = sa.T.contiguous() if a_block == "1x128" else sa  # 1x128: column-major [K // 128, M]
+        scale_b_shuffled = sb
+    else:
+        if a_block == "1x128":
+            scale_a_shuffled = gemm_common_utils.shuffle_scale_blockscale_a(sa, K)
+        else:
+            scale_a_shuffled = gemm_common_utils.shuffle_scale_w4(sa, 1, False)
+        if b_block == "128x128":
+            scale_b_shuffled = gemm_common_utils.shuffle_scale_blockscale_b(sb, N, K)
+        else:
+            scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(sb, 1, False)
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
