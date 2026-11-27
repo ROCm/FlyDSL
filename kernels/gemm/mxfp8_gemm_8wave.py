@@ -159,12 +159,16 @@ class ScaleRawLds:
             fx.add_offset(lds.ptr, fx.make_int_tuple(4096 if b_block128 else 4096 + b_row * 16 + lane_off)),
         ]
 
+    def _blk128_start(self, chunk):
+        """First K-128 block of a 128x128 B chunk's dword; it never runs past the row's
+        end (K // 128 >= 4)."""
+        return min(chunk * self.CHUNK, self.k128 - 4)
+
     def _soffset(self, op, chunk):
         if const_expr(op == 0 and self.a_col):
             return fx.Int32(chunk * self.CHUNK) * self.c_m
         if const_expr(op == 1 and self.b_blk):
-            # The dword never runs past the row's end (K // 128 >= 4).
-            return fx.Int32(min(chunk * self.CHUNK, self.k128 - 4))
+            return fx.Int32(self._blk128_start(chunk))
         if const_expr(self.k_byte_off is not None):
             return fx.Int32(chunk * 16) + self.k_byte_off
         return fx.Int32(chunk * 16)
@@ -200,9 +204,7 @@ class ScaleRawLds:
         slot = k // self.CHUNK % 2 * self.BYTES
         if const_expr(op == 1 and self.b_blk):
             # One block per 128-row half: every tile and lane shares its byte.
-            chunk = k // self.CHUNK
-            start = min(chunk * self.CHUNK, self.k128 - 4)
-            v = self._byte(op, slot + half_row // 128 * 4 + (k - start))
+            v = self._byte(op, slot + half_row // 128 * 4 + (k - self._blk128_start(k // self.CHUNK)))
             return [v] * n_tiles
         words = []
         for t in range_constexpr(n_tiles):
@@ -404,8 +406,8 @@ def compile_mxfp8_gemm_8w(
     ), "a split-K segment takes row-major 1x32 A and 1x32 / 32x32 B scales"
     assert k_split == 1 or xcd_swizzle == 0, "split-K tiles run in row-major order"
     K_ITERS = K // BLOCK_K // k_split
-    # Scale words are addressed by K-pair, so K must contain a whole number of
-    # them (K % 256 above already guarantees it).
+    # Scale words are addressed by K-pair, so a K-segment must contain a whole number
+    # of them (K % (k_split * 256) above already guarantees it).
     assert K_ITERS % 2 == 0
 
     N_TILES_A = BLOCK_M // 64
@@ -527,7 +529,7 @@ def compile_mxfp8_gemm_8w(
                 a_col_major=a_scale_block == "1x128",
                 b_block128=b_scale_block == "128x128",
                 c_m=c_m,
-                # A scale row holds K // 32 bytes: 4 per 128-K step.
+                # A or B scale row holds K // 32 bytes: 4 per 128-K step.
                 k_byte_off=k0 * (BLOCK_K // 32) if k_split > 1 else None,
             )
             n_chunks = (K_ITERS + ScaleRawLds.CHUNK - 1) // ScaleRawLds.CHUNK

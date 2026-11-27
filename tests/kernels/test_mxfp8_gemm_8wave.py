@@ -123,19 +123,22 @@ def _run_mxfp8_gemm(
 @pytest.mark.parametrize("scale_preshuffled", [True, False])
 @pytest.mark.parametrize("b_preshuffled", [False, True])
 @pytest.mark.parametrize(
-    "M, N, K, xcd_swizzle",
+    "M, N, K, xcd_swizzle, out_cols",
     [
-        (256, 256, 512, 0),
-        (256, 256, 768, 0),
-        (1024, 1024, 2048, 0),
-        (1024, 1024, 2048, 4),
-        (8192, 8192, 512, 4),
-        (2048, 2048, 4096, 0),
-        pytest.param(8192, 8192, 8192, 0, marks=pytest.mark.large_shape),
-        pytest.param(8192, 8192, 8192, 4, marks=pytest.mark.large_shape),
+        (256, 256, 512, 0, None),
+        (256, 256, 768, 0, None),
+        (1024, 1024, 2048, 0, None),
+        (1024, 1024, 2048, 4, None),
+        (8192, 8192, 512, 4, None),
+        (2048, 2048, 4096, 0, None),
+        # C as the leading column slice of a wider row-major output (ldc > N); nothing past
+        # the slice may be written (the split-K test cannot see that: the reduce overwrites it).
+        (512, 512, 512, 0, 768),
+        pytest.param(8192, 8192, 8192, 0, None, marks=pytest.mark.large_shape),
+        pytest.param(8192, 8192, 8192, 4, None, marks=pytest.mark.large_shape),
     ],
 )
-def test_mxfp8_gemm_8wave(M, N, K, xcd_swizzle, b_preshuffled, scale_preshuffled):
+def test_mxfp8_gemm_8wave(M, N, K, xcd_swizzle, out_cols, b_preshuffled, scale_preshuffled):
     _run_mxfp8_gemm(
         M,
         N,
@@ -143,14 +146,9 @@ def test_mxfp8_gemm_8wave(M, N, K, xcd_swizzle, b_preshuffled, scale_preshuffled
         b_preshuffled=b_preshuffled,
         scale_preshuffled=scale_preshuffled,
         xcd_swizzle=xcd_swizzle,
+        out_cols=out_cols,
         report=True,
     )
-
-
-def test_mxfp8_gemm_8wave_strided_out():
-    """C as the leading column slice of a wider row-major output (ldc > N); nothing past
-    the slice may be written (the split-K test cannot see that: the reduce overwrites it)."""
-    _run_mxfp8_gemm(512, 512, 512, out_cols=768, num_warmups=1, num_iters=2)
 
 
 def _tail_split_n1(M, N, n_cus):
@@ -161,11 +159,14 @@ def _tail_split_n1(M, N, n_cus):
     return None if head_n in (0, n_tiles) else head_n * 256
 
 
-def _run_mxfp8_tail_split(M, N, K, n_split, *, b_preshuffled, n1=None, num_warmups=10, num_iters=100, report=False):
+def _run_mxfp8_tail_split(
+    M, N, K, n_split, *, b_preshuffled, n1=None, b_scale_block="1x32", num_warmups=10, num_iters=100, report=False
+):
     """Columns ``[0, n1)`` unsplit in place (ldc = N); the rest K-split
     ``n_split`` ways into an fp32 workspace that the strided split-K reduce sums
     into ``Out[:, n1:]``. ``n1=None`` picks the head from the CU count;
-    ``n_split=1`` runs every column unsplit (the baseline). Returns the time (us)."""
+    ``n_split=1`` runs every column unsplit (the baseline). Row-major 1x32 A and
+    ``b_scale_block`` ("1x32" / "32x32") B scales. Returns the time (us)."""
     if ARCH != "gfx950":
         pytest.skip(f"MXFP8 8-wave GEMM requires gfx950, got {ARCH}")
     device = torch.device("cuda")
@@ -176,22 +177,25 @@ def _run_mxfp8_tail_split(M, N, K, n_split, *, b_preshuffled, n1=None, num_warmu
         assert n1 is not None, f"{M}x{N} fills whole waves; nothing to split"
     n2 = N - n1
     torch.manual_seed(0)
-    a_q, a_scale = gemm_common_utils.per_1x32_f8_quant(torch.randn(M, K, device=device))
-    b_q, b_scale = gemm_common_utils.per_1x32_f8_quant(torch.randn(N, K, device=device))
-    c_ref = _ref_mxfp8(a_q, b_q, a_scale, b_scale)
+    b_rows = 32 if b_scale_block == "32x32" else 1  # N-rows per B scale row
+    a_q, a_scale, a_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(M, K, device=device), 1, 32)
+    b_q, b_scale, b_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(N, K, device=device), b_rows, 32)
+    c_ref = torch.mm(a_deq, b_deq.T)
     b_in = preshuffle_b(b_q.view(torch.int8)) if b_preshuffled else b_q.view(torch.int8)
     b_in = b_in.reshape(N, K)  # preshuffle_b permutes within 16-row groups: rows slice as-is
     a_i8 = a_q.view(torch.int8).view(-1)
     a_sc, b_sc = a_scale.contiguous(), b_scale.contiguous()
 
-    head = compile_mxfp8_gemm_8w(K=K, b_preshuffled=b_preshuffled, scale_preshuffled=False)
-    tail = compile_mxfp8_gemm_8w(K=K, b_preshuffled=b_preshuffled, scale_preshuffled=False, k_split=n_split)
+    head = compile_mxfp8_gemm_8w(K=K, b_preshuffled=b_preshuffled, scale_preshuffled=False, b_scale_block=b_scale_block)
+    tail = compile_mxfp8_gemm_8w(
+        K=K, b_preshuffled=b_preshuffled, scale_preshuffled=False, k_split=n_split, b_scale_block=b_scale_block
+    )
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
     ws = torch.empty((n_split, M, n2), dtype=torch.float32, device=device)
 
     stream = torch.cuda.current_stream()
     b_head, b_tail = b_in[:n1].reshape(-1), b_in[n1:].reshape(-1)
-    bs_head, bs_tail = b_sc[:n1].reshape(-1), b_sc[n1:].reshape(-1)
+    bs_head, bs_tail = b_sc[: n1 // b_rows].reshape(-1), b_sc[n1 // b_rows :].reshape(-1)
     c_head = c_out.as_strided(((M - 1) * N + n1,), (1,))
     calls = []
     if n1:
@@ -229,16 +233,19 @@ def _run_mxfp8_tail_split(M, N, K, n_split, *, b_preshuffled, n1=None, num_warmu
 
 
 @pytest.mark.parametrize(
-    "M, N, K, n_split, n1, b_preshuffled",
+    "M, N, K, n_split, n1, b_preshuffled, b_scale_block",
     [
-        (256, 512, 1024, 2, 0, True),  # every tile split, contiguous reduce
-        (300, 768, 2048, 4, 256, True),  # partial M tile, explicit head
-        (300, 768, 2048, 4, 256, False),  # row-major B: its own K-segment offset
-        (4096, 5120, 1024, 2, None, True),  # head from the CU count
+        (256, 512, 1024, 2, 0, True, "1x32"),  # every tile split, contiguous reduce
+        (300, 768, 2048, 4, 256, True, "1x32"),  # partial M tile, explicit head
+        (300, 768, 2048, 4, 256, False, "1x32"),  # row-major B: its own K-segment offset
+        (4096, 5120, 1024, 2, None, True, "1x32"),  # head from the CU count
+        (300, 768, 2048, 4, 256, True, "32x32"),  # 32x32 B: head / tail slice its scale rows
     ],
 )
-def test_mxfp8_gemm_8wave_split_k(M, N, K, n_split, n1, b_preshuffled):
-    _run_mxfp8_tail_split(M, N, K, n_split, b_preshuffled=b_preshuffled, n1=n1, report=True)
+def test_mxfp8_gemm_8wave_split_k(M, N, K, n_split, n1, b_preshuffled, b_scale_block):
+    _run_mxfp8_tail_split(
+        M, N, K, n_split, b_preshuffled=b_preshuffled, n1=n1, b_scale_block=b_scale_block, report=True
+    )
 
 
 @pytest.mark.large_shape
@@ -260,38 +267,29 @@ def test_mxfp8_gemm_8wave_split_k_speedup(M, N, K, n_split):
     )
 
 
-def _quant_blocks(x, bm, bk):
-    """fp8 codes, unshuffled e8m0 scale and dequant of ``x`` on a (bm x bk) scale grid,
-    each block's magnitude jittered so a mis-indexed scale shows up."""
-    rows, K = x.shape
-    padded = torch.zeros((rows + bm - 1) // bm * bm, K, device=x.device)
-    padded[:rows] = x
-    jitter = torch.exp2(torch.randint(-2, 3, (padded.shape[0] // bm, K // bk), device=x.device).float())
-    padded = padded * jitter.repeat_interleave(bm, 0).repeat_interleave(bk, 1)
-    q, sc = gemm_common_utils.per_block_f8_quant(padded, bm, bk)
-    sc_f = gemm_common_utils.e8m0_to_f32(sc).repeat_interleave(bm, 0).repeat_interleave(bk, 1)
-    return q[:rows], sc, q[:rows].float() * sc_f[:rows]
-
-
 @pytest.mark.parametrize("b_preshuffled", [False, True])
 @pytest.mark.parametrize(
-    "a_block,b_block",
-    [("1x32", "32x32"), ("1x128", "1x32"), ("1x32", "128x128"), ("1x128", "128x128")],
+    "M, N, K, k_split, a_block, b_block",
+    [
+        (300, 512, 1024, 1, "1x32", "32x32"),
+        (300, 512, 1024, 1, "1x128", "1x32"),
+        (300, 512, 1024, 1, "1x32", "128x128"),
+        (300, 512, 1024, 1, "1x128", "128x128"),
+        # A split-K segment takes row-major 1x32 A and 1x32 / 32x32 B scales.
+        (256, 512, 2048, 2, "1x32", "32x32"),
+    ],
 )
-@pytest.mark.parametrize("M, N, K, k_split", [(300, 512, 1024, 1), (256, 512, 2048, 2)])
 def test_mxfp8_gemm_8wave_coarse_scales(M, N, K, k_split, a_block, b_block, b_preshuffled):
     """Unshuffled coarse scales: a column-major 1x128 A, a 32x32 or 128x128 B."""
     if ARCH != "gfx950":
         pytest.skip(f"MXFP8 8-wave GEMM requires gfx950, got {ARCH}")
-    if k_split > 1 and (a_block, b_block) != ("1x32", "32x32"):
-        pytest.skip("a split-K segment takes row-major 1x32 A and 1x32 / 32x32 B scales")
     device = torch.device("cuda")
     torch.manual_seed(0)
-    a_q, sa, a_deq = _quant_blocks(torch.randn(M, K, device=device), 1, 128 if a_block == "1x128" else 32)
+    blocks = {"1x32": (1, 32), "1x128": (1, 128), "32x32": (32, 32), "128x128": (128, 128)}
+    a_q, sa, a_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(M, K, device=device), *blocks[a_block])
     if a_block == "1x128":
         sa = sa.T.contiguous()  # the column-major [K // 128, M] bytes
-    b_bm = {"1x32": 1, "32x32": 32, "128x128": 128}[b_block]
-    b_q, sb, b_deq = _quant_blocks(torch.randn(N, K, device=device), b_bm, 128 if b_block == "128x128" else 32)
+    b_q, sb, b_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(N, K, device=device), *blocks[b_block])
     c_ref = torch.mm(a_deq, b_deq.T)
     b_in = preshuffle_b(b_q.view(torch.int8)) if b_preshuffled else b_q.view(torch.int8)
     launch = compile_mxfp8_gemm_8w(
@@ -302,16 +300,11 @@ def test_mxfp8_gemm_8wave_coarse_scales(M, N, K, k_split, a_block, b_block, b_pr
         a_scale_block=a_block,
         b_scale_block=b_block,
     )
-    stream = torch.cuda.current_stream()
-    if k_split == 1:
-        c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
-        args = (a_q.view(torch.int8).view(-1), b_in.reshape(-1), c_out.view(-1), sa.view(-1), sb.view(-1), M, N, N)
-        flyc.compile(launch, *args, stream)
-    else:
-        ws = torch.empty((k_split, M, N), dtype=torch.float32, device=device)
-        args = (a_q.view(torch.int8).view(-1), b_in.reshape(-1), ws.view(-1), sa.view(-1), sb.view(-1), M, N, N)
-        flyc.compile(launch, *args, stream)
-        torch.cuda.synchronize()
-        c_out = ws.sum(0).to(OUT_DTYPE)
+    c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
+    out = c_out if k_split == 1 else torch.empty((k_split, M, N), dtype=torch.float32, device=device)
+    args = (a_q.view(torch.int8).view(-1), b_in.reshape(-1), out.view(-1), sa.view(-1), sb.view(-1), M, N, N)
+    flyc.compile(launch, *args, torch.cuda.current_stream())
     torch.cuda.synchronize()
+    if k_split > 1:
+        c_out = out.sum(0).to(OUT_DTYPE)
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.05, atol=0.05)

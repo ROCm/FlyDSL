@@ -46,6 +46,11 @@ def _ptr(t):
     return flyc.from_c_void_p(fx.Uint8, t.contiguous().data_ptr())
 
 
+# launch_gemm's batch, a_row_stride, a_batch_stride, sca_row_stride, sca_batch_stride,
+# c_row_stride, c_batch_stride for one contiguous (unbatched) GEMM.
+_UNBATCHED = (1, -1, -1, -1, -1, -1, -1)
+
+
 def _mxfp4_launcher(
     N,
     K,
@@ -90,13 +95,7 @@ def _mxfp4_launcher(
             a_dtype,
             out_dtype,
             b_dtype,
-            1,
-            -1,
-            -1,
-            -1,
-            -1,
-            -1,
-            -1,
+            *_UNBATCHED,
             int(waves_per_eu or 0),
             xcd_swizzle,
             k_batch,
@@ -881,16 +880,15 @@ def test_mfma_a8w8_preshuffle_variants(shape, kwargs):
     test_mfma_a8w8_preshuffle("bf16", *shape, 0, **kwargs)
 
 
-def _a8w8_row_operands(M, N, K):
-    """fp8 A, preshuffled fp8 B and row-layout e8m0 scales, plus the fp32 reference."""
+def _a8w8_row_operands(M, N, K, b_rows=1):
+    """fp8 A, preshuffled fp8 B and row-layout e8m0 scales, plus the fp32 reference.
+    ``b_rows`` N-rows share a B scale row: 1 for a 1x32 w_scale, 32 for a 32x32 one."""
     device = torch.device("cuda")
     torch.manual_seed(0)
-    a_q, sa = gemm_common_utils.per_1x32_f8_quant(torch.randn(M, K, device=device))
-    w_q, sb = gemm_common_utils.per_1x32_f8_quant(torch.randn(N, K, device=device))
-    a_deq = a_q.float() * gemm_common_utils.e8m0_to_f32(sa.repeat_interleave(32, dim=1))
-    b_deq = w_q.float() * gemm_common_utils.e8m0_to_f32(sb.repeat_interleave(32, dim=1))
+    a_q, sa, a_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(M, K, device=device), 1, 32)
+    w_q, sb, b_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(N, K, device=device), b_rows, 32)
     b = gemm_common_utils.shuffle_weight_w4(w_q, 16, False, False)
-    return a_q, b, sa.contiguous(), sb.contiguous(), torch.mm(a_deq, b_deq.T)
+    return a_q, b, sa, sb, torch.mm(a_deq, b_deq.T)
 
 
 def _a8w8_blockscale_operands(M, N, K):
@@ -898,17 +896,9 @@ def _a8w8_blockscale_operands(M, N, K):
     shuffled blockscale scale order, plus the fp32 reference."""
     device = torch.device("cuda")
     torch.manual_seed(0)
-    scale_k = K // SCALE_BLOCK_128
-    a_fp32 = torch.randn(M, K, device=device)
-    a_fp32 = (a_fp32.view(M, scale_k, SCALE_BLOCK_128) * _blk_jitter((M, scale_k, 1), device)).view(M, K)
-    a_q, scale_a = gemm_common_utils.per_block_f8_quant(a_fp32, 1, SCALE_BLOCK_128)
-    b_q, scale_b = gemm_common_utils.per_block_f8_quant(
-        torch.randn(N, K, device=device), SCALE_BLOCK_128, SCALE_BLOCK_128
-    )
-    a_deq = a_q.float().view(M, scale_k, SCALE_BLOCK_128) * gemm_common_utils.e8m0_to_f32(scale_a).unsqueeze(-1)
-    b_sc_rows = gemm_common_utils.e8m0_to_f32(scale_b).repeat_interleave(SCALE_BLOCK_128, dim=0)
-    b_deq = b_q.float().view(N, scale_k, SCALE_BLOCK_128) * b_sc_rows.unsqueeze(-1)
-    c_ref = torch.mm(a_deq.view(M, K), b_deq.view(N, K).T)
+    a_q, scale_a, a_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(M, K, device=device), 1, 128)
+    b_q, scale_b, b_deq = gemm_common_utils.per_block_f8_quant_dequant(torch.randn(N, K, device=device), 128, 128)
+    c_ref = torch.mm(a_deq, b_deq.T)
     b = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
     sa = gemm_common_utils.shuffle_scale_blockscale_a(scale_a, K)
     sb = gemm_common_utils.shuffle_scale_blockscale_b(scale_b, N, K)
@@ -924,6 +914,9 @@ _A8W8_FUSED_VARIANTS = [
     # l2_reduce: a tile's splits 8 pids apart on one XCD.
     ("sk8-pf3-l2", (64, 2048, 8192, 32, 128, 256, 8), dict(prefetch=3, l2_reduce=True)),
     ("sk2-10tiles-l2", (32, 640, 2048, 32, 64, 256, 2), dict(l2_reduce=True)),  # a partial last group of 8
+    # 32x32 B (one scale row per 32 N-rows) through the same panels.
+    ("sk2-raggedM-b32", (100, 512, 2048, 64, 64, 128, 2), dict(b_scale_32x32=True)),
+    ("sk8-pf3-nt-b32", (29, 2048, 8192, 32, 128, 256, 8), dict(prefetch=3, b_nt=True, b_scale_32x32=True)),
     # 16-row bf16 blockscale tile: bf16 partials; single_row stores only row 0 and wave 0 reduces.
     ("bs-tm16-m1-sk4-single", (1, 1024, 4096, 16, 128, 256, 4), dict(blockscale="ab", single_row=True)),
     ("bs-tm16-m7-sk2", (7, 1024, 4096, 16, 64, 256, 2), dict(blockscale="ab")),  # every wave reduces
@@ -940,7 +933,7 @@ def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
     M, N, K, tile_m, tile_n, tile_k, k_batch = shape
     blockscale = kwargs.get("blockscale", "none")
     if blockscale == "none":
-        a, b, sa, sb, c_ref = _a8w8_row_operands(M, N, K)
+        a, b, sa, sb, c_ref = _a8w8_row_operands(M, N, K, b_rows=32 if kwargs.get("b_scale_32x32") else 1)
         scale_layout, ws_dtype = "row", torch.float32
     else:
         a, b, sa, sb, c_ref = _a8w8_blockscale_operands(M, N, K)
@@ -968,13 +961,7 @@ def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
         "fp8",
         "bf16",
         "fp8",
-        1,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
+        *_UNBATCHED,
         0,
         0,
         k_batch,
@@ -984,6 +971,8 @@ def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
         kwargs.get("prefetch", 1),
         kwargs.get("l2_reduce", False),
         kwargs.get("single_row", False),
+        kwargs.get("b_nt", False),
+        kwargs.get("b_scale_32x32", False),
     )
     exe = flyc.compile(launch_gemm_fused, *args)  # compiles and launches once
     torch.cuda.synchronize()
@@ -1357,11 +1346,6 @@ def test_preshuffle_preload_validation(bad):
 SCALE_BLOCK_128 = 128
 
 
-def _blk_jitter(shape, device):
-    """Random power-of-2 magnitude per scale block, so block E8M0 scales actually differ."""
-    return torch.exp2(torch.randint(-2, 3, shape, device=device, dtype=torch.float32))
-
-
 # Coarse E8M0 scale paths: (M, N, K, tile_m, tile_n, tile_k), A block, B block, scale layout, launch kwargs.
 # "mfma_tile" takes the coarse scales in the kernel's compact blockscale order (1x32 ones
 # shuffle_scale_w4'd); "row" takes them as the quantizer emits them (a 1x128 A column-major).
@@ -1437,23 +1421,14 @@ def test_mfma_a8w8_preshuffle_blockscale(
 
     device = torch.device("cuda")
     torch.manual_seed(0)
-    scale_k = K // SCALE_BLOCK_128
 
     def _quant(x, block):
-        """fp8 codes, the scale in the kernel's layout and the dequant of x on a (bm x bk)
-        grid. Per-block magnitude jitter: plain randn makes every block max nearly
-        identical, so a mis-indexed scale would read a value that happens to be right."""
+        # Per-block magnitude jitter: plain randn makes every block max nearly identical,
+        # so a mis-indexed scale would read a value that happens to be right. A
+        # shuffle_scale_w4'd 1x32 scale needs rows padded to 32.
         bm, bk = {"1x32": (1, 32), "1x128": (1, 128), "32x32": (32, 32), "128x128": (128, 128)}[block]
-        rows = x.shape[0]
-        # A shuffle_scale_w4'd 1x32 scale needs rows padded to 32.
-        pad = 32 if (scale_layout, block) == ("mfma_tile", "1x32") else bm
-        padded = torch.zeros((rows + pad - 1) // pad * pad, K, device=device)
-        padded[:rows] = x
-        jitter = _blk_jitter((padded.shape[0] // bm, K // bk), device)
-        padded = padded * jitter.repeat_interleave(bm, 0).repeat_interleave(bk, 1)
-        q, sc = gemm_common_utils.per_block_f8_quant(padded, bm, bk)
-        sc_f = gemm_common_utils.e8m0_to_f32(sc).repeat_interleave(bm, 0).repeat_interleave(bk, 1)
-        return q[:rows], sc, q[:rows].float() * sc_f[:rows]
+        pad = 32 if (scale_layout, block) == ("mfma_tile", "1x32") else None
+        return gemm_common_utils.per_block_f8_quant_dequant(x, bm, bk, pad_rows=pad)
 
     a_q, sa, a_deq = _quant(torch.randn(M, K, device=device), a_block)
     b_q, sb, b_deq = _quant(torch.randn(N, K, device=device), b_block)
@@ -1505,9 +1480,9 @@ def test_mfma_a8w8_preshuffle_blockscale(
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
-    # A and B: 1 byte/code; scales: M + N//128 rows of K//128 bytes.
+    # A and B: 1 byte/code; scales as passed.
     if us is not None:
-        bytes_moved = M * K + N * K + M * N * 2 + (M + N // SCALE_BLOCK_128) * scale_k
+        bytes_moved = M * K + N * K + M * N * 2 + scale_a_shuffled.numel() + scale_b_shuffled.numel()
         tflops = (2 * M * N * K) / (us / 1e6) / 1e12
         tbps = bytes_moved / 1e12 / (us / 1e6)
         print(f"[flyc] A8W8 blockscale Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")

@@ -90,6 +90,24 @@ def row_scale_panel(rows, tile_k, num_threads):
     return rs, passes, (size + 15) // 16 * 16
 
 
+def _pf_budget(tile_m, tile_n, tile_k, prefetch):
+    """(vmcnt, LDS bytes) of an a8w8 prefetch launch with 1x32 / 32x32 row-layout scales.
+
+    vmcnt: P - 1 iterations' loads in flight at an iteration's end -- the scale slices,
+    B (lo, hi per 128-K step and N subtile) and the A DMA; the counter counts to 63.
+    LDS: the A ring of P + 1 tiles plus the scale panels' 2 + ceil((P - 1) / chunk)
+    chunk buffers.
+    """
+    num_threads = min(4, tile_n // 16) * 64
+    _, pass_a, panel_a = row_scale_panel(tile_m, tile_k, num_threads)
+    _, pass_b, panel_b = row_scale_panel(tile_n, tile_k, num_threads)
+    b_loads = (tile_n // (num_threads // 64) // 16) * (tile_k // 128) * 2
+    a_loads = tile_m * tile_k // (num_threads * 16)
+    panel_bufs = 2 + -(-(prefetch - 1) // ROW_SCALE_CHUNK)
+    vmcnt = (prefetch - 1) * (pass_a + pass_b + b_loads + a_loads)
+    return vmcnt, tile_m * tile_k * (prefetch + 1) + panel_bufs * (panel_a + panel_b)
+
+
 # prefetch_depth's per-tile caps, tuned on gfx950 (ROCm/aiter#7309).
 _PF_MAX_DEPTH = 8
 # Tiles of _PF_MID_TILE_M rows or more cap at _PF_MID_MAX_DEPTH, and so do tiles of
@@ -112,12 +130,6 @@ def prefetch_depth(tile_m, tile_n, tile_k, N, K, k_batch=1, num_cus=256, b_nt=Fa
     caps follow aiter's gfx950 tuning.
     """
     k_tiles = K // tile_k // max(k_batch, 1)
-    num_threads = min(4, tile_n // 16) * 64
-    _, pass_a, panel_a = row_scale_panel(tile_m, tile_k, num_threads)
-    _, pass_b, panel_b = row_scale_panel(tile_n, tile_k, num_threads)
-    b_loads = (tile_n // (num_threads // 64) // 16) * (tile_k // 128) * 2  # lo, hi
-    a_loads = tile_m * tile_k // (num_threads * 16)
-    loads = pass_a + pass_b + b_loads + a_loads  # the kernel's PF_LOADS
     want = min(_PF_MAX_DEPTH, -(-(N // tile_n * max(k_batch, 1)) // num_cus))
     mid = tile_m >= _PF_MID_TILE_M or (tile_m >= _PF_MULTI_M_TILE_M and not b_nt)
     max_depth = _PF_MID_MAX_DEPTH if mid else _PF_MAX_DEPTH
@@ -125,8 +137,8 @@ def prefetch_depth(tile_m, tile_n, tile_k, N, K, k_batch=1, num_cus=256, b_nt=Fa
         max_depth = _PF_BIG_MAX_DEPTH
     best = 0
     for p in range(2, min(max_depth, k_tiles) + 1):
-        lds = tile_m * tile_k * (p + 1) + (2 + -(-(p - 1) // ROW_SCALE_CHUNK)) * (panel_a + panel_b)
-        if (p - 1) * loads <= 63 and lds <= LDS_LIMIT_BYTES and LDS_LIMIT_BYTES // lds >= want:
+        vmcnt, lds = _pf_budget(tile_m, tile_n, tile_k, p)
+        if vmcnt <= 63 and lds <= LDS_LIMIT_BYTES and LDS_LIMIT_BYTES // lds >= want:
             best = p
     return best
 
@@ -227,6 +239,9 @@ def _launch_gemm_impl(
     _row_a = a_scale_layout == "row"
     _row_b = b_scale_layout == "row"
     _row_any = _row_a or _row_b
+    # mfma_tile coarse blocks: broadcast to the 1x32 MFMA in the load address.
+    _bs_a = blockscale in ("a", "ab") and not _row_a
+    _bs_b = blockscale in ("b", "ab") and not _row_b
     # Row (unshuffled) coarse blocks: A's 1x128 column panel, B's 128x128 per-wave row.
     _rc_a = _row_a and blockscale in ("a", "ab")
     _rc_b = _row_b and blockscale in ("b", "ab")
@@ -240,25 +255,10 @@ def _launch_gemm_impl(
     # sums over its own rows in split order -- the separate reduce kernel's numbers
     # without its launch. A tunable: one block reducing a large tile over many splits
     # can cost more than the launch it saves.
-    fused_f32 = (
-        fused_split_k
-        and k_batch > 1
-        and _row_a
-        and _row_b
-        and out_dtype == "bf16"
-        and batch == 1
-        and c_row_stride < 0
-        and c_batch_stride < 0
-    )
+    fused_f32 = fused_split_k and k_batch > 1 and _row_a and _row_b and out_dtype == "bf16"
     # The 16-row blockscale tile's bf16 specialization (a decode GEMM, M <= 16).
     small_m_bf16 = (
-        BM == 16
-        and blockscale
-        in (("a", "ab") if a_scale_layout != "row" else ()) + (("b", "ab") if b_scale_layout != "row" else ())
-        and out_dtype == "bf16"
-        and batch == 1
-        and c_row_stride < 0
-        and c_batch_stride < 0
+        BM == 16 and (_bs_a or _bs_b) and out_dtype == "bf16" and batch == 1 and c_row_stride < 0 and c_batch_stride < 0
     )
     assert not single_row or small_m_bf16, "single_row: the 16-row bf16 blockscale tile only"
     # It fuses split-K with bf16 partials, reduced by the dynamically last block.
@@ -308,9 +308,6 @@ def _launch_gemm_impl(
     num_waves = min(4, BN // 16)
     num_threads = num_waves * 64
     num_acc_n = (BN // num_waves) // 16  # 16-col n-subblocks per wave
-    # mfma_tile coarse blocks: broadcast to the 1x32 MFMA in the load address.
-    _bs_a = blockscale in ("a", "ab") and not _row_a
-    _bs_b = blockscale in ("b", "ab") and not _row_b
     _sc_k0_a = 16 if _bs_a else 64  # per-256K-chunk dword stride (A: drop K_Lane=4)
     _sc_k0_b = 1 if _bs_b else 64  # (B: drop K_Lane*N_Lane=64)
     _scale_chunk_dw_a = ((K + 255) // 256) * _sc_k0_a
@@ -367,11 +364,8 @@ def _launch_gemm_impl(
         # SC_D * SC_C >= SC_C + P - 1.
         SC_D = 1 + -(-(PF - 1) // SC_C)
         SC_NB = SC_D + 1
-        # Loads in flight at an iteration's end: P - 1 iterations' scale slices, B (lo,
-        # hi per 128-K step and N subtile) and A DMA. vmcnt counts to 63.
-        PF_LOADS = SC_PASS_A + SC_PASS_B + num_acc_n * k_halves * 2 + n_coop
-        assert (PF - 1) * PF_LOADS <= 63, f"prefetch {PF}: vmcnt {(PF - 1) * PF_LOADS}"
-        PF_LDS_B = A_LDS_B * (PF + 1) + SC_LDS_B * SC_NB
+        PF_VMCNT, PF_LDS_B = _pf_budget(BM, BN, BK, PF)
+        assert PF_VMCNT <= 63, f"prefetch {PF}: vmcnt {PF_VMCNT}"
         assert PF_LDS_B <= LDS_LIMIT_BYTES, f"prefetch {PF}: LDS {PF_LDS_B}B > {LDS_LIMIT_BYTES}B"
 
     # Scheduler counts per loop iter: MFMAs, A LDS reads/thread (fp6/fp8 2 per (mi,kh)), gmem loads.
@@ -647,13 +641,15 @@ def _launch_gemm_impl(
             _i8g4 = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=4)
             sc_row_g = K // 32  # bytes per global scale row
 
-            def _sc_src(addr, nrec):
-                buf = fx.rocdl.make_buffer_tensor(
+            def _sc_buf(addr, nrec):
+                return fx.rocdl.make_buffer_tensor(
                     fx.Tensor(fx.make_view(fx.inttoptr(_i8g4, addr), fx.make_layout(1 << 30, 1))),
                     max_size=False,
                     num_records_bytes=nrec,
                 )
-                return fx.logical_divide(buf, fx.make_layout(1, 1))
+
+            def _sc_src(addr, nrec):
+                return fx.logical_divide(_sc_buf(addr, nrec), fx.make_layout(1, 1))
 
             if const_expr(_panel_any):
                 # Bounded to the tensors: rows past M read 0 (and are never stored).
@@ -686,7 +682,6 @@ def _launch_gemm_impl(
 
                 # CROW_B // 4 (dwords per panel row) is tile_k // 32: a power of two.
                 _SC_DW_SHIFT = (CROW_B // 4).bit_length() - 1
-                assert 1 << _SC_DW_SHIFT == CROW_B // 4
 
                 def dma_scale_slice(kt_c, j, buf):
                     """Slice j of the chunk starting at K-tile kt_c into buffer buf."""
@@ -763,15 +758,7 @@ def _launch_gemm_impl(
                 # 32p + l (+16 for odd j) of MFMA step 2w + j // 2 -- the E bytes a lane
                 # packs into pair p's word w, read with one ds_read. Spare lanes clamp to
                 # the last pair and land in the panel tail.
-                sa_rsrc = fx.rocdl.get_buffer_rsrc(
-                    fx.get_iter(
-                        fx.rocdl.make_buffer_tensor(
-                            fx.Tensor(fx.make_view(fx.inttoptr(_i8g4, arg_scale_a), fx.make_layout(1 << 30, 1))),
-                            max_size=False,
-                            num_records_bytes=fx.Int64(i32_m) * fx.Int64(k128),
-                        )
-                    )
-                )
+                sa_rsrc = fx.rocdl.get_buffer_rsrc(fx.get_iter(_sc_buf(arg_scale_a, fx.Int64(i32_m) * fx.Int64(k128))))
                 sC0_i8 = fx.recast_iter(_i8s, lds.c0.ptr)
                 sC0_i32 = fx.recast_iter(Int32, lds.c0.ptr)
                 sc_cdb = fx.Int32(fx.ptrtoint(lds.c1.ptr)) - fx.Int32(fx.ptrtoint(lds.c0.ptr))
@@ -1128,14 +1115,9 @@ def _launch_gemm_impl(
         c_stride = N if c_row_stride < 0 else c_row_stride
         # split-K writes an fp32 partial slab (no cast), the small-M fused path a bf16 one;
         # no-split writes bf16/fp16 out.
-        if const_expr(small_m_fused):
-            store_elem = BFloat16
-            _ebytes = 2
-            c_addr = arg_c + fx.Int64(bid_z) * fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(_ebytes)
-        elif const_expr(k_batch > 1):
-            store_elem = Float32
-            _ebytes = 4
-            # arg_c is tmp[batch*k_batch, M, N] fp32; this WG's slab index == bid_z.
+        if const_expr(k_batch > 1):
+            store_elem, _ebytes = (BFloat16, 2) if small_m_fused else (Float32, 4)
+            # arg_c is tmp[batch*k_batch, M, N]; this WG's slab index == bid_z.
             c_addr = arg_c + fx.Int64(bid_z) * fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(_ebytes)
         else:
             store_elem = out_elem
@@ -1160,11 +1142,13 @@ def _launch_gemm_impl(
             ),
             fx.make_layout(1, 1),
         )
-        if const_expr((k_batch > 1 and not small_m_fused) or single_row):
-            # fp32 partials, or single_row's two packed bf16 outputs.
-            c_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(_SC1 if splitk_fused and not fused_l2 else 0), store_elem)
-        else:
-            c_copy = fx.make_copy_atom(fx.rocdl.BufferCopy16b(_SC1 if splitk_fused else 0), store_elem)
+        # Fused split-K partials are stored device-scope (SC1), except l2_reduce's.
+        c_pol = _SC1 if splitk_fused and not fused_l2 else 0
+        # 32b: fp32 partials, or single_row's two packed bf16 outputs.
+        c_copy_op = (
+            fx.rocdl.BufferCopy32b if (k_batch > 1 and not small_m_fused) or single_row else fx.rocdl.BufferCopy16b
+        )
+        c_copy = fx.make_copy_atom(c_copy_op(c_pol), store_elem)
         c_rstride = fx.Int32(c_stride)
         col_w = by_n + wave * (BN // num_waves) + lane_mod_16
         if const_expr(single_row):

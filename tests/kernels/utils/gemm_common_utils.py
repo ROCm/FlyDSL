@@ -697,3 +697,24 @@ def per_block_f8_quant(x, block_m, block_k):
     scale_f32 = e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
     x_q = (xb / scale_f32[:, None, :, None]).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
     return x_q.view(rows, K).contiguous(), scale_e8m0.view(torch.uint8).contiguous()
+
+
+def per_block_f8_quant_dequant(x, block_m, block_k, *, pad_rows=None, jitter=True):
+    """``per_block_f8_quant`` of ``x`` with its rows zero-padded to a multiple of
+    ``pad_rows`` (default ``block_m``), plus the fp32 dequant of ``x``.
+
+    ``jitter`` first scales each block by a random power of two, so the blocks get
+    different E8M0 scales and a mis-indexed scale fails the check.
+
+    Returns ``(x_q[:rows], scale, dequant[:rows])``; ``scale`` keeps the padded rows.
+    """
+    rows, K = x.shape
+    pad = pad_rows or block_m
+    padded = torch.zeros((rows + pad - 1) // pad * pad, K, device=x.device)
+    padded[:rows] = x
+    if jitter:
+        j = torch.exp2(torch.randint(-2, 3, (padded.shape[0] // block_m, K // block_k), device=x.device).float())
+        padded = padded * j.repeat_interleave(block_m, 0).repeat_interleave(block_k, 1)
+    x_q, scale = per_block_f8_quant(padded, block_m, block_k)
+    scale_f = e8m0_to_f32(scale).repeat_interleave(block_m, 0).repeat_interleave(block_k, 1)
+    return x_q[:rows], scale, x_q[:rows].float() * scale_f[:rows]
