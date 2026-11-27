@@ -10,15 +10,11 @@
 # Python bindings) to python/mlir_flydsl/backends/<name>.cmake;
 # -DFLYDSL_BACKENDS can then select <name>.
 
-# TableGen / header subdirectories under include/flydsl/
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_DIALECT_SUBDIRS "FlyROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_CONVERSION_SUBDIRS "FlyToROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_CONVERSION_SUBDIRS "FlyKtraceToROCDL")
-
-# C++ library subdirectories under lib/
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_DIALECT_SUBDIRS "FlyROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "FlyToROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "FlyKtraceToROCDL")
+# Dialect and conversion subdirectories, each under include/flydsl/ (TableGen,
+# headers) and lib/ (libraries)
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_DIALECT_SUBDIRS "FlyROCDL")
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_CONVERSION_SUBDIRS
+  "FlyToROCDL" "FlyKtraceToROCDL")
 
 # CAPI wrapper subdirectory under lib/CAPI/Dialect/
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_CAPI_SUBDIRS "FlyROCDL")
