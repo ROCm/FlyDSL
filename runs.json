@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-27T03:27:08Z",
+ "updated": "2026-11-27T04:11:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -385,11 +385,11 @@
    "branch": "pr/fix-fnuz-value-caster",
    "event": "pull_request",
    "title": "[Bugfix] Register ArithValue casters for the FNUZ fp8 types",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45799254077",
    "created_at": "2026-11-26T10:13:10Z",
-   "updated_at": "2026-11-27T03:21:42Z",
+   "updated_at": "2026-11-27T04:08:43Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
