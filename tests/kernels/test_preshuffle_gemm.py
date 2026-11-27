@@ -62,6 +62,8 @@ def _mxfp4_launcher(
     a_scale_layout="mfma_tile",
     b_scale_layout="mfma_tile",
     prefetch=1,
+    single_row=False,
+    b_nt=False,
 ):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. This closure fixes every Constexpr, so it reuses one compiled handle:
@@ -101,6 +103,8 @@ def _mxfp4_launcher(
             a_scale_layout,
             b_scale_layout,
             prefetch,
+            single_row,
+            b_nt,
         )
         if compiled is None:
             compiled = flyc.compile(launch_gemm, *args)  # Compiles and launches once.
@@ -731,6 +735,7 @@ def test_mfma_a8w8_preshuffle(
     a_scale_layout: str = "mfma_tile",
     b_scale_layout: str = "mfma_tile",
     prefetch: int = 1,
+    b_nt: bool = False,
 ):
     """A8W8: MXFP8 (E4M3) A × MXFP8 (E4M3) B preshuffle GEMM — gfx950 only.
 
@@ -758,6 +763,7 @@ def test_mfma_a8w8_preshuffle(
         a_scale_layout=a_scale_layout,
         b_scale_layout=b_scale_layout,
         prefetch=prefetch,
+        b_nt=b_nt,
     )
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
@@ -846,11 +852,16 @@ _A8W8_VARIANTS = [
     ("row-raggedM-tk128", (100, 1024, 2048, 64, 128, 128), _ROW),  # 128-K tiles share a scale word
     ("rowA-k5tiles", (256, 2048, 1280, 64, 256, 256), dict(a_scale_layout="row")),  # not a multiple of the chunk
     ("rowB-tk128", (100, 1024, 2048, 64, 128, 128), dict(b_scale_layout="row")),
+    ("row-tm16-m1", (1, 1024, 2048, 16, 64, 256), _ROW),  # a 16-row tile (M <= 16), one accumulator
+    ("rowA-tm16-m9", (9, 1024, 2048, 16, 128, 256), dict(a_scale_layout="row")),
     # Prefetch pipeline: B and the row scales loaded prefetch - 1 K tiles ahead.
     ("pf2", (32, 1024, 2048, 32, 128, 256), dict(_ROW, prefetch=2)),
     ("pf3-raggedM", (100, 1024, 2048, 64, 128, 128), dict(_ROW, prefetch=3)),
     ("pf3-k5tiles", (256, 2048, 1280, 64, 128, 256), dict(_ROW, prefetch=3)),  # steady loop, remainder, peel
     ("pf4-k2tiles", (64, 512, 512, 32, 64, 256), dict(_ROW, prefetch=4)),  # fewer K tiles than the depth
+    # b_nt: a single M tile streams B non-temporal.
+    ("pf2-bnt", (32, 1024, 2048, 32, 128, 256), dict(_ROW, prefetch=2, b_nt=True)),
+    ("pf3-bnt-tm16", (16, 1024, 2048, 16, 64, 256), dict(_ROW, prefetch=3, b_nt=True)),
     # The depth prefetch_depth picks (per tile height, capped by vmcnt and LDS) builds and runs.
     ("pfauto-tm32", (32, 7168, 2048, 32, 128, 256), dict(_ROW, prefetch=prefetch_depth(32, 128, 256, 7168, 2048))),
     ("pfauto-tm64", (128, 5120, 5120, 64, 256, 256), dict(_ROW, prefetch=prefetch_depth(64, 256, 256, 5120, 5120))),
@@ -878,6 +889,28 @@ def _a8w8_row_operands(M, N, K):
     return a_q, b, sa.contiguous(), sb.contiguous(), torch.mm(a_deq, b_deq.T)
 
 
+def _a8w8_blockscale_operands(M, N, K):
+    """fp8 A (1x128 scales, per-block jitter), preshuffled fp8 B (128x128 scales) in the
+    shuffled blockscale scale order, plus the fp32 reference."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    scale_k = K // SCALE_BLOCK_128
+    a_fp32 = torch.randn(M, K, device=device)
+    a_fp32 = (a_fp32.view(M, scale_k, SCALE_BLOCK_128) * _blk_jitter((M, scale_k, 1), device)).view(M, K)
+    a_q, scale_a = gemm_common_utils.per_block_f8_quant(a_fp32, 1, SCALE_BLOCK_128)
+    b_q, scale_b = gemm_common_utils.per_block_f8_quant(
+        torch.randn(N, K, device=device), SCALE_BLOCK_128, SCALE_BLOCK_128
+    )
+    a_deq = a_q.float().view(M, scale_k, SCALE_BLOCK_128) * gemm_common_utils.e8m0_to_f32(scale_a).unsqueeze(-1)
+    b_sc_rows = gemm_common_utils.e8m0_to_f32(scale_b).repeat_interleave(SCALE_BLOCK_128, dim=0)
+    b_deq = b_q.float().view(N, scale_k, SCALE_BLOCK_128) * b_sc_rows.unsqueeze(-1)
+    c_ref = torch.mm(a_deq.view(M, K), b_deq.view(N, K).T)
+    b = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
+    sa = gemm_common_utils.shuffle_scale_blockscale_a(scale_a, K)
+    sb = gemm_common_utils.shuffle_scale_blockscale_b(scale_b, N, K)
+    return a_q, b, sa.view(torch.uint8), sb.view(torch.uint8), c_ref
+
+
 # launch_gemm_fused paths: (M, N, K, tile_m, tile_n, tile_k, k_batch, launch kwargs).
 _A8W8_FUSED_VARIANTS = [
     ("sk4", (32, 1024, 4096, 32, 128, 256, 4), {}),
@@ -887,6 +920,9 @@ _A8W8_FUSED_VARIANTS = [
     # l2_reduce: a tile's splits 8 pids apart on one XCD.
     ("sk8-pf3-l2", (64, 2048, 8192, 32, 128, 256, 8), dict(prefetch=3, l2_reduce=True)),
     ("sk2-10tiles-l2", (32, 640, 2048, 32, 64, 256, 2), dict(l2_reduce=True)),  # a partial last group of 8
+    # 16-row bf16 blockscale tile: bf16 partials; single_row stores only row 0 and wave 0 reduces.
+    ("bs-tm16-m1-sk4-single", (1, 1024, 4096, 16, 128, 256, 4), dict(blockscale="ab", single_row=True)),
+    ("bs-tm16-m7-sk2", (7, 1024, 4096, 16, 64, 256, 2), dict(blockscale="ab")),  # every wave reduces
 ]
 
 
@@ -898,8 +934,14 @@ def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP8 MX GEMM requires gfx950, got {get_rocm_arch()}")
     M, N, K, tile_m, tile_n, tile_k, k_batch = shape
-    a, b, sa, sb, c_ref = _a8w8_row_operands(M, N, K)
-    ws = torch.empty((k_batch, M, N), dtype=torch.float32, device="cuda")
+    blockscale = kwargs.get("blockscale", "none")
+    if blockscale == "none":
+        a, b, sa, sb, c_ref = _a8w8_row_operands(M, N, K)
+        scale_layout, ws_dtype = "row", torch.float32
+    else:
+        a, b, sa, sb, c_ref = _a8w8_blockscale_operands(M, N, K)
+        scale_layout, ws_dtype = "mfma_tile", torch.bfloat16
+    ws = torch.empty((k_batch, M, N), dtype=ws_dtype, device="cuda")
     out = torch.zeros((M, N), dtype=torch.bfloat16, device="cuda")
     n_tiles = -(-M // tile_m) * (N // tile_n)
     sem = torch.zeros(n_tiles, dtype=torch.int32, device="cuda")
@@ -932,11 +974,12 @@ def test_mfma_a8w8_preshuffle_fused_split_k(shape, kwargs):
         0,
         0,
         k_batch,
-        "none",
-        "row",
-        "row",
+        blockscale,
+        scale_layout,
+        scale_layout,
         kwargs.get("prefetch", 1),
         kwargs.get("l2_reduce", False),
+        kwargs.get("single_row", False),
     )
     exe = flyc.compile(launch_gemm_fused, *args)  # compiles and launches once
     torch.cuda.synchronize()
@@ -1316,7 +1359,14 @@ def _blk_jitter(shape, device):
 
 
 @pytest.mark.parametrize("out_dtype", ["bf16"])
-@pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k", [(64, 8192, 8192, 64, 128, 128)])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k, single_row",
+    [
+        (64, 8192, 8192, 64, 128, 128, False),
+        (13, 1024, 2048, 16, 128, 256, False),  # a 16-row tile (M <= 16)
+        (1, 1024, 2048, 16, 64, 256, True),  # M = 1: only row 0 stored
+    ],
+)
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 def test_mfma_a8w8_preshuffle_blockscale(
@@ -1327,6 +1377,7 @@ def test_mfma_a8w8_preshuffle_blockscale(
     tile_m,
     tile_n,
     tile_k,
+    single_row,
     *,
     bench_iters: int = 0,
     bench_warmup: int = 0,
@@ -1346,7 +1397,9 @@ def test_mfma_a8w8_preshuffle_blockscale(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", blockscale="ab")
+    launch_fn = _mxfp4_launcher(
+        N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", blockscale="ab", single_row=single_row
+    )
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
