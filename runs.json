@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-27T09:54:27Z",
+ "updated": "2026-11-27T10:20:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45980248924,
+   "pr": 1535,
+   "commit": "3e4e80af96055ae7ea560e200b0e674005e10296",
+   "branch": "pr/refactor-registration",
+   "event": "pull_request",
+   "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924",
+   "created_at": "2026-11-27T10:13:20Z",
+   "updated_at": "2026-11-27T10:16:41Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 45977210730,
    "pr": 1537,
@@ -10,13 +25,41 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45977210730",
    "created_at": "2026-11-27T09:51:36Z",
-   "updated_at": "2026-11-27T09:52:16Z",
+   "updated_at": "2026-11-27T10:14:54Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T10:15:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45977210730/job/140442766652"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T10:15:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45977210730/job/140442766664"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-27T10:14:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45977210730/job/140442766672"
+    }
+   ]
   },
   {
    "run_id": 45972459077,
@@ -68,11 +111,11 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Lower float conversions for the chip in convert-rocdl-math-op\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017",
    "created_at": "2026-11-27T09:15:31Z",
-   "updated_at": "2026-11-27T09:49:53Z",
+   "updated_at": "2026-11-27T10:01:16Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -96,10 +139,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-27T09:49:53Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-27T10:01:16Z",
+     "completed_at": "2026-11-27T10:15:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013763"
     }
    ]
@@ -596,7 +639,7 @@
    "commit": "faefa434076052934d1712e8809704a8042cda71",
    "branch": "pr/refactor-registration",
    "event": "pull_request",
-   "title": "[Refactor] Align FlyDSL registration and bindings with upstream MLIR",
+   "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45811409911",
@@ -611,7 +654,7 @@
    "commit": "faefa434076052934d1712e8809704a8042cda71",
    "branch": "pr/refactor-registration",
    "event": "pull_request",
-   "title": "[Refactor] Align FlyDSL registration and bindings with upstream MLIR",
+   "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474",
@@ -2304,43 +2347,6 @@
      "machine": "gbt350-odcdh1-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45531437351,
-   "pr": 1511,
-   "commit": "365a9b81bbd60adfb27e4770fc3ad1d4af65ac22",
-   "branch": "fix/f38-conv3d-fp8-drain-read-before-wait",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix the pipeline-drain LDS race in conv3d_implicit_fp8",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351",
-   "created_at": "2026-11-25T02:13:51Z",
-   "updated_at": "2026-11-26T16:23:43Z",
-   "actor": "thechenli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T11:28:17Z",
-     "completed_at": "2026-11-26T12:08:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589017",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-26T15:05:15Z",
-     "completed_at": "2026-11-26T16:23:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589298"
     }
    ]
   }
