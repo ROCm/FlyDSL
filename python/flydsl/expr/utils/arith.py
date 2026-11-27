@@ -431,6 +431,8 @@ def _select_raw_operand(value, other):
 @ir.register_value_caster(ir.Float6E2M3FNType.static_typeid)
 @ir.register_value_caster(ir.Float6E3M2FNType.static_typeid)
 @ir.register_value_caster(ir.Float8E4M3FNType.static_typeid)
+@ir.register_value_caster(ir.Float8E4M3FNUZType.static_typeid)
+@ir.register_value_caster(ir.Float8E5M2FNUZType.static_typeid)
 @ir.register_value_caster(ir.Float8E4M3B11FNUZType.static_typeid)
 @ir.register_value_caster(ir.Float8E5M2Type.static_typeid)
 @ir.register_value_caster(ir.Float8E4M3Type.static_typeid)

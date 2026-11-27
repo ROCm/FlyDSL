@@ -23,8 +23,10 @@ from lang_utils import dtype_of, dynamic_binop, dynamic_literal_binop, run, sour
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import func
 from flydsl.compiler.protocol import construct_from_ir_values, extract_to_ir_values
 from flydsl.expr import math as fmath
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.numeric import (
     BFloat16,
     Boolean,
@@ -311,6 +313,17 @@ class TestTypeTower:
     def test_type_exported(self, name):
         assert hasattr(fx, name), f"fx.{name} missing"
         assert issubclass(getattr(fx, name), Numeric)
+
+    @pytest.mark.parametrize("name", [name for name in NAMES if "Float" in name])
+    def test_float_run_time_values_are_arith_values(self, name):
+        dtype = getattr(fx, name)
+        with ir.Context(), ir.Location.unknown():
+            module = ir.Module.create()
+            with ir.InsertionPoint(module.body):
+                function = func.FuncOp("f", ([dtype.ir_type], []))
+                with ir.InsertionPoint(function.add_entry_block()):
+                    (value,) = function.entry_block.arguments
+                    assert isinstance(dtype(value).ir_value(), ArithValue)
 
     def test_boolean_is_width_one(self):
         assert Boolean.width == 1
