@@ -400,7 +400,15 @@ class RocmBackend(BaseBackend):
         return f"{self.target}:{toolkit}:{_device_bitcode_fingerprint(toolkit)}"
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
-        """Materialize a scalar waves-per-EU override on kernel entries."""
+        """Materialize a scalar waves-per-EU override on kernel entries.
+
+        On targets with a unified VGPR/AGPR file, kernel entries whose minimum
+        waves-per-EU is >= 2 also get ``amdgpu-agpr-alloc=0`` unless they set it:
+        without it LLVM reserves half of the vector registers for AGPRs, which
+        halves the VGPRs available at that occupancy and spills. The minimum is
+        the explicit ``rocdl.waves_per_eu`` or the one a workgroup of more than
+        256 threads forces, whichever is larger.
+        """
         if compile_hints.get("maxnreg") is not None:
             raise ValueError(
                 "maxnreg is not supported. It only ever reached LLVM through "
@@ -413,19 +421,19 @@ class RocmBackend(BaseBackend):
             )
 
         waves_per_eu = compile_hints.get("waves_per_eu")
-        if waves_per_eu is None:
-            return
-
-        wpe_str = _normalize_waves_per_eu(waves_per_eu)
-        if wpe_str is None:
+        wpe_str = None if waves_per_eu is None else _normalize_waves_per_eu(waves_per_eu)
+        unified_agprs = self.target.arch.startswith(("gfx90a", "gfx94", "gfx95"))
+        if wpe_str is None and not unified_agprs:
             return
 
         with module.context:
             from ..._mlir import ir as _ir
 
-            wpe_attr = _ir.StringAttr.get(wpe_str)
             for func_op in _iter_gpu_kernel_funcs(module):
-                func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
+                if wpe_str is not None:
+                    func_op.attributes["rocdl.waves_per_eu"] = _ir.StringAttr.get(wpe_str)
+                if unified_agprs and max(_min_waves_per_eu(func_op), _workgroup_min_waves_per_eu(func_op)) >= 2:
+                    _add_passthrough_default(func_op, "amdgpu-agpr-alloc", "0")
 
     def gpu_module_targets(self, *, compile_hints: dict, link_libs: Sequence[str] = ()) -> List[str]:
         # The one #rocdl.target, carrying every compile option
@@ -537,6 +545,58 @@ def _iter_gpu_kernel_funcs(module):
         for op in top.regions[0].blocks[0].operations:
             if op.operation.name == "gpu.func" and ("kernel" in op.attributes or "gpu.kernel" in op.attributes):
                 yield op
+
+
+def _min_waves_per_eu(func_op) -> int:
+    """Lower bound of a kernel's ``rocdl.waves_per_eu`` (int or ``"min[,max]"``); 0 if unset."""
+    from ..._mlir import ir
+
+    if "rocdl.waves_per_eu" not in func_op.attributes:
+        return 0
+    attr = func_op.attributes["rocdl.waves_per_eu"]
+    try:
+        return ir.IntegerAttr(attr).value
+    except (TypeError, ValueError):
+        return int(ir.StringAttr(attr).value.split(",")[0])
+
+
+def _workgroup_min_waves_per_eu(func_op) -> int:
+    """Waves per EU a kernel's largest workgroup forces on a wave64, 4-SIMD CU; 0 if unknown.
+
+    Reads ``rocdl.flat_work_group_size`` (``"min,max"``), else ``known_block_size``.
+    """
+    from ..._mlir import ir
+
+    if "rocdl.flat_work_group_size" in func_op.attributes:
+        max_threads = int(ir.StringAttr(func_op.attributes["rocdl.flat_work_group_size"]).value.split(",")[-1])
+    elif "known_block_size" in func_op.attributes:
+        dims = ir.DenseI32ArrayAttr(func_op.attributes["known_block_size"])
+        max_threads = dims[0] * dims[1] * dims[2]
+    else:
+        return 0
+    return -(-max_threads // (64 * 4))
+
+
+def _add_passthrough_default(func_op, key: str, value: str) -> None:
+    """Append ``[key, value]`` to ``llvm.passthrough`` unless the kernel already sets ``key``.
+
+    convert-gpu-to-rocdl drops an unprefixed ``passthrough`` attribute, so only
+    ``llvm.passthrough`` reaches LLVM.
+    """
+    from ..._mlir import ir
+
+    def _entry_key(entry):
+        try:
+            return ir.StringAttr(entry).value
+        except (TypeError, ValueError):
+            return ir.StringAttr(ir.ArrayAttr(entry)[0]).value
+
+    name = "llvm.passthrough"
+    existing = list(ir.ArrayAttr(func_op.attributes[name])) if name in func_op.attributes else []
+    if any(_entry_key(entry) == key for entry in existing):
+        return
+    new_entry = ir.ArrayAttr.get([ir.StringAttr.get(key), ir.StringAttr.get(value)])
+    func_op.attributes[name] = ir.ArrayAttr.get([*existing, new_entry])
 
 
 def _set_passthrough(func_op, key: str, value: str) -> None:

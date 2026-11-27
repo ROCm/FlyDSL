@@ -43,9 +43,9 @@ func.func @test_gfx120x_wmma_atom_call_ssa_iu8_signed_clamp(
   // CHECK: llvm.bitcast {{.*}} : vector<8xsi8> to vector<2xi32>
   // CHECK: llvm.bitcast {{.*}} : vector<8xsi8> to vector<2xi32>
   // CHECK: rocdl.wmma.i32.16x16x16.iu8
-  // CHECK-SAME: clamp = true
   // CHECK-SAME: signA = true
   // CHECK-SAME: signB = true
+  // CHECK-SAME: clamp = true
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (si8, si8) -> i32, signA = true, signB = true, clamp = true>>, vector<8xsi8>, vector<8xsi8>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }
@@ -70,9 +70,9 @@ func.func @test_gfx120x_wmma_atom_call_ssa_iu4_signed_clamp(
     %c: vector<8xi32>) -> vector<8xi32> {
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>
   // CHECK: rocdl.wmma.i32.16x16x16.iu4
-  // CHECK-SAME: clamp = true
   // CHECK-SAME: signA = true
   // CHECK-SAME: signB = true
+  // CHECK-SAME: clamp = true
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, vector<8xi4>, vector<8xi4>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }
@@ -98,9 +98,9 @@ func.func @test_gfx120x_wmma_atom_call_ssa_iu4_k32_signed_clamp(
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>
   // CHECK: llvm.bitcast {{.*}} : vector<16xi4> to vector<2xi32>
   // CHECK: rocdl.wmma.i32.16x16x32.iu4
-  // CHECK-SAME: clamp = true
   // CHECK-SAME: signA = true
   // CHECK-SAME: signB = true
+  // CHECK-SAME: clamp = true
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, vector<16xi4>, vector<16xi4>, vector<8xi32>) -> vector<8xi32>
   return %res : vector<8xi32>
 }
