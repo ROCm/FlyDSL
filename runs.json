@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-27T07:44:17Z",
+ "updated": "2026-11-27T08:08:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Wait for K/V copies before the fp8 flash-attn third phase ba\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388",
    "created_at": "2026-11-27T07:37:58Z",
-   "updated_at": "2026-11-27T07:40:13Z",
+   "updated_at": "2026-11-27T07:58:52Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-27T07:58:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412795"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T08:06:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412850"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-27T07:58:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959798388/job/140382412922"
+    }
+   ]
   },
   {
    "run_id": 45959497618,
@@ -25,13 +53,41 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop][Perf] Sort integer keys alone with the bitonic network in warp_merge_sort",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618",
    "created_at": "2026-11-27T07:35:23Z",
-   "updated_at": "2026-11-27T07:37:11Z",
+   "updated_at": "2026-11-27T07:48:19Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-27T07:48:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500305"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T07:48:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500311"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T07:59:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45959497618/job/140378500428"
+    }
+   ]
   },
   {
    "run_id": 45956299275,
@@ -267,11 +323,11 @@
    "branch": "users/merrittttt/fused-rope-pair-lane",
    "event": "pull_request",
    "title": "[Bugfix] Fix the NeoX pair lane in fused_rope_cache for head_dim=96",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45895586079",
    "created_at": "2026-11-26T21:04:47Z",
-   "updated_at": "2026-11-27T07:38:42Z",
+   "updated_at": "2026-11-27T08:00:59Z",
    "actor": "merrittttt",
    "jobs": [
     {
@@ -286,9 +342,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-11-27T07:38:42Z",
+     "started_at": "2026-11-27T08:00:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45895586079/job/140374922990"
     }
@@ -419,39 +475,42 @@
    "branch": "pr/refactor-registration",
    "event": "pull_request",
    "title": "[Refactor] Align FlyDSL registration and bindings with upstream MLIR",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474",
    "created_at": "2026-11-26T11:21:48Z",
-   "updated_at": "2026-11-27T07:39:04Z",
+   "updated_at": "2026-11-27T08:06:18Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T07:39:03Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T08:06:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903774"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T07:38:48Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T07:49:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903778"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T07:20:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903826"
+     "completed_at": "2026-11-27T07:46:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45809898474/job/140367903826",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
