@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-27T09:49:32Z",
+ "updated": "2026-11-27T09:54:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 45977210730,
+   "pr": 1537,
+   "commit": "a33857379b1f20ae1b6ca1b29ce34bb70111538b",
+   "branch": "perf/coop-warp-merge-sort-int-keys",
+   "event": "pull_request",
+   "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45977210730",
+   "created_at": "2026-11-27T09:51:36Z",
+   "updated_at": "2026-11-27T09:52:16Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 45972459077,
    "pr": 1537,
@@ -10,38 +25,38 @@
    "branch": "perf/coop-warp-merge-sort-int-keys",
    "event": "pull_request",
    "title": "[Coop] Add warp_sort: the call picks the bitonic network or the merge",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972459077",
    "created_at": "2026-11-27T09:17:22Z",
-   "updated_at": "2026-11-27T09:42:26Z",
+   "updated_at": "2026-11-27T09:52:00Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T09:45:40Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T09:51:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972459077/job/140427540002"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T09:43:02Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T09:51:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972459077/job/140427540017"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-11-27T09:42:39Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T09:52:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972459077/job/140427540024"
     }
    ]
@@ -53,13 +68,41 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Lower float conversions for the chip in convert-rocdl-math-op\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017",
    "created_at": "2026-11-27T09:15:31Z",
-   "updated_at": "2026-11-27T09:26:42Z",
+   "updated_at": "2026-11-27T09:49:53Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T09:51:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013673"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-27T09:50:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013718"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-27T09:49:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013763"
+    }
+   ]
   },
   {
    "run_id": 45972146256,
@@ -2300,21 +2343,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531437351/job/139807589298"
     }
    ]
-  },
-  {
-   "run_id": 45531296496,
-   "pr": 1510,
-   "commit": "98c052c3c18b6370f83da3ec3bec3dfa1c2d91c8",
-   "branch": "fix/f36-f37-allreduce-write-mode-flags",
-   "event": "pull_request",
-   "title": "[Bugfix] Fix early flag stores in the write-mode custom all-reduce",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45531296496",
-   "created_at": "2026-11-25T02:12:39Z",
-   "updated_at": "2026-11-25T02:12:39Z",
-   "actor": "thechenli",
-   "jobs": []
   }
  ]
 }
