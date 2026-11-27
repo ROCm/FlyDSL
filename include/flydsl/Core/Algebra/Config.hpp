@@ -286,6 +286,7 @@ enum class AlgebraOp : uint8_t {
   Lt,
   Eq,
   Ne,
+  Cast,
   // IntTuple algorithms. The arithmetic operators are the mode-wise
   // counterparts of the leaf arithmetic above.
   TupleAdd = 0x20,
@@ -401,6 +402,8 @@ inline llvm::StringRef get_algebra_op_name(AlgebraOp op) {
     return "eq";
   case AlgebraOp::Ne:
     return "ne";
+  case AlgebraOp::Cast:
+    return "cast";
   case AlgebraOp::TupleAdd:
     return "tuple_add";
   case AlgebraOp::TupleSub:

@@ -930,6 +930,10 @@ FLYDSL_CORE_LEAF_OPERATOR(leaf_shr, >>)
 FLYDSL_CORE_LEAF_UNARY(leaf_abs, abs)
 FLYDSL_CORE_LEAF_UNARY(leaf_signum, signum)
 
+template <class T, class Cat = category_of<T>> auto leaf_cast(const T &value, LogWidth width) {
+  return detail::leaf_unary(value, [width](Leaf<Cat> operand) { return cast(operand, width); });
+}
+
 FLYDSL_CORE_LEAF_FUNCTION(leaf_eq, eq)
 FLYDSL_CORE_LEAF_FUNCTION(leaf_ne, ne)
 FLYDSL_CORE_LEAF_FUNCTION(leaf_lt, lt)
