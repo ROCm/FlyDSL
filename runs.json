@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-27T10:20:55Z",
+ "updated": "2026-11-27T10:28:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -111,29 +111,32 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Lower float conversions for the chip in convert-rocdl-math-op\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017",
    "created_at": "2026-11-27T09:15:31Z",
-   "updated_at": "2026-11-27T10:01:16Z",
+   "updated_at": "2026-11-27T10:24:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T09:51:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013673"
+     "completed_at": "2026-11-27T10:23:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013673",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-27T09:50:19Z",
-     "completed_at": null,
+     "completed_at": "2026-11-27T10:24:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45972203017/job/140431013718"
     },
     {
