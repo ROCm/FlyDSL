@@ -17,6 +17,7 @@ from .reduce_batched import *
 from .reduce_batched import WarpReduceBatched as _WarpReduceBatched
 from .scan import *
 from .scan import WarpScan as _WarpScan
+from .sort import *
 from .store import *
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "warp_sum_batched_to_striped",
     "warp_bitonic_sort",
     "warp_merge_sort",
+    "warp_sort",
     "warp_reduce",
     "warp_sum",
     "warp_max",

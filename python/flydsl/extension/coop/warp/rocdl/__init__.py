@@ -22,6 +22,7 @@ every other call to the portable implementation it displaces, which
 - ``scan``: the scans and ``warp_broadcast``.
 - ``reduce_batched``, ``bitonic_sort``, ``merge_sort``: the functions of the
   same names.
+- ``sort``: ``warp_sort`` over the two sorts above.
 - ``exchange``: ``WarpExchange`` with the SHUFFLE algorithm.
 """
 
@@ -31,12 +32,14 @@ from . import merge_sort as _merge_sort
 from . import reduce as _reduce
 from . import reduce_batched as _reduce_batched
 from . import scan as _scan
+from . import sort as _sort
 from .bitonic_sort import *
 from .exchange import *
 from .merge_sort import *
 from .reduce import *
 from .reduce_batched import *
 from .scan import *
+from .sort import *
 
 __all__ = [
     *_reduce.__all__,
@@ -44,5 +47,6 @@ __all__ = [
     *_reduce_batched.__all__,
     *_bitonic_sort.__all__,
     *_merge_sort.__all__,
+    *_sort.__all__,
     *_exchange.__all__,
 ]

@@ -45,6 +45,7 @@ from .warp.exchange import *
 from .warp.load import *
 from .warp.merge_sort import *
 from .warp.reduce_batched import *
+from .warp.sort import *
 from .warp.store import *
 
 WarpReduce = _warp_reduce.WarpReduce
