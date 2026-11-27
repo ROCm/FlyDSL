@@ -1298,6 +1298,10 @@ def compile_pa_decode_sw(
                 tile_kv_seq_start,
                 tile_context_len,
             ) = _load_tile(prefetched_tile_metadata, prefetched_tile_scale_scalars)
+            # _qk_and_intra_softmax stores qk_max into the softmax_base slots
+            # that hold the Q scales, so every wave must have read its Q scale
+            # (in _finish_q_fragments) first.
+            gpu.barrier()
             attention_context_len = tile_context_len if const_expr(fuse_partitions) else context_len
             causal_bound = attention_context_len + fx.Int32(1 - query_length) + qi_val
             seq_start = attention_context_len - fx.Int32(query_length + sliding_window) + qi_val
