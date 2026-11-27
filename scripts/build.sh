@@ -75,6 +75,7 @@ echo "  MLIR_PATH:  ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
 echo "  GENERATOR:  ${GENERATOR}"
 echo "  HIP_PLATFORM: ${HIP_PLATFORM:-amd (default)}"
+echo "  BACKENDS:   ${FLYDSL_BACKENDS:-(configured value; rocdl on a first configure)}"
 echo "=============================================="
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,11 @@ cmake_args=(
   "${FLY_PYTHON_CMAKE_ARGS[@]}"
   -DHIP_PLATFORM="${HIP_PLATFORM}"
 )
+# Backends to build, semicolon-separated (e.g. FLYDSL_BACKENDS="rocdl"). Unset
+# keeps the configured value.
+if [ -n "${FLYDSL_BACKENDS:-}" ]; then
+  cmake_args+=(-DFLYDSL_BACKENDS="${FLYDSL_BACKENDS}")
+fi
 
 echo "Configuring CMake..."
 cmake "${cmake_args[@]}"
