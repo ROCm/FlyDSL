@@ -909,6 +909,13 @@ def test_layernorm_smoothquant():
     print("=" * 80)
 
     configs = _get_layernorm_configs()
+    if not os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip():
+        configs += [
+            (3000, 64, "bf16"),  # short rows packed several per block
+            (10, 1003, "f16"),  # vector row with a scalar tail
+            (8, 8192, "f32"),  # wide f32 row: non-temporal loads
+            (600, 2048, "f32"),  # mid-width f32 rows at large M: non-temporal loads
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
