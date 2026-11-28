@@ -24,6 +24,7 @@ _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
     "ktrace": ".ktrace",
+    "nvvm": ".nvvm",
 }
 
 _EXTENSION_MODULES = {

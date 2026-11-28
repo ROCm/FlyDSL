@@ -37,4 +37,5 @@ EXAMPLE_ARCHITECTURES = {
     "extension/coop/01-warp_collectives.py": ("*",),
     "extension/coop/02-block_scan.py": ("*",),
     "experimental/register_allocation.py": ("gfx942", "gfx95*"),
+    "cuda/01-MmaSync.py": ("sm_8*", "sm_9*", "sm_1??*"),
 }

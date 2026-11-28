@@ -58,7 +58,8 @@ FlyDSL/
 │   └── mlir_flydsl/               # MLIR Python binding package source
 ├── include/flydsl/                # C++ TableGen headers for Fly / FlyROCDL dialects and passes
 ├── lib/                           # C++ dialect implementation, conversions, runtime wrappers, Python bindings
-│   └── Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
+│   ├── Dialect/FlyROCDL/{CDNA3,CDNA4,GFX11,GFX120X,GFX1250}/  # Per-subtarget atom lowering: MmaAtom (MFMA on CDNA3/4, WMMA on GFX11/120X/1250) + CopyAtom (Buffer/LDS, CDNA3/4 only; TDM on GFX1250)
+│   └── Dialect/FlyNVVM/SM80/      # NVIDIA atom lowering: mma.sync.aligned, cp.async, ldmatrix (experimental nvvm backend)
 ├── tools/                         # fly-opt
 ├── kernels/                       # Production kernels, importable as kernels.*
 ├── tests/
@@ -98,6 +99,7 @@ Public docs are deployed from `.github/workflows/docs.yml` to
 bash scripts/build_llvm.sh -j64       # Build LLVM/MLIR once (resets ../llvm-project tracked files, then applies the patch series in llvm-build-info.json)
                                       #   FLYDSL_LLVM_NO_EXT=1 drops the extensions but keeps the required patches; FLYDSL_LLVM_REF/_REMOTE build any commit
 bash scripts/build.sh -j64            # Build FlyDSL C++ + Python bindings
+FLYDSL_BACKENDS="rocdl;nvvm" bash scripts/build.sh -j64  # Also build the experimental NVVM backend (needs a CUDA 12+ toolkit)
 pip install -e .                      # Editable Python install
 
 # If not relying on editable install paths:
@@ -140,7 +142,7 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 
 | Purpose | Variable |
 |---|---|
-| Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`) |
+| Compile backend | `FLYDSL_COMPILE_BACKEND` (default `rocm`; `cuda` selects the experimental NVVM backend) |
 | Compile without execution | `COMPILE_ONLY` |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` |
 | Enable/disable JIT disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` (`0` / `false` disables disk cache; in-memory cache remains) |
@@ -175,6 +177,8 @@ helper code that is not part of the traced closure.
 | `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/gemm/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
 | `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); native FP8. `is_rdna_arch()` returns True. |
 | `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. |
+
+The experimental NVVM backend (`FLYDSL_COMPILE_BACKEND=cuda`, in a build whose `FLYDSL_BACKENDS` includes `nvvm`) targets NVIDIA `sm_80` and newer (warp 32): SM80 `mma.sync.aligned` m16n8k16 f16->f32, SM80 `cp.async`, SM75+ `ldmatrix`. Its atoms live in `python/flydsl/expr/nvvm/` (reached as `fx.nvvm`); `FLYDSL_GPU_ARCH=sm_*` compiles without a device.
 
 ## Kernel Entry Points
 

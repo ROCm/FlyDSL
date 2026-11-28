@@ -16,11 +16,20 @@ The kernel mimics a GEMM tiling pattern:
 
 import pytest
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.expr import const_expr, range_constexpr
-from flydsl.expr.rocdl import cluster
-from kernels.common.gfx1250_cluster import compute_mcast_masks
+# TDM / cluster multicast is gfx1250-only, so this module imports the ROCDL
+# backend package unconditionally. Skip the whole module on a build without the
+# ROCDL bindings (e.g. FLYDSL_BACKENDS=nvvm), otherwise the imports below fail
+# at collection time, before the arch guard further down can run.
+pytest.importorskip(
+    "flydsl._mlir.dialects.rocdl",
+    reason="requires a build with the ROCDL backend (FLYDSL_BACKENDS=rocdl)",
+)
+
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+from flydsl.expr import const_expr, range_constexpr  # noqa: E402
+from flydsl.expr.rocdl import cluster  # noqa: E402
+from kernels.common.gfx1250_cluster import compute_mcast_masks  # noqa: E402
 
 try:
     import torch

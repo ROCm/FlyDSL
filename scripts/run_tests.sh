@@ -43,9 +43,23 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
+# The compile backend selects the pytest suites and the GPU arch examples are
+# matched against.
+_compile_backend="${FLYDSL_COMPILE_BACKEND:-rocm}"
+_compile_backend="${_compile_backend,,}"
+
 pytest_markers="not multi_gpu and not benchmark"
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
     pytest_markers+=" and not large_shape"
+fi
+if [ "${_compile_backend}" == "cuda" ]; then
+    # The other suites are ROCm kernels and rocm_lower tests; only the
+    # backend-agnostic tier applies to the cuda backend.
+    pytest_paths=(tests/language/ tests/unit/)
+    pytest_markers="l0_backend_agnostic and ${pytest_markers}"
+else
+    pytest_paths=(tests/kernels/ tests/language/ tests/unit/ tests/system/ tests/extension/
+                  tests/python/examples/ tests/python/experimental/)
 fi
 # pytest.ini already enables verbose mode; -q brings the broad suite back to
 # compact per-file progress instead of emitting thousands of node IDs to CI.
@@ -57,18 +71,10 @@ pytest_args=(-q --no-header --tb=short --durations=20 -m "${pytest_markers}")
 # repeated here, especially on single-GPU jobs backed by an 8-GPU host.
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + language + unit + system + extension + examples + experimental"
+echo "Pytest: ${pytest_paths[*]}"
 echo "========================================================================"
 
-python3 -m pytest \
-    tests/kernels/ \
-    tests/language/ \
-    tests/unit/ \
-    tests/system/ \
-    tests/extension/ \
-    tests/python/examples/ \
-    tests/python/experimental/ \
-    "${pytest_args[@]}"
+python3 -m pytest "${pytest_paths[@]}" "${pytest_args[@]}"
 
 # ---------------------------------------------------------------------------
 # 2. Standalone example scripts (not pytest)
@@ -79,8 +85,12 @@ echo "Examples (examples/)"
 echo "========================================================================"
 
 # Architecture assignments from tests/arch_compat.py, checked before execution.
-_gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
-for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py "${REPO_ROOT}"/examples/experimental/*.py; do
+if [ "${_compile_backend}" == "cuda" ]; then
+    _gpu_arch=$(python3 -c "from flydsl.runtime.device_runtime.cuda import get_cuda_arch; print(get_cuda_arch())" 2>/dev/null || echo "unknown")
+else
+    _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
+fi
+for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py "${REPO_ROOT}"/examples/experimental/*.py "${REPO_ROOT}"/examples/cuda/*.py; do
     [ -f "${example}" ] || continue
     # Named by their path under examples/, so nested ones stay unambiguous.
     name="${example#"${REPO_ROOT}"/examples/}"
@@ -137,7 +147,24 @@ if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
     MLIR_TESTS_SKIPPED=1
 else
 
+# A test of a backend the build leaves out cannot run: it names that backend's
+# dialect (fly_<backend>) or passes (*-<backend>, <backend>-*).
+_enabled_backends=$(grep '^FLYDSL_BACKENDS:' "${BUILD_DIR}/CMakeCache.txt" 2>/dev/null | sed 's|^FLYDSL_BACKENDS:[A-Z]*=||' || true)
+_disabled_backends=()
+for _descriptor in "${REPO_ROOT}"/cmake/backends/*.cmake; do
+    _backend=$(basename "${_descriptor}" .cmake)
+    [[ ";${_enabled_backends:-rocdl};" == *";${_backend};"* ]] || _disabled_backends+=("${_backend}")
+done
+
 for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
+    _skip=""
+    for _backend in "${_disabled_backends[@]}"; do
+        grep -qE "fly_${_backend}|-${_backend}\b|\b${_backend}-" "$f" && _skip="${_backend}"
+    done
+    if [ -n "${_skip}" ]; then
+        echo "  SKIP  ${f#${REPO_ROOT}/tests/mlir/}  (${_skip} backend not built)"
+        continue
+    fi
     # A file may carry several RUN lines, typically one per --check-prefix. Run
     # every one of them: only checking the first silently skips the rest.
     mapfile -t run_lines < <(grep '^// RUN:' "$f" | sed 's|^// RUN: *||')
