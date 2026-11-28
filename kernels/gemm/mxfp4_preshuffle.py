@@ -63,8 +63,7 @@ def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves, pair):
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
-@flyc.jit
-def launch_gemm(
+def _emit_gemm(
     arg_c: fx.Pointer,
     arg_a: fx.Pointer,
     arg_b: fx.Pointer,
@@ -92,18 +91,16 @@ def launch_gemm(
     xcd_swizzle: Constexpr[int] = 0,
     k_batch: Constexpr[int] = 1,
     blockscale: Constexpr[str] = "none",
+    pair_tail: Constexpr[int] = 0,
+    xcd_hw_order: Constexpr[bool] = False,
 ):
-    """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
-    per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
-    A x preshuffled b_dtype (fp4/fp8) B, e8m0 scales (a8w8 = a_dtype=fp8, b_dtype=fp8).
-    batch>1 = strided-batched over grid.z. The a_/sca_/c_ row/batch strides make A/scale_a/C
-    addressing caller-controlled; each <0 keeps the contiguous [B,M,*] bmn default, all set =
-    the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
-    """
+    """Build and launch the GEMM kernel for one tile geometry, inside launch_gemm's trace."""
     BM, BN, BK = tile_m, tile_n, tile_k
     assert blockscale in ("none", "ab"), f"blockscale must be 'none' or 'ab', got {blockscale!r}"
     assert BK in (128, 256), f"tile_k must be 128 or 256 (tiles_per_chunk = 256 // tile_k), got {BK}"
-    assert BM % 32 == 0, f"tile_m must be a multiple of 32 (the A e8m0 scale is 32-row granular), got {BM}"
+    assert BM % 32 == 0 or (
+        BM == 16 and a_dtype == "fp4" and b_dtype == "fp4" and blockscale == "none"
+    ), f"tile_m must be a multiple of 32 (or a 16-row fp4 x fp4 tile), got {BM}"
     assert BN % 16 == 0, f"tile_n must be a multiple of 16, got {BN}"
     if const_expr(out_dtype == "bf16"):
         out_elem = BFloat16
@@ -148,7 +145,8 @@ def launch_gemm(
     _scale_chunk_dw_a = ((K + 255) // 256) * _sc_k0_a
     _scale_chunk_dw_b = ((K + 255) // 256) * _sc_k0_b
     _b_sc_rows = (N // 128) if _bs_b else (N // 32)  # B scale super-rows
-    a_copy_granularity = num_threads * 16  # bytes one cooperative round covers
+    dma_threads = min(num_threads, A_LDS_B // 16)
+    a_copy_granularity = dma_threads * 16  # bytes one cooperative round covers
     assert A_LDS_B % a_copy_granularity == 0, (
         f"A_LDS_B ({A_LDS_B}B) must be divisible by num_threads*16 ({a_copy_granularity}B), else part "
         "of the A tile is never DMA'd; adjust tile_m / tile_k"
@@ -160,6 +158,20 @@ def launch_gemm(
     )
     n_pairs = max(1, num_acc_n // 2)
     m_pairs = max(1, m_chunks // 2)
+    # The paired loop's prefetch list holds, per N fragment, that fragment of the next two
+    # tiles; splitting it into two whole tiles is only right with one N fragment per wave.
+    pair_k = (
+        BM <= 32
+        and num_acc_n == 1
+        and k_tiles_local >= 2
+        and a_dtype == "fp4"
+        and b_dtype == "fp4"
+        and k_batch == 1
+        and blockscale == "none"
+    )
+    # The register-carried B/scale prefetch and the large-tile tail peel are tuned for fp4 x fp4;
+    # the other formats keep the loop that loads B in the iteration that consumes it.
+    b_pipe = a_dtype == "fp4" and b_dtype == "fp4" and k_batch == 1 and blockscale == "none"
 
     # Scheduler counts per loop iter: MFMAs, A LDS reads/thread (fp6/fp8 2 per (mi,kh)), gmem loads.
     sched_mfma_total = k_halves * m_chunks * num_acc_n
@@ -174,6 +186,10 @@ def launch_gemm(
     class SharedA:
         a0: fx.Array[Int8, A_LDS_B, 16]
         a1: fx.Array[Int8, A_LDS_B, 16]
+
+    @fx.struct
+    class SharedA4:
+        a0: fx.Array[Int8, A_LDS_B * 4, 16]
 
     @flyc.kernel
     def kernel_gemm(
@@ -202,15 +218,58 @@ def launch_gemm(
         lane_mod_16 = lane % 16
         # XCD swizzle: remap (bid_x, bid_y) for L2-cache reuse (no-op when xcd_swizzle<=0).
         if const_expr(xcd_swizzle > 0):
-            bid_x, bid_y = xcd_remap_bx_by(
-                bid_x,
-                bid_y,
-                i32_m,
-                tile_m=BM,
-                tile_n=BN,
-                N=N,
-                xcd_swizzle=xcd_swizzle,
-            )
+            if const_expr(xcd_swizzle == 1 and b_pipe):
+                # WGM=1 makes group_size_m and first_pid_m unnecessary: after the
+                # XCD distribution, (m, n) is simply the linearized range quotient.
+                n_tiles = N // BN
+                num_wgs = n_tiles * ((i32_m + (BM - 1)) // BM)
+                linear = bid_x * n_tiles + bid_y
+                # These indices are nonnegative: masks/shifts avoid signed-divide rounding.
+                xcd = linear & 7
+                in_xcd = linear >> 3
+                q = num_wgs >> 3
+                r = num_wgs & 7
+                clip = (xcd < r).select(xcd, r)
+                wgid = xcd * q + clip + in_xcd
+                if const_expr((n_tiles & (n_tiles - 1)) == 0):
+                    n_shift = n_tiles.bit_length() - 1
+                    bid_x = wgid >> n_shift
+                    bid_y = wgid & (n_tiles - 1)
+                else:
+                    bid_x = wgid // n_tiles
+                    bid_y = wgid % n_tiles
+            elif const_expr(xcd_hw_order):
+                # The grid is (M tiles, N tiles) and workgroups reach the 8 XCDs round-robin in
+                # dispatch order, M fastest. Give each XCD a contiguous range of that order, then
+                # walk each range in groups of xcd_swizzle M tiles so that concurrent workgroups
+                # share A rows and B columns in L2.
+                n_tiles = N // BN
+                m_tiles = (i32_m + (BM - 1)) // BM
+                num_wgs = n_tiles * m_tiles
+                hw_id = fx.Int32(bid_x) + fx.Int32(bid_y) * m_tiles
+                xcd = hw_id & 7
+                in_xcd = hw_id >> 3
+                q = num_wgs >> 3
+                r = num_wgs & 7
+                clip = (xcd < r).select(xcd, r)
+                wgid = xcd * q + clip + in_xcd
+                per_group = xcd_swizzle * n_tiles
+                first_m = (wgid // per_group) * xcd_swizzle
+                rem_m = m_tiles - first_m
+                group_m = (rem_m < xcd_swizzle).select(rem_m, fx.Int32(xcd_swizzle))
+                in_group = wgid % per_group
+                bid_x = first_m + in_group % group_m
+                bid_y = in_group // group_m
+            else:
+                bid_x, bid_y = xcd_remap_bx_by(
+                    bid_x,
+                    bid_y,
+                    i32_m,
+                    tile_m=BM,
+                    tile_n=BN,
+                    N=N,
+                    xcd_swizzle=xcd_swizzle,
+                )
         bx_m = bid_x * BM
         by_n = bid_y * BN
 
@@ -252,10 +311,15 @@ def launch_gemm(
             num_records_bytes=a_nrec,
         )
         a_flat_div = fx.logical_divide(a_flat, fx.make_layout(1, 1))
-        lds = fx.SharedAllocator().allocate(SharedA).peek()
+        if const_expr(pair_k):
+            lds = fx.SharedAllocator().allocate(SharedA4).peek()
+            lds_a1_ptr = fx.add_offset(lds.a0.ptr, A_LDS_B)
+        else:
+            lds = fx.SharedAllocator().allocate(SharedA).peek()
+            lds_a1_ptr = lds.a1.ptr
         # A-LDS modeled as i32 (16B = 4 i32): fx.copy is dtype-agnostic, only the MMA cares.
         sA0_i32 = fx.recast_iter(Int32, lds.a0.ptr)
-        lds_db = fx.Int32(fx.ptrtoint(lds.a1.ptr)) - fx.Int32(fx.ptrtoint(lds.a0.ptr))  # ping/pong byte stride
+        lds_db = fx.Int32(fx.ptrtoint(lds_a1_ptr)) - fx.Int32(fx.ptrtoint(lds.a0.ptr))  # ping/pong byte stride
         lds_db_i32 = lds_db // 4
         lds_copy = fx.make_copy_atom(fx.UniversalCopy128b(), Int32)
         dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
@@ -275,16 +339,21 @@ def launch_gemm(
             base_k_byte = kt * A_ROW_B
             for i in range_constexpr(n_coop):
                 if const_expr(i > 0):
-                    lds_ptr = fx.add_offset(lds_ptr, fx.Int32(num_threads * 16))
-                lin = (i * num_threads + tid) * 16
-                row = lin // A_ROW_B
-                col = lin % A_ROW_B
+                    lds_ptr = fx.add_offset(lds_ptr, fx.Int32(dma_threads * 16))
+                lin = (i * dma_threads + tid) * 16
+                a_row_shift = A_ROW_B.bit_length() - 1
+                row = lin >> a_row_shift
+                col = lin & (A_ROW_B - 1)
                 if const_expr(swz_lds):
-                    col = col ^ ((row % k_blk16) * 16)
+                    col = col ^ ((row & (k_blk16 - 1)) * 16)
                 gmem_byte = (bx_m + row) * a_rstride + base_k_byte + col
                 dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
                 src = fx.slice(a_flat_div, (None, gmem_byte))
-                fx.copy(dma_atom, src, dst)
+                if const_expr(dma_threads < num_threads):
+                    if tid < dma_threads:
+                        fx.copy(dma_atom, src, dst)
+                else:
+                    fx.copy(dma_atom, src, dst)
 
         def _read16(base_iter, off_i32):
             # ds_read_b128 straight into an i32[4] register fragment.
@@ -301,7 +370,7 @@ def launch_gemm(
                     row_base = row * A_ROW_I32
                     lo_blk = kh * (A_KH_I32 // 4) + lane_div_16 * (A_GK_I32 // 4)
                     if const_expr(swz_lds):
-                        off = row_base + (lo_blk ^ (row % k_blk16)) * 4
+                        off = row_base + (lo_blk ^ (row & (k_blk16 - 1))) * 4
                     else:
                         off = row_base + kh * A_KH_I32 + lane_div_16 * A_GK_I32
                     if const_expr(a_dtype == "fp4"):
@@ -309,7 +378,7 @@ def launch_gemm(
                     else:
                         # fp6/fp8: pack two halves (64 K apart, f8f6f4 ABI) into i32[A_NDW].
                         if const_expr(swz_lds):
-                            hi_off = row_base + ((lo_blk + A_HI_OFF // 4) ^ (row % k_blk16)) * 4
+                            hi_off = row_base + ((lo_blk + A_HI_OFF // 4) ^ (row & (k_blk16 - 1))) * 4
                         else:
                             hi_off = off + A_HI_OFF
                         lo = Vec(fx.memref_load_vec(_read16(base_iter, off)))
@@ -364,11 +433,12 @@ def launch_gemm(
 
         n_acc = m_chunks * num_acc_n
 
-        def load_b(kt):
+        def load_b(kt, ni_only=None):
             # buffer_load_dwordx4 into i32[4] frags; fp8 B packs two K0 blocks (lo/hi, 64 K
             # apart, f8f6f4 ABI) into i32[8] — same shuffle as read_a's fp6/fp8 A path.
             ops = []
-            for ni in range_constexpr(num_acc_n):
+            ni_range = range_constexpr(num_acc_n) if ni_only is None else [ni_only]
+            for ni in ni_range:
                 for kh in range_constexpr(k_halves):
                     lo = fx.make_rmem_tensor(4, Int32)
                     fx.copy(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 0, None], lo)
@@ -401,6 +471,18 @@ def launch_gemm(
                 for mp in range_constexpr(m_pairs)
             ]
 
+            if const_expr(BM == 16):
+                # A 16-row tile shares a 32-row scale word with its sibling tile. Swap
+                # adjacent E8M0 bytes in odd tiles so opsel 0/2 selects rows 16..31.
+                odd_m16 = (bx_m & 31) >= 16
+                sa = [
+                    odd_m16.select(
+                        ((v >> 8) & 0x00FF00FF) | ((v << 8) & 0xFF00FF00),
+                        v,
+                    )
+                    for v in sa
+                ]
+
             _bs_b_dedup = _bs_b and (BN // num_waves) <= 128 and (128 % (BN // num_waves) == 0)
             if const_expr(_bs_b_dedup):
                 _sb0 = Vec(
@@ -430,7 +512,7 @@ def launch_gemm(
                 ]
             return sa, sb
 
-        def compute(accs, av, bv, sa_v, sb_v, scale_shift=None):
+        def compute(accs, av, bv, sa_v, sb_v, scale_shift=None, prefetch_b=None):
             # tile_k=128: shift the active 128-K half of the shared 256-K word into the opsel's low bytes.
             if const_expr(scale_shift is not None):
                 sa_v = [v.shrui(scale_shift) for v in sa_v]
@@ -438,33 +520,48 @@ def launch_gemm(
             if const_expr(BN < 128):
                 _bnsh = ((by_n + wave * (BN // num_waves)) % 32) // 16 * 8
                 sb_v = [v.shrui(_bnsh) for v in sb_v]
-            # kh OUTERMOST: consecutive MFMAs hit distinct accumulators (dense issue). Each
-            # scaled MFMA = fx.gemm over rank-1 i32[4] A/B frags, e8m0 word on scale_a=/scale_b=.
+            # Each scaled MFMA = fx.gemm over rank-1 i32[4] A/B frags, e8m0 word on scale_a=/scale_b=.
             c_frags = [fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(n_acc)]
             for idx in range_constexpr(n_acc):
                 c_frags[idx].store(Vec(accs[idx]))
-            for kh in range_constexpr(k_halves):
+
+            def mma(kh, ni):
+                np_i, in_b = ni // 2, ni % 2
+                for mi in range_constexpr(m_chunks):
+                    mp_i, im = mi // 2, mi % 2
+                    cf = c_frags[mi * num_acc_n + ni]
+                    fx.gemm(
+                        scale_atoms[(kh * 2 + im, kh * 2 + in_b)],
+                        cf,
+                        av[mi * k_halves + kh],
+                        bv[ni * k_halves + kh],
+                        cf,
+                        scale_a=sa_v[mp_i],
+                        scale_b=sb_v[np_i],
+                    )
+
+            next_b = []
+            if const_expr(prefetch_b is None):
+                # kh OUTERMOST: consecutive MFMAs hit distinct accumulators (dense issue).
+                for kh in range_constexpr(k_halves):
+                    for ni in range_constexpr(num_acc_n):
+                        mma(kh, ni)
+            else:
+                # Each accumulator still visits kh in reduction order; the next B fragment
+                # issues before its corresponding MFMAs.
                 for ni in range_constexpr(num_acc_n):
-                    np_i, in_b = ni // 2, ni % 2
-                    for mi in range_constexpr(m_chunks):
-                        mp_i, im = mi // 2, mi % 2
-                        cf = c_frags[mi * num_acc_n + ni]
-                        fx.gemm(
-                            scale_atoms[(kh * 2 + im, kh * 2 + in_b)],
-                            cf,
-                            av[mi * k_halves + kh],
-                            bv[ni * k_halves + kh],
-                            cf,
-                            scale_a=sa_v[mp_i],
-                            scale_b=sb_v[np_i],
-                        )
+                    # Keep only one N-fragment of the next B tile live alongside the current one.
+                    next_b.extend(prefetch_b(ni))
+                    for kh in range_constexpr(k_halves):
+                        mma(kh, ni)
             for idx in range_constexpr(n_acc):
                 accs[idx] = c_frags[idx].load().ir_value()
-            return accs
+            return accs, next_b
 
-        def hot_loop_scheduler():
+        def hot_loop_scheduler(gmem_scale=1):
             # Interleave the MFMAs with the tile's vmem + A-LDS loads: preload all hints, then issue MFMAs 1-by-1.
-            rocdl.sched_vmem(sched_num_gmem)
+            if const_expr(gmem_scale > 0):
+                rocdl.sched_vmem(sched_num_gmem * gmem_scale)
             rocdl.sched_dsrd(sched_num_ds_load)
             for _ in range_constexpr(sched_mfma_total):
                 rocdl.sched_mfma(1)
@@ -472,30 +569,269 @@ def launch_gemm(
 
         accs_init = [fx.full(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
 
-        dma_a_to_lds(kt0, fx.Int32(0))
-        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-        gpu.barrier()
-        for iv, state in range(0, k_tiles_local, 1, init=accs_init):
-            accs = list(state)
-            ivi = fx.Int32(iv)
-            cur = ivi % 2
-            nxt = (ivi + 1) % 2
-            kt = kt0 + ivi  # absolute K-tile for A/B/scale addressing
-            nkt = ivi + 1
-            # clamp last-iter prefetch to the local last tile, then rebase to absolute
-            pf_kt = kt0 + (nkt - nkt // k_tiles_local)
-            chunk_kt = kt if tiles_per_chunk == 1 else kt // tiles_per_chunk
-            scale_shift = None if tiles_per_chunk == 1 else (kt % tiles_per_chunk) * 16
-            av = read_a(cur)
-            bv = load_b(kt)
-            sa_v, sb_v = load_sc(chunk_kt)
-            dma_a_to_lds(pf_kt, nxt)  # A DMA after B/scale loads -> overlaps the MFMAs
-            accs = compute(accs, av, bv, sa_v, sb_v, scale_shift)
-            hot_loop_scheduler()
-            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
+        if const_expr(not b_pipe):
+            dma_a_to_lds(kt0, fx.Int32(0))
+            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             gpu.barrier()
-            results = yield accs
-        accs = results
+            for iv, state in range(0, k_tiles_local, 1, init=accs_init):
+                accs = list(state)
+                ivi = fx.Int32(iv)
+                cur = ivi % 2
+                nxt = (ivi + 1) % 2
+                kt = kt0 + ivi  # absolute K-tile for A/B/scale addressing
+                nkt = ivi + 1
+                # clamp last-iter prefetch to the local last tile, then rebase to absolute
+                pf_kt = kt0 + (nkt - nkt // k_tiles_local)
+                chunk_kt = kt if tiles_per_chunk == 1 else kt // tiles_per_chunk
+                scale_shift = None if tiles_per_chunk == 1 else (kt % tiles_per_chunk) * 16
+                av = read_a(cur)
+                bv = load_b(kt)
+                sa_v, sb_v = load_sc(chunk_kt)
+                dma_a_to_lds(pf_kt, nxt)  # A DMA after B/scale loads -> overlaps the MFMAs
+                accs, _ = compute(accs, av, bv, sa_v, sb_v, scale_shift)
+                hot_loop_scheduler()
+                rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
+                gpu.barrier()
+                results = yield accs
+            accs = results
+        else:
+            n_bregs = num_acc_n * k_halves
+            chunk_init = kt0 if tiles_per_chunk == 1 else kt0 >> (tiles_per_chunk - 1)
+            b_init = load_b(kt0)
+            sa_init, sb_init = load_sc(chunk_init)
+            init_state = (
+                accs_init
+                + [b_init[i].load().ir_value() for i in range_constexpr(n_bregs)]
+                + [v.ir_value() for v in sa_init]
+                + [v.ir_value() for v in sb_init]
+            )
+
+            dma_a_to_lds(kt0, fx.Int32(0))
+            if const_expr(pair_k):
+                kt1 = kt0 + 1
+                b_init1 = load_b(kt1)
+                chunk1 = kt1 if tiles_per_chunk == 1 else kt1 >> (tiles_per_chunk - 1)
+                sa_init1, sb_init1 = load_sc(chunk1)
+                pair_init = (
+                    init_state
+                    + [b_init1[i].load().ir_value() for i in range_constexpr(n_bregs)]
+                    + [v.ir_value() for v in sa_init1]
+                    + [v.ir_value() for v in sb_init1]
+                )
+                dma_a_to_lds(kt1, fx.Int32(1))
+            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+            gpu.barrier()
+            prefetch_tiles = 0 if pair_k else (k_tiles_local - 1 if BM >= 128 else k_tiles_local)
+            for iv, state in range(0, prefetch_tiles, 1, init=init_state):
+                accs = list(state[:n_acc])
+                bv = []
+                for i in range_constexpr(n_bregs):
+                    frag = fx.make_rmem_tensor(B_NDW, Int32)
+                    frag.store(Vec(state[n_acc + i]))
+                    bv.append(frag)
+                sa_off = n_acc + n_bregs
+                sa_v = [fx.Int32(state[sa_off + mp]) for mp in range_constexpr(m_pairs)]
+                sb_off = sa_off + m_pairs
+                sb_v = [fx.Int32(state[sb_off + np]) for np in range_constexpr(n_pairs)]
+                ivi = fx.Int32(iv)
+                cur = ivi & 1
+                nxt = (ivi + 1) & 1
+                kt = kt0 + ivi  # absolute K-tile for A/B/scale addressing
+                nkt = ivi + 1
+                # Large tiles peel the tail; small tiles keep the scheduled clamped prefetch.
+                pf_kt = kt0 + nkt if BM >= 128 else kt0 + (nkt - nkt // k_tiles_local)
+                pf_chunk = pf_kt if tiles_per_chunk == 1 else pf_kt >> (tiles_per_chunk - 1)
+                chunk_kt = kt if tiles_per_chunk == 1 else kt >> (tiles_per_chunk - 1)
+                scale_shift = None if tiles_per_chunk == 1 else (kt & (tiles_per_chunk - 1)) * 16
+                av = read_a(cur)
+                next_sa, next_sb = load_sc(pf_chunk)
+                dma_a_to_lds(pf_kt, nxt)  # A DMA after scale loads -> overlaps the MFMAs
+                accs, next_b = compute(accs, av, bv, sa_v, sb_v, scale_shift, lambda ni: load_b(pf_kt, ni))
+                hot_loop_scheduler()
+                rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
+                gpu.barrier()
+                results = (
+                    yield accs
+                    + [next_b[i].load().ir_value() for i in range_constexpr(n_bregs)]
+                    + [v.ir_value() for v in next_sa]
+                    + [v.ir_value() for v in next_sb]
+                )
+            accs = list(results[:n_acc])
+            if const_expr(BM >= 128):
+                # The final large tile is already carried in registers/LDS. Compute it without
+                # issuing the clamped first-tile prefetch or the pipeline's final barrier.
+                bv = []
+                for i in range_constexpr(n_bregs):
+                    frag = fx.make_rmem_tensor(B_NDW, Int32)
+                    frag.store(Vec(results[n_acc + i]))
+                    bv.append(frag)
+                sa_off = n_acc + n_bregs
+                sa_v = [fx.Int32(results[sa_off + mp]) for mp in range_constexpr(m_pairs)]
+                sb_off = sa_off + m_pairs
+                sb_v = [fx.Int32(results[sb_off + np]) for np in range_constexpr(n_pairs)]
+                last_iv = k_tiles_local - 1
+                last_kt = kt0 + last_iv
+                scale_shift = None if tiles_per_chunk == 1 else (last_kt & (tiles_per_chunk - 1)) * 16
+                av = read_a(fx.Int32(last_iv % 2))
+                accs, _ = compute(
+                    accs,
+                    av,
+                    bv,
+                    sa_v,
+                    sb_v,
+                    scale_shift,
+                    lambda ni: [bv[ni * k_halves + kh] for kh in range_constexpr(k_halves)],
+                )
+
+            if const_expr(pair_k):
+                # Four A buffers and two B/scale register sets let one barrier cover two tiles.
+                pair1_b = n_acc + n_bregs + m_pairs + n_pairs
+                pair1_sa = pair1_b + n_bregs
+                pair1_sb = pair1_sa + m_pairs
+                peel_pair = (
+                    (bool(pair_tail) or (BM == 32 and BN == 64)) and k_tiles_local >= 4 and k_tiles_local % 2 == 0
+                )
+                pair_main_steps = k_tiles_local // 2 - (1 if peel_pair else 0)
+                early_hints = BM == 16 or bool(pair_tail)
+                for iv, state in range(0, pair_main_steps, 1, init=pair_init, unroll=4 if pair_tail else 15):
+                    accs = list(state[:n_acc])
+                    bv0 = []
+                    bv1 = []
+                    for i in range_constexpr(n_bregs):
+                        frag0 = fx.make_rmem_tensor(B_NDW, Int32)
+                        frag0.store(Vec(state[n_acc + i]))
+                        bv0.append(frag0)
+                        frag1 = fx.make_rmem_tensor(B_NDW, Int32)
+                        frag1.store(Vec(state[pair1_b + i]))
+                        bv1.append(frag1)
+                    sa_v0 = [fx.Int32(state[sa_off + mp]) for mp in range_constexpr(m_pairs)]
+                    sb_v0 = [fx.Int32(state[sb_off + np]) for np in range_constexpr(n_pairs)]
+                    sa_v1 = [fx.Int32(state[pair1_sa + mp]) for mp in range_constexpr(m_pairs)]
+                    sb_v1 = [fx.Int32(state[pair1_sb + np]) for np in range_constexpr(n_pairs)]
+                    ivi = fx.Int32(iv)
+                    parity = ivi & 1
+                    kt = kt0 + ivi * 2
+                    kt1 = kt + 1
+                    cur0 = parity * 2
+                    cur1 = cur0 + 1
+                    nxt0 = (1 - parity) * 2
+                    nxt1 = nxt0 + 1
+                    pfi0 = ivi * 2 + 2
+                    pfi1 = pfi0 + 1
+                    last_i = fx.Int32(k_tiles_local - 1)
+                    pfi0 = (pfi0 < last_i).select(pfi0, last_i)
+                    pfi1 = (pfi1 < last_i).select(pfi1, last_i)
+                    pf0 = kt0 + pfi0
+                    pf1 = kt0 + pfi1
+                    pfc0 = pf0 if tiles_per_chunk == 1 else pf0 >> (tiles_per_chunk - 1)
+                    pfc1 = pf1 if tiles_per_chunk == 1 else pf1 >> (tiles_per_chunk - 1)
+                    shift0 = None if tiles_per_chunk == 1 else (kt & (tiles_per_chunk - 1)) * 16
+                    shift1 = None if tiles_per_chunk == 1 else (kt1 % tiles_per_chunk) * 16
+
+                    av0 = read_a(cur0)
+                    next_sa0, next_sb0 = load_sc(pfc0)
+                    next_sa1, next_sb1 = load_sc(pfc1)
+                    dma_a_to_lds(pf0, nxt0)
+                    dma_a_to_lds(pf1, nxt1)
+                    accs, next_b01 = compute(
+                        accs,
+                        av0,
+                        bv0,
+                        sa_v0,
+                        sb_v0,
+                        shift0,
+                        lambda ni: load_b(pf0, ni) + load_b(pf1, ni),
+                    )
+                    next_b0 = next_b01[:n_bregs]
+                    next_b1_pre = next_b01[n_bregs:]
+                    hot_loop_scheduler(2 if early_hints else 1)
+                    av1 = read_a(cur1)
+                    accs, next_b1 = compute(
+                        accs,
+                        av1,
+                        bv1,
+                        sa_v1,
+                        sb_v1,
+                        shift1,
+                        lambda ni: [next_b1_pre[ni * k_halves + kh] for kh in range_constexpr(k_halves)],
+                    )
+                    hot_loop_scheduler(0 if early_hints else 1)
+                    rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
+                    gpu.barrier()
+                    results_pair = (
+                        yield accs
+                        + [next_b0[i].load().ir_value() for i in range_constexpr(n_bregs)]
+                        + [v.ir_value() for v in next_sa0]
+                        + [v.ir_value() for v in next_sb0]
+                        + [next_b1[i].load().ir_value() for i in range_constexpr(n_bregs)]
+                        + [v.ir_value() for v in next_sa1]
+                        + [v.ir_value() for v in next_sb1]
+                    )
+                accs = list(results_pair[:n_acc])
+                if const_expr(peel_pair):
+                    bv0 = []
+                    bv1 = []
+                    for i in range_constexpr(n_bregs):
+                        frag0 = fx.make_rmem_tensor(B_NDW, Int32)
+                        frag0.store(Vec(results_pair[n_acc + i]))
+                        bv0.append(frag0)
+                        frag1 = fx.make_rmem_tensor(B_NDW, Int32)
+                        frag1.store(Vec(results_pair[pair1_b + i]))
+                        bv1.append(frag1)
+                    sa_v0 = [fx.Int32(results_pair[sa_off + mp]) for mp in range_constexpr(m_pairs)]
+                    sb_v0 = [fx.Int32(results_pair[sb_off + np]) for np in range_constexpr(n_pairs)]
+                    sa_v1 = [fx.Int32(results_pair[pair1_sa + mp]) for mp in range_constexpr(m_pairs)]
+                    sb_v1 = [fx.Int32(results_pair[pair1_sb + np]) for np in range_constexpr(n_pairs)]
+                    last_pair = k_tiles_local // 2 - 1
+                    cur0 = (last_pair % 2) * 2
+                    cur1 = cur0 + 1
+                    last_kt = kt0 + k_tiles_local - 2
+                    last_kt1 = last_kt + 1
+                    shift0 = None if tiles_per_chunk == 1 else (last_kt & (tiles_per_chunk - 1)) * 16
+                    shift1 = None if tiles_per_chunk == 1 else (last_kt1 & (tiles_per_chunk - 1)) * 16
+                    av0 = read_a(fx.Int32(cur0))
+                    accs, _ = compute(
+                        accs,
+                        av0,
+                        bv0,
+                        sa_v0,
+                        sb_v0,
+                        shift0,
+                        lambda ni: [bv0[ni * k_halves + kh] for kh in range_constexpr(k_halves)],
+                    )
+                    hot_loop_scheduler()
+                    av1 = read_a(fx.Int32(cur1))
+                    accs, _ = compute(
+                        accs,
+                        av1,
+                        bv1,
+                        sa_v1,
+                        sb_v1,
+                        shift1,
+                        lambda ni: [bv1[ni * k_halves + kh] for kh in range_constexpr(k_halves)],
+                    )
+                    hot_loop_scheduler()
+                if const_expr(k_tiles_local % 2 == 1):
+                    bv = []
+                    for i in range_constexpr(n_bregs):
+                        frag = fx.make_rmem_tensor(B_NDW, Int32)
+                        frag.store(Vec(results_pair[n_acc + i]))
+                        bv.append(frag)
+                    sa_t = [fx.Int32(results_pair[sa_off + mp]) for mp in range_constexpr(m_pairs)]
+                    sb_t = [fx.Int32(results_pair[sb_off + np]) for np in range_constexpr(n_pairs)]
+                    last_iv = k_tiles_local - 1
+                    last_kt = kt0 + last_iv
+                    shift = None if tiles_per_chunk == 1 else (last_kt & (tiles_per_chunk - 1)) * 16
+                    av = read_a(fx.Int32(last_iv % 4))
+                    accs, _ = compute(
+                        accs,
+                        av,
+                        bv,
+                        sa_t,
+                        sb_t,
+                        shift,
+                        lambda ni: [bv[ni * k_halves + kh] for kh in range_constexpr(k_halves)],
+                    )
 
         # Epilogue via fx.copy: a lane owns 4 rows per (mi,ni) accm (row m*16+(l//16)*4+ii, col
         # base+l%16), c_stride apart.
@@ -566,6 +902,141 @@ def launch_gemm(
         i32_n,
         value_attrs={"rocdl.waves_per_eu": wpe},
     ).launch(grid=(gx, gy, gz), block=(num_threads, 1, 1), stream=stream)
+
+
+@flyc.jit
+def launch_gemm(
+    arg_c: fx.Pointer,
+    arg_a: fx.Pointer,
+    arg_b: fx.Pointer,
+    arg_scale_a: fx.Pointer,
+    arg_scale_b: fx.Pointer,
+    i32_m: fx.Int32,
+    i32_n: fx.Int32,
+    stream: fx.Stream,
+    N: Constexpr[int],
+    K: Constexpr[int],
+    tile_m: Constexpr[int],
+    tile_n: Constexpr[int],
+    tile_k: Constexpr[int],
+    a_dtype: Constexpr[str],
+    out_dtype: Constexpr[str],
+    b_dtype: Constexpr[str],
+    batch: Constexpr[int],
+    a_row_stride: Constexpr[int],
+    a_batch_stride: Constexpr[int],
+    sca_row_stride: Constexpr[int],
+    sca_batch_stride: Constexpr[int],
+    c_row_stride: Constexpr[int],
+    c_batch_stride: Constexpr[int],
+    waves_per_eu: Constexpr[int],
+    xcd_swizzle: Constexpr[int] = 0,
+    k_batch: Constexpr[int] = 1,
+    blockscale: Constexpr[str] = "none",
+):
+    """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
+    per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
+    A x preshuffled b_dtype (fp4/fp8) B, e8m0 scales (a8w8 = a_dtype=fp8, b_dtype=fp8).
+    batch>1 = strided-batched over grid.z. The a_/sca_/c_ row/batch strides make A/scale_a/C
+    addressing caller-controlled; each <0 keeps the contiguous [B,M,*] bmn default, all set =
+    the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
+
+    Plain fp4 x fp4 launches (tile_k=256, no blockscale, split-K, batching or custom strides)
+    treat the 32x128, 64x128 and 64x256 tiles as hints and pick the workgroup geometry from M at
+    launch time: small grids need more, narrower workgroups to cover the CUs, and once the grid
+    covers the machine a wider N tile cuts B traffic. The 128-row geometries pick their own XCD
+    order, so xcd_swizzle applies only to the small-M ones. Every other launch uses the given tile.
+    """
+    contiguous = all(
+        stride < 0
+        for stride in (a_row_stride, a_batch_stride, sca_row_stride, sca_batch_stride, c_row_stride, c_batch_stride)
+    )
+    plain_fp4 = (
+        a_dtype == b_dtype == "fp4"
+        and batch == 1
+        and k_batch == 1
+        and blockscale == "none"
+        and contiguous
+        and tile_k == 256
+    )
+
+    def emit(bm, bn, xcd, pair_tail=0, xcd_hw_order=False):
+        _emit_gemm(
+            arg_c,
+            arg_a,
+            arg_b,
+            arg_scale_a,
+            arg_scale_b,
+            i32_m,
+            i32_n,
+            stream,
+            N,
+            K,
+            bm,
+            bn,
+            tile_k,
+            a_dtype,
+            out_dtype,
+            b_dtype,
+            batch,
+            a_row_stride,
+            a_batch_stride,
+            sca_row_stride,
+            sca_batch_stride,
+            c_row_stride,
+            c_batch_stride,
+            waves_per_eu,
+            xcd,
+            k_batch,
+            blockscale,
+            pair_tail,
+            xcd_hw_order,
+        )
+
+    if const_expr(plain_fp4 and tile_n == 128 and tile_m in (32, 64)):
+        xcd = xcd_swizzle or 1
+
+        @flyc.jit
+        def dispatch():
+            if i32_m <= fx.Int32(32):
+                emit(16, 64, xcd, pair_tail=1)
+            elif i32_m <= fx.Int32(64):
+                emit(32, 32, xcd, pair_tail=1)
+            else:
+                emit(32, 64, xcd)
+
+        dispatch()
+    elif const_expr(plain_fp4 and (tile_m, tile_n) == (64, 256)):
+        if const_expr(N < 2048):
+            # A 256-wide N tile leaves too few N tiles below N=2048, whatever the M.
+            emit(128, 128, 4, xcd_hw_order=True)
+        elif const_expr(K <= 1024):
+
+            @flyc.jit
+            def dispatch():
+                wg128 = (i32_m + fx.Int32(127)) // fx.Int32(128) * fx.Int32(N // 128)
+                if wg128 <= fx.Int32(512):
+                    emit(128, 128, 4, xcd_hw_order=True)
+                elif wg128 <= fx.Int32(1024):
+                    emit(128, 256, 8, xcd_hw_order=True)
+                else:
+                    # Four or fewer K tiles cannot fill the 128-row pipelines on a grid this large.
+                    emit(64, 256, xcd_swizzle)
+
+            dispatch()
+        else:
+
+            @flyc.jit
+            def dispatch():
+                # Up to two waves of 128x128 workgroups on 256 CUs keep the narrower tile.
+                if (i32_m + fx.Int32(127)) // fx.Int32(128) * fx.Int32(N // 128) <= fx.Int32(512):
+                    emit(128, 128, 4, xcd_hw_order=True)
+                else:
+                    emit(128, 256, 8, xcd_hw_order=True)
+
+            dispatch()
+    else:
+        emit(tile_m, tile_n, xcd_swizzle)
 
 
 # ── split-K reduce ────────────────────────────────────────────────────────────
