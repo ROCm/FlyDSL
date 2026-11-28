@@ -35,7 +35,7 @@ if _ARCH != "gfx950" and not (_IS_CLI and _ARCH == "gfx942"):
 
 from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
-from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16  # noqa: E402
+from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16, select_default_launch  # noqa: E402
 from kernels.gemm.gemm_a16w16_gfx950_utils import GFX950_DMA_BYTES  # noqa: E402
 
 DEFAULT_BENCH_ITERS = 50
@@ -827,6 +827,156 @@ def test_gemm_a16w16_allocates_output_with_default_policy():
     assert out.dtype == dtype
     assert out.device == a.device
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=2e-1)
+
+
+#: The geometry rule, one row per branch: (m, n, k) -> (block_m, block_n, block_k,
+#: stages, m_waves, n_waves, group_m, use_half_tile_interleaved). The rows are
+#: the policy itself, so they are stated here rather than recomputed.
+_LAUNCH_CASES = [
+    # Narrow N: the tile never pads N past the next 32 columns, and 256 CTAs
+    # (one per CU) of 64x32 / 64x64 / 64x128 are the first that fit.
+    (16384, 32, 5120, (64, 32, 64, 4, 2, 2, 0, False)),
+    (16384, 64, 7168, (64, 64, 64, 4, 2, 2, 0, False)),
+    (16384, 128, 7168, (64, 128, 64, 4, 2, 2, 0, False)),
+    # Few rows or few columns: 200 and 196 CTAs of 128x128 and 64x128.
+    (448, 6304, 7168, (128, 128, 64, 4, 4, 2, 0, False)),
+    (448, 3584, 7168, (64, 128, 64, 4, 2, 4, 0, False)),
+    (2944, 256, 6144, (64, 64, 64, 5, 2, 2, 0, False)),
+    # The same branches with short K: the ring is capped by the K tiles.
+    (448, 6304, 128, (128, 128, 64, 3, 4, 2, 0, False)),
+    (65, 200, 128, (64, 64, 64, 3, 2, 2, 0, False)),
+    # Narrow N never takes a tile wider than the next 32 columns; 32-row
+    # tiles are reached when 64 rows still miss 256 CTAs.
+    (65, 32, 4096, (32, 32, 64, 6, 2, 2, 0, False)),
+    (65, 128, 4096, (32, 128, 64, 6, 2, 2, 0, False)),
+    (65, 32, 64, (32, 32, 64, 2, 2, 2, 0, False)),
+    # A well-filled 256x256 grid keeps the default launch.
+    (4096, 7168, 768, None),
+    # Fewer than 32 rows: a default grid beyond half the CUs stays when K has
+    # two even tiles, below that the small tile wins (1x1024 is 4x faster than
+    # the default).
+    (1, 36864, 7168, None),
+    (1, 65536, 128, None),
+    (1, 1024, 7168, (64, 64, 64, 5, 2, 2, 0, False)),
+    # A thin M with an odd or single K tile cannot keep the interleaved
+    # default; the m <= 640 ladder re-tiles it to 128x128.
+    (1, 36864, 192, (128, 128, 64, 4, 4, 2, 0, False)),
+    (16, 33024, 192, (128, 128, 64, 4, 4, 2, 0, False)),
+    (8, 65536, 192, (128, 128, 64, 4, 4, 2, 0, False)),
+    (1, 36864, 64, (128, 128, 64, 2, 4, 2, 0, False)),
+    (16, 33024, 64, (128, 128, 64, 2, 4, 2, 0, False)),
+    # Three K tiles is not an even number: the interleaved default cannot run,
+    # so a 128x256 launch without the interleaved epilogue is used.
+    (4096, 4096, 192, (128, 256, 64, 3, 2, 4, 4, False)),
+    # One K tile: the ring is capped at two stages.
+    (16384, 7168, 64, (128, 256, 64, 2, 2, 4, 4, False)),
+]
+
+
+@pytest.mark.parametrize(("m", "n", "k", "expected"), _LAUNCH_CASES)
+def test_gemm_a16w16_default_launch_picks(m: int, n: int, k: int, expected):
+    launch = select_default_launch(m, n, k)
+    if expected is None:
+        assert launch is None
+        return
+    assert launch is not None
+    picked = (
+        launch["block_m"],
+        launch["block_n"],
+        launch["block_k"],
+        launch["stages"],
+        launch["m_waves"],
+        launch["n_waves"],
+        launch["group_m"],
+        launch["use_half_tile_interleaved"],
+    )
+    assert picked == expected
+
+
+def test_gemm_a16w16_default_launch_is_read_only():
+    launch = select_default_launch(16384, 32, 5120)
+    with pytest.raises(TypeError):
+        launch["block_m"] = 1
+
+
+def test_gemm_a16w16_default_launch_non_gfx950(monkeypatch):
+    """The cache is keyed by architecture, so a gfx950 pick cannot leak."""
+    import kernels.gemm.gemm_a16w16_gfx950 as gfx950
+
+    gfx950._select_default_launch.cache_clear()
+    monkeypatch.setattr(gfx950, "get_rocm_arch", lambda: "gfx950")
+    assert select_default_launch(96, 3584, 7168) is not None
+    monkeypatch.setattr(gfx950, "get_rocm_arch", lambda: "gfx942")
+    assert select_default_launch(96, 3584, 7168) is None
+    monkeypatch.setattr(gfx950, "get_rocm_arch", lambda: "gfx950")
+    assert select_default_launch(96, 3584, 7168) is not None
+    gfx950._select_default_launch.cache_clear()
+
+
+@pytest.mark.parametrize(("m", "n", "k"), [(448, 1536, 7168), (96, 3584, 7168)])
+def test_gemm_a16w16_default_launch_runs(m: int, n: int, k: int):
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = torch.randn((n, k), dtype=dtype, device="cuda")
+    out = gemm_a16w16(a, b.T, layout="nt")
+    ref = torch.mm(a, b.T)
+    torch.testing.assert_close(out, ref, atol=3e-2, rtol=2e-1)
+
+
+@pytest.mark.parametrize(
+    ("m", "n", "k"),
+    [
+        (1, 36864, 192),
+        (16, 33024, 192),
+        (8, 65536, 192),
+        (1, 36864, 64),
+        (16, 33024, 64),
+    ],
+)
+def test_gemm_a16w16_default_launch_thin_m_k_tail_runs(m: int, n: int, k: int):
+    """A thin M with an odd or single K tile must not raise the HTI assertion."""
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = torch.randn((n, k), dtype=dtype, device="cuda")
+    out = gemm_a16w16(a, b.T, layout="nt")
+    ref = torch.mm(a, b.T)
+    torch.testing.assert_close(out, ref, atol=3e-2, rtol=2e-1)
+
+
+def test_gemm_a16w16_default_launch_is_used(monkeypatch):
+    """A no-launch call consults the policy; an explicitly launched call does not."""
+    import kernels.gemm.gemm_a16w16_gfx950 as gfx950
+
+    calls = []
+    real = gfx950.select_default_launch
+
+    def spy(m, n, k):
+        calls.append((m, n, k))
+        return real(m, n, k)
+
+    monkeypatch.setattr(gfx950, "select_default_launch", spy)
+    dtype = torch.bfloat16
+    m, n, k = 448, 1536, 7168
+    torch.manual_seed(0)
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    b = torch.randn((n, k), dtype=dtype, device="cuda")
+    gemm_a16w16(a, b.T, layout="nt")
+    assert calls == [(m, n, k)]
+
+    calls.clear()
+    explicit = {
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 64,
+        "stages": 5,
+        "m_waves": 2,
+        "n_waves": 2,
+        "use_half_tile_interleaved": False,
+    }
+    gemm_a16w16(a, b.T, layout="nt", user_kwargs=explicit)
+    assert calls == []
 
 
 @pytest.mark.parametrize(
