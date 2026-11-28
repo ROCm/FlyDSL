@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-28T07:16:22Z",
+ "updated": "2026-11-28T08:05:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 46123956738,
+   "pr": null,
+   "commit": "705763a7c66ef209eb924fd551b0b8a43f4eca01",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Link MLIR's nanobind libraries when build_llvm.sh has no Nin\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738",
+   "created_at": "2026-11-28T08:02:43Z",
+   "updated_at": "2026-11-28T08:02:55Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 46115662695,
    "pr": 1541,
@@ -11,12 +26,24 @@
    "event": "pull_request",
    "title": "[Version] Bump version to 0.5.5",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695",
    "created_at": "2026-11-28T06:14:12Z",
-   "updated_at": "2026-11-28T07:14:01Z",
+   "updated_at": "2026-11-28T08:03:07Z",
    "actor": "jli-melchior",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T07:32:48Z",
+     "completed_at": "2026-11-28T08:03:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140907330513",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
@@ -24,16 +51,7 @@
      "conclusion": "success",
      "started_at": "2026-11-28T06:35:03Z",
      "completed_at": "2026-11-28T06:55:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140893746781"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-11-28T06:37:17Z",
-     "completed_at": "2026-11-28T06:38:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140893746804"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140907331026"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -42,7 +60,7 @@
      "conclusion": "success",
      "started_at": "2026-11-28T06:35:47Z",
      "completed_at": "2026-11-28T06:59:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140893746807"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695/job/140907356162"
     }
    ]
   },
@@ -366,11 +384,11 @@
    "branch": "pr/refactor-registration",
    "event": "pull_request",
    "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924",
    "created_at": "2026-11-27T10:13:20Z",
-   "updated_at": "2026-11-27T10:16:41Z",
+   "updated_at": "2026-11-28T08:03:13Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -2322,52 +2340,6 @@
      "machine": null,
      "host_model": null,
      "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45581866075,
-   "pr": 1519,
-   "commit": "32a18b3ae7bd59e9afbfb5d77cc416561f111e2b",
-   "branch": "skills/prefetch-data-load-shared-branch-loads",
-   "event": "pull_request",
-   "title": "[Skills] prefetch-data-load: branch variants that start with the same loads",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075",
-   "created_at": "2026-11-25T09:04:01Z",
-   "updated_at": "2026-11-25T09:05:46Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:42Z",
-     "completed_at": "2026-11-25T09:05:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386336",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:41Z",
-     "completed_at": "2026-11-25T09:05:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386403"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:42Z",
-     "completed_at": "2026-11-25T09:05:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386509"
     }
    ]
   }
