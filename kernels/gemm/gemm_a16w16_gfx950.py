@@ -3,6 +3,7 @@
 
 import functools
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Optional
 
 import torch
@@ -1298,6 +1299,126 @@ def get_split_k_buffers(stream, device):
     return semaphore, signal
 
 
+#: Workgroup slots on gfx950: one CTA of the 256x256 throughput tile per CU.
+_GFX950_CU_NUM = 256
+#: Number of 64-wide K tiles in one K dimension.
+_LAUNCH_BLOCK_K = 64
+#: The 256x256 launch is kept, and the small-M/small-N ladder stops, while
+#: the grid reaches 5/8 of the CU count. Below that the call is latency bound
+#: and is re-tiled from the geometry.
+_LAUNCH_MIN_TILES = 5 * _GFX950_CU_NUM // 8
+#: A single 32-row tile already covers an M below this, so a 256x256 grid
+#: above half the CUs is not worth doubling the CTA count for.
+_LAUNCH_THIN_M = 32
+_LAUNCH_HALF_TILES = _GFX950_CU_NUM // 2
+#: Rows below which the M dimension cannot fill the device with 256-row tiles,
+#: and columns below which a 256-wide tile spends most of its N on padding.
+_LAUNCH_SMALL_M = 640
+_LAUNCH_SMALL_N = 512
+
+
+def _num_tiles(extent: int, tile: int) -> int:
+    return -(-extent // tile)
+
+
+def _k_tiles(k: int) -> int:
+    return k // _LAUNCH_BLOCK_K
+
+
+def _launch(block_m, block_n, block_k, stages, m_waves, n_waves, k, group_m=0):
+    """One launch, with the K ring no deeper than the K tiles it must cover.
+
+    ``assert_no_k_tail`` requires at least ``stages - 1`` K tiles, so a short
+    K caps the ring. These launches all use the plain (non-interleaved)
+    epilogue.
+    """
+    k_tiles = k // block_k
+    return MappingProxyType(
+        {
+            "block_m": block_m,
+            "block_n": block_n,
+            "block_k": block_k,
+            "stages": min(stages, k_tiles + 1),
+            "split_k": 1,
+            "m_waves": m_waves,
+            "n_waves": n_waves,
+            "k_waves": 1,
+            "group_m": group_m,
+            "use_half_tile_interleaved": False,
+        }
+    )
+
+
+def select_default_launch(m: int, n: int, k: int):
+    """Launch for a call that names none, or None to keep the default launch.
+
+    The result is cached per (architecture, shape) and must be treated as
+    read-only.
+
+    The 256x256 tile is a throughput tile: it needs about one workgroup per
+    CU to keep the matrix pipes busy. The geometry picks a different tile in
+    this order:
+
+    * a very thin M (``m < 32``) whose 256x256 grid already exceeds half the
+      256 CUs keeps that launch only when K has at least two even 64-wide
+      tiles; otherwise the next ladder re-tiles it.
+    * ``n <= 128``: ``block_n`` is ``n`` rounded up to a multiple of 32 (at
+      most 128). A 128-row tile is tried only when ``block_n == 128``; then
+      64- and 32-row tiles are tried. The first whose grid reaches 256 CTAs
+      wins, and 32 rows is the fallback.
+    * ``m <= 640`` or ``n <= 512``: 128x128, then 64x128, then 64x64, in
+      that order; the first whose grid reaches 5/8 of the 256 CUs wins, and
+      64x64 is used when none does.
+    * outside those ladders, the 256x256 launch is kept while its grid
+      reaches 5/8 of the 256 CUs and K has at least two even 64-wide tiles.
+    * every remaining shape takes a non-interleaved 128x256 tile with
+      ``group_m=4``.
+
+    The choices are tile counts, divisibility and the K-tile count only;
+    there is no (m, n, k) table.
+    """
+    return _select_default_launch(str(get_rocm_arch() or ""), m, n, k)
+
+
+@functools.lru_cache(maxsize=128)
+def _select_default_launch(arch: str, m: int, n: int, k: int):
+    """``select_default_launch`` body; the cache key includes the architecture."""
+    if arch != "gfx950":
+        return None
+    if (
+        m < _LAUNCH_THIN_M
+        and _num_tiles(m, 256) * _num_tiles(n, 256) > _LAUNCH_HALF_TILES
+        and _k_tiles(k) >= 2
+        and _k_tiles(k) % 2 == 0
+    ):
+        # An M below one 32-row tile wastes most rows of every tile; once the
+        # default grid is beyond half the CUs, a smaller tile only adds CTA
+        # overhead. The default still needs an even K-tile count for its
+        # interleaved epilogue, so an odd or single K tile falls through.
+        return None
+    if n <= 128:
+        block_n = min(128, -(-n // 32) * 32)
+        if block_n >= 128 and _num_tiles(m, 128) * _num_tiles(n, block_n) >= _GFX950_CU_NUM:
+            return _launch(128, block_n, _LAUNCH_BLOCK_K, 3, 2, 2, k)
+        if _num_tiles(m, 64) * _num_tiles(n, block_n) >= _GFX950_CU_NUM:
+            return _launch(64, block_n, _LAUNCH_BLOCK_K, 4, 2, 2, k)
+        return _launch(32, block_n, _LAUNCH_BLOCK_K, 6, 2, 2, k)
+    if m <= _LAUNCH_SMALL_M or n <= _LAUNCH_SMALL_N:
+        # Few rows or few columns: trade per-CTA reuse for enough CTAs.
+        if _num_tiles(m, 128) * _num_tiles(n, 128) >= _LAUNCH_MIN_TILES:
+            return _launch(128, 128, _LAUNCH_BLOCK_K, 4, 4, 2, k)
+        if _num_tiles(m, 64) * _num_tiles(n, 128) >= _LAUNCH_MIN_TILES:
+            return _launch(64, 128, _LAUNCH_BLOCK_K, 4, 2, 4, k)
+        return _launch(64, 64, _LAUNCH_BLOCK_K, 5, 2, 2, k)
+    if _num_tiles(m, 256) * _num_tiles(n, 256) >= _LAUNCH_MIN_TILES and _k_tiles(k) >= 2 and _k_tiles(k) % 2 == 0:
+        # A well-filled 256x256 grid keeps the throughput launch (its even
+        # K-tile count is what the half-tile interleaved epilogue needs).
+        return None
+    # Underfilled, or few enough K tiles that the interleaved default cannot
+    # run: a 128x256 tile fills the machine without the interleaved epilogue.
+    return _launch(128, 256, _LAUNCH_BLOCK_K, 3, 2, 4, k, group_m=4)
+
+
 def _dynamic_tensor_arg(tensor, leading_dim):
     return flyc.from_dlpack(tensor).mark_layout_dynamic(leading_dim=leading_dim)
 
@@ -1423,15 +1544,32 @@ def gemm_a16w16(
     kwargs["in_dtype_id"] = GEMM_A16W16_DTYPE_FP16 if a.dtype is torch.float16 else GEMM_A16W16_DTYPE_BF16
     kwargs["out_dtype_id"] = GEMM_A16W16_DTYPE_FP32 if out.dtype is torch.float32 else kwargs["in_dtype_id"]
     kwargs["has_bias"] = False if bias is None else True
+    param = None
+    if (
+        not user_kwargs
+        and not kwargs["has_bias"]
+        and kwargs["out_dtype_id"] == kwargs["in_dtype_id"]
+        and layout in ("nt", "nn")
+    ):
+        # A call that names no launch gets the throughput launch unless the
+        # shape is too small for it to fill the device. The candidate is
+        # validated once here; a rejected recipe falls through to the default.
+        launch = select_default_launch(m, n, k)
+        if launch is not None:
+            candidate = dict(kwargs)
+            candidate.update(launch)
+            param = make_gemm_a16w16_param_and_validate(m, n, k, candidate)
+            if param is not None:
+                kwargs = candidate
     split_k = kwargs["split_k"]
-    assert_no_k_tail(k, kwargs)
+    if param is None:
+        assert_no_k_tail(k, kwargs)
+        param = make_gemm_a16w16_param_and_validate(m, n, k, kwargs)
+    assert param is not None, "unsupported gemm_a16w16_gfx950 shape/config"
 
     if bias is not None:
         assert bias.shape[0] == n
         assert bias.dtype == a.dtype
-
-    param = make_gemm_a16w16_param_and_validate(m, n, k, kwargs)
-    assert param is not None, "unsupported gemm_a16w16_gfx950 shape/config"
     semaphore, signal = get_split_k_buffers(stream, device)
     a_arg = _dynamic_tensor_arg(a, 0 if a_is_transposed else 1)
     b_arg = _dynamic_tensor_arg(b, 0 if b_is_transposed else 1)
