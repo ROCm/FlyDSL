@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-28T09:44:10Z",
+ "updated": "2026-11-28T10:33:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,20 +20,23 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-28T09:24:28Z",
-     "completed_at": null,
+     "completed_at": "2026-11-28T09:47:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112/job/140933723438"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-11-28T09:25:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112/job/140933723456"
+     "completed_at": "2026-11-28T09:59:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112/job/140933723456",
+     "machine": "gbt350-odcdh1-b10-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -53,11 +56,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Link MLIR's nanobind libraries when build_llvm.sh has no Nin\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738",
    "created_at": "2026-11-28T08:02:43Z",
-   "updated_at": "2026-11-28T08:42:29Z",
+   "updated_at": "2026-11-28T10:29:45Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -84,10 +87,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-28T08:42:28Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T09:42:05Z",
+     "completed_at": "2026-11-28T10:10:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738/job/140923899328"
     }
    ]
