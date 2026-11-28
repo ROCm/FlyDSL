@@ -414,7 +414,7 @@ torch.cuda.synchronize()
 print("Result correct:", torch.allclose(C, A + B))
 ```
 
-See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tiled MMA (`03-tiledMma.py`), and preshuffle GEMM (`04-preshuffle_gemm.py`).
+See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tiled MMA (`03-tiledMma.py`), and preshuffle GEMM (`04-preshuffle_gemm.py`), and `examples/cuda/` for the experimental NVVM backend.
 
 ## ✅ Testing Status
 

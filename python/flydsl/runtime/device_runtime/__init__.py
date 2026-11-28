@@ -20,17 +20,20 @@ from typing import Dict, Optional, Type
 
 from ...utils import env
 from .base import DeviceRuntime
+from .cuda import CudaDeviceRuntime
 from .rocm import RocmDeviceRuntime
 
 # Compile-backend id -> device-runtime kind (single string namespace).
 COMPILE_BACKEND_TO_RUNTIME_KIND: Dict[str, str] = {
     "rocm": "rocm",
+    "cuda": "cuda",
 }
 
 _EXTRA_MAPPINGS: Dict[str, str] = {}
 
 _builtin_runtimes: Dict[str, Type[DeviceRuntime]] = {
     "rocm": RocmDeviceRuntime,
+    "cuda": CudaDeviceRuntime,
 }
 
 _runtime_cls_override: Optional[Type[DeviceRuntime]] = None
@@ -163,6 +166,7 @@ def get_device_runtime() -> DeviceRuntime:
 
 __all__ = [
     "COMPILE_BACKEND_TO_RUNTIME_KIND",
+    "CudaDeviceRuntime",
     "DeviceRuntime",
     "RocmDeviceRuntime",
     "ensure_compile_runtime_compatible",
