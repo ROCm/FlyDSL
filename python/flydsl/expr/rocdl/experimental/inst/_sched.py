@@ -32,6 +32,13 @@ does not move loads across them, out of a loop or into another piece. A group ta
 the region must not hold other instructions of the same classes (``fx.copy``, ``fx.gemm``, LDS loads); see
 :class:`ScheduleRegion`.
 
+``force`` replaces the groups and walls with a ``sched_barrier(0)`` between the statements of the block. While the block
+is traced, the MLIR Python bindings set the location of every op they build to the Python call stack
+(``ir.loc_tracebacks``; FlyDSL's own files are left out of it). On exit, each op belongs to the statement of the block
+that its innermost frame in the block's lines executes, and a ``sched_barrier(0)`` goes before the first op of each
+statement, in every block of the region. An op without such a frame, one built in C++, stays with the statement before
+it.
+
 ``priority`` puts ``s_setprio`` at the region's edges. LLVM ends a scheduling region at ``s_setprio`` as at
 ``sched_barrier(0)`` (``SIInstrInfo::isSchedulingBoundary``), so the prioritized span is exactly the region. The
 instruction takes only an immediate, so a run-time priority ``p`` is read from the first active lane and raises the
@@ -42,9 +49,15 @@ one-sided ``if`` keep the control flow as written; ``==`` tests fold into a ``sw
 or an if-else flow blocks several times longer.
 """
 
+import ast
+import linecache
+import sys
+
 from ....._mlir import ir
+from ....._mlir._mlir_libs._mlir import globals as _mlir_globals
 from ....._mlir.dialects import _rocdl_ops_gen as _rocdl
 from ....._mlir.dialects import scf
+from ....meta import _FLYDSL_PKG_ROOT
 from ....numeric import Int32
 from ....typing import as_ir_value
 
@@ -52,6 +65,8 @@ from ....typing import as_ir_value
 _GROUP_ID = 0
 _GROUP_BARRIER = "rocdl.sched.group.barrier"
 _BARRIER = "rocdl.sched.barrier"
+# Frames of user code kept in a traceback location; the block's frame lies within the innermost few.
+_TRACEBACK_DEPTH = 64
 
 _open = None  # the open ScheduleRegion
 
@@ -93,23 +108,38 @@ class ScheduleRegion:
         with ScheduleRegion(priority=1 - wave % 2, max_priority=1):  # even waves at priority 1, odd waves at 0
             ...
 
+    ``force=True`` orders the statements of the block instead: the code of a statement is issued after that of the
+    statements written before it and before that of the statements after it, everything included (DSL arithmetic,
+    copies, scalar loads, ``fx.copy`` / ``fx.gemm``). Within a statement the backend orders freely, so instruction
+    wrappers called in one statement keep no order among themselves. A statement is one however much it does: a call
+    to a helper defined outside the block, or a call written over several lines, is one statement; statements on one
+    line are one. Each iteration of a Python loop runs its body statements in order. The ops built in the block get a
+    location from the Python call stack, FlyDSL's own files left out. ::
+
+        with ScheduleRegion(force=True):
+            acc = cdna3.V_MFMA_F32_16X16X16_F16(a, b, acc)
+            b = dequant(w, scale)  # all of dequant's code after the MFMA and before the load, in any order
+            x = cdna3.BUFFER_LOAD_DWORDX4(rsrc, off)
+
     Requirements, checked where possible:
 
     - No ``sched_barrier`` / ``sched_group_barrier`` / ``iglp_opt`` of your own in the block; regions do not nest.
 
-    Not checked: the block must not issue other instructions of the classes it orders (MFMA, VMEM, DS, LDS DMA), such as
-    ``fx.copy`` / ``fx.gemm`` or a load from an LDS tensor; one of those can take an instruction's place in the order.
-    Register spills (scratch VMEM) can do the same. Explicit VALUs are held in place only in a piece that also holds an
-    ordered instruction: without one, LLVM's load clustering runs there too, and its edges can override the walls. An
-    explicit VALU wrapper may compile to no instruction or to another one when its operands allow (a uniform
-    ``V_READFIRSTLANE_B32``, a ``V_MED3_F32`` with constant bounds). Buffer resources and ``soffset`` must be
-    wave-uniform: otherwise the backend wraps the instruction in a loop of its own. Branch conditions that are
-    wave-uniform give scalar branches (``s_cbranch_scc*``); others give EXEC-mask code around the branch.
+    Not checked: without ``force``, the block must not issue other instructions of the classes it orders (MFMA, VMEM,
+    DS, LDS DMA), such as ``fx.copy`` / ``fx.gemm`` or a load from an LDS tensor; one of those can take an
+    instruction's place in the order. Register spills (scratch VMEM) can do the same. Explicit VALUs are held in place
+    only in a piece that also holds an ordered instruction: without one, LLVM's load clustering runs there too, and its
+    edges can override the walls. In either case, an explicit VALU wrapper may compile to no instruction or to another
+    one when its operands allow (a uniform ``V_READFIRSTLANE_B32``, a ``V_MED3_F32`` with constant bounds). Buffer
+    resources and ``soffset`` must be wave-uniform: otherwise the backend wraps the instruction in a loop of its own.
+    Branch conditions that are wave-uniform give scalar branches (``s_cbranch_scc*``); others give EXEC-mask code
+    around the branch.
     """
 
-    def __init__(self, priority=None, max_priority=3):
+    def __init__(self, priority=None, max_priority=3, force=False):
         self.priority = priority
         self.max_priority = max_priority
+        self.force = force
 
     def __enter__(self):
         global _open
@@ -121,23 +151,35 @@ class ScheduleRegion:
         self._entry = _rocdl.SchedBarrier(_mask("none"))
         self._emitted = {_GROUP_BARRIER: 0, _BARRIER: 0}  # barriers the region has in the block
         self._span = None  # (block, closing wall or None) of the open span of explicit VALUs
+        if self.force:
+            self._file, self._statements = _statements(sys._getframe(1))
+            _mlir_globals.register_traceback_file_exclusion(_FLYDSL_PKG_ROOT)
+            self._tracebacks = ir.loc_tracebacks(
+                max_depth=_TRACEBACK_DEPTH, on_explicit_actn=ir.OnExplicitAction.USE_TRACEBACK
+            )
+            self._tracebacks.__enter__()
         _open = self
         return self
 
     def __exit__(self, exc_type, exc, tb):
         global _open
         _open = None
+        if self.force:
+            self._tracebacks.__exit__(None, None, None)
         if exc_type is not None:
             return
         if ir.InsertionPoint.current.block != self._block:
             raise RuntimeError("ScheduleRegion: the block ends in another block than it started")
         found = dict.fromkeys(self._emitted, 0)
         ops = [op.operation for op in self._block.operations]
-        for op in ops[ops.index(self._entry.operation) + 1 :]:
+        ops = ops[ops.index(self._entry.operation) + 1 :]
+        for op in ops:
             _count(op, found)
         for name, n in found.items():
             if n != self._emitted[name]:
                 raise RuntimeError(f"ScheduleRegion: '{name}' in the region; the region already orders it")
+        if self.force:
+            self._split(ops)
         _rocdl.SchedBarrier(_mask("none"))
         if self.priority is not None:
             _rocdl.s_setprio(0)
@@ -146,6 +188,49 @@ class ScheduleRegion:
         """``sched_barrier(salu)``: only SALU crosses it."""
         self._emitted[_BARRIER] += 1
         return _rocdl.SchedBarrier(_mask("salu"))
+
+    def _statement(self, loc):
+        """The statement of the block that the innermost frame of ``loc`` in the block's lines executes, or None."""
+        if isinstance(loc, ir.CallSiteLoc):
+            return self._statement(loc.callee) or self._statement(loc.caller)
+        if isinstance(loc, ir.NameLoc):
+            return self._statement(loc.child_loc)
+        if isinstance(loc, ir.FileLineColLoc) and loc.filename == self._file:
+            return self._statements.get(loc.start_line)
+        return None
+
+    def _split(self, ops):
+        """A ``sched_barrier(0)`` before the first op of each statement in ``ops``, and in the blocks nested in them."""
+        current = None
+        for op in ops:
+            statement = self._statement(op.location)
+            if statement is not None and statement != current:
+                if current is not None:
+                    with ir.InsertionPoint(op):
+                        _rocdl.SchedBarrier(_mask("none"))
+                current = statement
+            for region in op.regions:
+                for block in region.blocks:
+                    self._split([inner.operation for inner in block.operations])
+
+
+def _statements(frame):
+    """The file of ``frame``, and {line: the innermost statement on it, as its line range} for the body of the ``with``
+    statement ``frame`` is entering."""
+    file, line = frame.f_code.co_filename, frame.f_lineno
+    tree = ast.parse("".join(linecache.getlines(file)))
+    heads = [n for n in ast.walk(tree) if isinstance(n, ast.With) and n.lineno <= line < n.body[0].lineno]
+    if not heads:
+        raise RuntimeError("ScheduleRegion(force=True): enter it with a with statement")
+    body = max(heads, key=lambda n: n.lineno).body
+    statements = sorted(
+        (n for s in body for n in ast.walk(s) if isinstance(n, ast.stmt)), key=lambda n: (n.lineno, -n.end_lineno)
+    )
+    lines = {}
+    for s in statements:  # an inner statement comes after the one holding it, and overrides its lines
+        for k in range(s.lineno, s.end_lineno + 1):
+            lines[k] = (s.lineno, s.end_lineno)
+    return file, lines
 
 
 def _set_priority(priority, max_priority):
@@ -178,7 +263,7 @@ def _count(op, found):
 def check(instr):
     """Before ``instr`` is built in the open region (if any): an ordered instruction ends the span of explicit VALUs,
     and the first explicit VALU after it opens one with a wall."""
-    if _open is None or instr.sched is None:
+    if _open is None or _open.force or instr.sched is None:
         return
     if instr.sched != "valu":
         _open._span = None
@@ -192,7 +277,7 @@ def check(instr):
 def order(instr):
     """After ``instr`` is built in the open region (if any): a group barrier after an ordered instruction; after an
     explicit VALU, the wall that closes its span, in place of the previous one."""
-    if _open is None or instr.sched is None:
+    if _open is None or _open.force or instr.sched is None:
         return
     if instr.sched != "valu":
         _rocdl.SchedGroupBarrier(_mask(instr.sched), 1, _GROUP_ID)
