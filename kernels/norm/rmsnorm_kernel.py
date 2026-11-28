@@ -64,6 +64,18 @@ WIDE_ROW_BLOCK_THREADS = 512
 LLC_BYTES = 256 * 1024 * 1024
 NT_MIN_WORKING_SET = LLC_BYTES * 9 // 8
 
+# One 128-bit vector per thread already puts a whole row in flight behind a
+# single round trip; past that a wider block only lengthens the row barrier.
+FUSED_ADD_MAX_BLOCK_THREADS = 1024
+# Streaming geometry for rows too large to cache (rides the same geometry; only
+# the cache policy differs), built for rows wide enough to matter.
+FUSED_ADD_STREAM_MIN_N = 1024
+# Cache policy of the streaming (large working set) variant: its loads skip the
+# cache, its stores settle in it - streaming the stores as well measures ~1%
+# slower at every large row count measured, wide rows and narrow rows alike.
+FUSED_ADD_STREAM_INPUT_MODIFIER = 2
+FUSED_ADD_STREAM_OUTPUT_MODIFIER = 0
+
 
 def default_block_threads(N: int, arch=None) -> int:
     """Wide rows hold fewer resident vectors per thread at 512 than at 256."""
@@ -742,24 +754,64 @@ def _build_rmsnorm_small_n_module(
     return launch_rmsnorm_small_n
 
 
-def build_fused_add_rmsnorm_module(
+def fused_add_vec_width(N: int, elem_bits: int) -> int:
+    """Elements one 128-bit copy moves, or 0 when a whole vector cannot fit.
+
+    fp32 rows move four elements per copy, 16-bit rows eight. A row that is not
+    a whole number of vectors long keeps its full vectors as a prefix and
+    finishes the remainder with the scalar tail: the copy atom tolerates a row
+    base that is not 16-byte aligned (it splits the access), so no row width
+    needs to fall back to the scalar path.
+    """
+    vec_width = VEC_WIDTH if elem_bits <= 16 else VEC_WIDTH // 2
+    return vec_width if N >= vec_width else 0
+
+
+def default_fused_add_block_threads(N: int, elem_bits: int) -> int:
+    """One 128-bit vector per thread, rounded up to whole waves.
+
+    Every thread keeps one vector of the row and one of gamma in registers
+    across the row reduction, so the row is in flight behind a single round
+    trip and the barrier only waits for the slowest load. Narrower blocks would
+    need a second iteration; wider ones only lengthen the barrier.
+    """
+    vec_width = fused_add_vec_width(N, elem_bits)
+    per_thread = (N + vec_width - 1) // vec_width if vec_width else 1
+    threads = (per_thread + WARP_SIZE - 1) // WARP_SIZE * WARP_SIZE
+    return max(WARP_SIZE, min(threads, FUSED_ADD_MAX_BLOCK_THREADS))
+
+
+def _build_fused_add_rmsnorm_kernel(
     N: int,
     dtype_str: str,
-    store_rstd: bool = False,
-    eps: float = EPS,
-    weight_dtype_str: str | None = None,
+    weight_dtype_str: str,
+    store_rstd: bool,
+    eps: float,
+    threads: int,
+    input_cache_modifier: int = 0,
+    output_cache_modifier: int = 0,
 ):
-    weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
+    """One launch geometry of the fused add + RMSNorm forward kernel.
+
+    One block owns one row. It caches its slice of the rounded sum in
+    registers, so the row is read once, and it keeps its slice of gamma in
+    registers too, so the weight load overlaps the row reduction instead of
+    following it.
+    """
+    elem_bits = 32 if dtype_str == "f32" else 16
+    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    vec_width = fused_add_vec_width(N, elem_bits)
+    USE_VEC_N = vec_width > 0
+    VEC_TILES = N // vec_width if USE_VEC_N else 0
+    VEC_ELEMS = VEC_TILES * vec_width
+    TAIL_ELEMS = N - VEC_ELEMS
+    NUM_VEC_ITERS = (VEC_TILES + threads - 1) // threads if USE_VEC_N else 0
+    NUM_SCALAR_ITERS = (N + threads - 1) // threads
+    gamma_lane_width = vec_width if weight_elem_bits == elem_bits else _weight_vec_width(weight_dtype_str)
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
-    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
-    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
-    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
-
-    BlockReduce = fx.coop.BlockReduce[fx.Float32x2, BLOCK_THREADS]
+    BlockReduce = fx.coop.BlockReduce[fx.Float32, threads]
     SharedStorage = BlockReduce.SharedStorage
 
     @flyc.kernel
@@ -786,130 +838,229 @@ def build_fused_add_rmsnorm_module(
             Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
 
         def block_reduce_add(val):
-            dummy = fx.Float32(0.0)
-            r0, _ = block_reduce_add2(val, dummy)
-            return r0
-
-        def block_reduce_add2(val0, val1):
             with fx.fastmath(fm_fast):
-                values = fx.Vector.from_elements([val0, val1], fx.Float32)
-                total = BlockReduce(values, fx.ReductionOp.ADD, storage=lds)
-            return total[0], total[1]
+                return BlockReduce(val, fx.ReductionOp.ADD, storage=lds)
 
-        # Vector path for every complete f16/bf16 vec8 row.
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        Output_buf = fx.rocdl.make_buffer_tensor(Output)
+        ResidualOut_buf = fx.rocdl.make_buffer_tensor(ResidualOut)
+
+        row_in = fx.slice(Input_buf, (bid, None))
+        row_residual_in = fx.slice(ResidualIn_buf, (bid, None))
+        row_out = fx.slice(Output_buf, (bid, None))
+        row_residual_out = fx.slice(ResidualOut_buf, (bid, None))
+
+        c_zero_f = fx.Float32(0.0)
+        thread_sumsq = c_zero_f
+        add_local = []
+        gamma_local = []
+
+        # Vector path: whole 128-bit copies, one row per block.
         if const_expr(USE_VEC_N):
-            Input_buf = fx.rocdl.make_buffer_tensor(Input)
-            ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
-            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-            Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            ResidualOut_buf = fx.rocdl.make_buffer_tensor(ResidualOut)
+            in_div = fx.logical_divide(row_in, fx.make_layout(vec_width, 1))
+            residual_in_div = fx.logical_divide(row_residual_in, fx.make_layout(vec_width, 1))
+            out_div = fx.logical_divide(row_out, fx.make_layout(vec_width, 1))
+            residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(vec_width, 1))
+            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(gamma_lane_width, 1))
 
-            row_in = fx.slice(Input_buf, (bid, None))
-            row_residual_in = fx.slice(ResidualIn_buf, (bid, None))
-            row_out = fx.slice(Output_buf, (bid, None))
-            row_residual_out = fx.slice(ResidualOut_buf, (bid, None))
-
-            in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
-            residual_in_div = fx.logical_divide(row_residual_in, fx.make_layout(VEC_WIDTH, 1))
-            out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
-            residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(VEC_WIDTH, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(_weight_vec_width(weight_dtype_str), 1))
-
-            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+            copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(input_cache_modifier), elem_bits)
+            output_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(output_cache_modifier), elem_bits)
             gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
 
-            c_zero_f = fx.Float32(0.0)
-            thread_sumsq = c_zero_f
-            thread_dummy = c_zero_f
-            add_local = []
+            def load_gamma(idx):
+                if const_expr(weight_elem_bits == elem_bits):
+                    return _load_vec(gamma_copy_atom, vec_width, weight_elem_dtype, gamma_div, idx).to(fx.Float32)
+                return _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
 
-            # Pass 1: add + cache + sumsq (also write residual_out)
+            # Pass 1: add, cache the rounded sum, write residual_out, sum squares.
             for tile_i in range_constexpr(NUM_VEC_ITERS):
-                idx = tid + tile_i * BLOCK_THREADS
+                idx = tid + tile_i * threads
                 is_valid = idx < VEC_TILES
                 idx_safe = is_valid.select(idx, 0)
-                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe).to(fx.Float32)
-                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
+                x = _load_vec(copy_atom, vec_width, elem_dtype, in_div, idx_safe).to(fx.Float32)
+                residual = _load_vec(copy_atom, vec_width, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
+                gamma_local.append(load_gamma(idx_safe))
                 added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                 add_local.append(added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
-
-                added2 = added * added
-                red2 = added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                red2 = (added * added).reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
-
                 if idx < VEC_TILES:
-                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
+                    _store_vec(copy_atom, vec_width, elem_dtype, added_e, residual_out_div, idx)
 
-            _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
+            # Remainder elements of a row that is not a whole number of
+            # vectors long: the leading threads each take one. Kept out of the
+            # vector loop so a row that is a whole number of vectors compiles
+            # to the loop alone.
+            if const_expr(TAIL_ELEMS > 0):
+                tail_valid = tid < TAIL_ELEMS
+                tail_idx = tail_valid.select(tid, 0) + VEC_ELEMS
+                x_tail_e = row_in[tail_idx]
+                residual_tail_e = row_residual_in[tail_idx]
+                g_tail_e = Gamma_buf[tail_idx]
+                x_tail = x_tail_e if dtype_str == "f32" else x_tail_e.to(fx.Float32)
+                residual_tail = residual_tail_e if dtype_str == "f32" else residual_tail_e.to(fx.Float32)
+                gamma_tail = g_tail_e if weight_dtype_str == "f32" else g_tail_e.to(fx.Float32)
+                added_tail_e = _to_elem_scalar(dtype_str, elem_dtype, x_tail + residual_tail)
+                added_tail = added_tail_e if dtype_str == "f32" else added_tail_e.to(fx.Float32)
+                thread_sumsq = thread_sumsq + tail_valid.select(added_tail * added_tail, c_zero_f)
+                if tail_valid:
+                    row_residual_out[VEC_ELEMS + tid] = added_tail_e
+
+            sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
-            ms_eps = mean_sq + eps_c
-            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+            rrms = fmath.rsqrt(mean_sq + eps_c, fastmath=fm_fast)
 
             if const_expr(store_rstd):
                 if tid == 0:
                     Rstd_buf[bid] = rrms
 
-            # Pass 2: normalize + gamma + store (reuse cached added values)
+            # Pass 2: normalize + gamma + store from the cached registers.
             for tile_i in range_constexpr(NUM_VEC_ITERS):
-                idx = tid + tile_i * BLOCK_THREADS
+                idx = tid + tile_i * threads
                 if idx < VEC_TILES:
-                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
                     added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
-                    y = (added * rrms) * g
+                    y = (added * rrms) * gamma_local[tile_i]
                     y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+                    _store_vec(output_copy_atom, vec_width, elem_dtype, y_e, out_div, idx)
+
+            if const_expr(TAIL_ELEMS > 0):
+                if tid < TAIL_ELEMS:
+                    y_tail = (added_tail * rrms) * gamma_tail
+                    row_out[VEC_ELEMS + tid] = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
 
         else:
-            # Scalar fallback for arbitrary N.
-            Input_buf = fx.rocdl.make_buffer_tensor(Input)
-            ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
-            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-            Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            ResidualOut_buf = fx.rocdl.make_buffer_tensor(ResidualOut)
-
-            row_in = fx.slice(Input_buf, (bid, None))
-            row_residual_in = fx.slice(ResidualIn_buf, (bid, None))
-            row_out = fx.slice(Output_buf, (bid, None))
-            row_residual_out = fx.slice(ResidualOut_buf, (bid, None))
-
-            c_zero_f = fx.Float32(0.0)
-            thread_sumsq = c_zero_f
-
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
-                idx = tid + base_idx_int
+            # Scalar fallback for rows that cannot hold a whole vector.
+            for tile_i in range_constexpr(NUM_SCALAR_ITERS):
+                idx = tid + tile_i * threads
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
                 x_e = row_in[idx_safe]
                 residual_e = row_residual_in[idx_safe]
+                g_e = Gamma_buf[idx_safe]
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 residual = residual_e if dtype_str == "f32" else residual_e.to(fx.Float32)
+                gamma_local.append(g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32))
                 added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
+                add_local.append(added_e)
                 if idx < N:
                     row_residual_out[idx] = added_e
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
-                added2 = added * added
-                thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
+                thread_sumsq = thread_sumsq + is_valid.select(added * added, c_zero_f)
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
-            ms_eps = mean_sq + eps_c
-            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+            rrms = fmath.rsqrt(mean_sq + eps_c, fastmath=fm_fast)
 
             if const_expr(store_rstd):
                 if tid == 0:
                     Rstd_buf[bid] = rrms
 
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
-                idx = tid + base_idx_int
+            for tile_i in range_constexpr(NUM_SCALAR_ITERS):
+                idx = tid + tile_i * threads
                 if idx < N:
-                    g_e = Gamma_buf[idx]
-                    added_e = row_residual_out[idx]
-                    g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
-                    added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
-                    y = (added * rrms) * g
-                    y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    row_out[idx] = y_e
+                    added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
+                    y = (added * rrms) * gamma_local[tile_i]
+                    row_out[idx] = _to_elem_scalar(dtype_str, elem_dtype, y)
+
+    return fused_add_rmsnorm_kernel
+
+
+def build_fused_add_rmsnorm_module(
+    N: int,
+    dtype_str: str,
+    store_rstd: bool = False,
+    eps: float = EPS,
+    weight_dtype_str: str | None = None,
+):
+    weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
+    elem_bits = 32 if dtype_str == "f32" else 16
+    elem_bytes = elem_bits // 8
+    threads = default_fused_add_block_threads(N, elem_bits)
+    kernel = _build_fused_add_rmsnorm_kernel(N, dtype_str, weight_dtype_str, store_rstd, eps, threads)
+
+    # Four element streams (input, residual, output, residual_out) stop fitting
+    # in the 256MB last-level cache past this row count; from there the
+    # streaming loads, which skip the cache instead of evicting the pending
+    # writes, win. Only the loads stream: streaming the stores as well measures
+    # ~1% slower at every large row count, because letting them settle in the
+    # cache drains them to HBM in better-scheduled bursts. Both policies are
+    # compiled into one launcher, so M stays runtime-only.
+    nt_min_rows = max(NT_MIN_WORKING_SET // (4 * elem_bytes * N), 1)
+    if N >= FUSED_ADD_STREAM_MIN_N:
+        stream_kernel = _build_fused_add_rmsnorm_kernel(
+            N,
+            dtype_str,
+            weight_dtype_str,
+            store_rstd,
+            eps,
+            threads,
+            input_cache_modifier=FUSED_ADD_STREAM_INPUT_MODIFIER,
+            output_cache_modifier=FUSED_ADD_STREAM_OUTPUT_MODIFIER,
+        )
+
+        if store_rstd:
+
+            @flyc.jit
+            def launch_fused_add_rmsnorm(
+                Input: fx.Tensor,
+                ResidualIn: fx.Tensor,
+                Gamma: fx.Tensor,
+                Output: fx.Tensor,
+                ResidualOut: fx.Tensor,
+                Rstd: fx.Tensor,
+                m_in: fx.Int32,
+                stream: fx.Stream = fx.Stream(None),
+            ):
+                def launch_streaming():
+                    launcher = stream_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Rstd)
+                    launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
+
+                def launch_cached():
+                    launcher = kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Rstd)
+                    launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
+
+                @flyc.jit
+                def dispatch():
+                    if m_in > fx.Int32(nt_min_rows):
+                        launch_streaming()
+                    else:
+                        launch_cached()
+
+                dispatch()
+
+            return launch_fused_add_rmsnorm
+
+        @flyc.jit
+        def launch_fused_add_rmsnorm(
+            Input: fx.Tensor,
+            ResidualIn: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            ResidualOut: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            def launch_streaming():
+                launcher = stream_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Gamma)
+                launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
+
+            def launch_cached():
+                launcher = kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Gamma)
+                launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
+
+            @flyc.jit
+            def dispatch():
+                if m_in > fx.Int32(nt_min_rows):
+                    launch_streaming()
+                else:
+                    launch_cached()
+
+            dispatch()
+
+        return launch_fused_add_rmsnorm
 
     if store_rstd:
 
@@ -924,12 +1075,8 @@ def build_fused_add_rmsnorm_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Rstd)
-            launcher.launch(
-                grid=(m_in, 1, 1),
-                block=(BLOCK_THREADS, 1, 1),
-                stream=stream,
-            )
+            launcher = kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Rstd)
+            launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
 
         return launch_fused_add_rmsnorm
 
@@ -943,12 +1090,10 @@ def build_fused_add_rmsnorm_module(
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Gamma)
-        launcher.launch(
-            grid=(m_in, 1, 1),
-            block=(BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
+        # store_rstd=False path: the Rstd slot is an unused placeholder here, so
+        # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
+        launcher = kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Gamma)
+        launcher.launch(grid=(m_in, 1, 1), block=(threads, 1, 1), stream=stream)
 
     return launch_fused_add_rmsnorm
 

@@ -2063,6 +2063,12 @@ def test_fused_add_rmsnorm():
     print("=" * 80)
 
     configs = _get_rmsnorm_configs()
+    if _get_rmsnorm_shape_override() is None:
+        configs += [
+            (3, 5, "bf16"),  # row narrower than one vector: scalar path
+            (2, 7, "f32"),  # f32 vector prefix and scalar tail
+            (12000, 4096, "bf16"),  # past the last-level cache: streaming loads
+        ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
