@@ -2,38 +2,45 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 #
 # ROCDL backend descriptor.
-# Self-registers into global properties consumed by downstream CMakeLists.txt.
+# Self-registers into global properties consumed by downstream CMakeLists.txt,
+# and finds the dependencies only this backend uses.
 #
-# Adding a new backend: copy this file, change the property values, and add the
-# new name to _FLYDSL_BACKENDS_ALLOWED in cmake/FlyDSLBackends.cmake.
+# Adding a new backend: copy this file to cmake/backends/<name>.cmake and change
+# the property values, and copy python/mlir_flydsl/backends/rocdl.cmake (its
+# Python bindings) to python/mlir_flydsl/backends/<name>.cmake;
+# -DFLYDSL_BACKENDS can then select <name>.
 
-# TableGen / header subdirectories under include/flydsl/
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_DIALECT_SUBDIRS "FlyROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_CONVERSION_SUBDIRS "FlyToROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_INCLUDE_CONVERSION_SUBDIRS "FlyKtraceToROCDL")
-
-# C++ library subdirectories under lib/
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_DIALECT_SUBDIRS "FlyROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "FlyToROCDL")
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_LIB_CONVERSION_SUBDIRS "FlyKtraceToROCDL")
+# Dialect and conversion subdirectories, each under include/flydsl/ (TableGen,
+# headers) and lib/ (libraries)
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_DIALECT_SUBDIRS "FlyROCDL")
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_CONVERSION_SUBDIRS
+  "FlyToROCDL" "FlyKtraceToROCDL")
 
 # CAPI wrapper subdirectory under lib/CAPI/Dialect/
 set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_CAPI_SUBDIRS "FlyROCDL")
 
-# CAPI link targets for _mlirRegisterEverything (EMBED_CAPI_LINK_LIBS)
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_EMBED_CAPI_LIBS "MLIRCPIFlyROCDL")
+# Dialect and pass registration hooks under lib/RegisterAll/, and the libraries they use
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_SOURCES "ROCDL.cpp")
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_REGISTRATION_LIBS
+  MLIRFlyROCDLDialect MLIRFlyToROCDL MLIRFlyKtraceToROCDL)
 
-# Link targets for fly-opt
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_FLYOPT_LINK_LIBS "MLIRCPIFlyROCDL")
+# JIT and AOT runtime subdirectory under lib/Runtime/
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS "ROCm")
 
-# Upstream MLIR dialect sources needed by this backend's Python bindings
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_UPSTREAM_DIALECT_SOURCES
-  "MLIRPythonSources.Dialects.rocdl")
-
-# Stubgen modules for this backend
-set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_STUBGEN_MODULES
-  "flydsl._mlir._mlir_libs._mlirDialectsFlyROCDL")
-
-# Convenience boolean for Python CMakeLists gating of ROCDL-specific bindings
-# (dialect bindings, nanobind extension, tablegen copy are still ROCDL-specific)
-set(FLYDSL_HAS_ROCDL ON)
+# LLD is linked as a library so GPU binary emission never has to locate an
+# `ld.lld` executable at runtime (see lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp).
+# Always resolve it from the LLVM install that provides MLIR: NO_DEFAULT_PATH
+# keeps CMake from picking up a system LLD whose version would not match the
+# code generator.  Optional, so an LLVM built without the lld project still works.
+if(NOT LLD_DIR)
+  set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
+endif()
+find_package(LLD CONFIG PATHS "${LLD_DIR}" NO_DEFAULT_PATH)
+if(LLD_FOUND)
+  message(STATUS "Found LLD: ${LLD_DIR} (in-process GPU binary linking)")
+  # Separate from LLVM_INCLUDE_DIRS when LLVM is used from its build tree.
+  include_directories(SYSTEM ${LLD_INCLUDE_DIRS})
+else()
+  message(STATUS "LLD not found under ${LLD_DIR}; GPU binary emission falls back to "
+                 "spawning ld.lld from the ROCm toolkit path")
+endif()

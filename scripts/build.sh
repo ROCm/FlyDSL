@@ -74,7 +74,7 @@ echo "  BUILD_DIR:  ${BUILD_DIR}"
 echo "  MLIR_PATH:  ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
 echo "  GENERATOR:  ${GENERATOR}"
-echo "  HIP_PLATFORM: ${HIP_PLATFORM:-amd (default)}"
+echo "  BACKENDS:   ${FLYDSL_BACKENDS:-(configured value; rocdl on a first configure)}"
 echo "=============================================="
 
 # ---------------------------------------------------------------------------
@@ -107,19 +107,17 @@ source "${SCRIPT_DIR}/python_interpreter.sh"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
-# HIP_PLATFORM: required by /opt/rocm/lib/cmake/hip/hip-config.cmake.
-# The shipped hip-config.cmake has `if("OFF") ... set(hip_HIPCONFIG_EXECUTABLE) ...`
-# so it cannot auto-detect the platform and relies on HIP_PLATFORM being
-# provided as a CMake cache variable or environment variable.
-HIP_PLATFORM="${HIP_PLATFORM:-amd}"
-
 cmake_args=(
   -G "${GENERATOR}"
   "${REPO_ROOT}"
   -DMLIR_DIR="${MLIR_PATH}/lib/cmake/mlir"
   "${FLY_PYTHON_CMAKE_ARGS[@]}"
-  -DHIP_PLATFORM="${HIP_PLATFORM}"
 )
+# Backends to build, semicolon-separated (e.g. FLYDSL_BACKENDS="rocdl"). Unset
+# keeps the configured value.
+if [ -n "${FLYDSL_BACKENDS:-}" ]; then
+  cmake_args+=(-DFLYDSL_BACKENDS="${FLYDSL_BACKENDS}")
+fi
 
 echo "Configuring CMake..."
 cmake "${cmake_args[@]}"

@@ -2,9 +2,11 @@ include LICENSE
 include README.md
 include pyproject.toml
 include setup.py
+include cmake/WriteNativeDigest.cmake
 recursive-include scripts *.sh
 
 recursive-include python/flydsl *.py
+prune python/flydsl/_mlir
 recursive-include python requirements.txt
 recursive-include examples *.py
 recursive-include tests *

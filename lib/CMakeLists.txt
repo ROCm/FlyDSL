@@ -1,5 +1,6 @@
 add_subdirectory(Core)
 add_subdirectory(Conversion)
 add_subdirectory(Dialect)
+add_subdirectory(RegisterAll)
 add_subdirectory(CAPI)
 add_subdirectory(Runtime)

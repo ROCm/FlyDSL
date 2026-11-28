@@ -11,53 +11,6 @@ find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
 
-# LLD is linked as a library so GPU binary emission never has to locate an
-# `ld.lld` executable at runtime (see lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp).
-# Always resolve it from the LLVM install that provides MLIR: NO_DEFAULT_PATH
-# keeps CMake from picking up a system LLD whose version would not match the
-# code generator.  Optional, so an LLVM built without the lld project still works.
-if(NOT LLD_DIR)
-  set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
-endif()
-find_package(LLD CONFIG PATHS "${LLD_DIR}" NO_DEFAULT_PATH)
-if(LLD_FOUND)
-  message(STATUS "Found LLD: ${LLD_DIR} (in-process GPU binary linking)")
-else()
-  message(STATUS "LLD not found under ${LLD_DIR}; GPU binary emission falls back to "
-                 "spawning ld.lld from the ROCm toolkit path")
-endif()
-
-# AMDGCN device bitcode (ocml/ockl/...) is loaded from <toolkit>/amdgcn/bitcode
-# whenever a kernel calls __ocml_* / __ockl_*.  Bundle it into the Python
-# package so that lookup does not depend on where the container installs ROCm.
-# Override the source with -DFLYDSL_ROCM_BITCODE_DIR=<dir>.
-if(NOT FLYDSL_ROCM_BITCODE_DIR)
-  find_path(FLYDSL_ROCM_BITCODE_DIR ocml.bc
-    HINTS
-      "$ENV{ROCM_PATH}/amdgcn/bitcode"
-      "$ENV{ROCM_PATH}/lib/llvm/amdgcn/bitcode"
-      "$ENV{ROCM_ROOT}/amdgcn/bitcode"
-      "$ENV{ROCM_ROOT}/lib/llvm/amdgcn/bitcode"
-      "$ENV{ROCM_HOME}/amdgcn/bitcode"
-      "$ENV{ROCM_HOME}/lib/llvm/amdgcn/bitcode"
-      "/opt/rocm/amdgcn/bitcode"
-      "/opt/rocm/lib/llvm/amdgcn/bitcode"
-    NO_DEFAULT_PATH)
-endif()
-if(FLYDSL_ROCM_BITCODE_DIR)
-  message(STATUS "Found AMDGCN device bitcode: ${FLYDSL_ROCM_BITCODE_DIR}")
-  # ROCm-Device-Libs is NCSA-licensed, which requires the notice to ship with
-  # binary redistributions of the bitcode; the notice is vendored because minimal
-  # ROCm installs (e.g. the manylinux wheel image) do not ship share/doc.
-  set(FLYDSL_ROCM_BITCODE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rocm-device-libs/LICENSE.TXT"
-    CACHE FILEPATH "License notice bundled with the device bitcode")
-else()
-  message(WARNING
-    "AMDGCN device bitcode (ocml.bc) not found; the Python package will not bundle it. "
-    "Kernels calling __ocml_*/__ockl_* will then need FLYDSL_COMPILE_ROCM_PATH or "
-    "ROCM_PATH to point at a ROCm install. Set -DFLYDSL_ROCM_BITCODE_DIR=<dir> to bundle it.")
-endif()
-
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
   message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to ${CMAKE_BUILD_TYPE}")
@@ -103,6 +56,9 @@ add_definitions(${LLVM_DEFINITIONS})
 
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
+# A nanobind domain of our own keeps the FlyDSL bindings apart from any other
+# MLIR Python package loaded into the same process.
+set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "flydsl" CACHE STRING "" FORCE)
 
 include(cmake/FlyDSLBackends.cmake)
 

@@ -18,15 +18,14 @@ def test_cmake_default_backend_stays_rocdl():
     text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
 
     assert 'set(FLYDSL_BACKENDS "rocdl"' in text
-    assert "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)" in text
-    assert "set(_FLYDSL_BACKENDS_ALLOWED rocdl)" in text
 
 
 def test_rocm_runtime_is_only_added_for_rocdl_backend():
-    text = (_REPO_ROOT / "lib" / "Runtime" / "CMakeLists.txt").read_text()
+    runtime = (_REPO_ROOT / "lib" / "Runtime" / "CMakeLists.txt").read_text()
+    rocdl = (_REPO_ROOT / "cmake" / "backends" / "rocdl.cmake").read_text()
 
-    assert 'if("rocdl" IN_LIST FLYDSL_BACKENDS)' in text
-    assert "add_subdirectory(ROCm)" in text
+    assert "get_property(_dirs GLOBAL PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS)" in runtime
+    assert 'set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_SUBDIRS "ROCm")' in rocdl
 
 
 def test_backend_descriptors_are_loaded_from_selected_backend_list():
@@ -34,12 +33,12 @@ def test_backend_descriptors_are_loaded_from_selected_backend_list():
 
     assert "foreach(_backend ${FLYDSL_BACKENDS})" in text
     assert 'include("${CMAKE_CURRENT_LIST_DIR}/backends/${_backend}.cmake")' in text
-    assert "add_compile_definitions(FLYDSL_BACKEND_COUNT=${_n_backends})" in text
-    assert "add_compile_definitions(FLYDSL_BACKEND_${_backend_index}=${_backend})" in text
+    assert "set(FLYDSL_BACKEND_DEFINITIONS FLYDSL_BACKEND_COUNT=${_n_backends})" in text
+    assert "list(APPEND FLYDSL_BACKEND_DEFINITIONS FLYDSL_BACKEND_${_backend_index}=${_backend})" in text
 
 
 def test_future_backend_descriptor_is_opt_in(tmp_path):
-    """A future backend should be legal only when explicitly selected."""
+    """A descriptor alone makes a backend selectable, and only selection includes it."""
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.skip("cmake not available")
@@ -48,16 +47,7 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
     backend_dir = cmake_dir / "backends"
     backend_dir.mkdir(parents=True)
 
-    text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
-    text = text.replace(
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl)",
-        "set_property(CACHE FLYDSL_BACKENDS PROPERTY STRINGS rocdl dummy)",
-    )
-    text = text.replace(
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl)",
-        "set(_FLYDSL_BACKENDS_ALLOWED rocdl dummy)",
-    )
-    (cmake_dir / "FlyDSLBackends.cmake").write_text(text)
+    shutil.copy(_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake", cmake_dir / "FlyDSLBackends.cmake")
 
     (backend_dir / "rocdl.cmake").write_text('set(GUARDRAIL_SELECTED_ROCDL ON CACHE BOOL "" FORCE)\n')
     (backend_dir / "dummy.cmake").write_text('set(GUARDRAIL_SELECTED_DUMMY ON CACHE BOOL "" FORCE)\n')
@@ -101,3 +91,11 @@ def test_future_backend_descriptor_is_opt_in(tmp_path):
     assert "FLYDSL_BACKENDS:STRING=dummy" in dummy_cache
     assert "GUARDRAIL_SELECTED_DUMMY:BOOL=ON" in dummy_cache
     assert "GUARDRAIL_SELECTED_ROCDL" not in dummy_cache
+
+    missing = subprocess.run(
+        [cmake, "-S", str(tmp_path), "-B", str(tmp_path / "build-missing"), "-DFLYDSL_BACKENDS=missing"],
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode != 0
+    assert "Unknown FLYDSL_BACKENDS entry: 'missing'" in missing.stderr

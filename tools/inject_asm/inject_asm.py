@@ -100,10 +100,10 @@ def _link_in_process(obj: Path, out: Path) -> None:
     from flydsl.compiler.backends.rocm import load_capi_library
 
     lib = load_capi_library()
-    lib.flydsl_link_hsaco.restype = ctypes.c_bool
-    lib.flydsl_link_hsaco.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+    lib.mlirFlyROCDLLinkHsacoInProcess.restype = ctypes.c_bool
+    lib.mlirFlyROCDLLinkHsacoInProcess.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
     error = ctypes.create_string_buffer(4096)
-    if not lib.flydsl_link_hsaco(os.fsencode(obj), os.fsencode(out), error, len(error)):
+    if not lib.mlirFlyROCDLLinkHsacoInProcess(os.fsencode(obj), os.fsencode(out), error, len(error)):
         sys.exit(f"inject_asm: linking {obj} failed:\n{error.value.decode(errors='replace').strip()}")
 
 

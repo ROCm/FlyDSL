@@ -3,6 +3,17 @@
 #
 # FlyJitRuntime — thin ROCm runtime with GPU module caching.
 
+# hip-config.cmake reads HIP_PLATFORM from the cache or the environment, and
+# some HIP builds ship it without the hipconfig lookup that would detect the
+# platform otherwise. This runtime is AMD-only.
+if("${HIP_PLATFORM}" STREQUAL "")
+  if("$ENV{HIP_PLATFORM}" STREQUAL "")
+    set(HIP_PLATFORM amd)
+  else()
+    set(HIP_PLATFORM "$ENV{HIP_PLATFORM}")
+  endif()
+endif()
+
 # Prefer an explicitly selected ROCm, then the SDK in the active environment.
 # NO_DEFAULT_PATH excludes default search locations; a cached hip_DIR still wins.
 if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
@@ -47,6 +58,7 @@ target_include_directories(FlyJitRuntime PRIVATE ${LLVM_INCLUDE_DIRS} ${MLIR_INC
 target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
 target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64 ${CMAKE_DL_LIBS})
 set_target_properties(FlyJitRuntime PROPERTIES OUTPUT_NAME "fly_jit_runtime")
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_TARGETS FlyJitRuntime)
 
 if(WIN32)
   # JIT-compiled host code resolves the mgpu* wrappers in this DLL by name, and
@@ -83,3 +95,4 @@ set_target_properties(FlyRocmAotRuntime PROPERTIES
   OUTPUT_NAME "fly_rocm_aot_runtime"
   POSITION_INDEPENDENT_CODE ON
 )
+set_property(GLOBAL APPEND PROPERTY FLYDSL_BACKEND_RUNTIME_TARGETS FlyRocmAotRuntime)

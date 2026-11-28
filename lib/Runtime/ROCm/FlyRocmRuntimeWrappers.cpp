@@ -22,8 +22,6 @@
 #include "hip/hip_runtime.h"
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 
-thread_local static int32_t defaultDevice = 0;
-
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
@@ -246,29 +244,4 @@ extern "C" void mgpuMemHostUnregisterMemRef(int64_t /*rank*/,
   mgpuMemHostUnregister(ptr);
 }
 
-template <typename T> static void mgpuMemGetDevicePointer(T *hostPtr, T **devicePtr) {
-  HIP_REPORT_IF_ERROR(hipSetDevice(defaultDevice));
-  HIP_REPORT_IF_ERROR(hipHostGetDevicePointer((void **)devicePtr, hostPtr, /*flags=*/0));
-}
-
-extern "C" StridedMemRefType<float, 1> mgpuMemGetDeviceMemRef1dFloat(float * /*allocated*/,
-                                                                     float *aligned, int64_t offset,
-                                                                     int64_t size, int64_t stride) {
-  float *devicePtr = nullptr;
-  mgpuMemGetDevicePointer(aligned, &devicePtr);
-  return {devicePtr, devicePtr, offset, {size}, {stride}};
-}
-
-extern "C" StridedMemRefType<int32_t, 1> mgpuMemGetDeviceMemRef1dInt32(int32_t * /*allocated*/,
-                                                                       int32_t *aligned,
-                                                                       int64_t offset, int64_t size,
-                                                                       int64_t stride) {
-  int32_t *devicePtr = nullptr;
-  mgpuMemGetDevicePointer(aligned, &devicePtr);
-  return {devicePtr, devicePtr, offset, {size}, {stride}};
-}
-
-extern "C" void mgpuSetDefaultDevice(int32_t device) {
-  defaultDevice = device;
-  HIP_REPORT_IF_ERROR(hipSetDevice(device));
-}
+extern "C" void mgpuSetDefaultDevice(int32_t device) { HIP_REPORT_IF_ERROR(hipSetDevice(device)); }
