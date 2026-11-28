@@ -69,12 +69,15 @@ if(FLYDSL_ROCM_BITCODE_DIR)
   # ROCm installs (e.g. the manylinux wheel image) do not ship share/doc.
   set(FLYDSL_ROCM_BITCODE_LICENSE "${PROJECT_SOURCE_DIR}/thirdparty/rocm-device-libs/LICENSE.TXT"
     CACHE FILEPATH "License notice bundled with the device bitcode")
+  set(_bitcode_install_dir "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_rocm/amdgcn/bitcode")
   foreach(_bc ocml ockl hip opencl)
     if(EXISTS "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc")
+      set(_output "${MLIR_BINARY_DIR}/${_bitcode_install_dir}/${_bc}.bc")
+      install(FILES "${_output}" DESTINATION "${_bitcode_install_dir}" COMPONENT FlyPythonModules)
       list(APPEND _fly_backend_copy_commands
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${FLYDSL_ROCM_BITCODE_DIR}/${_bc}.bc"
-          "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/${_bc}.bc")
+          "${_output}")
     else()
       message(WARNING "Device bitcode ${_bc}.bc missing from ${FLYDSL_ROCM_BITCODE_DIR}")
     endif()
@@ -82,7 +85,9 @@ if(FLYDSL_ROCM_BITCODE_DIR)
   list(APPEND _fly_backend_copy_commands
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${FLYDSL_ROCM_BITCODE_LICENSE}"
-      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/_rocm/amdgcn/bitcode/LICENSE.TXT")
+      "${MLIR_BINARY_DIR}/${_bitcode_install_dir}/LICENSE.TXT")
+  install(FILES "${MLIR_BINARY_DIR}/${_bitcode_install_dir}/LICENSE.TXT"
+    DESTINATION "${_bitcode_install_dir}" COMPONENT FlyPythonModules)
 else()
   message(WARNING
     "AMDGCN device bitcode (ocml.bc) not found; the Python package will not bundle it. "

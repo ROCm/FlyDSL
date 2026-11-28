@@ -7,10 +7,13 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from setuptools import Distribution, find_namespace_packages, find_packages, setup
+from setuptools import Distribution, find_packages, setup
+from setuptools.command.sdist import sdist as _sdist
 
 
 class BinaryDistribution(Distribution):
@@ -18,6 +21,19 @@ class BinaryDistribution(Distribution):
 
     def has_ext_modules(self):
         return True
+
+
+class sdist(_sdist):
+    def make_release_tree(self, base_dir, files):
+        super().make_release_tree(base_dir, files)
+        # Source distributions carry their prebuilt native payload at the default
+        # location, even when the producer used a custom FLY_BUILD_DIR.
+        prefix = Path(base_dir).resolve() / DEFAULT_BUILD_DIR_REL
+        mlir_dir = prefix / "python_packages/flydsl/_mlir"
+        if mlir_dir.exists():  # sdist --keep-temp can reuse a previous release tree.
+            shutil.rmtree(mlir_dir)
+        _install_python_modules(prefix)
+        _write_native_digest(mlir_dir)
 
 
 try:
@@ -39,8 +55,11 @@ try:
             in_build_sh = os.environ.get("FLY_IN_BUILD_SH") == "1"
             do_release_wheel = os.environ.get("FLY_BUILD_WHEEL", "0") == "1"
 
+            mlir_dir = Path(self.get_finalized_command("build").build_lib) / "flydsl/_mlir"
             if do_release_wheel and not in_build_sh:
-                _strip_embedded_shared_libs()
+                _strip_embedded_shared_libs(mlir_dir)
+
+            _write_native_digest(mlir_dir)
 
             # Track wheel outputs so we can locate the wheel we just built.
             dist_dir = Path(getattr(self, "dist_dir", "dist"))
@@ -54,7 +73,7 @@ try:
                 built = sorted(after - before, key=lambda p: p.stat().st_mtime)
                 wheel_path = built[-1] if built else _latest_wheel_in(dist_dir)
                 if wheel_path is not None:
-                    _auditwheel_repair_in_place(wheel_path, dist_dir)
+                    _auditwheel_repair_in_place(wheel_path, dist_dir, mlir_dir)
 
 except Exception:  # pragma: no cover
     bdist_wheel = None  # type: ignore
@@ -77,11 +96,9 @@ if _build_dir_env:
 else:
     BUILD_DIR_REL = DEFAULT_BUILD_DIR_REL
 
-EMBEDDED_MLIR_ROOT_REL = BUILD_DIR_REL / "python_packages" / "flydsl"
-EMBEDDED__MLIR_REL = EMBEDDED_MLIR_ROOT_REL / "_mlir"
+EMBEDDED__MLIR_REL = BUILD_DIR_REL / "python_packages" / "flydsl" / "_mlir"
 
 PY_SRC = REPO_ROOT / PY_SRC_REL
-EMBEDDED_MLIR_ROOT = REPO_ROOT / EMBEDDED_MLIR_ROOT_REL
 EMBEDDED__MLIR = REPO_ROOT / EMBEDDED__MLIR_REL
 
 
@@ -213,17 +230,17 @@ def _assert_embedded_mlir_exists() -> None:
 
 _assert_embedded_mlir_exists()
 
-IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
+IS_WHEEL_BUILD = "bdist_wheel" in sys.argv
 
 
-def _strip_embedded_shared_libs() -> None:
+def _strip_embedded_shared_libs(mlir_dir: Path) -> None:
     """Strip debug symbols from embedded shared libraries to reduce wheel size."""
     strip_bin = shutil.which("strip")
     if not strip_bin:
         print("Warning: strip not found; skipping binary stripping.")
         return
 
-    capi = EMBEDDED__MLIR / "_mlir_libs" / "libFlyPythonCAPI.so"
+    capi = mlir_dir / "_mlir_libs" / "libFlyPythonCAPI.so"
     try:
         capi.unlink()
     except FileNotFoundError:
@@ -237,7 +254,7 @@ def _strip_embedded_shared_libs() -> None:
     # ImportError on Python 3.12+.
     so_files: list[Path] = [
         p
-        for p in EMBEDDED__MLIR.rglob("*.so*")
+        for p in mlir_dir.rglob("*.so*")
         if p.is_file() and not p.is_symlink() and not p.name.startswith("libnanobind")
     ]
     if not so_files:
@@ -248,7 +265,7 @@ def _strip_embedded_shared_libs() -> None:
         for i in range(0, len(items), n):
             yield items[i : i + n]
 
-    print(f"Stripping {len(so_files)} shared libraries under {EMBEDDED__MLIR} ...")
+    print(f"Stripping {len(so_files)} shared libraries under {mlir_dir} ...")
     for chunk in _chunks([str(p) for p in so_files]):
         subprocess.run([strip_bin, "--strip-unneeded", *chunk], check=False)
 
@@ -260,7 +277,7 @@ def _latest_wheel_in(dist_dir: Path) -> Path | None:
     return max(wheels, key=lambda p: p.stat().st_mtime)
 
 
-def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
+def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path, mlir_dir: Path) -> None:
     """Run `auditwheel repair` to produce a manylinux-tagged wheel when possible.
 
     Note:
@@ -305,7 +322,7 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     # MLIR install prefix, if available) to LD_LIBRARY_PATH so that the
     # dynamic linker can resolve them during the repair step.
     env = dict(os.environ)
-    extra_lib_dirs = [str(EMBEDDED__MLIR / "_mlir_libs")]
+    extra_lib_dirs = [str(mlir_dir / "_mlir_libs")]
     mlir_path = os.environ.get("MLIR_PATH")
     if mlir_path:
         extra_lib_dirs.append(os.path.join(mlir_path, "lib"))
@@ -380,64 +397,85 @@ def _ensure_python_embedded_mlir_package() -> None:
         ) from e
 
 
-if not IS_WHEEL_BUILD:
-    _ensure_python_embedded_mlir_package()
-    # Editable/dev installs: python/flydsl/_mlir is a symlink to the build output.
-    # find_packages follows the symlink and discovers flydsl._mlir sub-packages.
-    all_packages = sorted(find_packages(where=str(PY_SRC_REL)))
-    package_dir = {
-        "": str(PY_SRC_REL),
-    }
+def _install_python_modules(prefix: Path) -> None:
+    if (REPO_ROOT / "PKG-INFO").is_file() and not (BUILD_DIR_REL / "cmake_install.cmake").is_file():
+        # An unpacked sdist already contains the selected component and has no CMake build tree.
+        shutil.copytree(EMBEDDED__MLIR, prefix / "python_packages/flydsl/_mlir", symlinks=True)
+        return
+    env = os.environ.copy()
+    env.pop("DESTDIR", None)
+    subprocess.run(
+        ["cmake", "--install", str(BUILD_DIR_REL), "--component", "FlyPythonModules", "--prefix", str(prefix)],
+        env=env,
+        check=True,
+    )
+
+
+def _write_native_digest(mlir_dir: Path) -> None:
+    subprocess.run(
+        ["cmake", f"-DLIBS_DIR={mlir_dir / '_mlir_libs'}", "-P", str(REPO_ROOT / "cmake/WriteNativeDigest.cmake")],
+        check=True,
+    )
+
+
+@contextmanager
+def _wheel_build_options():
+    if not IS_WHEEL_BUILD:
+        yield {}
+        return
+
+    # Install exactly the configured MLIR components. setuptools adds the pure
+    # Python packages to this same build_lib before assembling the wheel.
+    with TemporaryDirectory(prefix="flydsl-wheel-") as staging:
+        _install_python_modules(Path(staging))
+        yield {"build": {"build_base": staging, "build_lib": os.path.join(staging, "python_packages")}}
+
+
+if IS_WHEEL_BUILD or "sdist" in sys.argv:
+    # An editable install can leave a symlink to the native build tree here.
+    all_packages = find_packages(where=str(PY_SRC_REL), exclude=["flydsl._mlir", "flydsl._mlir.*"])
 else:
-    # Wheel/sdist builds: pure Python from source, _mlir from build output.
-    py_packages = find_packages(where=str(PY_SRC_REL), exclude=["_mlir*"])
-    embedded_mlir_pkgs = [
-        f"flydsl.{p}" for p in find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["_mlir*"])
-    ]
-    all_packages = sorted(set(py_packages + embedded_mlir_pkgs))
-    package_dir = {
-        "": str(PY_SRC_REL),
-        "flydsl._mlir": str(EMBEDDED__MLIR_REL),
-    }
+    _ensure_python_embedded_mlir_package()
+    all_packages = sorted(find_packages(where=str(PY_SRC_REL)))
 
-_version = _read_version()
 
-setup(
-    name="flydsl",
-    version=_version,
-    description="FlyDSL - ROCm Domain Specific Language for layout algebra (Python + embedded MLIR runtime)",
-    long_description=(
-        (REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else ""
-    ),
-    long_description_content_type="text/markdown",
-    license="Apache-2.0",
-    python_requires=">=3.10",
-    packages=all_packages,
-    package_dir=package_dir,
-    include_package_data=True,
-    # Ensure embedded shared libs are packaged in wheels.
-    # IMPORTANT: we must include versioned shared libraries (e.g. *.so.22.0git),
-    # otherwise the wheel will miss required runtime deps and be unusable.
-    package_data={
-        "flydsl._mlir": [
-            "_mlir_libs/_*.so",
-            "_mlir_libs/libFlyPythonCAPI.so.*",
-            "_mlir_libs/libnanobind-*.so",
-            "_mlir_libs/libMLIRPythonSupport-*.so",
-            "_mlir_libs/lib*.so",
-            "_mlir_libs/lib*.so.*",
-            "_mlir_libs/libfly_*_aot_runtime.a",
-            "_mlir_libs/*.pyd",
-            "_mlir_libs/*.dll",
-            "_mlir_libs/fly_*_aot_runtime.mlir",
-            # AMDGCN device bitcode bundled by CMake; lets the compiler resolve
-            # ocml/ockl without depending on where the container installs ROCm.
-            "_rocm/amdgcn/bitcode/*.bc",
-            "_rocm/amdgcn/bitcode/LICENSE.TXT",
-            "*.pyi",
-        ],
-    },
-    install_requires=_load_requirements(),
-    cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),
-    distclass=BinaryDistribution,
-)
+with _wheel_build_options() as options:
+    setup(
+        name="flydsl",
+        version=_read_version(),
+        description="FlyDSL - ROCm Domain Specific Language for layout algebra (Python + embedded MLIR runtime)",
+        long_description=(
+            (REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else ""
+        ),
+        long_description_content_type="text/markdown",
+        license="Apache-2.0",
+        python_requires=">=3.10",
+        options=options,
+        exclude_package_data={"flydsl": ["_mlir/*"]} if IS_WHEEL_BUILD else {},
+        packages=all_packages,
+        package_dir={"": str(PY_SRC_REL)},
+        include_package_data=True,
+        # Editable builds can discover the native package via a source-tree symlink.
+        package_data={
+            "flydsl._mlir": [
+                "_mlir_libs/_*.so",
+                "_mlir_libs/libFlyPythonCAPI.so.*",
+                "_mlir_libs/libnanobind-*.so",
+                "_mlir_libs/libMLIRPythonSupport-*.so",
+                "_mlir_libs/lib*.so",
+                "_mlir_libs/lib*.so.*",
+                "_mlir_libs/libfly_*_aot_runtime.a",
+                "_mlir_libs/*.pyd",
+                "_mlir_libs/*.dll",
+                "_mlir_libs/fly_*_aot_runtime.mlir",
+                # AMDGCN device bitcode bundled by CMake; lets the compiler resolve
+                # ocml/ockl without depending on where the container installs ROCm.
+                "_rocm/amdgcn/bitcode/*.bc",
+                "_rocm/amdgcn/bitcode/LICENSE.TXT",
+                "*.pyi",
+            ],
+        },
+        install_requires=_load_requirements(),
+        cmdclass={"sdist": sdist, **({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {})},
+        distclass=BinaryDistribution,
+    )

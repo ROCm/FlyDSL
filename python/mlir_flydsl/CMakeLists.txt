@@ -197,6 +197,7 @@ add_mlir_python_modules(FlyPythonModules
 
 set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
 set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
+set(_fly_libs_install_dir "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs")
 set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
 set(_STUBGEN_PYTHONPATH "${_FLYDSL_PYTHON_PACKAGES_DIR}")
 if(DEFINED nanobind_DIR AND NOT "${nanobind_DIR}" STREQUAL "")
@@ -222,6 +223,13 @@ list(APPEND _flydsl_stubgen_modules
 set(_flydsl_stubgen_m_flags "")
 foreach(_m IN LISTS _flydsl_stubgen_modules)
   string(APPEND _flydsl_stubgen_m_flags " -m ${_m}")
+  # stubgen writes either <module>.pyi or <module>/ with nested stubs.
+  string(REGEX REPLACE "^.*[.]" "" _module "${_m}")
+  install(FILES "${_MLIR_LIBS_DIR}/${_module}.pyi"
+    DESTINATION "${_fly_libs_install_dir}" COMPONENT FlyPythonModules OPTIONAL)
+  install(DIRECTORY "${_MLIR_LIBS_DIR}/${_module}"
+    DESTINATION "${_fly_libs_install_dir}" COMPONENT FlyPythonModules OPTIONAL
+    FILES_MATCHING PATTERN "*.pyi")
 endforeach()
 
 if(WIN32)
@@ -313,6 +321,16 @@ add_custom_target(CopyFlyPythonSources ALL
 )
 
 add_dependencies(CopyFlyPythonSources FlyPythonModules)
+if(TARGET install-FlyPythonModules)
+  add_dependencies(install-FlyPythonModules FlyPythonStubs)
+  add_dependencies(install-FlyPythonModules-stripped FlyPythonStubs)
+endif()
+
+# Package the copies with the runtime lookup paths set above.
+install(FILES
+  "${_MLIR_LIBS_DIR}/${_FLY_C_RUNNER_UTILS_NAME}"
+  "${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>"
+  DESTINATION "${_fly_libs_install_dir}" COMPONENT FlyPythonModules)
 
 ################################################################################
 # Backend runtime outputs + dependencies (built in lib/Runtime/<backend>/)
@@ -328,6 +346,7 @@ foreach(_target IN LISTS _fly_runtime_targets)
       LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
       RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   endif()
+  install(TARGETS ${_target} DESTINATION "${_fly_libs_install_dir}" COMPONENT FlyPythonModules)
   add_dependencies(FlyPythonCAPI ${_target})
 endforeach()
 
@@ -350,6 +369,8 @@ if(WIN32 AND TARGET FlyRocmAotRuntimeBitcode)
     VERBATIM
   )
   add_custom_target(FlyRocmAotRuntimeIR ALL DEPENDS "${_fly_aot_runtime_ir}")
+  install(FILES "${_fly_aot_runtime_ir}"
+    DESTINATION "${_fly_libs_install_dir}" COMPONENT FlyPythonModules)
   add_dependencies(FlyPythonCAPI FlyRocmAotRuntimeIR)
   list(APPEND _fly_runtime_targets FlyRocmAotRuntimeIR)
 endif()
