@@ -138,6 +138,7 @@ the `rocdl.waves_per_eu` MLIR attribute. `maxnreg` had no such second path — s
 | Key | Reaches LLVM as | Validated? | Verify with |
 |---|---|---|---|
 | `waves_per_eu` | `rocdl.waves_per_eu` → `"amdgpu-waves-per-eu"="N"` | bool/int/range | grep `*_llvm_ir.ll` |
+| `max_flat_work_group_size` | `rocdl.flat_work_group_size` `"1,N"` → `"amdgpu-flat-work-group-size"="1,N"`, only on kernels whose block size is open (no static block, `known_block_size` or own size attribute) | int 1-1024 | `.max_flat_workgroup_size: N` in `*_final_isa.s` |
 | ~~`maxnreg`~~ | **removed** — now raises; see §8 | raises | n/a |
 | `fast_fp_math` | `fast` flag of the `gpu.module`'s `#rocdl.target` **+** ambient tracing fastmath | truthiness | `fadd fast float` in IR |
 | `unsafe_fp_math` | `unsafe_math` flag of the `#rocdl.target` only | truthiness | ⚠ target flag only — **no** op flags |

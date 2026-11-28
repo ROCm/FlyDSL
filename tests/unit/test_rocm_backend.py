@@ -4,6 +4,9 @@
 """Unit tests for the ROCm backend (RocmBackend) that do not require GPU
 execution or the external LLVM toolchain."""
 
+import re
+
+import numpy as np
 import pytest
 
 import flydsl.compiler as flyc
@@ -205,3 +208,175 @@ def test_resource_limit_check_runs_only_with_its_hint(enabled):
     hints = {"check_resource_limits": True} if enabled else {}
     fragments = backend.pipeline_fragments(compile_hints=hints)
     assert ("gpu.module(fly-check-resource-limits)" in fragments) == enabled
+
+
+# ──────────────────────────────────────────────────────────────
+# max_flat_work_group_size
+# ──────────────────────────────────────────────────────────────
+
+
+def test_rocm_lower_max_flat_work_group_size_only_on_kernels_without_a_fixed_size():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    src = r"""module {
+      gpu.module @m {
+        gpu.func @open() kernel { gpu.return }
+        gpu.func @known() kernel attributes { known_block_size = array<i32: 64, 1, 1> } { gpu.return }
+        gpu.func @own() kernel attributes { rocdl.flat_work_group_size = "1,64" } { gpu.return }
+        gpu.func @maxflat() kernel attributes { rocdl.max_flat_work_group_size = 64 : i32 } { gpu.return }
+        gpu.func @reqd() kernel attributes { rocdl.reqd_work_group_size = array<i32: 64, 1, 1> } { gpu.return }
+        gpu.func @helper() { gpu.return }
+      }
+    }"""
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(src)
+        baseline_asm = str(module)
+        backend.lower_compile_hints(module, compile_hints={})
+        assert str(module) == baseline_asm
+
+        backend.lower_compile_hints(module, compile_hints={"max_flat_work_group_size": 512, "waves_per_eu": 2})
+        funcs = {
+            ir.StringAttr(op.attributes["sym_name"]).value: str(op)
+            for op in module.body.operations[0].regions[0].blocks[0].operations
+            if op.operation.name == "gpu.func"
+        }
+
+    assert 'rocdl.flat_work_group_size = "1,512"' in funcs["open"]
+    assert 'rocdl.flat_work_group_size = "1,64"' in funcs["own"]
+    for name in ("known", "maxflat", "reqd", "helper"):
+        assert "rocdl.flat_work_group_size" not in funcs[name], name
+    # waves_per_eu still reaches every kernel, whatever its size.
+    for name in ("open", "known", "own", "maxflat", "reqd"):
+        assert 'rocdl.waves_per_eu = "2"' in funcs[name], name
+
+
+@pytest.mark.parametrize(
+    ("arch", "hint", "agprs_disabled"),
+    [
+        ("gfx942", 512, True),
+        ("gfx942", 1024, True),
+        ("gfx950", 512, True),
+        ("gfx942", 256, False),
+        ("gfx1250", 1024, False),
+    ],
+)
+def test_rocm_lower_max_flat_work_group_size_above_256_disables_agprs(arch, hint, agprs_disabled):
+    """A maximum above 256 work-items forces two or more waves per EU, like any workgroup of that size."""
+    backend = RocmBackend(RocmBackend.make_target(arch))
+    src = r"""module {
+      gpu.module @m {
+        gpu.func @open() kernel { gpu.return }
+        gpu.func @own() kernel attributes { rocdl.flat_work_group_size = "1,64" } { gpu.return }
+        gpu.func @explicit() kernel attributes { llvm.passthrough = [["amdgpu-agpr-alloc", "64"]] } { gpu.return }
+      }
+    }"""
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(src)
+        backend.lower_compile_hints(module, compile_hints={"max_flat_work_group_size": hint})
+        funcs = {
+            ir.StringAttr(op.attributes["sym_name"]).value: str(op)
+            for op in module.body.operations[0].regions[0].blocks[0].operations
+        }
+
+    assert f'rocdl.flat_work_group_size = "1,{hint}"' in funcs["open"]
+    assert ('["amdgpu-agpr-alloc", "0"]' in funcs["open"]) == agprs_disabled
+    # A kernel that keeps its own smaller size, or its own AGPR split, is left as it is.
+    assert "amdgpu-agpr-alloc" not in funcs["own"]
+    assert '["amdgpu-agpr-alloc", "64"]' in funcs["explicit"] and '"amdgpu-agpr-alloc", "0"' not in funcs["explicit"]
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (True, TypeError),
+        (np.True_, TypeError),
+        ("1024", TypeError),
+        (512.0, TypeError),
+        (0, ValueError),
+        (1025, ValueError),
+    ],
+)
+def test_rocm_lower_max_flat_work_group_size_rejects_invalid_values(value, error):
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        module = ir.Module.create()
+        with pytest.raises(error, match="max_flat_work_group_size"):
+            backend.lower_compile_hints(module, compile_hints={"max_flat_work_group_size": value})
+
+
+_OPEN_KERNEL_MODULE = "module { gpu.module @m { gpu.func @open() kernel { gpu.return } } }"
+
+
+def test_rocm_lower_max_flat_work_group_size_accepts_integral_types():
+    class Integral:  # stands in for numpy.int64 and other types with __index__
+        def __index__(self):
+            return 512
+
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(_OPEN_KERNEL_MODULE)
+        backend.lower_compile_hints(module, compile_hints={"max_flat_work_group_size": Integral()})
+        assert 'rocdl.flat_work_group_size = "1,512"' in str(module)
+
+
+def test_rocm_lower_compile_hints_rejects_maxnreg_before_setting_a_size():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(_OPEN_KERNEL_MODULE)
+        baseline_asm = str(module)
+        with pytest.raises(ValueError, match="maxnreg is not supported"):
+            backend.lower_compile_hints(module, compile_hints={"maxnreg": 64, "max_flat_work_group_size": 512})
+        assert str(module) == baseline_asm
+
+
+@flyc.kernel
+def _empty_kernel():
+    pass
+
+
+@flyc.jit
+def _runtime_block_launch(threads: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    _empty_kernel().launch(grid=(1, 1, 1), block=(threads, 1, 1), stream=stream)
+
+
+@flyc.jit
+def _own_size_launch(threads: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    kernel = _empty_kernel(value_attrs={"rocdl.flat_work_group_size": "1,64"})
+    kernel.launch(grid=(1, 1, 1), block=(threads, 1, 1), stream=stream)
+
+
+def _max_flat_workgroup_sizes(compiled):
+    """The max flat work-group size in the metadata note of every code object."""
+    sizes = []
+    for binary in compiled.binaries().values():
+        # msgpack: the key, then the value as a uint16 (0xcd), a uint8 (0xcc) or a positive fixint.
+        for match in re.finditer(rb"\.max_flat_workgroup_size(?:\xcd(..)|\xcc(.)|([\x00-\x7f]))", binary, re.S):
+            sizes.append(int.from_bytes(next(g for g in match.groups() if g is not None), "big"))
+    return sizes
+
+
+@pytest.mark.parametrize(
+    ("hints", "launch", "expected"),
+    [
+        ({}, _runtime_block_launch, 256),  # the ROCDL translation's default for a kernel without a size
+        ({"max_flat_work_group_size": 1024}, _runtime_block_launch, 1024),
+        ({"max_flat_work_group_size": 512}, _runtime_block_launch, 512),
+        ({"max_flat_work_group_size": 128}, _runtime_block_launch, 128),
+        ({"max_flat_work_group_size": 1024}, _own_size_launch, 64),  # the kernel's own size wins
+    ],
+)
+def test_max_flat_work_group_size_reaches_the_code_object(monkeypatch, tmp_path, hints, launch, expected):
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx942")
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
+    # flyc.compile[hints] stores its hints on the launcher; restore them after the test.
+    monkeypatch.setattr(launch, "compile_hints", {})
+    compiled = flyc.compile[hints](launch, 64, compile_only=True)
+    assert _max_flat_workgroup_sizes(compiled) == [expected]

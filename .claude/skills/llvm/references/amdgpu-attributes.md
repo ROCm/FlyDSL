@@ -13,8 +13,9 @@ These are **IR function attributes, not command-line flags.** `llc` rejects
 `--amdgpu-waves-per-eu=2` outright. Three routes reach them:
 
 ```python
-# 1. The compile hint (waves_per_eu only) - also lowers to rocdl.waves_per_eu
-CompilationContext.compile_hints({"waves_per_eu": 2})
+# 1. Compile hints - waves_per_eu lowers to rocdl.waves_per_eu on every kernel,
+#    max_flat_work_group_size to rocdl.flat_work_group_size "1,N" on kernels without a size
+CompilationContext.compile_hints({"waves_per_eu": 2, "max_flat_work_group_size": 1024})
 
 # 2. Per-kernel MLIR attributes - the general route
 kernel_attrs = {
@@ -30,6 +31,8 @@ kernel_attrs = {"llvm.passthrough": [["no-nans-fp-math", "true"]]}
 `rocdl.waves_per_eu` *and* a `passthrough` `amdgpu-waves-per-eu` entry
 (`RocmBackend.lower_compile_hints`, pinned by
 `test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries`).
+A `max_flat_work_group_size` hint does the opposite: a kernel that has
+`known_block_size` or its own `rocdl.*_work_group_size` attribute keeps it.
 
 ## Value syntax
 
