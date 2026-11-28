@@ -755,7 +755,9 @@ def _kv_tile_addr(traits, tile_start, kv_gmem_elem_offset, kv_head_elem_offset, 
 
 def _linear_kv_src_elem(traits, src_base, d, n_in_warp, wave_id, d_bucket, stride_kv_n_v):
     """Global element index for lane's d-th 128-bit chunk in a linear KV tile."""
-    n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
+    # wave_id is a virtual wave index in [0, 8): with fewer physical waves each
+    # lane covers the remaining N rows in additional passes.
+    n_in_tile = n_in_warp * (traits.NUM_WAVES * traits.NUM_WAVE_PASSES) + wave_id
     global_d = d_bucket * traits.VEC_KV + d * traits.D_128B_SIZE
     return src_base + n_in_tile * stride_kv_n_v + global_d
 
@@ -1554,6 +1556,9 @@ class DualwaveSwpTraits:
     LGKMCNT_0_ONLY: int
     RETURN_LSE: bool = False
     XCD_SWIZZLE: bool = False
+    NUM_WAVE_PASSES: int = 1
+    DUALWAVE_SWP_PRELOAD_Q: bool = False
+    DUALWAVE_SWP_SKIP_NOP: bool = False
 
     @property
     def cache_tag(self):
@@ -1578,6 +1583,10 @@ class DualwaveSwpTraits:
             self.KV_VECTORIZED,
             self.RETURN_LSE,
             self.XCD_SWIZZLE,
+            self.NUM_WAVE_PASSES,
+            self.DUALWAVE_SWP_PRELOAD_Q,
+            self.DUALWAVE_SWP_SKIP_NOP,
+            self.PAGED_BT_LDS_SIZE,
         )
 
 
@@ -1601,15 +1610,20 @@ def _make_dualwave_swp_traits(
     kv_vectorized=None,
     return_lse=False,
     xcd_swizzle=False,
+    dualwave_swp_num_waves=8,
+    dualwave_swp_preload_q=False,
+    dualwave_swp_skip_nop=False,
 ):
     """Build gfx950 DUALWAVE_SWP compile-time layout traits."""
     # Tile shape and wave geometry follow the gfx950 dual-wave 8-wave CTA.
-    block_m = DUALWAVE_SWP_BLOCK_M
+    num_waves = int(dualwave_swp_num_waves)
+    if num_waves not in (2, 4, 8):
+        raise ValueError(f"dualwave_swp_num_waves must be 2, 4 or 8, got {num_waves}")
+    block_m = 32 * num_waves
     block_n = 64
     block_n_out = 64
     k_sub_n = 32
     warp_size = 64
-    num_waves = 8
     block_size = num_waves * warp_size
     rows_per_wave = 32
 
@@ -1741,7 +1755,7 @@ def _make_dualwave_swp_traits(
         V_LDS_TO_REG_DCHUNK_PAIR_STRIDE=v_lds_to_reg_dchunk_pair_stride,
         V_LDS_TO_REG_DCHUNK_IN_PAIR_STRIDE=v_lds_to_reg_dchunk_in_pair_stride,
         V_LDS_TO_REG_TRANSPOSE_PAIR_STRIDE=v_lds_to_reg_transpose_pair_stride,
-        PAGED_BT_LDS_SIZE=2048,
+        PAGED_BT_LDS_SIZE=(128 if num_waves == 2 else (256 if dualwave_swp_preload_q else 2048)),
         DUALWAVE_SWP_RESCALE_THRESHOLD=8.0,
         KV_VEC_SIZE=kv_vec_size,
         VEC_V_ROW_STRIDE=vec_v_row_stride,
@@ -1753,6 +1767,9 @@ def _make_dualwave_swp_traits(
         LGKMCNT_0_ONLY=0xC07F,
         RETURN_LSE=bool(return_lse),
         XCD_SWIZZLE=bool(xcd_swizzle),
+        NUM_WAVE_PASSES=8 // num_waves,
+        DUALWAVE_SWP_PRELOAD_Q=bool(dualwave_swp_preload_q),
+        DUALWAVE_SWP_SKIP_NOP=bool(dualwave_swp_skip_nop),
     )
 
 
@@ -3467,8 +3484,8 @@ class DualwaveKernelContext:
         if head_dim_runtime is None:
             head_dim_runtime = self.head_dim_runtime
         traits = self.traits
-        self.NUM_DMA_K = traits.SMEM_D_RPT
-        self.NUM_DMA_V = traits.SMEM_D_RPT
+        self.NUM_DMA_K = traits.SMEM_D_RPT * traits.NUM_WAVE_PASSES
+        self.NUM_DMA_V = traits.SMEM_D_RPT * traits.NUM_WAVE_PASSES
 
         self.fm_fast = fx.arith.FastMathFlags.fast
         self.elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
@@ -3698,32 +3715,35 @@ class DualwaveKernelContext:
     def init_q_row(self):
         _init_dualwave_q_row(self)
 
-    def k_dma_base(self, buf_id, d):
+    def k_dma_base(self, buf_id, d, wave_pass):
         return _k_dma_m0_base(
             self.traits,
             buf_id,
             d,
             lane_in_warp=self.lane_in_warp,
             lds_kv_base_idx=self.lds_kv_base_idx,
-            wave_id_uni=self.wave_id_uni,
+            wave_id_uni=self.wave_id_uni + wave_pass * self.traits.NUM_WAVES,
         )
 
-    def v_dma_base(self, buf_id, d):
+    def v_dma_base(self, buf_id, d, wave_pass):
         return _v_dma_m0_base(
             self.traits,
             buf_id,
             d,
             lane_in_warp=self.lane_in_warp,
             lds_kv_base_idx=self.lds_kv_base_idx,
-            wave_id_uni=self.wave_id_uni,
+            wave_id_uni=self.wave_id_uni + wave_pass * self.traits.NUM_WAVES,
         )
 
     def dma_m0_table(self, base_fn, count):
-        return tuple(tuple(base_fn(buf, d) for d in range(count)) for buf in range(2))
+        return tuple(
+            tuple(tuple(base_fn(buf, d, wp) for wp in range(self.traits.NUM_WAVE_PASSES)) for d in range(count))
+            for buf in range(2)
+        )
 
     def init_dma_m0_tables(self):
-        self.k_dma_m0 = self.dma_m0_table(self.k_dma_base, self.NUM_DMA_K)
-        self.v_dma_m0 = self.dma_m0_table(self.v_dma_base, self.NUM_DMA_V)
+        self.k_dma_m0 = self.dma_m0_table(self.k_dma_base, self.traits.SMEM_D_RPT)
+        self.v_dma_m0 = self.dma_m0_table(self.v_dma_base, self.traits.SMEM_D_RPT)
 
     def init_tile_bounds(self):
         traits = self.traits
@@ -4169,21 +4189,23 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
         return dense_div
 
     def _async_load_kv_linear(self, dma_m0, buf_id, src_div, src_base, soffset, num_dma):
+        traits = self.traits
         for d in range_constexpr(num_dma):
-            self._issue_kv_dma(
-                src_div,
-                dma_m0[buf_id][d],
-                _linear_kv_src_elem(
-                    self.traits,
-                    src_base,
-                    d,
-                    n_in_warp=self.n_in_warp,
-                    wave_id=self.wave_id,
-                    d_bucket=self.d_bucket,
-                    stride_kv_n_v=self.stride_kv_n_v,
-                ),
-                soffset,
-            )
+            for wp in range_constexpr(traits.NUM_WAVE_PASSES):
+                self._issue_kv_dma(
+                    src_div,
+                    dma_m0[buf_id][d][wp],
+                    _linear_kv_src_elem(
+                        traits,
+                        src_base,
+                        d,
+                        n_in_warp=self.n_in_warp,
+                        wave_id=self.wave_id + fx.Index(wp * traits.NUM_WAVES),
+                        d_bucket=self.d_bucket,
+                        stride_kv_n_v=self.stride_kv_n_v,
+                    ),
+                    soffset,
+                )
 
     def load_k(self, tile_start, buf_id, page_id=None):
         ctx = self.ctx_ref
@@ -4196,21 +4218,22 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
         )
         src_div = self._kv_src_div(self.K, self.k_div, page_id, "DualwaveKvGmemToLdsLoader.load_k")
         if const_expr(self.traits.KV_VECTORIZED):
-            for d in range_constexpr(self.num_dma_k):
-                self._issue_kv_dma(
-                    src_div,
-                    ctx.k_dma_m0[buf_id][d],
-                    _vec_k_src_elem(
-                        self.traits,
-                        d,
-                        wave_id_uni=self.wave_id_uni,
-                        lane_in_warp=self.lane_in_warp,
-                        kv_head_idx=self.kv_head_idx,
-                    ),
-                    soffset,
-                )
+            for d in range_constexpr(self.traits.SMEM_D_RPT):
+                for wp in range_constexpr(self.traits.NUM_WAVE_PASSES):
+                    self._issue_kv_dma(
+                        src_div,
+                        ctx.k_dma_m0[buf_id][d][wp],
+                        _vec_k_src_elem(
+                            self.traits,
+                            d,
+                            wave_id_uni=self.wave_id_uni + wp * self.traits.NUM_WAVES,
+                            lane_in_warp=self.lane_in_warp,
+                            kv_head_idx=self.kv_head_idx,
+                        ),
+                        soffset,
+                    )
         else:
-            self._async_load_kv_linear(ctx.k_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_k)
+            self._async_load_kv_linear(ctx.k_dma_m0, buf_id, src_div, src_base, soffset, self.traits.SMEM_D_RPT)
 
     def load_k_tile(self, tile_idx, buf_id, page_id=None):
         self.load_k(self.tile_start(tile_idx), buf_id, page_id=page_id)
@@ -4229,21 +4252,22 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
         )
         src_div = self._kv_src_div(self.V, self.v_div, page_id, "DualwaveKvGmemToLdsLoader.load_v")
         if const_expr(self.traits.KV_VECTORIZED):
-            for d in range_constexpr(self.num_dma_v):
-                self._issue_kv_dma(
-                    src_div,
-                    ctx.v_dma_m0[buf_id][d],
-                    _vec_v_src_elem(
-                        self.traits,
-                        d,
-                        wave_id_uni=self.wave_id_uni,
-                        lane_in_warp=self.lane_in_warp,
-                        kv_head_idx=self.kv_head_idx,
-                    ),
-                    soffset,
-                )
+            for d in range_constexpr(self.traits.SMEM_D_RPT):
+                for wp in range_constexpr(self.traits.NUM_WAVE_PASSES):
+                    self._issue_kv_dma(
+                        src_div,
+                        ctx.v_dma_m0[buf_id][d][wp],
+                        _vec_v_src_elem(
+                            self.traits,
+                            d,
+                            wave_id_uni=self.wave_id_uni + wp * self.traits.NUM_WAVES,
+                            lane_in_warp=self.lane_in_warp,
+                            kv_head_idx=self.kv_head_idx,
+                        ),
+                        soffset,
+                    )
         else:
-            self._async_load_kv_linear(ctx.v_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_v)
+            self._async_load_kv_linear(ctx.v_dma_m0, buf_id, src_div, src_base, soffset, self.traits.SMEM_D_RPT)
 
     def load_v_tile(self, tile_idx, buf_id, page_id=None):
         self.load_v(self.tile_start(tile_idx), buf_id, page_id=page_id)
