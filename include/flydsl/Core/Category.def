@@ -13,6 +13,7 @@
 //
 //     FLYDSL_CORE_LEAF_BINARY(NAME, OP)  Leaf NAME(Leaf a, Leaf b)
 //     FLYDSL_CORE_LEAF_UNARY(NAME, OP)   Leaf NAME(Leaf a)
+//     FLYDSL_CORE_LEAF_CAST(NAME, OP)    Leaf NAME(Leaf a, LogWidth width)
 //
 // A category defines every declared function in lib/Core. Operations derived
 // from them (operator!= and add_offset by a leaf or an owning tuple) are
@@ -24,6 +25,7 @@
 #define FLYDSL_CORE_POINTER Pointer<FLYDSL_CORE_CATEGORY>
 #define FLYDSL_CORE_LEAF_BINARY(NAME, OP) FLYDSL_CORE_LEAF NAME(FLYDSL_CORE_LEAF a, FLYDSL_CORE_LEAF b);
 #define FLYDSL_CORE_LEAF_UNARY(NAME, OP) FLYDSL_CORE_LEAF NAME(FLYDSL_CORE_LEAF a);
+#define FLYDSL_CORE_LEAF_CAST(NAME, OP) FLYDSL_CORE_LEAF NAME(FLYDSL_CORE_LEAF a, LogWidth width);
 #endif
 
 #ifndef FLYDSL_CORE_LEAF_BINARY
@@ -31,6 +33,9 @@
 #endif
 #ifndef FLYDSL_CORE_LEAF_UNARY
 #define FLYDSL_CORE_LEAF_UNARY(NAME, OP)
+#endif
+#ifndef FLYDSL_CORE_LEAF_CAST
+#define FLYDSL_CORE_LEAF_CAST(NAME, OP)
 #endif
 
 //===----------------------------------------------------------------------===//
@@ -105,8 +110,17 @@ FLYDSL_CORE_LEAF_UNARY(operator~, Not)
 FLYDSL_CORE_LEAF_UNARY(abs, Abs)
 FLYDSL_CORE_LEAF_UNARY(signum, Signum)
 
+// cast is the integer `a` at `width`. A dynamic integer is sign-extended or
+// truncated to it; i1, a predicate, is zero-extended. Its divisibility carries
+// over, and a fast-divmod divisor is cast as the integer it divides by. A
+// static integer has no width of its own and is returned unchanged. The value
+// must fit `width`: a static one that does not is IntegerOverflow, a dynamic
+// one is undefined, as any dynamic result outside its width is.
+FLYDSL_CORE_LEAF_CAST(cast, Cast)
+
 #undef FLYDSL_CORE_LEAF_BINARY
 #undef FLYDSL_CORE_LEAF_UNARY
+#undef FLYDSL_CORE_LEAF_CAST
 
 #ifdef FLYDSL_CORE_CATEGORY
 

@@ -154,6 +154,14 @@ Leaf<Runtime> unary(UnaryRule rule, Leaf<Runtime> a) {
   return result;
 }
 
+/// A cast keeps the value, which the new width has to hold.
+Leaf<Runtime> cast(Leaf<Trait> property, Leaf<Runtime> a) {
+  if (property.isError())
+    return Leaf<Runtime>(property, 0);
+  auto result = Leaf<Runtime>(property, a.value);
+  return result.isSound() ? result : Leaf<Runtime>::getError(ErrorCode::IntegerOverflow);
+}
+
 } // namespace
 } // namespace runtime
 
@@ -165,6 +173,10 @@ Leaf<Runtime> unary(UnaryRule rule, Leaf<Runtime> a) {
 #define FLYDSL_CORE_LEAF_UNARY(NAME, OP)                                                           \
   Leaf<Runtime> NAME(Leaf<Runtime> a) {                                                            \
     return runtime::unary([](Leaf<Trait> x) { return NAME(x); }, a);                               \
+  }
+#define FLYDSL_CORE_LEAF_CAST(NAME, OP)                                                            \
+  Leaf<Runtime> NAME(Leaf<Runtime> a, LogWidth width) {                                            \
+    return runtime::cast(NAME(Leaf<Trait>(a), width), a);                                          \
   }
 #include "flydsl/Core/Category.def"
 

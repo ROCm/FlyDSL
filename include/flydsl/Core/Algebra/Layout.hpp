@@ -214,6 +214,16 @@ template <class Cat> struct ComplementPrefix {
   bool ok = true;
   ErrorCode code = ErrorCode::InvalidLayout;
 };
+/// The extent of a complement that counts tiles: leaf `leaf` of the complement,
+/// in leaf order, is the product of the tile counts of `modes` modes of the
+/// cotarget, from mode `first` on. After the first mode the tiles have the
+/// static stride `stride` there. `modes` is 0 while no such leaf is known.
+struct TileCounts {
+  int32_t leaf = -1;
+  int32_t first = 0;
+  int32_t modes = 0;
+  int64_t stride = 0;
+};
 template <class Cat> struct BasisInverseBucket {
   llvm::SmallVector<int32_t, kMaxBasisModes> path;
   llvm::SmallVector<IntTuple<Cat>, 4> shapes;
@@ -833,6 +843,24 @@ template <class T, class Cat> Tile<Cat> shape_to_tile(const T &shape) {
   return Tile<Cat>::getTuple(children);
 }
 
+namespace detail {
+
+/// The extents that size(tile) multiplies, in leaf order.
+template <class Cat>
+void tileExtents(const Tile<Cat> &tile, llvm::SmallVectorImpl<Leaf<Cat>> &extents) {
+  if (tile.isNone())
+    extents.push_back(Leaf<Cat>::getZero());
+  else if (tile.isLayout())
+    llvm::append_range(extents, tile.getLayout().shape().leaves());
+  else if (tile.isScalar())
+    extents.push_back(tile.getScalar());
+  else
+    for (auto child : tile)
+      tileExtents(child, extents);
+}
+
+} // namespace detail
+
 template <class Cat> auto size(const Tile<Cat> &tile) {
   if (tile.isNone())
     return IntTuple<Cat>::getZero();
@@ -840,6 +868,10 @@ template <class Cat> auto size(const Tile<Cat> &tile) {
     return size(tile.getLayout());
   if (tile.isScalar())
     return IntTuple<Cat>::fromLeaf(tile.getScalar());
+  llvm::SmallVector<Leaf<Cat>, 8> extents;
+  detail::tileExtents(tile, extents);
+  if (detail::hasDynamicPair<Cat>(extents))
+    return IntTuple<Cat>::fromLeaf(detail::extentProduct<Cat>(extents));
   auto result = IntTuple<Cat>::getOne();
   for (auto child : tile)
     result = result * size(child);
@@ -1316,10 +1348,16 @@ template <class T, class Cat> IntTuple<Cat> coalesce(const T &shape) {
   llvm::SmallVector<IntTuple<Cat>, 8> result;
   auto append = [&](IntTupleRef<Cat> value) {
     IntTuple<Cat> leaf = value;
-    if (!result.empty() && result.back().isStatic() == leaf.isStatic())
+    if (!result.empty() && result.back().isStatic() == leaf.isStatic()) {
+      // Two dynamic extents are multiplied at i64, where they cannot wrap.
+      if (!leaf.isStatic()) {
+        result.back() = leaf_cast(result.back(), LogWidth::I64);
+        leaf = leaf_cast(leaf, LogWidth::I64);
+      }
       result.back() = leaf_mul(result.back(), leaf);
-    else
+    } else {
       result.push_back(std::move(leaf));
+    }
   };
   for (auto child : flat.asRef())
     append(child);
@@ -1476,9 +1514,32 @@ Layout<Cat> complement_basis_layout(IntTupleRef<Cat> coprofile, const Layout<Cat
   return make_layout(make_tuple(shapes), make_tuple(strides));
 }
 
+/// The tiles of stride `stride` along an extent, ceil_div(extent, |stride|).
+/// There are at most `extent` of them, so the division runs at the type of
+/// the extent: an i64 stride along an extent narrower than i64 is clamped to
+/// INT32_MAX and cast to i32 first, which gives the same count.
+template <class Cat> IntTuple<Cat> tileCount(IntTupleRef<Cat> extent, IntTupleRef<Cat> stride) {
+  IntTuple<Cat> divisor = leaf_abs(stride);
+  auto isI64 = [](IntTupleRef<Cat> value) { return value.getLeaf().logWidth() == LogWidth::I64; };
+  if ((extent.isSInt() || extent.isDInt()) && !isI64(extent) && divisor.asRef().isDInt() &&
+      isI64(divisor.asRef()))
+    divisor = leaf_cast(leaf_min(divisor, IntTuple<Cat>::getSInt(INT32_MAX)), LogWidth::I32);
+  return leaf_ceil_div(extent, divisor);
+}
+
+/// min(a, b) at the narrower type of the two, which holds it for a, b >= 0.
+template <class Cat> IntTuple<Cat> narrowMin(IntTupleRef<Cat> a, IntTupleRef<Cat> b) {
+  auto result = leaf_min(a, b);
+  if (!result.isDInt())
+    return result;
+  auto width = std::min(a.getLeaf().scale().logWidth(), b.getLeaf().scale().logWidth());
+  return leaf_cast(result, width == LogWidth::I1 ? LogWidth::I32 : width);
+}
+
 template <class Cat>
 Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStride,
-                             IntTupleRef<Cat> rhsShape, IntTupleRef<Cat> rhsStride) {
+                             IntTupleRef<Cat> rhsShape, IntTupleRef<Cat> rhsStride,
+                             TileCounts tiles = {}) {
   if (!rhsShape.isLeaf()) {
     FLYDSL_CORE_ASSERT(!rhsStride.isLeaf() && congruent(rhsShape, rhsStride));
     llvm::SmallVector<IntTuple<Cat>, 8> resultShapes;
@@ -1486,7 +1547,8 @@ Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStri
     auto shapeIt = rhsShape.begin();
     auto strideIt = rhsStride.begin();
     for (auto end = rhsShape.end(); shapeIt != end; ++shapeIt, ++strideIt) {
-      Layout<Cat> child = composition_impl(lhsShape, lhsStride, *shapeIt, *strideIt);
+      Layout<Cat> child = composition_impl(lhsShape, lhsStride, *shapeIt, *strideIt, tiles);
+      tiles.leaf -= (*shapeIt).leafCount();
       if (child.isError())
         return tagError(child, AlgebraOp::Composition, resultShapes.size());
       resultShapes.emplace_back(child.shape());
@@ -1530,6 +1592,13 @@ Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStri
   auto restStride = rstride;
   int32_t lhsRank = lhsShape.rank();
   FLYDSL_CORE_ASSERT(lhsRank > 0);
+  // The rest of a divide is the product of the tile counts of the modes
+  // [tileBegin, tileEnd), each at least 1, so the loop below needs neither
+  // that product nor its quotients: where the rest still holds a later count,
+  // the minimum is the count of this mode, and where it holds only this one,
+  // the rest is this count.
+  int32_t tileBegin = tiles.first;
+  int32_t tileEnd = tiles.leaf == 0 ? tiles.first + tiles.modes : 0;
 
   for (int32_t i = 0; i + 1 < lhsRank; ++i) {
     IntTupleRef<Cat> shapeMode = lhsShape.at(i);
@@ -1545,15 +1614,29 @@ Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStri
         restStride.staticValue() >= currShape.staticValue())
       return Layout<Cat>::getError(
           ErrorInfo(ErrorCode::IncompatibleShapeDivision).withFrame(AlgebraOp::Composition));
-    auto nextShape = leaf_ceil_div(currShape, leaf_abs(restStride));
+    // They are the counts of this loop only if the modes before them took
+    // nothing from the rest and left the stride at which they were counted.
+    if (i == tileBegin && i > 0 &&
+        !(resultShape.empty() && restStride.asRef().isSInt(tiles.stride)))
+      tileEnd = 0;
+    auto nextShape = tileCount(currShape, restStride.asRef());
     auto nextStride = leaf_ceil_div(leaf_abs(restStride), currShape) * leaf_signum(restStride);
 
+    auto counted = i >= tileBegin && i < tileEnd;
+    if (counted && i + 1 == tileEnd)
+      restShape = nextShape;
     if (nextShape.isOne() || restShape.isOne()) {
       restStride = nextStride;
       continue;
     }
+    if (counted && i + 1 < tileEnd) {
+      resultShape.push_back(nextShape);
+      resultStride.push_back(restStride * currStride);
+      restStride = nextStride;
+      continue;
+    }
 
-    auto newShape = leaf_min(nextShape, restShape);
+    auto newShape = narrowMin(nextShape.asRef(), restShape.asRef());
     if (newShape.isSInt() && newShape.isZero())
       return Layout<Cat>::getError(
           ErrorInfo(ErrorCode::DivisionByZero).withFrame(AlgebraOp::Composition));
@@ -1569,6 +1652,8 @@ Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStri
 
   IntTupleRef<Cat> lastStride = lhsStride.at(lhsRank - 1);
   FLYDSL_CORE_ASSERT(lastStride.isLeaf());
+  if (tileEnd == lhsRank)
+    restShape = tileCount(lhsShape.at(lhsRank - 1), restStride.asRef());
   auto finalStride = restStride * lastStride;
   if (resultShape.empty())
     return make_layout(std::move(restShape), std::move(finalStride));
@@ -1582,15 +1667,43 @@ Layout<Cat> composition_impl(IntTupleRef<Cat> lhsShape, IntTupleRef<Cat> lhsStri
 
 } // namespace detail
 
-template <class Cat> Layout<Cat> composition(const Layout<Cat> &lhs, const Layout<Cat> &rhs) {
-  if (auto error = detail::firstError(lhs, rhs))
+namespace detail {
+
+/// Whether `shape`, the shape that composition divides, has the modes of
+/// `cotarget`, the shape whose tiles a complement counted: the same extents in
+/// the same places. coalesce_x keeps a last extent of 1 that coalesce drops.
+template <class Cat> bool sameModes(IntTupleRef<Cat> shape, IntTupleRef<Cat> cotarget) {
+  auto modes = shape.leaves();
+  auto extents = cotarget.leaves();
+  if (modes.size() == extents.size() + 1 && modes.back().isOne())
+    modes = modes.drop_back();
+  return modes.size() == extents.size() &&
+         std::equal(modes.begin(), modes.end(), extents.begin(), [](auto mode, auto extent) {
+           return mode.isStatic() ? mode == extent : !extent.isStatic();
+         });
+}
+
+/// composition(lhs, rhs), where `tiles` names the extent of `rhs` that counts
+/// the tiles of `cotarget`, if there is one.
+template <class Cat>
+Layout<Cat> composition(const Layout<Cat> &lhs, const Layout<Cat> &rhs, TileCounts tiles,
+                        IntTupleRef<Cat> cotarget) {
+  if (auto error = firstError(lhs, rhs))
     return Layout<Cat>::getError(error->withFrame(AlgebraOp::Composition));
   auto flatLhs = coalesce_x(lhs, coprofile(rhs));
   if (flatLhs.isError())
-    return detail::tagError(flatLhs, AlgebraOp::Composition);
+    return tagError(flatLhs, AlgebraOp::Composition);
+  if (tiles.modes > 0 && !sameModes(flatLhs.shape(), cotarget))
+    tiles = {};
   auto result =
-      detail::composition_impl(flatLhs.shape(), flatLhs.stride(), rhs.shape(), rhs.stride());
-  return detail::tagError(std::move(result), AlgebraOp::Composition);
+      composition_impl(flatLhs.shape(), flatLhs.stride(), rhs.shape(), rhs.stride(), tiles);
+  return tagError(std::move(result), AlgebraOp::Composition);
+}
+
+} // namespace detail
+
+template <class Cat> Layout<Cat> composition(const Layout<Cat> &lhs, const Layout<Cat> &rhs) {
+  return detail::composition(lhs, rhs, detail::TileCounts(), IntTupleRef<Cat>());
 }
 
 template <class Cat> Layout<Cat> composition(const Layout<Cat> &lhs, const Tile<Cat> &rhs) {
@@ -1671,17 +1784,56 @@ ComplementPrefix<Cat> complement_prefix(IntTupleRef<Cat> shape, IntTupleRef<Cat>
   return out;
 }
 
+/// Where `complement` counts tiles: `counts` are the tile counts
+/// ceil_div(cotarget, stride) that it coalesced after static gaps. Its first
+/// dynamic extent is the product of the first run of dynamic counts. Static
+/// extents before the run carry a static stride forward to it; a dynamic
+/// stride is known only where it starts, at the first count.
 template <class Cat>
-Layout<Cat> complement(IntTupleRef<Cat> shape, IntTupleRef<Cat> stride, IntTupleRef<Cat> cotarget) {
-  if (stride.isZero())
-    return make_layout(coalesce(cotarget));
+TileCounts tileCounts(IntTupleRef<Cat> counts, IntTupleRef<Cat> stride, IntTupleRef<Cat> cotarget,
+                      const Layout<Cat> &complement) {
+  auto leaves = counts.leaves();
+  if (complement.isError() || leaves.size() != cotarget.leaves().size())
+    return {};
+  IntTuple<Cat> carried = stride;
+  auto first = size_t{0};
+  if (stride.isSInt())
+    for (; first < leaves.size() && leaves[first].isStatic(); ++first)
+      carried = leaf_ceil_div(carried, IntTuple<Cat>::fromLeaf(cotarget.leaves()[first]));
+  auto end = first;
+  while (end < leaves.size() && !leaves[end].isStatic())
+    ++end;
+  // A single count is no product: composition keeps the code it has for it.
+  if (end - first < 2)
+    return {};
+  auto shapes = complement.shape().leaves();
+  auto leaf = llvm::find_if(shapes, [](const auto &extent) { return !extent.isStatic(); });
+  if (leaf == shapes.end())
+    return {};
+  return {static_cast<int32_t>(leaf - shapes.begin()), static_cast<int32_t>(first),
+          static_cast<int32_t>(end - first), carried.isSInt() ? carried.staticValue() : 0};
+}
+
+template <class Cat>
+Layout<Cat> complement(IntTupleRef<Cat> shape, IntTupleRef<Cat> stride, IntTupleRef<Cat> cotarget,
+                       TileCounts *tiles = nullptr) {
+  if (stride.isZero()) {
+    auto result = make_layout(coalesce(cotarget));
+    if (tiles)
+      *tiles = tileCounts(cotarget, IntTuple<Cat>::getOne().asRef(), cotarget, result);
+    return result;
+  }
   auto prefix = complement_prefix(shape, stride);
   if (!prefix.ok)
     return Layout<Cat>::getError(prefix.code);
-  auto restShape = coalesce(ceil_div(cotarget, prefix.new_stride));
+  auto counts = ceil_div(cotarget, prefix.new_stride);
+  auto restShape = coalesce(counts);
   auto restStride = compact_col_major(restShape, prefix.new_stride);
-  return coalesce(make_layout(make_tuple(prefix.result_shape, restShape),
-                              make_tuple(prefix.result_stride, restStride)));
+  auto result = coalesce(make_layout(make_tuple(prefix.result_shape, restShape),
+                                     make_tuple(prefix.result_stride, restStride)));
+  if (tiles && prefix.result_shape.isStatic())
+    *tiles = tileCounts(counts.asRef(), prefix.new_stride.asRef(), cotarget, result);
+  return result;
 }
 
 } // namespace detail
@@ -1735,9 +1887,13 @@ template <class Cat> Layout<Cat> complement(const Layout<Cat> &layout) {
   }
 }
 
-template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
-Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget) {
-  if (auto error = detail::firstError(layout, cotarget))
+namespace detail {
+
+/// complement(layout, cotarget); `tiles`, if given, receives where the result
+/// counts tiles.
+template <class Cotarget, class Cat>
+Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget, TileCounts *tiles) {
+  if (auto error = firstError(layout, cotarget))
     return Layout<Cat>::getError(error->withFrame(AlgebraOp::Complement));
   if (has_basis_stride(layout)) {
     auto base = complement(layout);
@@ -1745,19 +1901,25 @@ Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget) {
       return base;
     auto profile = coprofile(layout);
     auto basis = make_basis_like(cotarget);
-    auto result =
-        detail::complement_basis_layout(profile.asRef(), base, cotarget.asRef(), basis.asRef());
+    auto result = complement_basis_layout(profile.asRef(), base, cotarget.asRef(), basis.asRef());
     if (result.isError())
-      return detail::tagError(result, AlgebraOp::Complement);
+      return tagError(result, AlgebraOp::Complement);
     if (profile.isLeaf())
       return make_layout(make_tuple(result.shape()), make_tuple(result.stride()));
     return result;
   } else {
     auto filter_layout = filter(layout);
     auto result =
-        detail::complement(filter_layout.shape(), filter_layout.stride(), cotarget.asRef());
-    return detail::tagError(std::move(result), AlgebraOp::Complement);
+        complement(filter_layout.shape(), filter_layout.stride(), cotarget.asRef(), tiles);
+    return tagError(std::move(result), AlgebraOp::Complement);
   }
+}
+
+} // namespace detail
+
+template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
+Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget) {
+  return detail::complement(layout, cotarget, nullptr);
 }
 
 namespace detail {
@@ -2081,7 +2243,11 @@ template <class Cat>
 Layout<Cat> logical_divide(const Layout<Cat> &layout, const Layout<Cat> &tiler) {
   if (auto error = detail::firstError(layout, tiler))
     return Layout<Cat>::getError(error->withFrame(AlgebraOp::LogicalDivide));
-  auto result = composition(layout, make_layout(tiler, complement(tiler, shape(coalesce(layout)))));
+  auto coalesced = coalesce(layout);
+  detail::TileCounts tiles;
+  auto rhs = make_layout(tiler, detail::complement(tiler, coalesced.shape(), &tiles));
+  tiles.leaf += tiler.shape().leafCount();
+  auto result = detail::composition(layout, rhs, tiles, coalesced.shape());
   return detail::tagError(std::move(result), AlgebraOp::LogicalDivide);
 }
 

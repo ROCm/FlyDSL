@@ -795,6 +795,19 @@ Leaf<EmitOp> signum(Leaf<EmitOp> a) {
   return Leaf<EmitOp>(type, value, ctx);
 }
 
+Leaf<EmitOp> cast(Leaf<EmitOp> a, LogWidth width) {
+  auto type = cast(Leaf<Trait>(a), width);
+  if (type.isError())
+    return Leaf<EmitOp>::getError(type.errorInfo());
+  // A static integer, or a dynamic one that has the width already, is `a`.
+  if (Leaf<Trait>(a) == type)
+    return a;
+  auto *ctx = a.context();
+  if (!ctx)
+    return Leaf<EmitOp>::getError(ErrorCode::MissingEmitContext);
+  return Leaf<EmitOp>(type, emit_op::emitScalar(*ctx, a, type.bitWidth()), ctx);
+}
+
 /// The SSA binding is not printed, so only static leaves round-trip.
 void print(Leaf<EmitOp> leaf, llvm::raw_ostream &os) { print(Leaf<Trait>(leaf), os); }
 

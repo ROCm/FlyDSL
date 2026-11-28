@@ -32,6 +32,18 @@ TEST(TileParity, Size) {
             "?32{div=8}");
   EXPECT_EQ(toString(size(make_tile(make_layout(dyn(16, 4), 1_ct), make_layout(8_ct, 1_ct)))),
             "?128{div=32}");
+  EXPECT_EQ(toString(size(make_tile(make_layout(65536_dt, 1_ct), make_layout(32768_dt, 1_ct)))),
+            "?2147483648i64");
+  // A static extent between two dynamic ones, as a mode of its own or inside one, comes last.
+  EXPECT_EQ(toString(size(make_tile(make_layout(262144_dt, 1_ct), make_layout(8192_ct, 1_ct),
+                                    make_layout(2_dt, 1_ct)))),
+            "?4294967296i64{div=8192}");
+  EXPECT_EQ(toString(size(make_tile(make_layout(8192_ct, 1_ct), make_layout(262144_dt, 1_ct),
+                                    make_layout(2_dt, 1_ct)))),
+            "?4294967296i64{div=8192}");
+  EXPECT_EQ(
+      toString(size(make_tile(make_layout(make_tuple(262144_d, 8192_c)), make_layout(2_dt, 1_ct)))),
+      "?4294967296i64{div=8192}");
 }
 
 // Each tiler mode composes with the matching layout mode and an underscore keeps its mode whole;

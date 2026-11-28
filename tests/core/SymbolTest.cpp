@@ -169,6 +169,17 @@ TEST(SymbolCategory, OperatorsMatchTypeStage) {
   EXPECT_EQ(toString(abs(N)), "abs(N)");
   EXPECT_EQ(toString(signum(N)),
             FLYDSL_CORE_ENABLE_RANGE_INFERENCE ? "signum(N){range=[-1,1]}" : "signum(N)");
+  // A cast is spelled as its width. One that changes nothing adds no node.
+  EXPECT_EQ(toString(cast(N, LogWidth::I64)), "i64(N)i64");
+  EXPECT_EQ(toString(cast(cast(N, LogWidth::I64) * n("M"), LogWidth::I32)), "i32(i64(N)*M)");
+  EXPECT_EQ(toString(cast(N, LogWidth::I32)), "N");
+  EXPECT_EQ(toString(cast(i(5), LogWidth::I64)), "5");
+  // A cast of a cast keeps both nodes, as EmitOp emits both operations: a
+  // node has no width, so the outer cast cannot tell that it returns to the
+  // width of N.
+  EXPECT_EQ(toString(cast(cast(N, LogWidth::I64), LogWidth::I32)), "i32(i64(N))");
+  EXPECT_EQ(cast(N, LogWidth::I64), cast(N, LogWidth::I64));
+  EXPECT_NE(cast(N, LogWidth::I64), cast(N, LogWidth::I8));
   EXPECT_EQ(exprStr(exact_div(D, i(4))), "exact_div(D,4)");
   EXPECT_EQ(exprStr(safe_div(D, i(4))), "safe_div(D,4)");
   EXPECT_EQ(exprStr(shape_div(N, i(4))), "shape_div(N,4)");
@@ -338,7 +349,7 @@ TEST(SymbolCategory, CompactLayoutSizeAndCrd2Idx) {
   EXPECT_TRUE(layout.stride().at(0).getLeaf().isSInt(1));
   EXPECT_EQ(layout.stride().at(1).getLeaf(), N);
   EXPECT_EQ(exprStr(layout.stride().at(2).getLeaf()), "N*M");
-  EXPECT_EQ(exprStr(size(layout).getLeaf()), "N*M*4");
+  EXPECT_EQ(exprStr(size(layout).getLeaf()), "i64(N)*i64(M)*4i64");
 
   auto idx = crd2idx(make_tuple(leaf(iIdx), leaf(jIdx), leaf(2)), layout);
   ASSERT_TRUE(idx.isLeaf());
@@ -442,13 +453,23 @@ TEST(SymbolCategory, TextRoundTrip) {
   // constant stays one literal.
   auto cmp = eq(n("N"), n("M"));
   EXPECT_EQ(toString(cmp + i(4)), "(N==M)+4");
-  for (auto leaf :
-       {Sy::getRatio(3, 7), Sy::getBasis(sum, {1}), ceil_div(n("N"), i(4)), lshr(n("N"), i(2)),
-        cmp + i(4), lt(cmp, n("K")), n("N") + i(-4), n("N") * i(-3)}) {
+  for (auto leaf : {Sy::getRatio(3, 7), Sy::getBasis(sum, {1}), ceil_div(n("N"), i(4)),
+                    lshr(n("N"), i(2)), cmp + i(4), lt(cmp, n("K")), n("N") + i(-4), n("N") * i(-3),
+                    cast(n("N"), LogWidth::I64) * n("M"), cast(n("N") + i(1), LogWidth::I8),
+                    cast(cast(n("N"), LogWidth::I64), LogWidth::I32)}) {
     auto parsed = Sy::fromString(toString(leaf));
     ASSERT_TRUE(parsed.has_value()) << toString(leaf);
     EXPECT_EQ(*parsed, leaf) << toString(leaf);
   }
+  // The parser builds a cast as cast() does: none on a constant, which has to
+  // fit the width, and none on a cast to the same width.
+  auto constant = Sy::fromString("i64(5)+N");
+  ASSERT_TRUE(constant.has_value());
+  EXPECT_EQ(*constant, cast(i(5), LogWidth::I64) + n("N"));
+  EXPECT_FALSE(Sy::fromString("i8(300)+N").has_value());
+  auto twice = Sy::fromString("i64(i64(N))i64");
+  ASSERT_TRUE(twice.has_value());
+  EXPECT_EQ(*twice, cast(cast(n("N"), LogWidth::I64), LogWidth::I64));
 }
 
 TEST(SymbolCategory, PointerKeepsAddressSpace) {

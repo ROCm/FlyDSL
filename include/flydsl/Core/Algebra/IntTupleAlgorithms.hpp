@@ -954,15 +954,31 @@ template <int... Is, class T, class Cat> IntTuple<Cat> shape(const T &tuple) {
     return get<Is...>(tuple);
 }
 
+namespace detail {
+
+/// Whether two or more of `extents` are dynamic.
+template <class Cat> bool hasDynamicPair(llvm::ArrayRef<Leaf<Cat>> extents) {
+  return llvm::count_if(extents, [](const Leaf<Cat> &extent) { return !extent.isStatic(); }) >= 2;
+}
+
+/// The product of shape extents, in leaf order. Where two or more of them are
+/// dynamic, each is cast to i64 first, so that two i32 extents cannot wrap.
+template <class Cat> Leaf<Cat> extentProduct(llvm::ArrayRef<Leaf<Cat>> extents) {
+  auto wide = hasDynamicPair(extents);
+  auto result = Leaf<Cat>::getOne();
+  for (auto extent : extents)
+    result = result * (wide ? cast(extent, LogWidth::I64) : extent);
+  return result;
+}
+
+} // namespace detail
+
 template <class T, class Cat> IntTuple<Cat> product(const T &t) {
   auto tuple = t.asRef();
 
   if (tuple.isLeaf())
     return tuple;
-  auto result = Leaf<Cat>::getOne();
-  for (auto leaf : tuple.leaves())
-    result = result * leaf;
-  return IntTuple<Cat>::fromLeaf(result);
+  return IntTuple<Cat>::fromLeaf(detail::extentProduct(tuple.leaves()));
 }
 
 template <int... Is, class T, class Cat> IntTuple<Cat> size(const T &t) {
@@ -1232,6 +1248,75 @@ auto compact_row_major(const T &shape, const Current &current) {
   return detail::compact_row_major_impl(shape.asRef(), std::move(ownedCurrent)).first;
 }
 
+namespace detail {
+
+/// Whether the size of `shape` is i64 when its extents are multiplied as they
+/// are, in leaf order: an extent is i64, dynamic or static, or the static
+/// extents before the first dynamic one have a product beyond i32.
+template <class Cat> bool hasWideSize(IntTupleRef<Cat> shape) {
+  auto fitsInt32 = [](int64_t value) { return value >= INT32_MIN && value <= INT32_MAX; };
+  auto prefix = int64_t{1};
+  auto inPrefix = true;
+  for (const Leaf<Cat> &leaf : shape.leaves()) {
+    auto extent = leaf.scale();
+    if (extent.isDInt()) {
+      if (extent.logWidth() == LogWidth::I64)
+        return true;
+      inPrefix = false;
+    } else if (extent.isSInt()) {
+      if (!fitsInt32(extent.staticValue()))
+        return true;
+      if (inPrefix && !fitsInt32(prefix *= extent.staticValue()))
+        return true;
+    }
+  }
+  return false;
+}
+
+/// Whether the coordinate `rest` goes through the tuple mode `shape` one leaf
+/// at a time instead of being divided by the size of the mode. That is so
+/// where the size is i64 only because product() casts two or more dynamic
+/// extents: a run-time coordinate is then divided by each extent at the type
+/// of the two, as it was by the i32 size, and no size is formed. Where the
+/// extents make the size i64 by themselves, and for a static coordinate, the
+/// coordinate is divided by the size.
+template <class Cat> bool splitByLeaves(IntTupleRef<Cat> shape, IntTupleRef<Cat> rest) {
+  return rest.isDInt() && !hasWideSize(shape) && hasDynamicPair(shape.leaves());
+}
+
+/// idx2crd(rest % size(shape), shape), leaving rest / size(shape) in `rest`.
+/// It divides by each leaf in turn, which gives the same result for positive
+/// extents, and never forms the size.
+///
+/// The division by the size gives the leaf that ends a tuple what is left of
+/// the coordinate: a run-time value, even where the remainder taken here
+/// folds to 0, as it does for an extent of 1. `last` marks such a leaf, and
+/// it stays a run-time value, so that its stride still gives the offset its
+/// type. A tuple of size 1 that does not end its own tuple is the exception:
+/// the remainder by its size is the static 0, and so are its coordinates.
+template <class Cat>
+IntTuple<Cat> splitLeaves(IntTupleRef<Cat> shape, IntTuple<Cat> &rest, bool last = false) {
+  if (shape.isLeaf()) {
+    IntTuple<Cat> coord = rest % shape;
+    // A static 0 has no value that a cast could make a run-time one. The
+    // difference of two run-time values is one in every category.
+    if (last && coord.asRef().isZero())
+      coord = rest - rest;
+    rest = rest / shape;
+    return coord;
+  }
+  auto unit = !last && llvm::all_of(shape.leaves(),
+                                    [](const Leaf<Cat> &leaf) { return leaf.scale().isOne(); });
+  llvm::SmallVector<IntTuple<Cat>, 8> coords;
+  auto rank = shape.rank();
+  auto i = int32_t{0};
+  for (auto child : shape)
+    coords.push_back(splitLeaves(child, rest, ++i == rank && !unit));
+  return make_tuple(coords);
+}
+
+} // namespace detail
+
 /// Convert a scalar generalized column-major coordinate to the profile of `shape`.
 template <class Index, class Shape, class Cat>
 IntTuple<Cat> idx2crd(const Index &index, const Shape &shape) {
@@ -1248,6 +1333,10 @@ IntTuple<Cat> idx2crd(const Index &index, const Shape &shape) {
       if (++i == rank) {
         result.push_back(idx2crd(rest, child));
         break;
+      }
+      if (detail::splitByLeaves(child, rest.asRef())) {
+        result.push_back(detail::splitLeaves(child, rest));
+        continue;
       }
       auto childSize = product(child);
       result.push_back(idx2crd(rest % childSize, child));
@@ -1315,9 +1404,13 @@ IntTuple<Cat> crd2idx(const Coord &coord, const Shape &shape, const Stride &stri
     for (auto i = int32_t{0}; i < rank_s; ++i, ++is, ++id) {
       auto childCoord = rest;
       if (i + 1 < rank_s) {
-        auto childSize = product(*is);
-        childCoord = rest % childSize;
-        rest = rest / childSize;
+        if (detail::splitByLeaves(*is, rest.asRef())) {
+          childCoord = detail::splitLeaves(*is, rest);
+        } else {
+          auto childSize = product(*is);
+          childCoord = rest % childSize;
+          rest = rest / childSize;
+        }
       }
       result = result + crd2idx(childCoord, *is, *id);
     }
