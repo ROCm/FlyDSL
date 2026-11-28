@@ -270,7 +270,10 @@ class SplitKProtocol:
 
 
 def make_lds_layout(rows, block_k):
-    swizzle = fx.static(fx.SwizzleType.get(3, 3, 3))
+    # XOR row bits into the 8-element column groups of the same row. A row has
+    # block_k // 8 groups, so use at most log2(block_k // 8) bits: for
+    # block_k = 32, Swizzle<3,3,3> would flip bit 5, i.e. bit 0 of the row.
+    swizzle = fx.static(fx.SwizzleType.get(min(3, block_k.bit_length() - 4), 3, 3))
     return fx.make_composed_layout(
         swizzle,
         fx.make_ordered_layout((rows, block_k), (1, 0)),
