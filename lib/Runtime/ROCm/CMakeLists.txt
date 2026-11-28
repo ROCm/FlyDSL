@@ -6,8 +6,12 @@
 # hip-config.cmake reads HIP_PLATFORM from the cache or the environment, and
 # some HIP builds ship it without the hipconfig lookup that would detect the
 # platform otherwise. This runtime is AMD-only.
-if(NOT DEFINED HIP_PLATFORM AND NOT DEFINED ENV{HIP_PLATFORM})
-  set(HIP_PLATFORM amd)
+if("${HIP_PLATFORM}" STREQUAL "")
+  if("$ENV{HIP_PLATFORM}" STREQUAL "")
+    set(HIP_PLATFORM amd)
+  else()
+    set(HIP_PLATFORM "$ENV{HIP_PLATFORM}")
+  endif()
 endif()
 
 # Prefer an explicitly selected ROCm, then the SDK in the active environment.
