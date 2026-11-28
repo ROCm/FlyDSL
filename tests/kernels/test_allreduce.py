@@ -887,6 +887,39 @@ def test_allreduce_8gpu_benchmark(shape, dtype_str, mode):
     _run_subprocess_benchmark(world_size=8, shape=shape, dtype_str=dtype_str, mode=mode)
 
 
+def _small_max_size_worker(rank: int, world_size: int, port: int):
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
+    offsets = [0 for _ in range(world_size)]
+    meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
+    # With a 1 MiB max_size the IPC input buffer is a block inside one of the caching allocator's segments, not the
+    # segment's start. The input is allocated afterwards, so the segment does not start with a copy of it.
+    fa = init_custom_ar(meta, meta, handles, offsets, rank=rank, full_nvlink=True, max_size=1 << 20)
+    x = torch.full((2560,), float(rank + 1), dtype=torch.bfloat16, device=device)
+    out = fa.custom_all_reduce(x)
+    # Peers read this rank's input buffer in their kernels; keep it until every rank is done.
+    dist.barrier(device_ids=[rank])
+    expected = torch.full_like(x, world_size * (world_size + 1) // 2)
+    wrong = int((out != expected).sum())
+    assert wrong == 0, f"[rank={rank}] {wrong} of {out.numel()} elements wrong, first {out[0].item()}"
+    dist.destroy_process_group()
+
+
+@pytest.mark.multi_gpu
+def test_allreduce_4gpu_small_max_size(monkeypatch):
+    """Eager all-reduce whose IPC input buffers do not start their allocations (max_size 1 MiB)."""
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 4:
+        pytest.skip(f"Requires >= 4 physical GPUs, found {phys_ng}.")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    mp.spawn(_small_max_size_worker, args=(4, _free_port()), nprocs=4)
+
+
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize("shape,dtype_str,mode", _4GPU_PARAMS, ids=[_param_id(*p) for p in _4GPU_PARAMS])
 def test_allreduce_4gpu_accuracy(shape, dtype_str, mode):

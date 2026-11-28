@@ -332,7 +332,7 @@ class FlyDSLAllreduce:
         self.input_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
         self.output_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
 
-        inp_buf_base = int(self.input_buffer.untyped_storage().data_ptr())
+        inp_buf_base = self._get_alloc_base_ptr(int(self.input_buffer.data_ptr()))
         inp_buf_off = int(self.input_buffer.data_ptr()) - inp_buf_base
         my_inp_buf_h = self._get_mem_handle_bytes(inp_buf_base)
         all_inp_buf = self._gather_object_list_via_broadcast(self.group, (my_inp_buf_h, inp_buf_off))
@@ -358,7 +358,7 @@ class FlyDSLAllreduce:
         rotated_tmp_ptrs = [self._tmp_ptrs[(rk + i) % ws] for i in range(8)]
         self._gpu_tmp_ptrs_array = torch.tensor(rotated_tmp_ptrs, dtype=torch.int64, device=self.device)
 
-        out_buf_base = int(self.output_buffer.untyped_storage().data_ptr())
+        out_buf_base = self._get_alloc_base_ptr(int(self.output_buffer.data_ptr()))
         out_buf_off = int(self.output_buffer.data_ptr()) - out_buf_base
         my_out_buf_h = self._get_mem_handle_bytes(out_buf_base)
         all_out_buf = self._gather_object_list_via_broadcast(self.group, (my_out_buf_h, out_buf_off))
