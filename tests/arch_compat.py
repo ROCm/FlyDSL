@@ -14,6 +14,7 @@ CDNA_ONLY_TESTS = frozenset(
         "test_gemm_a16w16_gfx950.py",  # gfx950-only A16W16 GEMM kernel
         "test_preshuffle_gemm.py",
         "test_moe_gemm.py",
+        "test_moe_fp8_b32.py",  # gfx950-only fp8 MFMA layer (the file also skips off gfx950)
         "test_moe_reduce.py",
         "test_pa.py",
         "test_swa_gfx950.py",

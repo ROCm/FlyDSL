@@ -50,12 +50,18 @@ def _gemm1_body_a16w4(
     INTER,
     NE,
     TOPK,
+    n_offset=0,
+    n_tiles=None,
     act="silu",
     b_cache_mod=2,
     w_dtype="fp4",
     w_layout="standard",
     k_wave=1,
     rocm_arch="",
+    out_stride=None,
+    use_lds_b=False,
+    b_lds_base_bytes=0,
+    b_lds_slot_bytes=0,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W) fused stage1 gemm1 body.
 
@@ -65,6 +71,9 @@ def _gemm1_body_a16w4(
     """
     _is_gfx942 = str(rocm_arch).startswith("gfx942")
     N_OUT = 2 * INTER
+    # The intermediate's row stride (INTER unless the caller pads its rows, as the fp8
+    # 32x32-block layer does for its stage 2's K tile).
+    OUT_STRIDE = INTER if out_stride is None else int(out_stride)
     elem_bytes = 2  # bf16
     a_elem_bytes = 2
     KH_TILE_BYTES = TILE_K * a_elem_bytes  # A-LDS bytes per row per K-tile
@@ -97,7 +106,8 @@ def _gemm1_body_a16w4(
     A_SLOT_BYTES = BM * KH_TILE_BYTES
     # Per-k-group A-LDS region (single region at k_wave=1).
     _A_GRP_BYTES = A_LDS_STAGES * A_SLOT_BYTES
-    NUM_N_BLOCKS = INTER // TILE_N
+    NUM_N_BLOCKS = (INTER // TILE_N) if n_tiles is None else int(n_tiles)
+    N_OFFSET = int(n_offset)
 
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
@@ -107,7 +117,7 @@ def _gemm1_body_a16w4(
     m_block_idx = bx_i32 // fx.Int32(NUM_N_BLOCKS)
     e = rocdl.readfirstlane(T.i32, _raw(_global_i32_at(arg_eids, m_block_idx)))
     bx_m = m_block_idx * fx.Int32(BM)  # first sorted row of this m-block
-    by_n = n_block_idx * fx.Int32(TILE_N)
+    by_n = N_OFFSET + n_block_idx * fx.Int32(TILE_N)
     inter_i32 = fx.Int32(INTER)
 
     # ---- B (weight) operand path: layouts + buffer resources + load closures ----
@@ -126,6 +136,11 @@ def _gemm1_body_a16w4(
         w_dtype=w_dtype,
         b_cache_mod=b_cache_mod,
         rocm_arch=rocm_arch,
+        b_lds=(
+            (lds_raw_ptr, int(b_lds_base_bytes), int(b_lds_slot_bytes), wave, lane, inter_i32)
+            if const_expr(use_lds_b)
+            else None
+        ),
     )
     # Intermediate [sorted_size, inter] bf16: num_records = cumsum0*inter*2, so masked
     # (clamped) stores land OOB. KEPT RAW: the output resource + masked buffer_store need a
@@ -134,7 +149,7 @@ def _gemm1_body_a16w4(
     _cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
     out_rsrc = buffer_ops.create_buffer_resource_from_addr(
         _raw(fx.Int64(arg_out)),
-        num_records_bytes=_raw(fx.Int64(_cumsum0) * fx.Int64(INTER * 2)),
+        num_records_bytes=_raw(fx.Int64(_cumsum0) * fx.Int64(OUT_STRIDE * 2)),
     )
 
     # ---- A path (shared with gemm2, see utils.make_a_loader) -------------------
@@ -268,7 +283,36 @@ def _gemm1_body_a16w4(
     else:
         k_base = fx.Int32(0)
 
-    if const_expr(not _PIPE):
+    if const_expr(use_lds_b):
+        # Weight tile double-buffered through LDS: coalesced 16B/lane global copies (one
+        # contiguous 128B run per weight row) instead of the transposed per-lane 16B
+        # gather, whose every lane touches its own 32B sector.
+        b_loader.set_col0(by_n + n_tile_base)
+
+        def load_b_scale_tile(base_k):
+            return (
+                [b_loader.load_scale(base_k, c) for c in cols_gate],
+                [b_loader.load_scale(base_k, c) for c in cols_up],
+            )
+
+        a_loader.store_tile(k_base, slot=0)
+        b_loader.stage_tile(k_base, 0)
+        b_sc_cur = load_b_scale_tile(k_base)
+        for kt in range_constexpr(K_TILES_TOTAL):
+            cur_slot = kt % A_LDS_STAGES
+            rocdl.s_waitcnt(lgkmcnt=0)
+            gpu.barrier()
+            a_frags = preload_a(cur_slot)
+            g_raw = [b_loader.load_raw_lds(cur_slot, 0) for _ in range(num_acc_n)]
+            u_raw = [b_loader.load_raw_lds(cur_slot, 1) for _ in range(num_acc_n)]
+            if const_expr(kt + 1 < K_TILES_TOTAL):
+                a_loader.store_tile(k_base + fx.Int32((kt + 1) * TILE_K), slot=(kt + 1) % A_LDS_STAGES)
+                b_loader.stage_tile(k_base + fx.Int32((kt + 1) * TILE_K), (kt + 1) % A_LDS_STAGES)
+                b_sc_nxt = load_b_scale_tile(k_base + fx.Int32((kt + 1) * TILE_K))
+            compute_tile((g_raw, u_raw, b_sc_cur[0], b_sc_cur[1]), a_frags)
+            if const_expr(kt + 1 < K_TILES_TOTAL):
+                b_sc_cur = b_sc_nxt
+    elif const_expr(not _PIPE):
         a_loader.store_tile(k_base, slot=0)
         b0 = load_b_tile(k_base)
         rocdl.s_waitcnt(lgkmcnt=0)
@@ -352,13 +396,13 @@ def _gemm1_body_a16w4(
                 u = fx.Float32(fx.Vector(fx.memref_load_vec(acc_up[mi][ni]))[ii])
                 y = gate_up_act(act, [g], [u], situ)[0]
                 yb = y.to(fx.BFloat16)
-                out_idx = sorted_row * inter_i32 + col_g_list[ni]
+                out_idx = sorted_row * fx.Int32(OUT_STRIDE) + col_g_list[ni]
                 buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
 
 
-def gemm1_a16w4_grid(BM, *, INTER, TILE_N, max_m_blocks):
-    """Flattened grid for a16w4 gemm1: (m-blocks) x (inter/tile_n) n-blocks."""
-    num_n_blocks = INTER // TILE_N
+def gemm1_a16w4_grid(BM, *, INTER, TILE_N, max_m_blocks, n_tiles=None):
+    """Flattened grid for a16w4 gemm1: (m-blocks) x n-tiles."""
+    num_n_blocks = (INTER // TILE_N) if n_tiles is None else int(n_tiles)
     return int(max_m_blocks) * num_n_blocks
 
 
@@ -379,7 +423,12 @@ def compile_gemm1_a16w4_port(
     w_dtype="fp4",
     w_layout="standard",
     k_wave=1,
+    n_offset=0,
+    n_tiles=None,
     rocm_arch,
+    out_stride=None,
+    use_lds_b=False,
+    zero_out_final=False,
 ):
     """a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W1) fused stage1 builder.
 
@@ -403,7 +452,8 @@ def compile_gemm1_a16w4_port(
         "fp4",
         "int4",
         "bf16",
-    ), f"w_dtype must be 'mxfp4', 'int4' or 'bf16', got {w_dtype!r}"
+        "fp8",
+    ), f"w_dtype must be 'mxfp4', 'int4', 'bf16' or 'fp8', got {w_dtype!r}"
     assert w_layout in (
         "standard",
         "guinterleave",
@@ -418,21 +468,39 @@ def compile_gemm1_a16w4_port(
     _N_OUT = 2 * _INTER
     assert _K % TILE_K == 0, f"D_HIDDEN (K) must be a multiple of {TILE_K}, got {_K}"
     assert _K % (k_wave * TILE_K) == 0, f"D_HIDDEN (K) must be a multiple of k_wave*TILE_K, got {_K}, k_wave={k_wave}"
-    assert _N_OUT % 256 == 0, f"2*D_INTER (N_OUT) must be a multiple of 256, got {_N_OUT}"
-    assert _INTER % TILE_N == 0, f"D_INTER must be a multiple of TILE_N={TILE_N}, got {_INTER}"
+    if w_dtype == "fp8":
+        # row-major W with 32x32-block scales: any inter dim of whole 32-row blocks
+        assert _INTER % 32 == 0, f"fp8 W needs D_INTER % 32 == 0, got {_INTER}"
+    else:
+        assert _N_OUT % 256 == 0, f"2*D_INTER (N_OUT) must be a multiple of 256, got {_N_OUT}"
+    if n_tiles is None:
+        assert _INTER % TILE_N == 0, f"D_INTER must be a multiple of TILE_N={TILE_N}, got {_INTER}"
     # 4 waves repartition into (4//k_wave) N-waves; each owns TILE_N//(4//k_wave)
     # columns -> num_acc_n = that // 16. num_acc_n==0 makes every accumulate/store
     # loop empty -> silent all-zero output that times fast (e.g. TILE_N=32,k_wave=1).
-    assert (
-        TILE_N // (4 // k_wave)
-    ) >= 16, f"TILE_N//(4//k_wave) must be >= 16 (num_acc_n>=1), got TILE_N={TILE_N}, k_wave={k_wave}"
+    assert (TILE_N // (4 // k_wave)) >= 16, f"TILE_N//(4//k_wave) must be >= 16, got TILE_N={TILE_N}"
     # Whole 16-wide groups per N-wave, else num_acc_n truncates (TILE_N=96: 8 of 24).
     assert TILE_N % (16 * (4 // k_wave)) == 0, (
         f"TILE_N must be a multiple of {16 * (4 // k_wave)} (16*(4//k_wave), else "
         f"num_acc_n truncates and drops columns), got TILE_N={TILE_N}, k_wave={k_wave}"
     )
     assert BM % 16 == 0, f"BM must be a multiple of 16, got {BM}"
-    NUM_N_BLOCKS = _INTER // TILE_N
+    NUM_N_BLOCKS = (_INTER // TILE_N) if n_tiles is None else int(n_tiles)
+    assert NUM_N_BLOCKS >= 1 and int(n_offset) >= 0
+    assert (
+        int(n_offset) + NUM_N_BLOCKS * TILE_N <= _INTER
+    ), f"N offset {n_offset} + {NUM_N_BLOCKS} x TILE_N {TILE_N} exceeds inter dim {_INTER}"
+    # LDS-staged fp8 W (one 16-wide N block a wave: gate block + up block = 32 rows).
+    _use_lds_b = bool(use_lds_b) and w_dtype == "fp8" and (TILE_N // (4 // k_wave)) == 16
+    assert not _use_lds_b or TILE_K == 128, f"LDS-staged fp8 W needs TILE_K=128, got {TILE_K}"
+    _b_slot_bytes = 32 * TILE_K if _use_lds_b else 0
+    _b_region_bytes = 4 * 2 * _b_slot_bytes if _use_lds_b else 0
+    _blds_tag = "_blds" if _use_lds_b else ""
+    # Fused zeroing of the intermediate's K padding and the output (see the kernel body).
+    _OUT_STRIDE = _INTER if out_stride is None else int(out_stride)
+    _zero_final = bool(zero_out_final) and _OUT_STRIDE > _INTER
+    _PAD_V4 = (_OUT_STRIDE - _INTER) // 8
+    _zero_tag = "_zf" if _zero_final else ""
 
     # A-LDS tile BM x TILE_K bf16, double-buffered (must match A_LDS_STAGES in the body).
     # k_wave>1 gives each K-wave its own region (x k_wave).
@@ -448,6 +516,9 @@ def compile_gemm1_a16w4_port(
         lds_bytes = max(_a_lds_bytes, _reduce_bytes)
     else:
         lds_bytes = _a_lds_bytes
+    # The staged W region lives after the A/reduce region for the whole K loop.
+    _b_lds_base_bytes = lds_bytes
+    lds_bytes = lds_bytes + _b_region_bytes
 
     assert act in (
         "silu",
@@ -461,7 +532,9 @@ def compile_gemm1_a16w4_port(
     _wd_tag = "" if w_dtype == "fp4" else f"_{w_dtype}"
     _wl_tag = "" if w_layout == "standard" else f"_{w_layout}"
     _kw_tag = f"_kw{k_wave}" if k_wave > 1 else ""
-    name_suffix = f"a16w4{_wd_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}"
+    _os_tag = "" if out_stride is None or int(out_stride) == _INTER else f"_os{int(out_stride)}"
+    _no_tag = f"_no{int(n_offset)}x{NUM_N_BLOCKS}" if (int(n_offset) != 0 or NUM_N_BLOCKS != _INTER // TILE_N) else ""
+    name_suffix = f"a16w4{_wd_tag}{_wl_tag}_h{_K}_i{_INTER}_ne{NE}_bm{BM}_tn{TILE_N}{_act_tag}{_bcm_tag}{_xcd_tag}{_wpe_tag}{_kw_tag}{_os_tag}{_no_tag}{_blds_tag}{_zero_tag}"
 
     @fx.struct
     class SharedStorage:
@@ -482,6 +555,7 @@ def compile_gemm1_a16w4_port(
         f32_situ_linbeta_rcp: fx.Float32,
         f32_swiglu_limit: fx.Float32,
         arg_out: fx.Int64,
+        arg_out_final: fx.Int64 = 0,
     ):
         lds_raw_ptr = fx.SharedAllocator().allocate(SharedStorage).peek().raw.ptr
         tx_i32 = fx.Int32(gpu.thread_id("x"))
@@ -491,6 +565,33 @@ def compile_gemm1_a16w4_port(
         cumsum0 = _global_i32_at(arg_cumsum, fx.Int32(0))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(NUM_N_BLOCKS)
+
+        if const_expr(zero_out_final):
+            # Zero the intermediate's K padding and the whole bf16 output from this grid, before stage 2
+            # reads/accumulates them: one launch fewer than separate fills; an extra launch is ~1.8 us of
+            # GPU busy time at decode size, 3-10% of a 20-70 us layer. Neither region is written by this
+            # kernel's own stores (which cover only the intermediate's real columns), so no race.
+            _zero_gid = bx_i32 * fx.Int32(256) + tx_i32
+            _zero_stride = fx.Int32(gpu.grid_dim.x) * fx.Int32(256)
+            _zero4 = fx.full(4, 0, fx.Int32)
+            _n_pad_v4 = cumsum0 * fx.Int32(_PAD_V4)
+            _rsrc_i = buffer_ops.create_buffer_resource_from_addr(
+                _raw(arg_out), num_records_bytes=_raw(cumsum0 * fx.Int32(_OUT_STRIDE * 2))
+            )
+            for _i in range(fx.Int32(0), (_n_pad_v4 + _zero_stride - fx.Int32(1)) // _zero_stride, fx.Int32(1)):
+                _idx = _zero_gid + _i * _zero_stride
+                _row = _idx // fx.Int32(_PAD_V4)
+                _col = fx.Int32(_INTER) + (_idx % fx.Int32(_PAD_V4)) * fx.Int32(8)
+                buffer_ops.buffer_store(
+                    _zero4, _rsrc_i, (_row * fx.Int32(_OUT_STRIDE) + _col) // fx.Int32(2), mask=_idx < _n_pad_v4
+                )
+            _n_out_v4 = i32_ntok * fx.Int32(_K // 8)
+            _rsrc_o = buffer_ops.create_buffer_resource_from_addr(
+                _raw(arg_out_final), num_records_bytes=_raw(_n_out_v4 * fx.Int32(16))
+            )
+            for _i in range(fx.Int32(0), (_n_out_v4 + _zero_stride - fx.Int32(1)) // _zero_stride, fx.Int32(1)):
+                _idx = _zero_gid + _i * _zero_stride
+                buffer_ops.buffer_store(_zero4, _rsrc_o, _idx * fx.Int32(4), mask=_idx < _n_out_v4)
 
         # Bijective XCD round-robin over valid tiles [0, bound) to balance per-XCD/HBM
         # weight-load traffic; xcd_swizzle>0 also M-group-swizzles for per-XCD L2
@@ -550,12 +651,18 @@ def compile_gemm1_a16w4_port(
                 INTER=_INTER,
                 NE=NE,
                 TOPK=TOPK,
+                n_offset=n_offset,
+                n_tiles=n_tiles,
                 act=act,
                 b_cache_mod=b_cache_mod,
                 w_dtype=w_dtype,
                 w_layout=w_layout,
                 k_wave=k_wave,
                 rocm_arch=rocm_arch,
+                out_stride=out_stride,
+                use_lds_b=_use_lds_b,
+                b_lds_base_bytes=_b_lds_base_bytes,
+                b_lds_slot_bytes=_b_slot_bytes,
             )
 
     @flyc.jit
@@ -591,7 +698,49 @@ def compile_gemm1_a16w4_port(
             f32_situ_linbeta_rcp,
             f32_swiglu_limit,
             arg_out,
+            fx.Int64(0),
             value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
 
-    return launch_gemm1
+    if not zero_out_final:
+        return launch_gemm1
+
+    @flyc.jit
+    def launch_gemm1_zero(
+        arg_x: fx.Int64,
+        arg_bq: fx.Int64,
+        arg_bscale: fx.Int64,
+        arg_eids: fx.Int64,
+        arg_cumsum: fx.Int64,
+        arg_mind: fx.Int64,
+        i32_ntok: fx.Int32,
+        i32_grid: fx.Int32,
+        f32_situ_beta: fx.Float32,
+        f32_situ_beta_rcp: fx.Float32,
+        f32_situ_linbeta: fx.Float32,
+        f32_situ_linbeta_rcp: fx.Float32,
+        f32_swiglu_limit: fx.Float32,
+        arg_out: fx.Int64,
+        stream: fx.Stream,
+        arg_out_final: fx.Int64,
+    ):
+        grid_x = fx.Int64(i32_grid)
+        gemm1_kernel(
+            arg_x,
+            arg_bq,
+            arg_bscale,
+            arg_eids,
+            arg_cumsum,
+            arg_mind,
+            i32_ntok,
+            f32_situ_beta,
+            f32_situ_beta_rcp,
+            f32_situ_linbeta,
+            f32_situ_linbeta_rcp,
+            f32_swiglu_limit,
+            arg_out,
+            arg_out_final,
+            value_attrs={"rocdl.waves_per_eu": waves_per_eu} if waves_per_eu else None,
+        ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
+
+    return launch_gemm1_zero
