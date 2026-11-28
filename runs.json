@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-28T08:05:26Z",
+ "updated": "2026-11-28T09:24:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 46129271112,
+   "pr": 976,
+   "commit": "862de26aa803a185732905becf8e2f59dac859a5",
+   "branch": "pr/nvvm-target",
+   "event": "pull_request",
+   "title": "[Feat] Add an experimental cuda nvvm backend",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112",
+   "created_at": "2026-11-28T09:11:15Z",
+   "updated_at": "2026-11-28T09:12:51Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 46123956738,
    "pr": null,
@@ -10,13 +25,44 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Link MLIR's nanobind libraries when build_llvm.sh has no Nin\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738",
    "created_at": "2026-11-28T08:02:43Z",
-   "updated_at": "2026-11-28T08:02:55Z",
+   "updated_at": "2026-11-28T08:42:29Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T08:43:03Z",
+     "completed_at": "2026-11-28T09:19:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738/job/140923899323",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-28T08:42:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738/job/140923899326"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-28T08:42:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46123956738/job/140923899328"
+    }
+   ]
   },
   {
    "run_id": 46115662695,
@@ -384,13 +430,44 @@
    "branch": "pr/refactor-registration",
    "event": "pull_request",
    "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924",
    "created_at": "2026-11-27T10:13:20Z",
-   "updated_at": "2026-11-28T08:03:13Z",
+   "updated_at": "2026-11-28T08:58:56Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T08:31:48Z",
+     "completed_at": "2026-11-28T08:55:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924/job/140921111587"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T08:32:34Z",
+     "completed_at": "2026-11-28T09:07:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924/job/140921111663",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-28T08:58:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45980248924/job/140921111676"
+    }
+   ]
   },
   {
    "run_id": 45977210730,
@@ -2291,52 +2368,6 @@
      "started_at": "2026-11-25T09:13:12Z",
      "completed_at": "2026-11-25T09:13:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583060248/job/139098408028",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 45581923207,
-   "pr": 1520,
-   "commit": "79fee92c1838c7464ee9d150c384176db4abc9d6",
-   "branch": "skills/kernel-code-cleanup-predicate-equivalence",
-   "event": "pull_request",
-   "title": "[Skills] kernel-code-cleanup: prove a predicate-only cleanup by its specialization keys",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207",
-   "created_at": "2026-11-25T09:04:23Z",
-   "updated_at": "2026-11-25T09:06:03Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:58Z",
-     "completed_at": "2026-11-25T09:06:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558284"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:59Z",
-     "completed_at": "2026-11-25T09:06:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558295"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:58Z",
-     "completed_at": "2026-11-25T09:06:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581923207/job/139094558355",
      "machine": null,
      "host_model": null,
      "bench_skipped": "host unidentified != MI355"
