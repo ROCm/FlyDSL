@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-11-28T10:33:02Z",
+ "updated": "2026-11-28T11:14:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 46136337609,
+   "pr": 1535,
+   "commit": "c433e82bf99a376b43c199fecf1925f41d25b066",
+   "branch": "pr/refactor-registration",
+   "event": "pull_request",
+   "title": "[Refactor] Align registration with upstream MLIR and make backend builds self-contained",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/46136337609",
+   "created_at": "2026-11-28T10:41:13Z",
+   "updated_at": "2026-11-28T10:54:30Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-11-28T10:54:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46136337609/job/140955540771"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-28T10:54:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46136337609/job/140955540781"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-11-28T10:54:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/46136337609/job/140955540813"
+    }
+   ]
+  },
   {
    "run_id": 46129271112,
    "pr": 976,
@@ -10,11 +53,11 @@
    "branch": "pr/nvvm-target",
    "event": "pull_request",
    "title": "[Feat] Add an experimental cuda nvvm backend",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112",
    "created_at": "2026-11-28T09:11:15Z",
-   "updated_at": "2026-11-28T09:24:04Z",
+   "updated_at": "2026-11-28T11:12:16Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -41,10 +84,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-11-28T09:24:04Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-11-28T10:30:15Z",
+     "completed_at": "2026-11-28T11:02:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/46129271112/job/140933723488"
     }
    ]
@@ -2356,52 +2399,6 @@
      "started_at": "2026-11-25T09:17:13Z",
      "completed_at": "2026-11-25T09:17:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583686361/job/139100513398"
-    }
-   ]
-  },
-  {
-   "run_id": 45583060248,
-   "pr": 1517,
-   "commit": "d332d549aa1dd835337720ba5dd44342327d3f4f",
-   "branch": "skills/flydsl-kernel-authoring-none-state-lds-check",
-   "event": "pull_request",
-   "title": "[Skills] flydsl-kernel-authoring: None-bound scf.if state, LDS overflow is not caught by default",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583060248",
-   "created_at": "2026-11-25T09:11:35Z",
-   "updated_at": "2026-11-25T09:13:17Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:13:12Z",
-     "completed_at": "2026-11-25T09:13:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583060248/job/139098407924"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:13:12Z",
-     "completed_at": "2026-11-25T09:13:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583060248/job/139098408003"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:13:12Z",
-     "completed_at": "2026-11-25T09:13:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45583060248/job/139098408028",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
     }
    ]
   }
