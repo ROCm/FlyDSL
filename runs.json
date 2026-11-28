@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-11-28T06:09:02Z",
+ "updated": "2026-11-28T06:32:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 46115662695,
+   "pr": 1541,
+   "commit": "0ec9434cf1a8103c5bf99921807c2e4cadc0a009",
+   "branch": "jli/flydsl-0.5.5",
+   "event": "pull_request",
+   "title": "[Version] Bump version to 0.5.5",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/46115662695",
+   "created_at": "2026-11-28T06:14:12Z",
+   "updated_at": "2026-11-28T06:16:03Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 46106231911,
    "pr": 1540,
@@ -2325,52 +2340,6 @@
      "started_at": "2026-11-25T09:05:42Z",
      "completed_at": "2026-11-25T09:05:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581866075/job/139094386509"
-    }
-   ]
-  },
-  {
-   "run_id": 45581788323,
-   "pr": 1518,
-   "commit": "56bcfb31e6457d11d6e69a767090eddd234c9ebc",
-   "branch": "skills/debug-flydsl-kernel-test-coverage",
-   "event": "pull_request",
-   "title": "[Skills] debug-flydsl-kernel: specialization coverage, rescale test data, in-memory JIT cache",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323",
-   "created_at": "2026-11-25T09:03:30Z",
-   "updated_at": "2026-11-25T09:05:12Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:08Z",
-     "completed_at": "2026-11-25T09:05:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079170"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:07Z",
-     "completed_at": "2026-11-25T09:05:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079222"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-11-25T09:05:08Z",
-     "completed_at": "2026-11-25T09:05:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/45581788323/job/139094079363",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
     }
    ]
   }
