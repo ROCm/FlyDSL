@@ -6113,6 +6113,212 @@ def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
 
 
+def _paged_fp8_split_kv_build(num_kv_splits):
+    """A ``_build_paged_fp8`` stand-in that pins the paged FP8 builder to ``num_kv_splits``."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+
+    def build(**kwargs):
+        return build_flash_attn_paged_fp8_module(
+            num_heads=kwargs["num_heads"],
+            num_kv_heads=kwargs["num_kv_heads"],
+            head_dim=kwargs["head_dim"],
+            value_head_dim=kwargs["value_head_dim"],
+            causal=True,
+            dtype_str="fp8",
+            waves_per_eu=kwargs["waves_per_eu"],
+            daz=kwargs["daz"],
+            dualwave_swp_lazy_rescale=kwargs["lazy_rescale"],
+            num_kv_splits=num_kv_splits,
+            varlen=True,
+            cross_seqlen=True,
+            paged=True,
+            kv_cache_layout=kwargs["kv_cache_layout"],
+            paged_bn128=kwargs["use_bn128"],
+            batch_interleave_group=kwargs["batch_interleave_group"],
+            page_size=kwargs["page_size"],
+            cache_buffered=kwargs["cache_buffered"],
+        )
+
+    return build
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("num_kv_splits", [2, 3, 16])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128)])
+def test_paged_fp8_split_kv_matches_torch(
+    monkeypatch, num_kv_splits, page_size, kv_cache_layout, head_dim, value_head_dim
+):
+    """Every split count combines to the unsplit result, including the splits that
+    short and empty sequences leave without a tile."""
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", _paged_fp8_split_kv_build(num_kv_splits))
+    kv_lengths = [33, 0, 2049, 65]
+    counts = [(n + page_size - 1) // page_size for n in kv_lengths]
+    pages = list(reversed(range(max(counts))))
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[0, 65, 63, 17],
+        kv_lengths=kv_lengths,
+        block_table_rows=[pages[:n] + [-1] * (max(counts) - n) for n in counts],
+        num_query_heads=6,
+        num_kv_heads=2,
+        page_size=page_size,
+        kv_cache_layout=kv_cache_layout,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "page_size,kv_cache_layout,head_dim,value_head_dim,num_query_heads,num_kv_heads,query_lengths,kv_lengths",
+    [
+        (64, "vectorized", 128, 128, 16, 1, [1], [8192]),
+        (64, "vectorized", 192, 128, 8, 1, [8, 8], [4096, 3001]),
+        (1024, "vectorized", 192, 192, 8, 2, [4, 1, 7], [4096, 2048, 4097]),
+        (16, "vectorized", 128, 128, 8, 1, [1, 1], [2049, 4096]),
+        (1, "linear", 128, 128, 4, 4, [8], [2048]),
+        (1, "linear3d", 192, 128, 8, 1, [1], [4097]),
+    ],
+)
+def test_paged_fp8_low_occupancy_launch_splits_kv(
+    monkeypatch,
+    page_size,
+    kv_cache_layout,
+    head_dim,
+    value_head_dim,
+    num_query_heads,
+    num_kv_heads,
+    query_lengths,
+    kv_lengths,
+):
+    """A decode-sized call over a long KV range picks a split-KV launch on its own."""
+    from kernels.attention import flash_attn_fp8_paged_gfx950 as paged_module
+
+    builds = []
+    build = paged_module.build_flash_attn_paged_fp8_module
+
+    def recording_build(*args, **kwargs):
+        builds.append(int(kwargs.get("num_kv_splits", 1)))
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(paged_module, "build_flash_attn_paged_fp8_module", recording_build)
+    # Uncached, so this test's launcher is built (and records its split builds) here.
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", flash_attn_interface._build_paged_fp8.__wrapped__)
+    counts = [(n + page_size - 1) // page_size for n in kv_lengths]
+    rows, start = [], 0
+    for count in counts:
+        rows.append(list(range(start, start + count)) + [-1] * (max(counts) - count))
+        start += count
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=query_lengths,
+        kv_lengths=kv_lengths,
+        block_table_rows=rows,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        page_size=page_size,
+        kv_cache_layout=kv_cache_layout,
+    )
+    assert max(builds) > 1, f"expected a split-KV launch, built {builds}"
+
+
+@_requires_gfx950
+def test_paged_fp8_split_kv_workspace_lives_on_the_launch_stream(monkeypatch):
+    """A direct split launch allocates its workspace on the stream it launches on, so the
+    caching allocator cannot hand the block to work on torch's current stream while the
+    split kernels are still queued behind it."""
+    from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
+    from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
+
+    torch.manual_seed(29)
+    num_heads, head_dim, value_head_dim, splits = 8, 128, 128, 4
+    query_length, kv_length, page_size = 4, 4096, 64
+    num_pages = kv_length // page_size
+    query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, num_heads, head_dim, device="cuda") * 0.2)
+    key_shape, value_shape = _paged_fp8_cache_shapes(num_pages, 1, head_dim, value_head_dim, page_size, "vectorized")
+    key, key_descale = quantize_per_tensor_fp8(torch.randn(key_shape, device="cuda") * 0.2)
+    value, value_descale = quantize_per_tensor_fp8(torch.randn(value_shape, device="cuda") * 0.2)
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(1, num_pages)
+    q_indptr = torch.tensor([0, query_length], device="cuda", dtype=torch.int32)
+    kv_indptr = torch.tensor([0, kv_length], device="cuda", dtype=torch.int32)
+    launch = build_flash_attn_paged_fp8_module(
+        num_heads,
+        head_dim,
+        value_head_dim=value_head_dim,
+        causal=True,
+        dtype_str="fp8",
+        num_kv_heads=1,
+        num_kv_splits=splits,
+        varlen=True,
+        cross_seqlen=True,
+        paged=True,
+        kv_cache_layout="vectorized",
+        paged_bn128=True,
+        page_size=page_size,
+    )
+    workspace_elems = dualwave_splitk_workspace_elems(1, num_heads, query_length, splits, head_dim=value_head_dim)
+    workspace_streams = []
+    empty = torch.empty
+
+    def recording_empty(*args, **kwargs):
+        tensor = empty(*args, **kwargs)
+        if tensor.dtype == torch.float32 and tensor.numel() == workspace_elems:
+            workspace_streams.append(torch.cuda.current_stream(tensor.device))
+        return tensor
+
+    monkeypatch.setattr(torch, "empty", recording_empty)
+
+    def run(stream):
+        out = torch.full((query_length, num_heads, value_head_dim), float("nan"), device="cuda", dtype=torch.bfloat16)
+        torch.cuda.synchronize()
+        launch(
+            query.view(-1),
+            key,
+            value,
+            out.view(-1),
+            1,
+            query_length,
+            seq_len_kv=kv_length,
+            cu_seqlens_q=q_indptr,
+            cu_seqlens_kv=kv_indptr,
+            block_table=block_table.view(-1),
+            block_table_stride=num_pages,
+            q_descale=query_descale,
+            k_descale=key_descale,
+            v_descale=value_descale,
+            stream=stream,
+        )
+        return out
+
+    side = torch.cuda.Stream()
+    actual = run(side)
+    side.synchronize()
+    assert workspace_streams == [side]
+
+    workspace_streams.clear()
+    with torch.cuda.stream(torch.cuda.Stream()):
+        run(None)
+    torch.cuda.synchronize()
+    assert workspace_streams == [torch.cuda.default_stream()]
+
+    expected = _paged_fp8_torch_reference(
+        query,
+        key,
+        value,
+        block_table,
+        [query_length],
+        [kv_length],
+        (query_descale, key_descale, value_descale),
+    )
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
 @_requires_gfx950
 @pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize(

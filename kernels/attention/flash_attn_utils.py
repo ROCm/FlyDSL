@@ -2149,6 +2149,16 @@ class PagedDualwaveSwpFp8Traits:
             return self.V_LOAD_LAYOUT
         return None
 
+    @property
+    def ODD_TILE_TAIL(self):
+        """Finish an odd paged tile count on one lone tile instead of a padded pair.
+
+        The V192 build already runs at the 256-VGPR ceiling, and the extra
+        single-tile region spills its hot loop (37 VGPRs, ~1.6x on decode-sized
+        shapes), so it keeps the padded pair it has always used.
+        """
+        return not self.FP8_PV_SEGMENTED
+
 
 def _make_paged_dualwave_swp_fp8_traits(
     num_heads,
@@ -2164,6 +2174,7 @@ def _make_paged_dualwave_swp_fp8_traits(
     page_size=64,
     kv_cache_layout="vectorized",
     cache_buffered=False,
+    num_kv_splits=1,
 ):
     """Build layouts after the dedicated builder validates the paged contract."""
     block_n = 64
@@ -2210,6 +2221,8 @@ def _make_paged_dualwave_swp_fp8_traits(
         VT_BF16_TOTAL=num_prefetch_k * (fp8_v_tile_bytes // 2) + 128,
         FP8_V_ROW_STRIDE=fp8_v_row_stride,
         BATCH_INTERLEAVE_GROUP=int(batch_interleave_group),
+        NUM_KV_SPLITS=int(num_kv_splits),
+        SPLITK=int(num_kv_splits) > 1,
     )
 
 
@@ -4776,10 +4789,22 @@ class DualwaveFp8KernelContext:
         else:
             causal_end_raw_i32 = None
             max_num_tiles = num_kv_tiles
-        # Pipeline needs an EVEN tile count >= 4; extra tiles read 0 (num_records) and are masked.
-        max_num_tiles = ((max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        max_num_tiles = (max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles)
-        self.max_num_tiles = max_num_tiles
+        # The paired pipeline consumes EVEN counts; extra tiles read 0 (num_records)
+        # and are masked. The paged pipeline instead keeps the exact count and lets
+        # ``split_tail_end`` finish an odd one with a lone tile, so a sequence owning
+        # a single 64-key tile never pays for a second, fully masked one.
+        tail_end = max_num_tiles
+        odd_tail = traits.PAGED and not traits.SPLITK and traits.ODD_TILE_TAIL
+        if const_expr(odd_tail):
+            max_num_tiles = (max_num_tiles // fx.Index(2)) * fx.Index(2)
+        else:
+            # Split-K reserves four tiles per split and the dense schedules were tuned at
+            # four, so only the unsplit paged pipeline pads to two.
+            min_tiles = 2 if traits.PAGED and not traits.SPLITK else 4
+            max_num_tiles = ((max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
+            max_num_tiles = (max_num_tiles < fx.Index(min_tiles)).select(fx.Index(min_tiles), max_num_tiles)
+            tail_end = max_num_tiles
+        self.max_num_tiles = tail_end
         if const_expr(traits.SPLITK):
             chunk = ((max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
             chunk = (chunk < fx.Index(6)).select(fx.Index(6), chunk)
@@ -4801,9 +4826,17 @@ class DualwaveFp8KernelContext:
                 in_mask = causal_end_raw_i32 > fx.Int32(0)
                 active = in_mask if active is None else (active & in_mask)
             split_t_end = active.select(split_t_end, split_t0)
+            if const_expr(odd_tail):
+                tail_end = active.select(tail_end, split_t0)
 
         self.split_t0 = split_t0
         self.split_t_end = split_t_end
+        # Only the paged paired pipeline consumes the odd single-tile tail; every
+        # other schedule keeps its historical even bounds.
+        if const_expr(odd_tail):
+            self.split_tail_end = tail_end
+        else:
+            self.split_tail_end = split_t_end
 
     def init_workspace_io(self):
         if const_expr(self.traits.SPLITK):
@@ -5123,6 +5156,20 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             v_op = self._v_concat_i32x8(v_v, dc)
             v_o[dc] = self._mfma_acc_fp8_wide(v_op, p_fp8, v_o[dc])
         return v_o
+
+    def pv_fragment(self, fragment, p_fp8, c_v16):
+        """P*V for one 32-channel chunk against that chunk's V fragment.
+
+        Same MFMA byte order as ``_v_concat_i32x8`` but takes the fragment in
+        hand, so a caller that drives one chunk at a time never materialises the
+        whole wide V tile in registers.
+        """
+        words = []
+        for ks in range_constexpr(4):
+            v2 = Vec.from_elements([fragment[ks]], fx.Int64).bitcast(fx.Int32)
+            words.append(v2[0])
+            words.append(v2[1])
+        return self._mfma_acc_fp8_wide(Vec.from_elements(words, fx.Int32).ir_value(), p_fp8, c_v16)
 
     def pv(self, v_p, v_v, v_o):
         return self._pv_fp8_direct(v_p, v_v, v_o)
@@ -5850,6 +5897,15 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         a_lo, a_hi, b_lo, b_hi = _run(v_s_a, v_s_b)
         return (a_lo, a_hi), (b_lo, b_hi)
 
+    def causal_mask_tail_if_needed(self, v_s, tile_idx):
+        """Causal-mask the lone tile that closes an odd paged tile count.
+
+        Same branch shape as the pair mask: the tail tile straddles the diagonal
+        for at most one q-block row, so every other call skips the VALU compares.
+        """
+        kv_end_pos = (fx.Index(tile_idx) + fx.Index(1)) * self.traits.BLOCK_N
+        return self.causal_mask_prologue_if_needed(v_s, tile_idx, kv_end_pos)
+
     def _seq_pad_mask_inplace(self, v_s_lists, tile_idx):
         traits = self.traits
         s_lo, s_hi = v_s_lists
@@ -6080,6 +6136,24 @@ class DualwaveFp8StoreHelper(DualwaveFp8KernelContext):
                 d_col = (dc * self.traits.D_CHUNK) + (2 * g + self.lane_div_32) * 8
                 o_global = self.global_idx_o(q_row, d_col)
                 self.buffer_store_128(o_pack, o_global)
+
+    def store_final_o_if_active(self, v_o, q_row):
+        """Store this wave's O rows, unless the whole wave is past the sequence end.
+
+        A decode-sized call runs one 256-row block for a 17-row sequence, so seven
+        of eight waves would otherwise pack and store rows that the O descriptor
+        bound already drops. ``wave_id_uni`` is a readfirstlane scalar, so the test
+        is uniform across the wave and branches around the pack math as well.
+        """
+        wave_row = self.q_start + fx.Index(self.wave_id_uni) * self.traits.ROWS_PER_WAVE
+        seqlen_q_v = self.seqlen_q_v
+
+        @flyc.jit
+        def _store_final_o_if_active():
+            if wave_row < seqlen_q_v:
+                self.store_final_o(v_o, q_row)
+
+        _store_final_o_if_active()
 
     def store_splitk_partial_o(self, v_o, m_row, l_row, q_row):
         m_row = fx.Float32(m_row) * self.c_logit_scale
