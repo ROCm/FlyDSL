@@ -315,7 +315,9 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         # Main loop prefetches a_next1 one step behind; issue the final
         # K_ITERS - 1 tile here, otherwise c10 / c11 read stale A1 data.
         a_g2s.load(a_next1, A1_gl_offset + (K_ITERS - 1) * BLOCK_K)
-        rocdl.s_barrier()
+        # b_next0 and a_cur0 are read before the next wait; wave_m == 0 runs one barrier ahead of
+        # wave_m == 1, so the wait covering them must be here rather than next to those reads.
+        wait_barrier(N_LDS_STEPS_A)
 
         c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
 

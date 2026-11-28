@@ -277,6 +277,32 @@ def test_fp8_gemm_case_list_preserves_pairwise_coverage():
     assert not missing, f"FP8 row-scale matrix is missing pairwise interactions: {sorted(missing, key=repr)}"
 
 
+# The 8-wave tail once read the last K-step's B0 and A0 tiles before their loads landed, which made these shapes
+# wrong on most calls. With signed inputs a stale K-step moves the outputs it touches far out of tolerance.
+@pytest.mark.parametrize("M,N,K", [(64, 77824, 5120), (32768, 4096, 2048)])
+def test_fp8_gemm_8w_every_call_matches_fp64(M, N, K):
+    if "gfx95" not in ARCH:
+        pytest.skip("FP8 row-scale GEMMs requires CDNA4 (gfx95*)")
+    g = torch.Generator(device="cuda").manual_seed(0)
+    a, b = (
+        torch.randn(n, K, generator=g, device="cuda") * 2 ** (torch.rand(n, 1, generator=g, device="cuda") * 6 - 3)
+        for n in (M, N)
+    )
+    (a_q, scale_a), (b_q, scale_b) = (pertoken_quant(x, quant_dtype=FP8_DTYPE) for x in (a, b))
+    a64, b64 = (q.to(torch.float32).double() * s.double() for q, s in ((a_q, scale_a), (b_q, scale_b)))
+    ref = a64 @ b64.T
+    # One bf16 rounding (2**-8 relative), doubled, plus an fp32 accumulation bound.
+    tol = 2.0**-7 * ref.abs() + 2.0**-16 * (a64.abs() @ b64.abs().T)
+    c = torch.empty((M, N), dtype=OUT_DTYPE, device="cuda")
+    args = (_as_i8(a_q).view(-1), _as_i8(b_q).view(-1), c.view(-1), scale_a.view(-1), scale_b.view(-1), M, N)
+    launch = flyc.compile(compile_fp8_gemm_8w(K=K), *args, torch.cuda.current_stream())
+    for call in range(5):
+        c.fill_(float("nan"))
+        launch(*args, torch.cuda.current_stream())
+        bad = ~((c.double() - ref).abs() <= tol)
+        assert not bad.any(), f"call {call}: {int(bad.sum())} of {bad.numel()} outputs wrong"
+
+
 if __name__ == "__main__":
     import argparse
 
