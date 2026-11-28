@@ -74,6 +74,11 @@ SOFTMAX_BWD_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
+# LayerNorm backward: an HBM-bound training shape and one whose operands fit in the LLC.
+LAYERNORM_BWD_SHAPES='
+32768,8192,bf16
+4096,4096,bf16
+'
 # FlashAttention shapes:
 #   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
 #   legacy:    "batch,seq_len,num_heads,head_dim,dtype,causal" (num_kv_heads=num_heads)
@@ -197,7 +202,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | softmax_bwd | rmsnorm | layernorm_bwd | flash_attn | mla | gemm | moe
   (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -288,6 +293,7 @@ _normalize_op() {
   op="${1:-}"
   case "${op}" in
     softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
+    layernorm_bwd|layernorm-bwd|layernorm_backward|layernorm-backward) echo "layernorm_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
     *) echo "${op}" ;;
@@ -295,10 +301,11 @@ _normalize_op() {
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others: softmax, softmax_bwd, rmsnorm, layernorm_bwd, flash_attn, mla, gemm, moe
 RUN_SOFTMAX=1
 RUN_SOFTMAX_BWD=1
 RUN_RMSNORM=1
+RUN_LAYERNORM_BWD=1
 RUN_FLASH_ATTN=1
 RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
@@ -308,6 +315,7 @@ _enable_only_ops() {
   RUN_SOFTMAX=0
   RUN_SOFTMAX_BWD=0
   RUN_RMSNORM=0
+  RUN_LAYERNORM_BWD=0
   RUN_FLASH_ATTN=0
   RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
@@ -318,6 +326,7 @@ _enable_only_ops() {
       softmax) RUN_SOFTMAX=1 ;;
       softmax_bwd) RUN_SOFTMAX_BWD=1 ;;
       rmsnorm) RUN_RMSNORM=1 ;;
+      layernorm_bwd) RUN_LAYERNORM_BWD=1 ;;
       flash_attn) RUN_FLASH_ATTN=1 ;;
       mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
@@ -356,6 +365,7 @@ if [ "$#" -gt 0 ]; then
         echo "softmax"
         echo "softmax_bwd"
         echo "rmsnorm"
+        echo "layernorm_bwd"
         echo "flash_attn"
         echo "mla"
         echo "gemm"
@@ -615,6 +625,29 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
+fi
+
+# LayerNorm backward (ROCDSL_LAYERNORM_BWD_SHAPES makes the test script time only the backward)
+if [ "${RUN_LAYERNORM_BWD}" -eq 1 ]; then
+  for shape in $LAYERNORM_BWD_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
+    export ROCDSL_LAYERNORM_BWD_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/layernorm_bwd_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_layernorm.py >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      _fail_or_skip "${log}" "layernorm_bwd"
+    fi
+    row="$(_py_parse_and_emit layernorm_bwd "${M}x${N}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+  unset ROCDSL_LAYERNORM_BWD_SHAPES
 fi
 
 # FlashAttention / FMHA (CDNA only)
