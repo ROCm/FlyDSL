@@ -104,6 +104,11 @@ const LeafOp ops[] = {
     UNARY("neg", -a),
     UNARY("abs", abs(a)),
     UNARY("signum", signum(a)),
+    UNARY("cast i1", cast(a, LogWidth::I1)),
+    UNARY("cast i8", cast(a, LogWidth::I8)),
+    UNARY("cast i16", cast(a, LogWidth::I16)),
+    UNARY("cast i32", cast(a, LogWidth::I32)),
+    UNARY("cast i64", cast(a, LogWidth::I64)),
 };
 // clang-format on
 
@@ -399,6 +404,40 @@ TEST_F(EmitOpCategory, IdentityShortcutsCastToTheTypeResult) {
   auto y = arg(3);
   check(y / Leaf<EmitOp>::getOne(), to_trait(y) / Leaf<Trait>::getOne());
   EXPECT_EQ((y / Leaf<EmitOp>::getOne()).value(), y.value());
+}
+
+TEST_F(EmitOpCategory, CastExtendsTruncatesOrReturnsTheOperand) {
+  auto narrow = arg(2), wide = arg(3), flag = arg(5);
+  auto extended = cast(narrow, LogWidth::I64);
+  check(extended, cast(to_trait(narrow), LogWidth::I64));
+  EXPECT_TRUE(extended.value().getDefiningOp<mlir::arith::ExtSIOp>());
+  auto truncated = cast(wide, LogWidth::I32);
+  check(truncated, cast(to_trait(wide), LogWidth::I32));
+  EXPECT_TRUE(truncated.value().getDefiningOp<mlir::arith::TruncIOp>());
+  // i1 is a predicate: it zero-extends.
+  auto predicate = cast(flag, LogWidth::I32);
+  check(predicate, cast(to_trait(flag), LogWidth::I32));
+  EXPECT_TRUE(predicate.value().getDefiningOp<mlir::arith::ExtUIOp>());
+
+  // An integer at its own width and a static integer are the operand: no IR.
+  auto ops = entry->getOperations().size();
+  EXPECT_EQ(cast(narrow, LogWidth::I32).value(), narrow.value());
+  auto five = cast(Leaf<EmitOp>::getSInt(5), LogWidth::I64);
+  EXPECT_EQ(to_trait(five), Leaf<Trait>::getSInt(5));
+  EXPECT_FALSE(five.value());
+  EXPECT_EQ(to_trait(cast(Leaf<EmitOp>::getSInt(int64_t{1} << 40), LogWidth::I32)).errorCode(),
+            ErrorCode::IntegerOverflow);
+  EXPECT_EQ(entry->getOperations().size(), ops);
+
+  // A fast-divmod divisor keeps its handle at its own width. At another width
+  // it is the integer it divides by.
+  auto divisor = narrow.withFastDivMod();
+  ASSERT_TRUE(divisor.hasFastDivMod());
+  EXPECT_EQ(cast(divisor, LogWidth::I32), divisor);
+  auto plain = cast(divisor, LogWidth::I64);
+  check(plain, cast(to_trait(divisor), LogWidth::I64));
+  EXPECT_FALSE(plain.hasFastDivMod());
+  EXPECT_TRUE(plain.value().getDefiningOp<mlir::arith::ExtSIOp>());
 }
 
 TEST_F(EmitOpCategory, ShiftsAndBooleanArithmeticUseTheTypeResult) {

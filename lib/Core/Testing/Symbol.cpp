@@ -48,6 +48,7 @@ enum class SymbolOp : uint8_t {
   Gcd,
   Abs,
   Signum,
+  Cast,
 };
 
 /// An immutable expression node. Operands are shared by reference, so an
@@ -123,6 +124,11 @@ SymbolExprRef getFresh() {
 
 bool isConst(const SymbolExprRef &node, int64_t value) {
   return node && node->op == SymbolOp::Const && node->payload == value;
+}
+
+/// `a` cast to `width`, which the node keeps as its payload.
+SymbolExprRef getCast(LogWidth width, SymbolExprRef a) {
+  return a ? makeNode(SymbolOp::Cast, static_cast<int64_t>(width), {}, std::move(a)) : nullptr;
 }
 
 /// `op` applied to `a` (and `b`), folding the identities that return an
@@ -271,6 +277,11 @@ void printExpr(const SymbolNode *node, llvm::raw_ostream &os, int parentPrec) {
     break;
   case SymbolOp::Signum:
     os << "signum(";
+    printExpr(lhs, os, 0);
+    os << ')';
+    break;
+  case SymbolOp::Cast:
+    os << 'i' << (int64_t{1} << node->payload) << '(';
     printExpr(lhs, os, 0);
     os << ')';
     break;
@@ -490,6 +501,20 @@ private:
     if (!lhs)
       return nullptr;
     if (consume(')')) {
+      // i32(x) and the other widths are casts, built as cast() builds them:
+      // none on a constant, which has to fit the width, and none on a cast to
+      // the same width.
+      auto bits = unsigned{0};
+      if (name.starts_with("i") && !name.drop_front().getAsInteger(10, bits)) {
+        auto width = detail::parseLogWidth(bits);
+        if (!width)
+          return nullptr;
+        if (lhs->op == SymbolOp::Const)
+          return core::cast(Leaf<Trait>::getSInt(lhs->payload), *width).isError() ? nullptr : lhs;
+        if (lhs->op == SymbolOp::Cast && lhs->payload == static_cast<int64_t>(*width))
+          return lhs;
+        return getCast(*width, lhs);
+      }
       auto op = llvm::StringSwitch<std::optional<SymbolOp>>(name)
                     .Case("abs", SymbolOp::Abs)
                     .Case("signum", SymbolOp::Signum)
@@ -544,6 +569,15 @@ Leaf<Symbol> unary(Leaf<Trait> type, SymbolOp op, const Leaf<Symbol> &a) {
   if (type.isStatic())
     return SymbolAccess::leaf(type, nullptr);
   return SymbolAccess::leaf(type, apply(op, embed(a)));
+}
+
+/// A static integer, or a dynamic one that has the width already, is `a`.
+Leaf<Symbol> cast(Leaf<Trait> type, LogWidth width, const Leaf<Symbol> &a) {
+  if (Leaf<Trait>(a) == type)
+    return a;
+  if (type.isError())
+    return SymbolAccess::leaf(type, nullptr);
+  return SymbolAccess::leaf(type, getCast(width, embed(a)));
 }
 
 } // namespace
@@ -619,6 +653,10 @@ bool operator==(const Leaf<Symbol> &a, const Leaf<Symbol> &b) {
 #define FLYDSL_CORE_LEAF_UNARY(NAME, OP)                                                           \
   Leaf<Symbol> NAME(Leaf<Symbol> a) {                                                              \
     return symbol::unary(NAME(Leaf<Trait>(a)), symbol::SymbolOp::OP, a);                           \
+  }
+#define FLYDSL_CORE_LEAF_CAST(NAME, OP)                                                            \
+  Leaf<Symbol> NAME(Leaf<Symbol> a, LogWidth width) {                                              \
+    return symbol::cast(NAME(Leaf<Trait>(a), width), width, a);                                    \
   }
 #include "flydsl/Core/Category.def"
 

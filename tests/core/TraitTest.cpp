@@ -431,6 +431,47 @@ TEST(TraitCategory, Signum) {
   EXPECT_EQ(signum(Leaf<Trait>::getNone()), i(0));
 }
 
+TEST(TraitCategory, Cast) {
+  // A dynamic integer takes the width; what is known to divide it still does.
+  EXPECT_EQ(cast(d(), LogWidth::I64), d(LogWidth::I64));
+  EXPECT_EQ(cast(d(LogWidth::I64, 8), LogWidth::I32), d(LogWidth::I32, 8));
+  EXPECT_EQ(cast(d(LogWidth::I8, 2), LogWidth::I64), d(LogWidth::I64, 2));
+  EXPECT_EQ(cast(d(LogWidth::I1), LogWidth::I32), d());
+  // A range carries over where the width can hold it. Without range inference
+  // no leaf has a range, so only a build with it can see this rule.
+  auto ranged = cast(d(LogWidth::I32, 1, {{-5, 300}}), LogWidth::I64);
+  EXPECT_EQ(ranged, d(LogWidth::I64, 1, {{-5, 300}}));
+  EXPECT_EQ(ranged.hasRange(), bool(FLYDSL_CORE_ENABLE_RANGE_INFERENCE));
+  EXPECT_EQ(cast(d(LogWidth::I32, 1, {{-5, 300}}), LogWidth::I8), d(LogWidth::I8));
+  // At its own width an integer is itself, a fast-divmod divisor with its
+  // handle. At another width the divisor is a plain integer.
+  auto fast = d(LogWidth::I32, 1, nullopt, true);
+  EXPECT_EQ(cast(d(LogWidth::I32, 4), LogWidth::I32), d(LogWidth::I32, 4));
+  EXPECT_EQ(cast(fast, LogWidth::I32), fast);
+  EXPECT_EQ(cast(fast, LogWidth::I64), d(LogWidth::I64));
+  // A static integer has no width: it is unchanged, and it has to fit.
+  EXPECT_EQ(cast(i(5), LogWidth::I64), i(5));
+  EXPECT_EQ(cast(i(-128), LogWidth::I8), i(-128));
+  EXPECT_EQ(cast(i(int64_t{1} << 40), LogWidth::I64), i(int64_t{1} << 40));
+  EXPECT_EQ(cast(i(1), LogWidth::I1), i(1));
+  EXPECT_EQ(cast(Leaf<Trait>::getNone(), LogWidth::I64), Leaf<Trait>::getNone());
+  for (auto [value, width] :
+       {std::pair{int64_t{1} << 40, LogWidth::I32}, std::pair{int64_t{128}, LogWidth::I8},
+        std::pair{int64_t{2}, LogWidth::I1}, std::pair{int64_t{-1}, LogWidth::I1}}) {
+    auto overflow = cast(i(value), width);
+    ASSERT_TRUE(overflow.isError()) << value;
+    EXPECT_EQ(overflow.errorCode(), ErrorCode::IntegerOverflow) << value;
+    EXPECT_EQ(overflow.errorInfo().op(0), AlgebraOp::Cast) << value;
+  }
+  // The scale of a basis leaf is cast; its modes stay.
+  EXPECT_EQ(cast(bs(d(), {2}), LogWidth::I64), bs(d(LogWidth::I64), {2}));
+  EXPECT_EQ(cast(bs(i(4), {2}), LogWidth::I64), bs(i(4), {2}));
+  // A ratio is not an integer, and an error passes through.
+  EXPECT_EQ(cast(rat(3, 4), LogWidth::I32).errorCode(), ErrorCode::UnsupportedRatioOperation);
+  auto error = Leaf<Trait>::getError(ErrorCode::DivisionByZero);
+  EXPECT_EQ(cast(error, LogWidth::I64), error);
+}
+
 TEST(TraitCategory, Bitwise) {
   EXPECT_EQ((i(6) & i(3)), i(2));
   EXPECT_EQ((i(6) | i(3)), i(7));

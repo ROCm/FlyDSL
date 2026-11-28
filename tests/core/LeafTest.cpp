@@ -117,6 +117,27 @@ TEST(LeafParity, ShapeArithmetic) {
   EXPECT_EQ(toString(leaf_safe_div(dyn(16, 8), 4_ct)), "?4{div=2}");
 }
 
+// A cast keeps the value. The Runtime category checks that the width holds it.
+TEST(LeafParity, Cast) {
+  EXPECT_EQ(toString(leaf_cast(3_dt, LogWidth::I64)), "?3i64");
+  EXPECT_EQ(toString(leaf_cast(-3_dt, LogWidth::I64)), "?-3i64");
+  EXPECT_EQ(toString(leaf_cast(dyn(24, 8), LogWidth::I64)), "?24i64{div=8}");
+  auto wide = [](int64_t value) { return Tup::fromLeaf(RT::getDyn(value, LogWidth::I64)); };
+  EXPECT_EQ(toString(leaf_cast(wide(-7), LogWidth::I32)), "?-7");
+  EXPECT_EQ(toString(leaf_cast(wide(INT32_MAX), LogWidth::I32)), "?2147483647");
+  EXPECT_EQ(toString(leaf_cast(wide(int64_t{1} << 31), LogWidth::I32)), "!integer-overflow");
+  EXPECT_EQ(toString(leaf_cast(300_dt, LogWidth::I8)), "!integer-overflow");
+  // A static integer stays static.
+  EXPECT_EQ(toString(leaf_cast(7_ct, LogWidth::I64)), "7");
+  EXPECT_EQ(toString(leaf_cast(8589934592_ct, LogWidth::I32)), "!integer-overflow");
+  // The sum of two i32 values that passes 2^31 is exact at i64.
+  auto big = dyn(INT32_MAX);
+  EXPECT_EQ(toString(leaf_add(big, big)), "!integer-overflow");
+  EXPECT_EQ(toString(leaf_add(leaf_cast(big, LogWidth::I64), leaf_cast(big, LogWidth::I64))),
+            "?4294967294i64");
+  EXPECT_EQ(toString(leaf_cast(make_tuple(1_c, 2_c), LogWidth::I64)), "!expected-leaf-operand");
+}
+
 TEST(LeafParity, Comparison) {
   EXPECT_EQ(toString(leaf_lt(3_ct, 4_ct)), "1");
   EXPECT_EQ(toString(leaf_lt(3_dt, 4_ct)), "?1");

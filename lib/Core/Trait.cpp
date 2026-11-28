@@ -1070,6 +1070,31 @@ Leaf<Trait> signum(Leaf<Trait> a) {
   return scale;
 }
 
+Leaf<Trait> cast(Leaf<Trait> a, LogWidth width) {
+  if (a.isError())
+    return a;
+  auto failure = [](ErrorCode code) {
+    return Leaf<Trait>::getError(ErrorInfo(code).withFrame(AlgebraOp::Cast));
+  };
+  auto scale = a.scale();
+  if (scale.isRatio())
+    return failure(ErrorCode::UnsupportedRatioOperation);
+  if (scale.isSInt()) {
+    // i1 is a predicate: 0 or 1. Every other width is signed.
+    auto bits = 1u << width;
+    auto value = scale.staticValue();
+    auto fits = bits == 1 ? value == 0 || value == 1
+                          : bits >= 64 || (value >= -(int64_t{1} << (bits - 1)) &&
+                                           value <= (int64_t{1} << (bits - 1)) - 1);
+    return fits ? a : failure(ErrorCode::IntegerOverflow);
+  }
+  // An integer that has the width already is itself, a fast-divmod divisor
+  // with its handle. At another width that handle no longer applies.
+  if (scale.logWidth() == width)
+    return a;
+  return trait::dynamic(width, scale.divisibility(), trait::rangeOf(scale)).withModes(a);
+}
+
 void print(Leaf<Trait> l, llvm::raw_ostream &os) {
   if (l.isNone()) {
     os << '*';
