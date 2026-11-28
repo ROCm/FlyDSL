@@ -120,6 +120,7 @@ Type MmaOpCDNA4_MFMAScaleType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpCDNA4_MFMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpCDNA4_MFMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpCDNA4_MFMAScaleType::getValTypeD() const { return getElemTyAcc(); }
+bool MmaOpCDNA4_MFMAScaleType::modifiesC() const { return false; }
 
 Attribute MmaOpCDNA4_MFMAScaleType::getThrValLayoutA() const {
   return cdna4::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA());

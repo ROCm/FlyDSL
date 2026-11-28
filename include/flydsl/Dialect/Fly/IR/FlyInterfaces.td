@@ -234,7 +234,12 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface"> {
            "::mlir::Value":$d,
            "::mlir::ValueRange":$a,
            "::mlir::ValueRange":$b,
-           "::mlir::Value":$c)>
+           "::mlir::Value":$c)>,
+    InterfaceMethod<
+      "Whether every call of this MMA op modifies its C input, for example negates it. A GEMM "
+      "passes a tile's partial sum as C after the tile's first K step, so it would modify that "
+      "sum too.",
+      "bool", "modifiesC", (ins)>
   ];
 }
 

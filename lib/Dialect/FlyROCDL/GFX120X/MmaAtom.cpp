@@ -57,6 +57,7 @@ Type MmaOpGFX120X_WMMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpGFX120X_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX120X_WMMAType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX120X_WMMAType::getValTypeD() const { return getElemTyAcc(); }
+bool MmaOpGFX120X_WMMAType::modifiesC() const { return false; }
 
 Attribute MmaOpGFX120X_WMMAType::getThrLayout() const { return FxLayout(FxC(32), FxC(1)); }
 

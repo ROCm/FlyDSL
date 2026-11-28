@@ -942,6 +942,7 @@ struct PyMmaAtomType : PyConcreteType<PyMmaAtomType> {
     c.def_prop_ro("tv_layout_c", [](PyMmaAtomType &self) -> MlirType {
       return wrap(LayoutType::get(cast<LayoutAttr>(self.toCppType().getThrValLayoutC())));
     });
+    c.def_prop_ro("modifies_c", [](PyMmaAtomType &self) { return self.toCppType().modifiesC(); });
   }
 };
 

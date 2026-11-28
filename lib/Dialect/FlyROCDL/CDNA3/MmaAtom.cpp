@@ -44,6 +44,7 @@ Type MmaOpCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaOpCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
+bool MmaOpCDNA3_MFMAType::modifiesC() const { return false; }
 
 Attribute MmaOpCDNA3_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),

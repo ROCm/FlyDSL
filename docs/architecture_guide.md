@@ -229,7 +229,7 @@ definition for this checkout:
 | # | Pass | Description |
 |---|---|---|
 | 1 | `fly-canonicalize` | FlyDSL-specific canonicalization (rebuilds every static-typed result as `fly.static`, so static layout algebra folds away; producers with side effects stay). |
-| 2 | `fly-rocdl-expand-ops` | Expands target-specific FlyROCDL operations while Core layout profiles are available. |
+| 2 | `fly-rocdl-expand-ops` | Expands target-specific FlyROCDL operations while Core layout profiles are available, and rejects an MMA atom that modifies C (a gfx1250 WMMA `mod_c`) in a `fly.gemm` with more than one K step per tile. |
 | 3 | `fly-layout-lowering` | Lowers layout algebra (`fly.crd2idx`, partitions, divides) to concrete `arith` + `vector` ops. |
 | 4 | `fly-int-swizzle-simplify` | Algebraically simplifies the swizzle-shaped arith sequences emitted by `applySwizzle`. |
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |

@@ -1271,6 +1271,10 @@ class MmaAtom(BuiltinDslType):
     def layout_C_tv(self):
         return static(self.type.tv_layout_c)
 
+    @property
+    def modifies_c(self):
+        return self.type.modifies_c
+
     @overload
     def set_value(self, field: str, value): ...
     @overload

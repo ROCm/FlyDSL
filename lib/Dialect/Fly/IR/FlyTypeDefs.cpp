@@ -408,6 +408,7 @@ Attribute MmaAtomType::getThrValLayoutB() const {
 Attribute MmaAtomType::getThrValLayoutC() const {
   return cast<MmaOpTypeInterface>(getMmaOp()).getThrValLayoutC();
 }
+bool MmaAtomType::modifiesC() const { return cast<MmaOpTypeInterface>(getMmaOp()).modifiesC(); }
 
 LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
                                         Type dMemTy, TypeRange aMemTy, TypeRange bMemTy,
